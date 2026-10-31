@@ -453,7 +453,7 @@ static int kovaplus_init_specials(struct hid_device *hdev)
 	if (intf->cur_altsetting->desc.bInterfaceProtocol
 			== USB_INTERFACE_PROTOCOL_MOUSE) {
 
-		kovaplus = kzalloc(sizeof(*kovaplus), GFP_KERNEL);
+		kovaplus = kzalloc_obj(*kovaplus);
 		if (!kovaplus) {
 			hid_err(hdev, "can't alloc device descriptor\n");
 			return -ENOMEM;
@@ -612,6 +612,9 @@ static int kovaplus_raw_event(struct hid_device *hdev,
 		return 0;
 
 	if (kovaplus == NULL)
+		return 0;
+
+	if (size < sizeof(struct kovaplus_mouse_report_button))
 		return 0;
 
 	kovaplus_keep_values_up_to_date(kovaplus, data);

@@ -355,6 +355,7 @@ static const struct ptp_clock_info ptp_qoriq_caps = {
 	.n_per_out	= 0,
 	.n_pins		= 0,
 	.pps		= 1,
+	.supported_extts_flags = PTP_RISING_EDGE | PTP_STRICT_FLAGS,
 	.adjfine	= ptp_qoriq_adjfine,
 	.adjtime	= ptp_qoriq_adjtime,
 	.gettime64	= ptp_qoriq_gettime,
@@ -613,7 +614,7 @@ static int ptp_qoriq_probe(struct platform_device *dev)
 	int err = -ENOMEM;
 	void __iomem *base;
 
-	ptp_qoriq = kzalloc(sizeof(*ptp_qoriq), GFP_KERNEL);
+	ptp_qoriq = kzalloc_obj(*ptp_qoriq);
 	if (!ptp_qoriq)
 		goto no_memory;
 

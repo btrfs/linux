@@ -169,7 +169,7 @@ static void ipoib_schedule_ifupdown_task(struct net_device *dev, bool up)
 	    (!up && !(dev->flags & IFF_UP)))
 		return;
 
-	work = kmalloc(sizeof(*work), GFP_KERNEL);
+	work = kmalloc_obj(*work);
 	if (!work)
 		return;
 	work->dev = dev;
@@ -229,6 +229,13 @@ static int ipoib_stop(struct net_device *dev)
 	ipoib_dbg(priv, "stopping interface\n");
 
 	clear_bit(IPOIB_FLAG_ADMIN_UP, &priv->flags);
+
+	/* Normal flush runs without RTNL and may bring the device back
+	 * up. Cancel it before the device down transition.
+	 * Heavy flush is already serialized by RTNL and must not be
+	 * waited on here while RTNL is held.
+	 */
+	cancel_work_sync(&priv->flush_normal);
 
 	netif_stop_queue(dev);
 
@@ -673,7 +680,7 @@ struct ipoib_path_iter *ipoib_path_iter_init(struct net_device *dev)
 {
 	struct ipoib_path_iter *iter;
 
-	iter = kmalloc(sizeof(*iter), GFP_KERNEL);
+	iter = kmalloc_obj(*iter);
 	if (!iter)
 		return NULL;
 
@@ -924,7 +931,7 @@ static struct ipoib_path *path_rec_create(struct net_device *dev, void *gid)
 	if (!priv->broadcast)
 		return NULL;
 
-	path = kzalloc(sizeof(*path), GFP_ATOMIC);
+	path = kzalloc_obj(*path, GFP_ATOMIC);
 	if (!path)
 		return NULL;
 
@@ -1297,16 +1304,19 @@ static int ipoib_hard_header(struct sk_buff *skb,
 	return IPOIB_HARD_LEN;
 }
 
-static void ipoib_set_mcast_list(struct net_device *dev)
+static int ipoib_set_rx_mode_async(struct net_device *dev,
+				   struct netdev_hw_addr_list *uc,
+				   struct netdev_hw_addr_list *mc)
 {
 	struct ipoib_dev_priv *priv = ipoib_priv(dev);
 
 	if (!test_bit(IPOIB_FLAG_OPER_UP, &priv->flags)) {
 		ipoib_dbg(priv, "IPOIB_FLAG_OPER_UP not set");
-		return;
+		return 0;
 	}
 
 	queue_work(priv->wq, &priv->restart_task);
+	return 0;
 }
 
 static int ipoib_get_iflink(const struct net_device *dev)
@@ -1375,7 +1385,8 @@ out_unlock:
 	return neigh;
 }
 
-static void __ipoib_reap_neigh(struct ipoib_dev_priv *priv)
+static void __ipoib_reap_neigh(struct ipoib_dev_priv *priv,
+			       int gc_interval)
 {
 	struct ipoib_neigh_table *ntbl = &priv->ntbl;
 	struct ipoib_neigh_hash *htbl;
@@ -1394,7 +1405,7 @@ static void __ipoib_reap_neigh(struct ipoib_dev_priv *priv)
 		goto out_unlock;
 
 	/* neigh is obsolete if it was idle for two GC periods */
-	dt = 2 * arp_tbl.gc_interval;
+	dt = 2 * gc_interval;
 	neigh_obsolete = jiffies - dt;
 
 	for (i = 0; i < htbl->size; i++) {
@@ -1430,11 +1441,16 @@ static void ipoib_reap_neigh(struct work_struct *work)
 {
 	struct ipoib_dev_priv *priv =
 		container_of(work, struct ipoib_dev_priv, neigh_reap_task.work);
+	struct net_device *dev = priv->dev;
+	struct net *net = dev_net(dev);
+	struct neigh_table *tbl;
+	int gc_interval;
 
-	__ipoib_reap_neigh(priv);
+	tbl = arp_table(net);
+	gc_interval = tbl->gc_interval;
+	__ipoib_reap_neigh(priv, gc_interval);
 
-	queue_delayed_work(priv->wq, &priv->neigh_reap_task,
-			   arp_tbl.gc_interval);
+	queue_delayed_work(priv->wq, &priv->neigh_reap_task, gc_interval);
 }
 
 
@@ -1443,7 +1459,7 @@ static struct ipoib_neigh *ipoib_neigh_ctor(u8 *daddr,
 {
 	struct ipoib_neigh *neigh;
 
-	neigh = kzalloc(sizeof(*neigh), GFP_ATOMIC);
+	neigh = kzalloc_obj(*neigh, GFP_ATOMIC);
 	if (!neigh)
 		return NULL;
 
@@ -1587,17 +1603,22 @@ void ipoib_neigh_free(struct ipoib_neigh *neigh)
 static int ipoib_neigh_hash_init(struct ipoib_dev_priv *priv)
 {
 	struct ipoib_neigh_table *ntbl = &priv->ntbl;
-	struct ipoib_neigh_hash *htbl;
 	struct ipoib_neigh __rcu **buckets;
+	struct net_device *dev = priv->dev;
+	struct net *net = dev_net(dev);
+	struct ipoib_neigh_hash *htbl;
+	struct neigh_table *tbl;
 	u32 size;
 
 	clear_bit(IPOIB_NEIGH_TBL_FLUSH, &priv->flags);
 	ntbl->htbl = NULL;
-	htbl = kzalloc(sizeof(*htbl), GFP_KERNEL);
+	htbl = kzalloc_obj(*htbl);
 	if (!htbl)
 		return -ENOMEM;
-	size = roundup_pow_of_two(arp_tbl.gc_thresh3);
-	buckets = kvcalloc(size, sizeof(*buckets), GFP_KERNEL);
+
+	tbl = arp_table(net);
+	size = roundup_pow_of_two(tbl->gc_thresh3);
+	buckets = kvzalloc_objs(*buckets, size);
 	if (!buckets) {
 		kfree(htbl);
 		return -ENOMEM;
@@ -1611,7 +1632,7 @@ static int ipoib_neigh_hash_init(struct ipoib_dev_priv *priv)
 
 	/* start garbage collection */
 	queue_delayed_work(priv->wq, &priv->neigh_reap_task,
-			   arp_tbl.gc_interval);
+			   tbl->gc_interval);
 
 	return 0;
 }
@@ -1773,9 +1794,7 @@ static int ipoib_dev_init_default(struct net_device *dev)
 	ipoib_napi_add(dev);
 
 	/* Allocate RX/TX "rings" to hold queued skbs */
-	priv->rx_ring =	kcalloc(ipoib_recvq_size,
-				       sizeof(*priv->rx_ring),
-				       GFP_KERNEL);
+	priv->rx_ring =	kzalloc_objs(*priv->rx_ring, ipoib_recvq_size);
 	if (!priv->rx_ring)
 		goto out;
 
@@ -1823,6 +1842,29 @@ static int ipoib_ioctl(struct net_device *dev, struct ifreq *ifr,
 		return -EOPNOTSUPP;
 
 	return priv->rn_ops->ndo_eth_ioctl(dev, ifr, cmd);
+}
+
+static int ipoib_hwtstamp_get(struct net_device *dev,
+			      struct kernel_hwtstamp_config *config)
+{
+	struct ipoib_dev_priv *priv = ipoib_priv(dev);
+
+	if (!priv->rn_ops->ndo_hwtstamp_get)
+		return -EOPNOTSUPP;
+
+	return priv->rn_ops->ndo_hwtstamp_get(dev, config);
+}
+
+static int ipoib_hwtstamp_set(struct net_device *dev,
+			      struct kernel_hwtstamp_config *config,
+			      struct netlink_ext_ack *extack)
+{
+	struct ipoib_dev_priv *priv = ipoib_priv(dev);
+
+	if (!priv->rn_ops->ndo_hwtstamp_set)
+		return -EOPNOTSUPP;
+
+	return priv->rn_ops->ndo_hwtstamp_set(dev, config, extack);
 }
 
 static int ipoib_dev_init(struct net_device *dev)
@@ -2139,7 +2181,7 @@ static const struct net_device_ops ipoib_netdev_ops_pf = {
 	.ndo_fix_features	 = ipoib_fix_features,
 	.ndo_start_xmit		 = ipoib_start_xmit,
 	.ndo_tx_timeout		 = ipoib_timeout,
-	.ndo_set_rx_mode	 = ipoib_set_mcast_list,
+	.ndo_set_rx_mode_async	 = ipoib_set_rx_mode_async,
 	.ndo_get_iflink		 = ipoib_get_iflink,
 	.ndo_set_vf_link_state	 = ipoib_set_vf_link_state,
 	.ndo_get_vf_config	 = ipoib_get_vf_config,
@@ -2149,6 +2191,8 @@ static const struct net_device_ops ipoib_netdev_ops_pf = {
 	.ndo_set_mac_address	 = ipoib_set_mac,
 	.ndo_get_stats64	 = ipoib_get_stats,
 	.ndo_eth_ioctl		 = ipoib_ioctl,
+	.ndo_hwtstamp_get	 = ipoib_hwtstamp_get,
+	.ndo_hwtstamp_set	 = ipoib_hwtstamp_set,
 };
 
 static const struct net_device_ops ipoib_netdev_ops_vf = {
@@ -2160,10 +2204,12 @@ static const struct net_device_ops ipoib_netdev_ops_vf = {
 	.ndo_fix_features	 = ipoib_fix_features,
 	.ndo_start_xmit	 	 = ipoib_start_xmit,
 	.ndo_tx_timeout		 = ipoib_timeout,
-	.ndo_set_rx_mode	 = ipoib_set_mcast_list,
+	.ndo_set_rx_mode_async	 = ipoib_set_rx_mode_async,
 	.ndo_get_iflink		 = ipoib_get_iflink,
 	.ndo_get_stats64	 = ipoib_get_stats,
 	.ndo_eth_ioctl		 = ipoib_ioctl,
+	.ndo_hwtstamp_get	 = ipoib_hwtstamp_get,
+	.ndo_hwtstamp_set	 = ipoib_hwtstamp_set,
 };
 
 static const struct net_device_ops ipoib_netdev_default_pf = {
@@ -2251,7 +2297,7 @@ int ipoib_intf_init(struct ib_device *hca, u32 port, const char *name,
 	struct ipoib_dev_priv *priv;
 	int rc;
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -2637,7 +2683,7 @@ static int ipoib_add_one(struct ib_device *device)
 	unsigned int p;
 	int count = 0;
 
-	dev_list = kmalloc(sizeof(*dev_list), GFP_KERNEL);
+	dev_list = kmalloc_obj(*dev_list);
 	if (!dev_list)
 		return -ENOMEM;
 
@@ -2755,6 +2801,7 @@ err_client:
 err_sa:
 	ib_sa_unregister_client(&ipoib_sa_client);
 	destroy_workqueue(ipoib_workqueue);
+	rcu_barrier();
 
 err_fs:
 	ipoib_unregister_debugfs();
@@ -2772,6 +2819,7 @@ static void __exit ipoib_cleanup_module(void)
 	ib_sa_unregister_client(&ipoib_sa_client);
 	ipoib_unregister_debugfs();
 	destroy_workqueue(ipoib_workqueue);
+	rcu_barrier();
 }
 
 module_init(ipoib_init_module);

@@ -69,7 +69,7 @@ komeda_plane_init_data_flow(struct drm_plane_state *st,
  */
 static int
 komeda_plane_atomic_check(struct drm_plane *plane,
-			  struct drm_atomic_state *state)
+			  struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state,
 										 plane);
@@ -116,7 +116,7 @@ komeda_plane_atomic_check(struct drm_plane *plane,
  */
 static void
 komeda_plane_atomic_update(struct drm_plane *plane,
-			   struct drm_atomic_state *state)
+			   struct drm_atomic_commit *state)
 {
 }
 
@@ -132,19 +132,17 @@ static void komeda_plane_destroy(struct drm_plane *plane)
 	kfree(to_kplane(plane));
 }
 
-static void komeda_plane_reset(struct drm_plane *plane)
+static struct drm_plane_state *komeda_plane_create_state(struct drm_plane *plane)
 {
 	struct komeda_plane_state *state;
 
-	if (plane->state)
-		__drm_atomic_helper_plane_destroy_state(plane->state);
+	state = kzalloc_obj(*state);
+	if (!state)
+		return ERR_PTR(-ENOMEM);
 
-	kfree(plane->state);
-	plane->state = NULL;
+	__drm_atomic_helper_plane_state_init(&state->base, plane);
 
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
-	if (state)
-		__drm_atomic_helper_plane_reset(plane, &state->base);
+	return &state->base;
 }
 
 static struct drm_plane_state *
@@ -155,7 +153,7 @@ komeda_plane_atomic_duplicate_state(struct drm_plane *plane)
 	if (WARN_ON(!plane->state))
 		return NULL;
 
-	new = kzalloc(sizeof(*new), GFP_KERNEL);
+	new = kzalloc_obj(*new);
 	if (!new)
 		return NULL;
 
@@ -188,7 +186,7 @@ static const struct drm_plane_funcs komeda_plane_funcs = {
 	.update_plane		= drm_atomic_helper_update_plane,
 	.disable_plane		= drm_atomic_helper_disable_plane,
 	.destroy		= komeda_plane_destroy,
-	.reset			= komeda_plane_reset,
+	.atomic_create_state = komeda_plane_create_state,
 	.atomic_duplicate_state	= komeda_plane_atomic_duplicate_state,
 	.atomic_destroy_state	= komeda_plane_atomic_destroy_state,
 	.format_mod_supported	= komeda_plane_format_mod_supported,
@@ -247,7 +245,7 @@ static int komeda_plane_add(struct komeda_kms_dev *kms,
 	u32 *formats, n_formats = 0;
 	int err;
 
-	kplane = kzalloc(sizeof(*kplane), GFP_KERNEL);
+	kplane = kzalloc_obj(*kplane);
 	if (!kplane)
 		return -ENOMEM;
 

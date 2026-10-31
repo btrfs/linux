@@ -327,6 +327,28 @@ Description:	Energy performance preference
 
 		This file is only present if the cppc-cpufreq driver is in use.
 
+What:		/sys/devices/system/cpu/cpuX/cpufreq/perf_limited
+Date:		February 2026
+Contact:	linux-pm@vger.kernel.org
+Description:	Performance Limited
+
+		Read to check if platform throttling (thermal/power/current
+		limits) caused delivered performance to fall below the
+		requested level. A non-zero value indicates throttling occurred.
+		If firmware provides the register but Linux cannot access it
+		safely, reads return the literal string "<unsupported>".
+
+		Write 0x3 to clear both bits. Selectively clearing one bit is
+		not supported because ACPI does not define the effect of writing
+		one to these status bits and an interlocked read-modify-write is
+		not generally available.
+		Writing 0x3 returns -EOPNOTSUPP when firmware describes the
+		register using an access which Linux cannot clear safely; reads
+		may remain available in that case.
+
+		The platform sets these bits; OSPM can only clear them.
+
+		This file is only present if the cppc-cpufreq driver is in use.
 
 What:		/sys/devices/system/cpu/cpu*/cache/index3/cache_disable_{0,1}
 Date:		August 2008
@@ -671,15 +693,21 @@ Description:	Umwait control
 			  Low order two bits must be zero.
 
 What:		/sys/devices/system/cpu/sev
+		/sys/devices/system/cpu/sev/sev_status
 		/sys/devices/system/cpu/sev/vmpl
 Date:		May 2024
 Contact:	Linux kernel mailing list <linux-kernel@vger.kernel.org>
 Description:	Secure Encrypted Virtualization (SEV) information
 
-		This directory is only present when running as an SEV-SNP guest.
+		This directory is only present when running as an SEV guest.
+
+		sev_status: Reports the value of the SEV_STATUS MSR which
+			    enumerates the enabled features of an SEV
+			    environment.
 
 		vmpl: Reports the Virtual Machine Privilege Level (VMPL) at which
-		      the SEV-SNP guest is running.
+		      the SEV-SNP guest is running. This file is only present
+		      when running as an SEV-SNP guest.
 
 
 What:		/sys/devices/system/cpu/svm
@@ -764,6 +792,17 @@ Description:
 		participate in load balancing. These CPUs are set by
 		boot parameter "isolcpus=".
 
+What:		/sys/devices/system/cpu/housekeeping
+Date:		Oct 2025
+Contact:	Linux kernel mailing list <linux-kernel@vger.kernel.org>
+Description:
+		(RO) the list of logical CPUs that are designated by the kernel as
+		"housekeeping". Each CPU are responsible for handling essential
+		system-wide background tasks, including RCU callbacks, delayed
+		timer callbacks, and unbound workqueues, minimizing scheduling
+		jitter on low-latency, isolated CPUs. These CPUs are set when boot
+		parameter "isolcpus=nohz" or "nohz_full=" is specified.
+
 What:		/sys/devices/system/cpu/crash_hotplug
 Date:		Aug 2023
 Contact:	Linux kernel mailing list <linux-kernel@vger.kernel.org>
@@ -777,3 +816,17 @@ Date:		Nov 2022
 Contact:	Linux kernel mailing list <linux-kernel@vger.kernel.org>
 Description:
 		(RO) the list of CPUs that can be brought online.
+
+What:		/sys/devices/system/cpu/preferred
+Date:		Sep 2026
+Contact:	Linux kernel mailing list <linux-kernel@vger.kernel.org>
+Description:
+		(RO) the list of preferred CPUs applicable in
+		paravirtualized environments.
+
+		The steal governor driver dynamically adjusts this mask
+		based on observed steal time. Scheduling tasks on
+		CPUs outside of this list may lead to performance
+		degradations due to underlying physical CPU contention.
+
+		See Documentation/scheduler/sched-paravirt.rst for more details.

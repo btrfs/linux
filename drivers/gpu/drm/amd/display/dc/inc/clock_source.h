@@ -1,4 +1,5 @@
-/*
+/* SPDX-License-Identifier: MIT
+ *
  * Copyright 2012-15 Advanced Micro Devices, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
@@ -170,10 +171,10 @@ struct clock_source_funcs {
 			struct clock_source *,
 			struct pixel_clk_params *,
 			struct pll_settings *);
-	bool (*get_pixel_clk_frequency_100hz)(
+	bool (*get_dp_dto_frequency_100hz)(
 			const struct clock_source *clock_source,
 			unsigned int inst,
-			unsigned int *pixel_clk_khz);
+			unsigned int *pixel_clk_100hz);
 	bool (*override_dp_pix_clk)(
 			struct clock_source *clock_source,
 			unsigned int inst,
@@ -185,6 +186,7 @@ struct clock_source {
 	const struct clock_source_funcs *funcs;
 	struct dc_context *ctx;
 	enum clock_source_id id;
+	unsigned int inst;
 	bool dp_clk_src;
 };
 

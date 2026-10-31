@@ -53,6 +53,11 @@ enum regulator_detection_severity {
 #define REGULATOR_LINEAR_RANGE(_min_uV, _min_sel, _max_sel, _step_uV)	\
 	LINEAR_RANGE(_min_uV, _min_sel, _max_sel, _step_uV)
 
+/* Initialize struct linear_range using voltages, not selectors */
+#define REGULATOR_LINEAR_VRANGE(_offs_uV, _min_uV, _max_uV, _step_uV)	\
+	LINEAR_RANGE(_min_uV, ((_min_uV) - (_offs_uV)) / (_step_uV),	\
+		     ((_max_uV) - (_offs_uV)) / (_step_uV), _step_uV)
+
 /**
  * struct regulator_ops - regulator operations.
  *
@@ -357,7 +362,7 @@ enum regulator_type {
  * @off_on_delay: guard time (in uS), before re-enabling a regulator
  *
  * @poll_enabled_time: The polling interval (in uS) to use while checking that
- *                     the regulator was actually enabled. Max upto enable_time.
+ *                     the regulator was actually enabled. Max up to enable_time.
  *
  * @of_map_mode: Maps a hardware mode defined in a DeviceTree to a standard mode
  */
@@ -635,6 +640,7 @@ struct regulator_dev {
 	int ref_cnt;
 	struct module *owner;
 	struct device dev;
+	struct device bdev;
 	struct regulation_constraints *constraints;
 	struct regulator *supply;	/* for tree */
 	const char *supply_name;
@@ -649,6 +655,7 @@ struct regulator_dev {
 	struct regulator_enable_gpio *ena_pin;
 	unsigned int ena_gpio_state:1;
 
+	unsigned int constraints_pending:1;
 	unsigned int is_switch:1;
 
 	/* time when this regulator was disabled last time */
@@ -658,6 +665,9 @@ struct regulator_dev {
 	spinlock_t err_lock;
 
 	int pw_requested_mW;
+
+	/* regulator notification forwarding */
+	struct notifier_block supply_fwd_nb;
 };
 
 /*

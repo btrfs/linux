@@ -122,7 +122,7 @@
 #define LC_COEFB    0x4B /* Lens B channel compensation coefficient */
 #define LC_COEFR    0x4C /* Lens R channel compensation coefficient */
 
-#define FIXGAIN     0x4D /* Analog fix gain amplifer */
+#define FIXGAIN     0x4D /* Analog fix gain amplifier */
 #define AREF0       0x4E /* Sensor reference control */
 #define AREF1       0x4F /* Sensor reference current control */
 #define AREF2       0x50 /* Analog reference control */
@@ -1171,6 +1171,7 @@ ov772x_set_fmt_error:
 }
 
 static int ov772x_get_selection(struct v4l2_subdev *sd,
+				const struct v4l2_subdev_client_info *ci,
 				struct v4l2_subdev_state *sd_state,
 				struct v4l2_subdev_selection *sel)
 {
@@ -1212,6 +1213,7 @@ static int ov772x_get_fmt(struct v4l2_subdev *sd,
 }
 
 static int ov772x_set_fmt(struct v4l2_subdev *sd,
+			  const struct v4l2_subdev_client_info *ci,
 			  struct v4l2_subdev_state *sd_state,
 			  struct v4l2_subdev_format *format)
 {
@@ -1546,7 +1548,7 @@ static void ov772x_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ov772x_id[] = {
-	{ "ov772x" },
+	{ .name = "ov772x" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ov772x_id);

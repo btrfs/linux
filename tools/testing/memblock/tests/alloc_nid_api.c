@@ -20,8 +20,6 @@ static const unsigned int node_fractions[] = {
 
 static inline const char * const get_memblock_alloc_nid_name(int flags)
 {
-	if (flags & TEST_F_EXACT)
-		return "memblock_alloc_exact_nid_raw";
 	if (flags & TEST_F_RAW)
 		return "memblock_alloc_try_nid_raw";
 	return "memblock_alloc_try_nid";
@@ -32,15 +30,6 @@ static inline void *run_memblock_alloc_nid(phys_addr_t size,
 					   phys_addr_t min_addr,
 					   phys_addr_t max_addr, int nid)
 {
-	assert(!(alloc_nid_test_flags & TEST_F_EXACT) ||
-	       (alloc_nid_test_flags & TEST_F_RAW));
-	/*
-	 * TEST_F_EXACT should be checked before TEST_F_RAW since
-	 * memblock_alloc_exact_nid_raw() performs raw allocations.
-	 */
-	if (alloc_nid_test_flags & TEST_F_EXACT)
-		return memblock_alloc_exact_nid_raw(size, align, min_addr,
-						    max_addr, nid);
 	if (alloc_nid_test_flags & TEST_F_RAW)
 		return memblock_alloc_try_nid_raw(size, align, min_addr,
 						  max_addr, nid);
@@ -1965,7 +1954,7 @@ static int alloc_nid_bottom_up_numa_part_reserved_check(void)
 	max_addr = memblock_end_of_DRAM();
 	total_size = size + r1.size;
 
-	memblock_reserve(r1.base, r1.size);
+	__memblock_reserve(r1.base, r1.size, nid_req, MEMBLOCK_RSRV_KERN);
 	allocated_ptr = run_memblock_alloc_nid(size, SMP_CACHE_BYTES,
 					       min_addr, max_addr, nid_req);
 
@@ -2412,8 +2401,8 @@ static int alloc_nid_numa_reserved_full_merge_generic_check(void)
 	min_addr = r2.base + r2.size;
 	max_addr = r1.base;
 
-	memblock_reserve(r1.base, r1.size);
-	memblock_reserve(r2.base, r2.size);
+	__memblock_reserve(r1.base, r1.size, nid_req, MEMBLOCK_RSRV_KERN);
+	__memblock_reserve(r2.base, r2.size, nid_req, MEMBLOCK_RSRV_KERN);
 
 	allocated_ptr = run_memblock_alloc_nid(size, SMP_CACHE_BYTES,
 					       min_addr, max_addr, nid_req);
@@ -2719,15 +2708,6 @@ int memblock_alloc_nid_checks(void)
 {
 	memblock_alloc_nid_checks_internal(TEST_F_NONE);
 	memblock_alloc_nid_checks_internal(TEST_F_RAW);
-
-	return 0;
-}
-
-int memblock_alloc_exact_nid_range_checks(void)
-{
-	alloc_nid_test_flags = (TEST_F_RAW | TEST_F_EXACT);
-
-	memblock_alloc_nid_range_checks();
 
 	return 0;
 }

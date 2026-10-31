@@ -41,17 +41,32 @@ static const unsigned short keycode_kore[] = {
 	BTN_3,
 	BTN_2,
 	BTN_1,
-	BTN_8,
-	BTN_7,
-	BTN_6,
 	BTN_5,
-	KEY_BRL_DOT4,   /* touch sensitive knobs */
+	BTN_6,
+	BTN_7,
+	BTN_8,
+	KEY_BRL_DOT4,   /* touch sensitive knobs (Kore 2 order) */
 	KEY_BRL_DOT3,
 	KEY_BRL_DOT2,
 	KEY_BRL_DOT1,
 	KEY_BRL_DOT8,
 	KEY_BRL_DOT7,
 	KEY_BRL_DOT6,
+	KEY_BRL_DOT5
+};
+
+/* index of the first touch sensor in keycode_kore */
+#define KORE_TOUCH_KEYS	24
+
+/* the first Kore controller reports its touch sensors in this order */
+static const unsigned short keycode_kore1_touch[] = {
+	KEY_BRL_DOT4,
+	KEY_BRL_DOT8,
+	KEY_BRL_DOT3,
+	KEY_BRL_DOT7,
+	KEY_BRL_DOT2,
+	KEY_BRL_DOT6,
+	KEY_BRL_DOT1,
 	KEY_BRL_DOT5
 };
 
@@ -203,6 +218,8 @@ static void snd_caiaq_input_read_analog(struct snd_usb_caiaqdev *cdev,
 
 	switch (cdev->chip.usb_id) {
 	case USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_RIGKONTROL2):
+		if (len < 6)
+			return;
 		snd_caiaq_input_report_abs(cdev, ABS_X, buf, 2);
 		snd_caiaq_input_report_abs(cdev, ABS_Y, buf, 0);
 		snd_caiaq_input_report_abs(cdev, ABS_Z, buf, 1);
@@ -210,11 +227,15 @@ static void snd_caiaq_input_read_analog(struct snd_usb_caiaqdev *cdev,
 	case USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_RIGKONTROL3):
 	case USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_KORECONTROLLER):
 	case USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_KORECONTROLLER2):
+		if (len < 6)
+			return;
 		snd_caiaq_input_report_abs(cdev, ABS_X, buf, 0);
 		snd_caiaq_input_report_abs(cdev, ABS_Y, buf, 1);
 		snd_caiaq_input_report_abs(cdev, ABS_Z, buf, 2);
 		break;
 	case USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_TRAKTORKONTROLX1):
+		if (len < 16)
+			return;
 		snd_caiaq_input_report_abs(cdev, ABS_HAT0X, buf, 4);
 		snd_caiaq_input_report_abs(cdev, ABS_HAT0Y, buf, 2);
 		snd_caiaq_input_report_abs(cdev, ABS_HAT1X, buf, 6);
@@ -237,12 +258,16 @@ static void snd_caiaq_input_read_erp(struct snd_usb_caiaqdev *cdev,
 
 	switch (cdev->chip.usb_id) {
 	case USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_AK1):
+		if (len < 2)
+			return;
 		i = decode_erp(buf[0], buf[1]);
 		input_report_abs(input_dev, ABS_X, i);
 		input_sync(input_dev);
 		break;
 	case USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_KORECONTROLLER):
 	case USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_KORECONTROLLER2):
+		if (len < 16)
+			return;
 		i = decode_erp(buf[7], buf[5]);
 		input_report_abs(input_dev, ABS_HAT0X, i);
 		i = decode_erp(buf[12], buf[14]);
@@ -263,6 +288,8 @@ static void snd_caiaq_input_read_erp(struct snd_usb_caiaqdev *cdev,
 		break;
 
 	case USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_MASCHINECONTROLLER):
+		if (len < 22)
+			return;
 		/* 4 under the left screen */
 		input_report_abs(input_dev, ABS_HAT0X, decode_erp(buf[21], buf[20]));
 		input_report_abs(input_dev, ABS_HAT0Y, decode_erp(buf[15], buf[14]));
@@ -308,9 +335,13 @@ static void snd_caiaq_input_read_io(struct snd_usb_caiaqdev *cdev,
 	switch (cdev->chip.usb_id) {
 	case USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_KORECONTROLLER):
 	case USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_KORECONTROLLER2):
+		if (len < 5)
+			return;
 		input_report_abs(cdev->input_dev, ABS_MISC, 255 - buf[4]);
 		break;
 	case USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_TRAKTORKONTROLX1):
+		if (len < 7)
+			return;
 		/* rotary encoders */
 		input_report_abs(cdev->input_dev, ABS_X, buf[5] & 0xf);
 		input_report_abs(cdev->input_dev, ABS_Y, buf[5] >> 4);
@@ -330,7 +361,7 @@ static void snd_usb_caiaq_tks4_dispatch(struct snd_usb_caiaqdev *cdev,
 {
 	struct device *dev = caiaqdev_to_dev(cdev);
 
-	while (len) {
+	while (len >= TKS4_MSGBLOCK_SIZE) {
 		unsigned int i, block_id = (buf[0] << 8) | buf[1];
 
 		switch (block_id) {
@@ -589,13 +620,15 @@ int snd_usb_caiaq_input_init(struct snd_usb_caiaqdev *cdev)
 	struct usb_device *usb_dev = cdev->chip.dev;
 	struct input_dev *input;
 	int i, ret = 0;
+	int len;
 
 	input = input_allocate_device();
 	if (!input)
 		return -ENOMEM;
 
-	usb_make_path(usb_dev, cdev->phys, sizeof(cdev->phys));
-	strlcat(cdev->phys, "/input0", sizeof(cdev->phys));
+	len = usb_make_path(usb_dev, cdev->phys, sizeof(cdev->phys));
+	if (len >= 0)
+		strscpy(cdev->phys + len, "/input0", sizeof(cdev->phys) - len);
 
 	input->name = cdev->product_name;
 	input->phys = cdev->phys;
@@ -650,6 +683,12 @@ int snd_usb_caiaq_input_init(struct snd_usb_caiaqdev *cdev)
 		input->absbit[BIT_WORD(ABS_MISC)] |= BIT_MASK(ABS_MISC);
 		BUILD_BUG_ON(sizeof(cdev->keycode) < sizeof(keycode_kore));
 		memcpy(cdev->keycode, keycode_kore, sizeof(keycode_kore));
+		BUILD_BUG_ON(KORE_TOUCH_KEYS + ARRAY_SIZE(keycode_kore1_touch) >
+			     ARRAY_SIZE(keycode_kore));
+		if (cdev->chip.usb_id ==
+		    USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_KORECONTROLLER))
+			memcpy(cdev->keycode + KORE_TOUCH_KEYS, keycode_kore1_touch,
+			       sizeof(keycode_kore1_touch));
 		input->keycodemax = ARRAY_SIZE(keycode_kore);
 		input_set_abs_params(input, ABS_HAT0X, 0, 999, 0, 10);
 		input_set_abs_params(input, ABS_HAT0Y, 0, 999, 0, 10);
@@ -804,7 +843,7 @@ int snd_usb_caiaq_input_init(struct snd_usb_caiaqdev *cdev)
 
 	default:
 		/* no input methods supported on this device */
-		ret = -EINVAL;
+		ret = -ENODEV;
 		goto exit_free_idev;
 	}
 

@@ -68,7 +68,7 @@ flush_write_domain(struct drm_i915_gem_object *obj, unsigned int flush_domains)
 			i915_vma_flush_writes(vma);
 		spin_unlock(&obj->vma.lock);
 
-		i915_gem_object_flush_frontbuffer(obj, ORIGIN_CPU);
+		i915_gem_object_frontbuffer_flush(obj, ORIGIN_CPU);
 		break;
 
 	case I915_GEM_DOMAIN_WC:
@@ -421,7 +421,7 @@ struct i915_vma *
 i915_gem_object_pin_to_display_plane(struct drm_i915_gem_object *obj,
 				     struct i915_gem_ww_ctx *ww,
 				     u32 alignment, unsigned int guard,
-				     const struct i915_gtt_view *view,
+				     const struct intel_gtt_view *view,
 				     unsigned int flags)
 {
 	struct drm_i915_private *i915 = to_i915(obj->base.dev);
@@ -462,7 +462,7 @@ i915_gem_object_pin_to_display_plane(struct drm_i915_gem_object *obj,
 	 */
 	vma = ERR_PTR(-ENOSPC);
 	if ((flags & PIN_MAPPABLE) == 0 &&
-	    (!view || view->type == I915_GTT_VIEW_NORMAL))
+	    (!view || intel_gtt_view_is_normal(view)))
 		vma = i915_gem_object_ggtt_pin_ww(obj, ww, view, 0, alignment,
 						  flags | PIN_MAPPABLE |
 						  PIN_NONBLOCK);
@@ -647,7 +647,7 @@ out_unlock:
 	i915_gem_object_unlock(obj);
 
 	if (!err && write_domain)
-		i915_gem_object_invalidate_frontbuffer(obj, ORIGIN_CPU);
+		i915_gem_object_frontbuffer_invalidate(obj, ORIGIN_CPU);
 
 out:
 	i915_gem_object_put(obj);
@@ -681,7 +681,7 @@ int i915_gem_object_prepare_read(struct drm_i915_gem_object *obj,
 		return ret;
 
 	if (obj->cache_coherent & I915_BO_CACHE_COHERENT_FOR_READ ||
-	    !static_cpu_has(X86_FEATURE_CLFLUSH)) {
+	    !cpu_feature_enabled(X86_FEATURE_CLFLUSH)) {
 		ret = i915_gem_object_set_to_cpu_domain(obj, false);
 		if (ret)
 			goto err_unpin;
@@ -732,7 +732,7 @@ int i915_gem_object_prepare_write(struct drm_i915_gem_object *obj,
 		return ret;
 
 	if (obj->cache_coherent & I915_BO_CACHE_COHERENT_FOR_WRITE ||
-	    !static_cpu_has(X86_FEATURE_CLFLUSH)) {
+	    !cpu_feature_enabled(X86_FEATURE_CLFLUSH)) {
 		ret = i915_gem_object_set_to_cpu_domain(obj, true);
 		if (ret)
 			goto err_unpin;
@@ -759,7 +759,7 @@ int i915_gem_object_prepare_write(struct drm_i915_gem_object *obj,
 	}
 
 out:
-	i915_gem_object_invalidate_frontbuffer(obj, ORIGIN_CPU);
+	i915_gem_object_frontbuffer_invalidate(obj, ORIGIN_CPU);
 	obj->mm.dirty = true;
 	/* return with the pages pinned */
 	return 0;

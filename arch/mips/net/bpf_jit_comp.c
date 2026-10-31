@@ -208,7 +208,7 @@ void emit_mov_r(struct jit_context *ctx, u8 dst, u8 src)
 }
 
 /* Validate ALU immediate range */
-bool valid_alu_i(u8 op, s32 imm)
+bool valid_alu_i(u8 op, s32 imm, s16 off)
 {
 	switch (BPF_OP(op)) {
 	case BPF_NEG:
@@ -237,6 +237,9 @@ bool valid_alu_i(u8 op, s32 imm)
 		return imm == 0 || (imm > 0 && is_power_of_2(imm));
 	case BPF_DIV:
 	case BPF_MOD:
+		/* Do not use unsigned shift/mask rewrites for signed div/mod. */
+		if (off == 1)
+			return false;
 		/* imm must be an 17-bit power of two */
 		return (u32)imm <= 0x10000 && is_power_of_2((u32)imm);
 	}
@@ -338,8 +341,42 @@ void emit_alu_i(struct jit_context *ctx, u8 dst, s32 imm, u8 op)
 	clobber_reg(ctx, dst);
 }
 
+/* ALU division operation (32-bit) */
+static void emit_div(struct jit_context *ctx, u8 dst, u8 src, s16 off)
+{
+	if (cpu_has_mips32r6) {
+		if (off == 1)
+			emit(ctx, div_r6, dst, dst, src);
+		else
+			emit(ctx, divu_r6, dst, dst, src);
+	} else {
+		if (off == 1)
+			emit(ctx, div, dst, src);
+		else
+			emit(ctx, divu, dst, src);
+		emit(ctx, mflo, dst);
+	}
+}
+
+/* ALU modulo operation (32-bit) */
+static void emit_mod(struct jit_context *ctx, u8 dst, u8 src, s16 off)
+{
+	if (cpu_has_mips32r6) {
+		if (off == 1)
+			emit(ctx, mod, dst, dst, src);
+		else
+			emit(ctx, modu, dst, dst, src);
+	} else {
+		if (off == 1)
+			emit(ctx, div, dst, src);
+		else
+			emit(ctx, divu, dst, src);
+		emit(ctx, mfhi, dst);
+	}
+}
+
 /* ALU register operation (32-bit) */
-void emit_alu_r(struct jit_context *ctx, u8 dst, u8 src, u8 op)
+void emit_alu_r(struct jit_context *ctx, u8 dst, u8 src, u8 op, s16 off)
 {
 	switch (BPF_OP(op)) {
 	/* dst = dst & src */
@@ -385,21 +422,11 @@ void emit_alu_r(struct jit_context *ctx, u8 dst, u8 src, u8 op)
 		break;
 	/* dst = dst / src */
 	case BPF_DIV:
-		if (cpu_has_mips32r6) {
-			emit(ctx, divu_r6, dst, dst, src);
-		} else {
-			emit(ctx, divu, dst, src);
-			emit(ctx, mflo, dst);
-		}
+		emit_div(ctx, dst, src, off);
 		break;
 	/* dst = dst % src */
 	case BPF_MOD:
-		if (cpu_has_mips32r6) {
-			emit(ctx, modu, dst, dst, src);
-		} else {
-			emit(ctx, divu, dst, src);
-			emit(ctx, mfhi, dst);
-		}
+		emit_mod(ctx, dst, src, off);
 		break;
 	}
 	clobber_reg(ctx, dst);
@@ -823,7 +850,7 @@ void emit_jmp_r(struct jit_context *ctx, u8 dst, u8 src, s32 off, u8 op)
 }
 
 /* Jump always */
-int emit_ja(struct jit_context *ctx, s16 off)
+int emit_ja(struct jit_context *ctx, s32 off)
 {
 	int target = get_target(ctx, ctx->bpf_index + off + 1);
 
@@ -909,12 +936,10 @@ bool bpf_jit_needs_zext(void)
 	return true;
 }
 
-struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *prog)
+struct bpf_prog *bpf_int_jit_compile(struct bpf_verifier_env *env, struct bpf_prog *prog)
 {
-	struct bpf_prog *tmp, *orig_prog = prog;
 	struct bpf_binary_header *header = NULL;
 	struct jit_context ctx;
-	bool tmp_blinded = false;
 	unsigned int tmp_idx;
 	unsigned int image_size;
 	u8 *image_ptr;
@@ -925,19 +950,7 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *prog)
 	 * the interpreter.
 	 */
 	if (!prog->jit_requested)
-		return orig_prog;
-	/*
-	 * If constant blinding was enabled and we failed during blinding
-	 * then we must fall back to the interpreter. Otherwise, we save
-	 * the new JITed code.
-	 */
-	tmp = bpf_jit_blind_constants(prog);
-	if (IS_ERR(tmp))
-		return orig_prog;
-	if (tmp != prog) {
-		tmp_blinded = true;
-		prog = tmp;
-	}
+		return prog;
 
 	memset(&ctx, 0, sizeof(ctx));
 	ctx.program = prog;
@@ -1025,14 +1038,10 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *prog)
 	prog->jited_len = image_size;
 
 out:
-	if (tmp_blinded)
-		bpf_jit_prog_release_other(prog, prog == orig_prog ?
-					   tmp : orig_prog);
 	kfree(ctx.descriptors);
 	return prog;
 
 out_err:
-	prog = orig_prog;
 	if (header)
 		bpf_jit_binary_free(header);
 	goto out;

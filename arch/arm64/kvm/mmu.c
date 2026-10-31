@@ -5,8 +5,10 @@
  */
 
 #include <linux/acpi.h>
+#include <linux/cleanup.h>
 #include <linux/mman.h>
 #include <linux/kvm_host.h>
+#include <linux/interval_tree.h>
 #include <linux/io.h>
 #include <linux/hugetlb.h>
 #include <linux/sched/signal.h>
@@ -37,6 +39,8 @@ static unsigned long __ro_after_init io_map_base;
 
 #define KVM_PGT_FN(fn)		(!is_protected_kvm_enabled() ? fn : p ## fn)
 
+static int kvm_vm_init_vm_s2_ops(struct kvm *kvm);
+
 static phys_addr_t __stage2_range_addr_end(phys_addr_t addr, phys_addr_t end,
 					   phys_addr_t size)
 {
@@ -59,27 +63,36 @@ static phys_addr_t stage2_range_addr_end(phys_addr_t addr, phys_addr_t end)
  * long will also starve other vCPUs. We have to also make sure that the page
  * tables are not freed while we released the lock.
  */
-static int stage2_apply_range(struct kvm_s2_mmu *mmu, phys_addr_t addr,
+static int stage2_apply_range(struct kvm_s2_mmu *mmu, phys_addr_t start,
 			      phys_addr_t end,
 			      int (*fn)(struct kvm_pgtable *, u64, u64),
 			      bool resched)
 {
 	struct kvm *kvm = kvm_s2_mmu_to_kvm(mmu);
+	bool lock_dropped = false;
+	phys_addr_t addr = start;
 	int ret;
 	u64 next;
 
 	do {
 		struct kvm_pgtable *pgt = mmu->pgt;
+		/*
+		 * We may be raced on PGT teardown when we release the
+		 * kvm->mmu_lock. That's fine as the PGT is legitimately no
+		 * longer present.
+		 */
 		if (!pgt)
-			return -EINVAL;
+			return lock_dropped ? 0 : -EINVAL;
 
 		next = stage2_range_addr_end(addr, end);
 		ret = fn(pgt, addr, next - addr);
 		if (ret)
 			break;
 
-		if (resched && next != end)
+		if (resched && next != end) {
 			cond_resched_rwlock_write(&kvm->mmu_lock);
+			lock_dropped = true;
+		}
 	} while (addr = next, addr != end);
 
 	return ret;
@@ -166,6 +179,18 @@ static bool memslot_is_logging(struct kvm_memory_slot *memslot)
 	return memslot->dirty_bitmap && !(memslot->flags & KVM_MEM_READONLY);
 }
 
+static int pkvm_flush_remote_tlbs(struct kvm *kvm)
+{
+	kvm_call_hyp_nvhe(__pkvm_tlb_flush_vmid, kvm->arch.pkvm.handle);
+	return 0;
+}
+
+static int kvm_vm_flush_remote_tlbs(struct kvm *kvm)
+{
+	kvm_call_hyp(__kvm_tlb_flush_vmid, &kvm->arch.mmu);
+	return 0;
+}
+
 /**
  * kvm_arch_flush_remote_tlbs() - flush all VM TLB entries for v7/8
  * @kvm:	pointer to kvm structure.
@@ -174,24 +199,29 @@ static bool memslot_is_logging(struct kvm_memory_slot *memslot)
  */
 int kvm_arch_flush_remote_tlbs(struct kvm *kvm)
 {
-	if (is_protected_kvm_enabled())
-		kvm_call_hyp_nvhe(__pkvm_tlb_flush_vmid, kvm->arch.pkvm.handle);
-	else
-		kvm_call_hyp(__kvm_tlb_flush_vmid, &kvm->arch.mmu);
-	return 0;
+	return kvm->arch.vm_s2_ops->vm_flush_remote_tlbs(kvm);
 }
 
-int kvm_arch_flush_remote_tlbs_range(struct kvm *kvm,
-				      gfn_t gfn, u64 nr_pages)
+static int pkvm_flush_remote_tlbs_range(struct kvm *kvm,
+					gfn_t gfn, u64 nr_pages)
+{
+	return pkvm_flush_remote_tlbs(kvm);
+}
+
+static int kvm_vm_flush_remote_tlbs_range(struct kvm *kvm,
+					 gfn_t gfn, u64 nr_pages)
 {
 	u64 size = nr_pages << PAGE_SHIFT;
 	u64 addr = gfn << PAGE_SHIFT;
 
-	if (is_protected_kvm_enabled())
-		kvm_call_hyp_nvhe(__pkvm_tlb_flush_vmid, kvm->arch.pkvm.handle);
-	else
-		kvm_tlb_flush_vmid_range(&kvm->arch.mmu, addr, size);
+	kvm_tlb_flush_vmid_range(&kvm->arch.mmu, addr, size);
 	return 0;
+}
+
+int kvm_arch_flush_remote_tlbs_range(struct kvm *kvm,
+				     gfn_t gfn, u64 nr_pages)
+{
+	return kvm->arch.vm_s2_ops->vm_flush_remote_tlbs_range(kvm, gfn, nr_pages);
 }
 
 static void *stage2_memcache_zalloc_page(void *arg)
@@ -289,6 +319,37 @@ static void invalidate_icache_guest_page(void *va, size_t size)
 	__invalidate_icache_guest_page(va, size);
 }
 
+static int kvm_pgtable_stage2_unmap_tracked(struct kvm_pgtable *pgt,
+					    u64 addr, u64 size);
+
+static void kvm_vm_stage2_unmap_range(struct kvm_s2_mmu *mmu,
+				      phys_addr_t start,
+				      u64 size, bool may_block)
+{
+	struct kvm *kvm = kvm_s2_mmu_to_kvm(mmu);
+	int (*fn)(struct kvm_pgtable *, u64, u64);
+
+	if (kvm_is_nested_s2_mmu(kvm, mmu))
+		fn = kvm_pgtable_stage2_unmap_tracked;
+	else
+		fn = kvm_pgtable_stage2_unmap;
+
+	WARN_ON(stage2_apply_range(mmu, start, start + size, fn, may_block));
+}
+
+static void pkvm_stage2_unmap_range(struct kvm_s2_mmu *mmu,
+				    phys_addr_t start,
+				    u64 size, bool may_block)
+{
+	WARN_ON(stage2_apply_range(mmu, start, start + size,
+				   pkvm_pgtable_stage2_unmap, may_block));
+}
+
+static void no_stage2_unmap_range(struct kvm_s2_mmu *mmu,
+				  phys_addr_t start, u64 size, bool may_block)
+{
+}
+
 /*
  * Unmapping vs dcache management:
  *
@@ -313,34 +374,39 @@ static void invalidate_icache_guest_page(void *va, size_t size)
  * we then fully enforce cacheability of RAM, no matter what the guest
  * does.
  */
+
+static int kvm_pgtable_stage2_unmap_tracked(struct kvm_pgtable *pgt, u64 addr, u64 size)
+{
+	int ret;
+
+	ret = kvm_pgtable_stage2_unmap(pgt, addr, size);
+	if (ret)
+		return ret;
+
+	kvm_remove_guest_s2_mappings(pgt->mmu, addr, size);
+	return 0;
+}
+
 /**
- * __unmap_stage2_range -- Clear stage2 page table entries to unmap a range
+ * kvm_stage2_unmap_range -- Clear stage2 page table entries to unmap a range
  * @mmu:   The KVM stage-2 MMU pointer
  * @start: The intermediate physical base address of the range to unmap
  * @size:  The size of the area to unmap
  * @may_block: Whether or not we are permitted to block
  *
  * Clear a range of stage-2 mappings, lowering the various ref-counts.  Must
- * be called while holding mmu_lock (unless for freeing the stage2 pgd before
- * destroying the VM), otherwise another faulting VCPU may come in and mess
- * with things behind our backs.
+ * be called while holding mmu_lock otherwise another faulting VCPU may
+ * come in and mess with things behind our backs.
  */
-static void __unmap_stage2_range(struct kvm_s2_mmu *mmu, phys_addr_t start, u64 size,
-				 bool may_block)
-{
-	struct kvm *kvm = kvm_s2_mmu_to_kvm(mmu);
-	phys_addr_t end = start + size;
-
-	lockdep_assert_held_write(&kvm->mmu_lock);
-	WARN_ON(size & ~PAGE_MASK);
-	WARN_ON(stage2_apply_range(mmu, start, end, KVM_PGT_FN(kvm_pgtable_stage2_unmap),
-				   may_block));
-}
-
 void kvm_stage2_unmap_range(struct kvm_s2_mmu *mmu, phys_addr_t start,
 			    u64 size, bool may_block)
 {
-	__unmap_stage2_range(mmu, start, size, may_block);
+	struct kvm *kvm = kvm_s2_mmu_to_kvm(mmu);
+
+	lockdep_assert_held_write(&kvm->mmu_lock);
+	WARN_ON(size & ~PAGE_MASK);
+
+	kvm->arch.vm_s2_ops->vm_stage2_unmap_range(mmu, start, size, may_block);
 }
 
 void kvm_stage2_flush_range(struct kvm_s2_mmu *mmu, phys_addr_t addr, phys_addr_t end)
@@ -487,7 +553,7 @@ static int share_pfn_hyp(u64 pfn)
 		goto unlock;
 	}
 
-	this = kzalloc(sizeof(*this), GFP_KERNEL);
+	this = kzalloc_obj(*this);
 	if (!this) {
 		ret = -ENOMEM;
 		goto unlock;
@@ -497,7 +563,11 @@ static int share_pfn_hyp(u64 pfn)
 	this->count = 1;
 	rb_link_node(&this->node, parent, node);
 	rb_insert_color(&this->node, &hyp_shared_pfns);
-	ret = kvm_call_hyp_nvhe(__pkvm_host_share_hyp, pfn, 1);
+	ret = kvm_call_hyp_nvhe(__pkvm_host_share_hyp, pfn);
+	if (ret) {
+		rb_erase(&this->node, &hyp_shared_pfns);
+		kfree(this);
+	}
 unlock:
 	mutex_unlock(&hyp_shared_pfns_lock);
 
@@ -517,13 +587,17 @@ static int unshare_pfn_hyp(u64 pfn)
 		goto unlock;
 	}
 
-	this->count--;
-	if (this->count)
+	if (this->count > 1) {
+		this->count--;
+		goto unlock;
+	}
+
+	ret = kvm_call_hyp_nvhe(__pkvm_host_unshare_hyp, pfn);
+	if (ret)
 		goto unlock;
 
 	rb_erase(&this->node, &hyp_shared_pfns);
 	kfree(this);
-	ret = kvm_call_hyp_nvhe(__pkvm_host_unshare_hyp, pfn, 1);
 unlock:
 	mutex_unlock(&hyp_shared_pfns_lock);
 
@@ -533,8 +607,8 @@ unlock:
 int kvm_share_hyp(void *from, void *to)
 {
 	phys_addr_t start, end, cur;
+	int ret = 0;
 	u64 pfn;
-	int ret;
 
 	if (is_kernel_in_hyp_mode())
 		return 0;
@@ -556,10 +630,24 @@ int kvm_share_hyp(void *from, void *to)
 		pfn = __phys_to_pfn(cur);
 		ret = share_pfn_hyp(pfn);
 		if (ret)
-			return ret;
+			break;
 	}
 
-	return 0;
+	if (!ret)
+		return 0;
+
+	/*
+	 * Roll back the pages shared by this call. A failed unshare leaks
+	 * the page (it stays shared with the hypervisor and is no longer
+	 * reusable for pKVM) but breaks no isolation guarantee, so warn and
+	 * continue. Not expected in practice.
+	 */
+	for (end = cur, cur = start; cur < end; cur += PAGE_SIZE) {
+		pfn = __phys_to_pfn(cur);
+		WARN_ON(unshare_pfn_hyp(pfn));
+	}
+
+	return ret;
 }
 
 void kvm_unshare_hyp(void *from, void *to)
@@ -574,6 +662,11 @@ void kvm_unshare_hyp(void *from, void *to)
 	end = PAGE_ALIGN(__pa(to));
 	for (cur = start; cur < end; cur += PAGE_SIZE) {
 		pfn = __phys_to_pfn(cur);
+		/*
+		 * A failed unshare leaks the page: it stays shared with the
+		 * hypervisor and is no longer reusable for pKVM. No isolation
+		 * guarantee is broken, and this is not expected in practice.
+		 */
 		WARN_ON(unshare_pfn_hyp(pfn));
 	}
 }
@@ -836,7 +929,7 @@ static int get_user_mapping_size(struct kvm *kvm, u64 addr)
 	 * IPI-ing threads).
 	 */
 	local_irq_save(flags);
-	ret = kvm_pgtable_get_leaf(&pgt, addr, &pte, &level);
+	ret = kvm_pgtable_get_leaf(&pgt, addr, &pte, &level, 0);
 	local_irq_restore(flags);
 
 	if (ret)
@@ -878,9 +971,6 @@ static int kvm_init_ipa_range(struct kvm_s2_mmu *mmu, unsigned long type)
 	u64 mmfr0, mmfr1;
 	u32 phys_shift;
 
-	if (type & ~KVM_VM_TYPE_ARM_IPA_SIZE_MASK)
-		return -EINVAL;
-
 	phys_shift = KVM_VM_TYPE_ARM_IPA_SIZE(type);
 	if (is_protected_kvm_enabled()) {
 		phys_shift = kvm_ipa_limit;
@@ -904,6 +994,38 @@ static int kvm_init_ipa_range(struct kvm_s2_mmu *mmu, unsigned long type)
 	return 0;
 }
 
+/*
+ * Assume that @pgt is valid and unlinked from the KVM MMU to free the
+ * page-table without taking the kvm_mmu_lock and without performing any
+ * TLB invalidations.
+ *
+ * Also, the range of addresses can be large enough to cause need_resched
+ * warnings, for instance on CONFIG_PREEMPT_NONE kernels. Hence, invoke
+ * cond_resched() periodically to prevent hogging the CPU for a long time
+ * and schedule something else, if required.
+ */
+static void stage2_destroy_range(struct kvm_pgtable *pgt, phys_addr_t addr,
+				   phys_addr_t end)
+{
+	u64 next;
+
+	do {
+		next = stage2_range_addr_end(addr, end);
+		KVM_PGT_FN(kvm_pgtable_stage2_destroy_range)(pgt, addr,
+							     next - addr);
+		if (next != end)
+			cond_resched();
+	} while (addr = next, addr != end);
+}
+
+static void kvm_stage2_destroy(struct kvm_pgtable *pgt)
+{
+	unsigned int ia_bits = VTCR_EL2_IPA(pgt->mmu->vtcr);
+
+	stage2_destroy_range(pgt, 0, BIT(ia_bits));
+	KVM_PGT_FN(kvm_pgtable_stage2_destroy_pgd)(pgt);
+}
+
 /**
  * kvm_init_stage2_mmu - Initialise a S2 MMU structure
  * @kvm:	The pointer to the KVM structure
@@ -924,6 +1046,12 @@ int kvm_init_stage2_mmu(struct kvm *kvm, struct kvm_s2_mmu *mmu, unsigned long t
 	int cpu, err;
 	struct kvm_pgtable *pgt;
 
+	/* Initialize the VM ops for the VM instance for the first time */
+	if (mmu == &kvm->arch.mmu) {
+		err = kvm_vm_init_vm_s2_ops(kvm);
+		if (err)
+			return err;
+	}
 	/*
 	 * If we already have our page tables in place, and that the
 	 * MMU context is the canonical one, we have a bug somewhere,
@@ -946,7 +1074,7 @@ int kvm_init_stage2_mmu(struct kvm *kvm, struct kvm_s2_mmu *mmu, unsigned long t
 	if (err)
 		return err;
 
-	pgt = kzalloc(sizeof(*pgt), GFP_KERNEL_ACCOUNT);
+	pgt = kzalloc_obj(*pgt, GFP_KERNEL_ACCOUNT);
 	if (!pgt)
 		return -ENOMEM;
 
@@ -974,13 +1102,16 @@ int kvm_init_stage2_mmu(struct kvm *kvm, struct kvm_s2_mmu *mmu, unsigned long t
 
 	mmu->pgd_phys = __pa(pgt->pgd);
 
+	mmu->guest_s2_mappings = RB_ROOT_CACHED;
+
 	if (kvm_is_nested_s2_mmu(kvm, mmu))
 		kvm_init_nested_s2_mmu(mmu);
 
 	return 0;
 
 out_destroy_pgtable:
-	KVM_PGT_FN(kvm_pgtable_stage2_destroy)(pgt);
+	kvm_stage2_destroy(pgt);
+	mmu->pgt = NULL;
 out_free_pgtable:
 	kfree(pgt);
 	return err;
@@ -1062,10 +1193,25 @@ void stage2_unmap_vm(struct kvm *kvm)
 	srcu_read_unlock(&kvm->srcu, idx);
 }
 
+static void guest_s2_tracking_destroy(struct rb_root_cached *tree)
+{
+	struct kvm_guest_s2_mapping *mapping;
+	struct interval_tree_node *node;
+
+	while ((node = interval_tree_iter_first(tree, 0, ULONG_MAX))) {
+		interval_tree_remove(node, tree);
+		mapping = container_of(node, struct kvm_guest_s2_mapping,
+				       canonical);
+		kfree(mapping);
+		cond_resched();
+	}
+}
+
 void kvm_free_stage2_pgd(struct kvm_s2_mmu *mmu)
 {
 	struct kvm *kvm = kvm_s2_mmu_to_kvm(mmu);
 	struct kvm_pgtable *pgt = NULL;
+	struct rb_root_cached mappings_tree;
 
 	write_lock(&kvm->mmu_lock);
 	pgt = mmu->pgt;
@@ -1078,12 +1224,18 @@ void kvm_free_stage2_pgd(struct kvm_s2_mmu *mmu)
 	if (kvm_is_nested_s2_mmu(kvm, mmu))
 		kvm_init_nested_s2_mmu(mmu);
 
+	mappings_tree = mmu->guest_s2_mappings;
+	mmu->guest_s2_mappings = RB_ROOT_CACHED;
+
 	write_unlock(&kvm->mmu_lock);
 
 	if (pgt) {
-		KVM_PGT_FN(kvm_pgtable_stage2_destroy)(pgt);
+		kvm_stage2_destroy(pgt);
 		kfree(pgt);
 	}
+
+	if (!kvm_is_nested_s2_mmu(kvm, mmu))
+		guest_s2_tracking_destroy(&mappings_tree);
 }
 
 static void hyp_mc_free_fn(void *addr, void *mc)
@@ -1100,8 +1252,10 @@ static void *hyp_mc_alloc_fn(void *mc)
 {
 	struct kvm_hyp_memcache *memcache = mc;
 	void *addr;
+	gfp_t gfp;
 
-	addr = (void *)__get_free_page(GFP_KERNEL_ACCOUNT);
+	gfp = memcache->flags & HYP_MEMCACHE_ACCOUNT_KMEMCG ? GFP_KERNEL_ACCOUNT : GFP_KERNEL;
+	addr = (void *)__get_free_page(gfp);
 	if (addr && memcache->flags & HYP_MEMCACHE_ACCOUNT_STAGE2)
 		kvm_account_pgtable_pages(addr, 1);
 
@@ -1123,7 +1277,8 @@ int topup_hyp_memcache(struct kvm_hyp_memcache *mc, unsigned long min_pages)
 		return 0;
 
 	if (!mc->mapping) {
-		mc->mapping = kzalloc(sizeof(struct pkvm_mapping), GFP_KERNEL_ACCOUNT);
+		mc->mapping = kzalloc_obj(struct pkvm_mapping,
+					  GFP_KERNEL_ACCOUNT);
 		if (!mc->mapping)
 			return -ENOMEM;
 	}
@@ -1153,7 +1308,7 @@ int kvm_phys_addr_ioremap(struct kvm *kvm, phys_addr_t guest_ipa,
 				     KVM_PGTABLE_PROT_R |
 				     (writable ? KVM_PGTABLE_PROT_W : 0);
 
-	if (is_protected_kvm_enabled())
+	if (kvm_vm_hyp_is_distrusting(kvm))
 		return -EPERM;
 
 	size += offset_in_page(guest_ipa);
@@ -1292,21 +1447,53 @@ static void kvm_send_hwpoison_signal(unsigned long address, short lsb)
 	send_sig_mceerr(BUS_MCEERR_AR, (void __user *)address, lsb, current);
 }
 
-static bool fault_supports_stage2_huge_mapping(struct kvm_memory_slot *memslot,
-					       unsigned long hva,
+struct kvm_s2_fault_desc {
+	struct kvm_vcpu		*vcpu;
+	phys_addr_t		fault_ipa;
+	struct kvm_s2_trans	*nested;
+	struct kvm_memory_slot	*memslot;
+	unsigned long		hva;
+	unsigned long		esr;
+	struct kvm_s2_mmu	*mmu;
+};
+
+struct kvm_s2_fault_vma_info {
+	unsigned long	mmu_seq;
+	long		vma_pagesize;
+	vm_flags_t	vm_flags;
+	unsigned long	max_map_size;
+	struct page	*page;
+	kvm_pfn_t	pfn;
+	gfn_t		gfn;
+	bool		device;
+	bool		mte_allowed;
+	bool		is_vma_cacheable;
+	bool		map_writable;
+	bool		map_non_cacheable;
+};
+
+struct kvm_s2_fault_result {
+	unsigned long mapping_size;
+};
+
+static bool fault_supports_stage2_huge_mapping(const struct kvm_s2_fault_desc *s2fd,
 					       unsigned long map_size)
 {
-	gpa_t gpa_start;
+	struct kvm_memory_slot *memslot = s2fd->memslot;
+	unsigned long hva = s2fd->hva;
 	hva_t uaddr_start, uaddr_end;
+	gpa_t gpa_start;
 	size_t size;
 
 	/* The memslot and the VMA are guaranteed to be aligned to PAGE_SIZE */
 	if (map_size == PAGE_SIZE)
 		return true;
 
-	/* pKVM only supports PMD_SIZE huge-mappings */
-	if (is_protected_kvm_enabled() && map_size != PMD_SIZE)
-		return false;
+	/* pKVM only supports PMD_SIZE huge-mappings for non-protected VMs */
+	if (is_protected_kvm_enabled()) {
+		if (vcpu_is_protected(s2fd->vcpu) || map_size != PMD_SIZE)
+			return false;
+	}
 
 	size = memslot->npages * PAGE_SIZE;
 
@@ -1366,19 +1553,19 @@ static bool fault_supports_stage2_huge_mapping(struct kvm_memory_slot *memslot,
  * Returns the size of the mapping.
  */
 static long
-transparent_hugepage_adjust(struct kvm *kvm, struct kvm_memory_slot *memslot,
-			    unsigned long hva, kvm_pfn_t *pfnp,
-			    phys_addr_t *ipap)
+transparent_hugepage_adjust(const struct kvm_s2_fault_desc *s2fd, kvm_pfn_t *pfnp, gfn_t *gfnp)
 {
+	struct kvm *kvm = s2fd->vcpu->kvm;
 	kvm_pfn_t pfn = *pfnp;
+	gfn_t gfn = *gfnp;
 
 	/*
 	 * Make sure the adjustment is done only for THP pages. Also make
 	 * sure that the HVA and IPA are sufficiently aligned and that the
 	 * block map is contained within the memslot.
 	 */
-	if (fault_supports_stage2_huge_mapping(memslot, hva, PMD_SIZE)) {
-		int sz = get_user_mapping_size(kvm, hva);
+	if (fault_supports_stage2_huge_mapping(s2fd, PMD_SIZE)) {
+		int sz = get_user_mapping_size(kvm, s2fd->hva);
 
 		if (sz < 0)
 			return sz;
@@ -1386,7 +1573,8 @@ transparent_hugepage_adjust(struct kvm *kvm, struct kvm_memory_slot *memslot,
 		if (sz < PMD_SIZE)
 			return PAGE_SIZE;
 
-		*ipap &= PMD_MASK;
+		gfn &= ~(PTRS_PER_PMD - 1);
+		*gfnp = gfn;
 		pfn &= ~(PTRS_PER_PMD - 1);
 		*pfnp = pfn;
 
@@ -1397,31 +1585,10 @@ transparent_hugepage_adjust(struct kvm *kvm, struct kvm_memory_slot *memslot,
 	return PAGE_SIZE;
 }
 
-static int get_vma_page_shift(struct vm_area_struct *vma, unsigned long hva)
+static int get_vma_page_shift(struct vm_area_struct *vma)
 {
-	unsigned long pa;
-
-	if (is_vm_hugetlb_page(vma) && !(vma->vm_flags & VM_PFNMAP))
+	if (vma_is_hugetlb(vma))
 		return huge_page_shift(hstate_vma(vma));
-
-	if (!(vma->vm_flags & VM_PFNMAP))
-		return PAGE_SHIFT;
-
-	VM_BUG_ON(is_vm_hugetlb_page(vma));
-
-	pa = (vma->vm_pgoff << PAGE_SHIFT) + (hva - vma->vm_start);
-
-#ifndef __PAGETABLE_PMD_FOLDED
-	if ((hva & (PUD_SIZE - 1)) == (pa & (PUD_SIZE - 1)) &&
-	    ALIGN_DOWN(hva, PUD_SIZE) >= vma->vm_start &&
-	    ALIGN(hva, PUD_SIZE) <= vma->vm_end)
-		return PUD_SHIFT;
-#endif
-
-	if ((hva & (PMD_SIZE - 1)) == (pa & (PMD_SIZE - 1)) &&
-	    ALIGN_DOWN(hva, PMD_SIZE) >= vma->vm_start &&
-	    ALIGN(hva, PMD_SIZE) <= vma->vm_end)
-		return PMD_SHIFT;
 
 	return PAGE_SHIFT;
 }
@@ -1443,6 +1610,11 @@ static void sanitise_mte_tags(struct kvm *kvm, kvm_pfn_t pfn,
 
 	if (!kvm_has_mte(kvm))
 		return;
+
+	if (is_zero_pfn(pfn)) {
+		WARN_ON_ONCE(nr_pages != 1);
+		return;
+	}
 
 	if (folio_test_hugetlb(folio)) {
 		/* Hugetlb has MTE flags set on head page only */
@@ -1479,25 +1651,22 @@ static bool kvm_vma_is_cacheable(struct vm_area_struct *vma)
 	}
 }
 
-static int prepare_mmu_memcache(struct kvm_vcpu *vcpu, bool topup_memcache,
-				void **memcache)
+static void *get_mmu_memcache(struct kvm_vcpu *vcpu)
 {
-	int min_pages;
-
 	if (!is_protected_kvm_enabled())
-		*memcache = &vcpu->arch.mmu_page_cache;
+		return &vcpu->arch.mmu_page_cache;
 	else
-		*memcache = &vcpu->arch.pkvm_memcache;
+		return &vcpu->arch.stage2_mc;
+}
 
-	if (!topup_memcache)
-		return 0;
-
-	min_pages = kvm_mmu_cache_min_pages(vcpu->arch.hw_mmu);
+static int topup_mmu_memcache(struct kvm_s2_mmu *mmu, void *memcache)
+{
+	int min_pages = kvm_mmu_cache_min_pages(mmu);
 
 	if (!is_protected_kvm_enabled())
-		return kvm_mmu_topup_memory_cache(*memcache, min_pages);
+		return kvm_mmu_topup_memory_cache(memcache, min_pages);
 
-	return topup_hyp_memcache(*memcache, min_pages);
+	return topup_hyp_memcache(memcache, min_pages);
 }
 
 /*
@@ -1510,158 +1679,260 @@ static int prepare_mmu_memcache(struct kvm_vcpu *vcpu, bool topup_memcache,
  * TLB invalidation from the guest and used to limit the invalidation scope if a
  * TTL hint or a range isn't provided.
  */
-static void adjust_nested_fault_perms(struct kvm_s2_trans *nested,
-				      enum kvm_pgtable_prot *prot,
-				      bool *writable)
+static enum kvm_pgtable_prot adjust_nested_fault_perms(struct kvm_s2_trans *nested,
+						       enum kvm_pgtable_prot prot)
 {
-	*writable &= kvm_s2_trans_writable(nested);
+	if (!kvm_s2_trans_writable(nested))
+		prot &= ~KVM_PGTABLE_PROT_W;
 	if (!kvm_s2_trans_readable(nested))
-		*prot &= ~KVM_PGTABLE_PROT_R;
+		prot &= ~KVM_PGTABLE_PROT_R;
 
-	*prot |= kvm_encode_nested_level(nested);
+	return prot | kvm_encode_nested_level(nested);
 }
 
-#define KVM_PGTABLE_WALK_MEMABORT_FLAGS (KVM_PGTABLE_WALK_HANDLE_FAULT | KVM_PGTABLE_WALK_SHARED)
-
-static int gmem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
-		      struct kvm_s2_trans *nested,
-		      struct kvm_memory_slot *memslot, bool is_perm)
+static enum kvm_pgtable_prot adjust_nested_exec_perms(struct kvm *kvm,
+						      struct kvm_s2_trans *nested,
+						      enum kvm_pgtable_prot prot)
 {
-	bool write_fault, exec_fault, writable;
-	enum kvm_pgtable_walk_flags flags = KVM_PGTABLE_WALK_MEMABORT_FLAGS;
+	if (!kvm_s2_trans_exec_el0(kvm, nested))
+		prot &= ~KVM_PGTABLE_PROT_UX;
+	if (!kvm_s2_trans_exec_el1(kvm, nested))
+		prot &= ~KVM_PGTABLE_PROT_PX;
+
+	return prot;
+}
+
+static bool kvm_s2_fault_is_perm(const struct kvm_s2_fault_desc *s2fd)
+{
+	return esr_fsc_is_permission_fault(s2fd->esr);
+}
+
+static bool kvm_s2_fault_is_exec(const struct kvm_s2_fault_desc *s2fd)
+{
+	return esr_abt_is_exec_fault(s2fd->esr);
+}
+
+static bool kvm_s2_fault_is_write(const struct kvm_s2_fault_desc *s2fd)
+{
+	return esr_abt_is_write_fault(s2fd->esr);
+}
+
+static u64 kvm_s2_perm_fault_granule(const struct kvm_s2_fault_desc *s2fd)
+{
+	u64 level;
+
+	if (!kvm_s2_fault_is_perm(s2fd))
+		return 0;
+	level = s2fd->esr & ESR_ELx_FSC_LEVEL;
+	return BIT(ARM64_HW_PGTABLE_LEVEL_SHIFT(level));
+}
+
+static int kvm_s2_fault_get_vma_info(const struct kvm_s2_fault_desc *s2fd,
+				     struct kvm_s2_fault_vma_info *s2vi);
+
+static gfn_t get_canonical_gfn(const struct kvm_s2_fault_desc *s2fd,
+			       const struct kvm_s2_fault_vma_info *s2vi);
+
+static int gmem_abort(const struct kvm_s2_fault_desc *s2fd,
+		      struct kvm_s2_fault_result *result)
+{
+	bool write_fault, exec_fault;
+	bool perm_fault = kvm_s2_fault_is_perm(s2fd);
+	enum kvm_pgtable_walk_flags flags = KVM_PGTABLE_WALK_SHARED;
 	enum kvm_pgtable_prot prot = KVM_PGTABLE_PROT_R;
-	struct kvm_pgtable *pgt = vcpu->arch.hw_mmu->pgt;
-	unsigned long mmu_seq;
-	struct page *page;
-	struct kvm *kvm = vcpu->kvm;
-	void *memcache;
-	kvm_pfn_t pfn;
-	gfn_t gfn;
+	struct kvm_pgtable *pgt = s2fd->mmu->pgt;
+	struct kvm_guest_s2_mapping *mapping = NULL;
+	struct kvm_s2_fault_vma_info s2vi = {};
+	struct kvm *kvm = s2fd->vcpu->kvm;
+	void *memcache = NULL;
+	gfn_t canonical_gfn;
 	int ret;
 
-	ret = prepare_mmu_memcache(vcpu, true, &memcache);
-	if (ret)
-		return ret;
+	if (!perm_fault) {
+		memcache = get_mmu_memcache(s2fd->vcpu);
+		ret = topup_mmu_memcache(s2fd->mmu, memcache);
+		if (ret)
+			return ret;
+		if (kvm_is_nested_s2_mmu(kvm, pgt->mmu)) {
+			mapping = kmalloc_obj(struct kvm_guest_s2_mapping, GFP_KERNEL_ACCOUNT);
+			if (!mapping)
+				return -ENOMEM;
+		}
+	}
 
-	if (nested)
-		gfn = kvm_s2_trans_output(nested) >> PAGE_SHIFT;
-	else
-		gfn = fault_ipa >> PAGE_SHIFT;
+	s2vi.vma_pagesize = PAGE_SIZE;
+	s2vi.gfn = ALIGN_DOWN(s2fd->fault_ipa, s2vi.vma_pagesize) >> PAGE_SHIFT;
+	canonical_gfn = get_canonical_gfn(s2fd, &s2vi);
 
-	write_fault = kvm_is_write_fault(vcpu);
-	exec_fault = kvm_vcpu_trap_is_exec_fault(vcpu);
+	write_fault = kvm_s2_fault_is_write(s2fd);
+	exec_fault = kvm_s2_fault_is_exec(s2fd);
 
 	VM_WARN_ON_ONCE(write_fault && exec_fault);
 
-	mmu_seq = kvm->mmu_invalidate_seq;
+	s2vi.mmu_seq = kvm->mmu_invalidate_seq;
 	/* Pairs with the smp_wmb() in kvm_mmu_invalidate_end(). */
 	smp_rmb();
 
-	ret = kvm_gmem_get_pfn(kvm, memslot, gfn, &pfn, &page, NULL);
+	ret = kvm_gmem_get_pfn(kvm, s2fd->memslot, canonical_gfn, &s2vi.pfn, NULL);
 	if (ret) {
-		kvm_prepare_memory_fault_exit(vcpu, fault_ipa, PAGE_SIZE,
-					      write_fault, exec_fault, false);
-		return ret;
+		/* If result is non-NULL this is a synthetic fault. */
+		if (!result)
+			kvm_prepare_memory_fault_exit(s2fd->vcpu, gfn_to_gpa(canonical_gfn),
+						      s2vi.vma_pagesize, write_fault, exec_fault,
+						      false);
+		kfree(mapping);
 	}
 
-	writable = !(memslot->flags & KVM_MEM_READONLY);
-
-	if (nested)
-		adjust_nested_fault_perms(nested, &prot, &writable);
-
-	if (writable)
+	if (!(s2fd->memslot->flags & KVM_MEM_READONLY))
 		prot |= KVM_PGTABLE_PROT_W;
 
-	if (exec_fault ||
-	    (cpus_have_final_cap(ARM64_HAS_CACHE_DIC) &&
-	     (!nested || kvm_s2_trans_executable(nested))))
+	if (s2fd->nested)
+		prot = adjust_nested_fault_perms(s2fd->nested, prot);
+
+	if (exec_fault || cpus_have_final_cap(ARM64_HAS_CACHE_DIC))
 		prot |= KVM_PGTABLE_PROT_X;
 
+	if (s2fd->nested)
+		prot = adjust_nested_exec_perms(kvm, s2fd->nested, prot);
+
 	kvm_fault_lock(kvm);
-	if (mmu_invalidate_retry(kvm, mmu_seq)) {
+	if (mmu_invalidate_retry(kvm, s2vi.mmu_seq)) {
 		ret = -EAGAIN;
 		goto out_unlock;
 	}
 
-	ret = KVM_PGT_FN(kvm_pgtable_stage2_map)(pgt, fault_ipa, PAGE_SIZE,
-						 __pfn_to_phys(pfn), prot,
-						 memcache, flags);
+	if (perm_fault) {
+		/*
+		 * Drop the SW bits in favour of those stored in the
+		 * PTE, which will be preserved.
+		 */
+		prot &= ~KVM_NV_GUEST_MAP_SZ;
+		ret = KVM_PGT_FN(kvm_pgtable_stage2_relax_perms)(pgt, gfn_to_gpa(s2vi.gfn),
+								 prot, flags);
+	} else {
+		ret = KVM_PGT_FN(kvm_pgtable_stage2_map)(pgt, gfn_to_gpa(s2vi.gfn),
+							 s2vi.vma_pagesize,
+							 __pfn_to_phys(s2vi.pfn), prot,
+							 memcache, flags);
+		/*
+		 * -EAGAIN from kvm_pgtable_stage2_map() can install mappings.
+		 * We don't know which subrange is installed, track the whole
+		 * thing.
+		 */
+		if ((ret == 0 || ret == -EAGAIN) && kvm_is_nested_s2_mmu(kvm, pgt->mmu)) {
+			kvm_record_guest_s2_mapping(pgt->mmu, canonical_gfn << PAGE_SHIFT,
+						    s2fd->fault_ipa, s2vi.vma_pagesize, mapping);
+			mapping = NULL;
+		}
+	}
 
 out_unlock:
-	kvm_release_faultin_page(kvm, page, !!ret, writable);
 	kvm_fault_unlock(kvm);
+	kfree(mapping);
 
-	if (writable && !ret)
-		mark_page_dirty_in_slot(kvm, memslot, gfn);
+	if ((prot & KVM_PGTABLE_PROT_W) && !ret)
+		mark_page_dirty_in_slot(kvm, s2fd->memslot, canonical_gfn);
 
-	return ret != -EAGAIN ? ret : 0;
+	if (ret == -EAGAIN)
+		return result ? ret : 0;
+
+	if (result && !ret)
+		result->mapping_size = s2vi.vma_pagesize;
+
+	return ret;
 }
 
-static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
-			  struct kvm_s2_trans *nested,
-			  struct kvm_memory_slot *memslot, unsigned long hva,
-			  bool fault_is_perm)
+static int protected_pkvm_mem_abort(const struct kvm_s2_fault_desc *s2fd)
 {
-	int ret = 0;
-	bool topup_memcache;
-	bool write_fault, writable;
-	bool exec_fault, mte_allowed, is_vma_cacheable;
-	bool s2_force_noncacheable = false, vfio_allow_any_uc = false;
-	unsigned long mmu_seq;
-	phys_addr_t ipa = fault_ipa;
+	unsigned int flags = FOLL_HWPOISON | FOLL_LONGTERM | FOLL_WRITE;
+	struct kvm_s2_fault_vma_info s2vi = {};
+	struct kvm_vcpu *vcpu = s2fd->vcpu;
+	struct kvm_pgtable *pgt = s2fd->mmu->pgt;
+	struct mm_struct *mm = current->mm;
 	struct kvm *kvm = vcpu->kvm;
-	struct vm_area_struct *vma;
-	short vma_shift;
-	void *memcache;
-	gfn_t gfn;
-	kvm_pfn_t pfn;
-	bool logging_active = memslot_is_logging(memslot);
-	bool force_pte = logging_active;
-	long vma_pagesize, fault_granule;
-	enum kvm_pgtable_prot prot = KVM_PGTABLE_PROT_R;
-	struct kvm_pgtable *pgt;
-	struct page *page;
-	vm_flags_t vm_flags;
-	enum kvm_pgtable_walk_flags flags = KVM_PGTABLE_WALK_MEMABORT_FLAGS;
+	void *hyp_memcache;
+	int ret;
 
-	if (fault_is_perm)
-		fault_granule = kvm_vcpu_trap_get_perm_fault_granule(vcpu);
-	write_fault = kvm_is_write_fault(vcpu);
-	exec_fault = kvm_vcpu_trap_is_exec_fault(vcpu);
-	VM_WARN_ON_ONCE(write_fault && exec_fault);
+	hyp_memcache = get_mmu_memcache(vcpu);
+	ret = topup_mmu_memcache(s2fd->mmu, hyp_memcache);
+	if (ret)
+		return -ENOMEM;
 
-	/*
-	 * Permission faults just need to update the existing leaf entry,
-	 * and so normally don't require allocations from the memcache. The
-	 * only exception to this is when dirty logging is enabled at runtime
-	 * and a write fault needs to collapse a block entry into a table.
-	 */
-	topup_memcache = !fault_is_perm || (logging_active && write_fault);
-	ret = prepare_mmu_memcache(vcpu, topup_memcache, &memcache);
+	ret = kvm_s2_fault_get_vma_info(s2fd, &s2vi);
 	if (ret)
 		return ret;
 
-	/*
-	 * Let's check if we will get back a huge page backed by hugetlbfs, or
-	 * get block mapping for device MMIO region.
-	 */
-	mmap_read_lock(current->mm);
-	vma = vma_lookup(current->mm, hva);
-	if (unlikely(!vma)) {
-		kvm_err("Failed to find VMA for hva 0x%lx\n", hva);
-		mmap_read_unlock(current->mm);
-		return -EFAULT;
+	ret = account_locked_vm(mm, 1, true);
+	if (ret)
+		return ret;
+
+	mmap_read_lock(mm);
+	ret = pin_user_pages(s2fd->hva, 1, flags, &s2vi.page);
+	mmap_read_unlock(mm);
+
+	if (ret == -EHWPOISON) {
+		kvm_send_hwpoison_signal(s2fd->hva, PAGE_SHIFT);
+		ret = 0;
+		goto dec_account;
+	} else if (ret != 1) {
+		ret = -EFAULT;
+		goto dec_account;
+	} else if (!folio_test_swapbacked(page_folio(s2vi.page))) {
+		/*
+		 * We really can't deal with page-cache pages returned by GUP
+		 * because (a) we may trigger writeback of a page for which we
+		 * no longer have access and (b) page_mkclean() won't find the
+		 * stage-2 mapping in the rmap so we can get out-of-whack with
+		 * the filesystem when marking the page dirty during unpinning
+		 * (see cc5095747edf ("ext4: don't BUG if someone dirty pages
+		 * without asking ext4 first")).
+		 *
+		 * Ideally we'd just restrict ourselves to anonymous pages, but
+		 * we also want to allow memfd (i.e. shmem) pages, so check for
+		 * pages backed by swap in the knowledge that the GUP pin will
+		 * prevent try_to_unmap() from succeeding.
+		 */
+		ret = -EIO;
+		goto unpin;
 	}
 
-	if (force_pte)
+	write_lock(&kvm->mmu_lock);
+	ret = pkvm_pgtable_stage2_map(pgt, gfn_to_gpa(s2vi.gfn), PAGE_SIZE,
+				      page_to_phys(s2vi.page), KVM_PGTABLE_PROT_RWX,
+				      hyp_memcache, 0);
+	write_unlock(&kvm->mmu_lock);
+	if (ret) {
+		if (ret == -EAGAIN)
+			ret = 0;
+		goto unpin;
+	}
+
+	return 0;
+unpin:
+	unpin_user_page(s2vi.page);
+dec_account:
+	account_locked_vm(mm, 1, false);
+	return ret;
+}
+
+static short kvm_s2_resolve_vma_size(const struct kvm_s2_fault_desc *s2fd,
+				     struct kvm_s2_fault_vma_info *s2vi,
+				     struct vm_area_struct *vma)
+{
+	short vma_shift;
+
+	if (memslot_is_logging(s2fd->memslot)) {
+		s2vi->max_map_size = PAGE_SIZE;
 		vma_shift = PAGE_SHIFT;
-	else
-		vma_shift = get_vma_page_shift(vma, hva);
+	} else {
+		s2vi->max_map_size = PUD_SIZE;
+		vma_shift = get_vma_page_shift(vma);
+	}
 
 	switch (vma_shift) {
 #ifndef __PAGETABLE_PMD_FOLDED
 	case PUD_SHIFT:
-		if (fault_supports_stage2_huge_mapping(memslot, hva, PUD_SIZE))
+		if (fault_supports_stage2_huge_mapping(s2fd, PUD_SIZE))
 			break;
 		fallthrough;
 #endif
@@ -1669,12 +1940,12 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
 		vma_shift = PMD_SHIFT;
 		fallthrough;
 	case PMD_SHIFT:
-		if (fault_supports_stage2_huge_mapping(memslot, hva, PMD_SIZE))
+		if (fault_supports_stage2_huge_mapping(s2fd, PMD_SIZE))
 			break;
 		fallthrough;
 	case CONT_PTE_SHIFT:
 		vma_shift = PAGE_SHIFT;
-		force_pte = true;
+		s2vi->max_map_size = PAGE_SIZE;
 		fallthrough;
 	case PAGE_SHIFT:
 		break;
@@ -1682,21 +1953,17 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
 		WARN_ONCE(1, "Unknown vma_shift %d", vma_shift);
 	}
 
-	vma_pagesize = 1UL << vma_shift;
-
-	if (nested) {
+	if (s2fd->nested) {
 		unsigned long max_map_size;
 
-		max_map_size = force_pte ? PAGE_SIZE : PUD_SIZE;
-
-		ipa = kvm_s2_trans_output(nested);
+		max_map_size = min(s2vi->max_map_size, PUD_SIZE);
 
 		/*
 		 * If we're about to create a shadow stage 2 entry, then we
 		 * can only create a block mapping if the guest stage 2 page
 		 * table uses at least as big a mapping.
 		 */
-		max_map_size = min(kvm_s2_trans_size(nested), max_map_size);
+		max_map_size = min(kvm_s2_trans_size(s2fd->nested), max_map_size);
 
 		/*
 		 * Be careful that if the mapping size falls between
@@ -1707,31 +1974,41 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
 		else if (max_map_size >= PAGE_SIZE && max_map_size < PMD_SIZE)
 			max_map_size = PAGE_SIZE;
 
-		force_pte = (max_map_size == PAGE_SIZE);
-		vma_pagesize = min_t(long, vma_pagesize, max_map_size);
+		s2vi->max_map_size = max_map_size;
+		vma_shift = min_t(short, vma_shift, __ffs(max_map_size));
 	}
+
+	return vma_shift;
+}
+
+static int kvm_s2_fault_get_vma_info(const struct kvm_s2_fault_desc *s2fd,
+				     struct kvm_s2_fault_vma_info *s2vi)
+{
+	struct vm_area_struct *vma;
+	struct kvm *kvm = s2fd->vcpu->kvm;
+
+	mmap_read_lock(current->mm);
+	vma = vma_lookup(current->mm, s2fd->hva);
+	if (unlikely(!vma)) {
+		kvm_err("Failed to find VMA for hva 0x%lx\n", s2fd->hva);
+		mmap_read_unlock(current->mm);
+		return -EFAULT;
+	}
+
+	s2vi->vma_pagesize = BIT(kvm_s2_resolve_vma_size(s2fd, s2vi, vma));
 
 	/*
-	 * Both the canonical IPA and fault IPA must be hugepage-aligned to
-	 * ensure we find the right PFN and lay down the mapping in the right
-	 * place.
+	 * Both the canonical IPA and fault IPA must be aligned to the
+	 * mapping size to ensure we find the right PFN and lay down the
+	 * mapping in the right place.
 	 */
-	if (vma_pagesize == PMD_SIZE || vma_pagesize == PUD_SIZE) {
-		fault_ipa &= ~(vma_pagesize - 1);
-		ipa &= ~(vma_pagesize - 1);
-	}
+	s2vi->gfn = ALIGN_DOWN(s2fd->fault_ipa, s2vi->vma_pagesize) >> PAGE_SHIFT;
 
-	gfn = ipa >> PAGE_SHIFT;
-	mte_allowed = kvm_vma_mte_allowed(vma);
+	s2vi->mte_allowed = kvm_vma_mte_allowed(vma);
 
-	vfio_allow_any_uc = vma->vm_flags & VM_ALLOW_ANY_UNCACHED;
+	s2vi->vm_flags = vma->vm_flags;
 
-	vm_flags = vma->vm_flags;
-
-	is_vma_cacheable = kvm_vma_is_cacheable(vma);
-
-	/* Don't use the VMA after the unlock -- it may have vanished */
-	vma = NULL;
+	s2vi->is_vma_cacheable = kvm_vma_is_cacheable(vma);
 
 	/*
 	 * Read mmu_invalidate_seq so that KVM can detect if the results of
@@ -1741,24 +2018,48 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
 	 * Rely on mmap_read_unlock() for an implicit smp_rmb(), which pairs
 	 * with the smp_wmb() in kvm_mmu_invalidate_end().
 	 */
-	mmu_seq = kvm->mmu_invalidate_seq;
+	s2vi->mmu_seq = kvm->mmu_invalidate_seq;
 	mmap_read_unlock(current->mm);
 
-	pfn = __kvm_faultin_pfn(memslot, gfn, write_fault ? FOLL_WRITE : 0,
-				&writable, &page);
-	if (pfn == KVM_PFN_ERR_HWPOISON) {
-		kvm_send_hwpoison_signal(hva, vma_shift);
-		return 0;
-	}
-	if (is_error_noslot_pfn(pfn))
+	return 0;
+}
+
+static gfn_t get_canonical_gfn(const struct kvm_s2_fault_desc *s2fd,
+			       const struct kvm_s2_fault_vma_info *s2vi)
+{
+	phys_addr_t ipa;
+
+	if (!s2fd->nested)
+		return s2vi->gfn;
+
+	ipa = kvm_s2_trans_output(s2fd->nested);
+	return ALIGN_DOWN(ipa, s2vi->vma_pagesize) >> PAGE_SHIFT;
+}
+
+static int kvm_s2_fault_pin_pfn(const struct kvm_s2_fault_desc *s2fd,
+				struct kvm_s2_fault_vma_info *s2vi)
+{
+	int ret;
+
+	ret = kvm_s2_fault_get_vma_info(s2fd, s2vi);
+	if (ret)
+		return ret;
+
+	s2vi->pfn = __kvm_faultin_pfn(s2fd->memslot, get_canonical_gfn(s2fd, s2vi),
+				      kvm_s2_fault_is_write(s2fd) ? FOLL_WRITE : 0,
+				      &s2vi->map_writable, &s2vi->page);
+	if (unlikely(is_error_noslot_pfn(s2vi->pfn))) {
+		if (s2vi->pfn == KVM_PFN_ERR_HWPOISON)
+			return -EHWPOISON;
 		return -EFAULT;
+	}
 
 	/*
 	 * Check if this is non-struct page memory PFN, and cannot support
-	 * CMOs. It could potentially be unsafe to access as cachable.
+	 * CMOs. It could potentially be unsafe to access as cacheable.
 	 */
-	if (vm_flags & (VM_PFNMAP | VM_MIXEDMAP) && !pfn_is_map_memory(pfn)) {
-		if (is_vma_cacheable) {
+	if (s2vi->vm_flags & (VM_PFNMAP | VM_MIXEDMAP) && !pfn_is_map_memory(s2vi->pfn)) {
+		if (s2vi->is_vma_cacheable) {
 			/*
 			 * Whilst the VMA owner expects cacheable mapping to this
 			 * PFN, hardware also has to support the FWB and CACHE DIC
@@ -1771,124 +2072,245 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
 			 * S2FWB and CACHE DIC are mandatory to avoid the need for
 			 * cache maintenance.
 			 */
-			if (!kvm_supports_cacheable_pfnmap())
-				ret = -EFAULT;
+			if (!kvm_supports_cacheable_pfnmap()) {
+				kvm_release_faultin_page(s2fd->vcpu->kvm, s2vi->page, true, false);
+				return -EFAULT;
+			}
 		} else {
-			/*
-			 * If the page was identified as device early by looking at
-			 * the VMA flags, vma_pagesize is already representing the
-			 * largest quantity we can map.  If instead it was mapped
-			 * via __kvm_faultin_pfn(), vma_pagesize is set to PAGE_SIZE
-			 * and must not be upgraded.
-			 *
-			 * In both cases, we don't let transparent_hugepage_adjust()
-			 * change things at the last minute.
-			 */
-			s2_force_noncacheable = true;
+			s2vi->map_non_cacheable = true;
 		}
-	} else if (logging_active && !write_fault) {
-		/*
-		 * Only actually map the page as writable if this was a write
-		 * fault.
-		 */
-		writable = false;
+
+		s2vi->device = true;
 	}
 
-	if (exec_fault && s2_force_noncacheable)
-		ret = -ENOEXEC;
+	return 1;
+}
 
-	if (ret) {
-		kvm_release_page_unused(page);
-		return ret;
+static int kvm_s2_fault_compute_prot(const struct kvm_s2_fault_desc *s2fd,
+				     const struct kvm_s2_fault_vma_info *s2vi,
+				     enum kvm_pgtable_prot *prot)
+{
+	struct kvm *kvm = s2fd->vcpu->kvm;
+
+	if (kvm_s2_fault_is_exec(s2fd) && s2vi->map_non_cacheable)
+		return -ENOEXEC;
+
+	/*
+	 * Guest performs atomic/exclusive operations on memory with unsupported
+	 * attributes (e.g. ld64b/st64b on normal memory when no FEAT_LS64WB)
+	 * and trigger the exception here. Since the memslot is valid, inject
+	 * the fault back to the guest.
+	 */
+	if (esr_fsc_is_excl_atomic_fault(s2fd->esr)) {
+		kvm_inject_dabt_excl_atomic(s2fd->vcpu, kvm_vcpu_get_hfar(s2fd->vcpu));
+		return 1;
 	}
 
-	if (nested)
-		adjust_nested_fault_perms(nested, &prot, &writable);
+	*prot = KVM_PGTABLE_PROT_R;
+
+	if (s2vi->map_writable && (s2vi->device ||
+				   !memslot_is_logging(s2fd->memslot) ||
+				   kvm_s2_fault_is_write(s2fd)))
+		*prot |= KVM_PGTABLE_PROT_W;
+
+	if (s2fd->nested)
+		*prot = adjust_nested_fault_perms(s2fd->nested, *prot);
+
+	if (kvm_s2_fault_is_exec(s2fd))
+		*prot |= KVM_PGTABLE_PROT_X;
+
+	if (s2vi->map_non_cacheable)
+		*prot |= (s2vi->vm_flags & VM_ALLOW_ANY_UNCACHED) ?
+			KVM_PGTABLE_PROT_NORMAL_NC : KVM_PGTABLE_PROT_DEVICE;
+	else if (cpus_have_final_cap(ARM64_HAS_CACHE_DIC))
+		*prot |= KVM_PGTABLE_PROT_X;
+
+	if (s2fd->nested)
+		*prot = adjust_nested_exec_perms(kvm, s2fd->nested, *prot);
+
+	if (!kvm_s2_fault_is_perm(s2fd) && !s2vi->map_non_cacheable && kvm_has_mte(kvm)) {
+		/* Check the VMM hasn't introduced a new disallowed VMA */
+		if (!s2vi->mte_allowed)
+			return -EFAULT;
+	}
+
+	return 0;
+}
+
+static int kvm_s2_fault_map(const struct kvm_s2_fault_desc *s2fd,
+			    const struct kvm_s2_fault_vma_info *s2vi,
+			    enum kvm_pgtable_prot prot,
+			    void *memcache,
+			    struct kvm_s2_fault_result *result)
+{
+	enum kvm_pgtable_walk_flags flags = KVM_PGTABLE_WALK_SHARED;
+	struct kvm_guest_s2_mapping *mapping = NULL;
+	bool writable = prot & KVM_PGTABLE_PROT_W;
+	struct kvm *kvm = s2fd->vcpu->kvm;
+	phys_addr_t canonical_ipa;
+	struct kvm_pgtable *pgt;
+	long perm_fault_granule;
+	long mapping_size;
+	kvm_pfn_t pfn;
+	gfn_t gfn;
+	int ret;
+
+	if (kvm_is_nested_s2_mmu(kvm, s2fd->mmu)) {
+		mapping = kmalloc_obj(struct kvm_guest_s2_mapping,
+				      GFP_KERNEL_ACCOUNT);
+		if (!mapping) {
+			kvm_release_page_unused(s2vi->page);
+			return -ENOMEM;
+		}
+	}
 
 	kvm_fault_lock(kvm);
-	pgt = vcpu->arch.hw_mmu->pgt;
-	if (mmu_invalidate_retry(kvm, mmu_seq)) {
-		ret = -EAGAIN;
+	pgt = s2fd->mmu->pgt;
+	ret = -EAGAIN;
+	if (mmu_invalidate_retry(kvm, s2vi->mmu_seq))
 		goto out_unlock;
-	}
+
+	perm_fault_granule = kvm_s2_perm_fault_granule(s2fd);
+	mapping_size = s2vi->vma_pagesize;
+	pfn = s2vi->pfn;
+	gfn = s2vi->gfn;
+	canonical_ipa = gfn_to_gpa(get_canonical_gfn(s2fd, s2vi));
 
 	/*
 	 * If we are not forced to use page mapping, check if we are
-	 * backed by a THP and thus use block mapping if possible.
+	 * backed by a huge stage-1 mapping and thus use block mapping if
+	 * possible.
 	 */
-	if (vma_pagesize == PAGE_SIZE && !(force_pte || s2_force_noncacheable)) {
-		if (fault_is_perm && fault_granule > PAGE_SIZE)
-			vma_pagesize = fault_granule;
-		else
-			vma_pagesize = transparent_hugepage_adjust(kvm, memslot,
-								   hva, &pfn,
-								   &fault_ipa);
-
-		if (vma_pagesize < 0) {
-			ret = vma_pagesize;
-			goto out_unlock;
-		}
-	}
-
-	if (!fault_is_perm && !s2_force_noncacheable && kvm_has_mte(kvm)) {
-		/* Check the VMM hasn't introduced a new disallowed VMA */
-		if (mte_allowed) {
-			sanitise_mte_tags(kvm, pfn, vma_pagesize);
+	if (mapping_size == PAGE_SIZE && s2vi->max_map_size != PAGE_SIZE) {
+		if (perm_fault_granule > PAGE_SIZE) {
+			mapping_size = perm_fault_granule;
 		} else {
-			ret = -EFAULT;
-			goto out_unlock;
+			mapping_size = transparent_hugepage_adjust(s2fd, &pfn, &gfn);
+			if (mapping_size < 0) {
+				ret = mapping_size;
+				goto out_unlock;
+			}
 		}
+		canonical_ipa = ALIGN_DOWN(canonical_ipa, mapping_size);
 	}
 
-	if (writable)
-		prot |= KVM_PGTABLE_PROT_W;
-
-	if (exec_fault)
-		prot |= KVM_PGTABLE_PROT_X;
-
-	if (s2_force_noncacheable) {
-		if (vfio_allow_any_uc)
-			prot |= KVM_PGTABLE_PROT_NORMAL_NC;
-		else
-			prot |= KVM_PGTABLE_PROT_DEVICE;
-	} else if (cpus_have_final_cap(ARM64_HAS_CACHE_DIC) &&
-		   (!nested || kvm_s2_trans_executable(nested))) {
-		prot |= KVM_PGTABLE_PROT_X;
-	}
+	if (!perm_fault_granule && !s2vi->map_non_cacheable && kvm_has_mte(kvm))
+		sanitise_mte_tags(kvm, pfn, mapping_size);
 
 	/*
 	 * Under the premise of getting a FSC_PERM fault, we just need to relax
-	 * permissions only if vma_pagesize equals fault_granule. Otherwise,
+	 * permissions only if mapping_size equals perm_fault_granule. Otherwise,
 	 * kvm_pgtable_stage2_map() should be called to change block size.
 	 */
-	if (fault_is_perm && vma_pagesize == fault_granule) {
+	if (mapping_size == perm_fault_granule) {
 		/*
 		 * Drop the SW bits in favour of those stored in the
 		 * PTE, which will be preserved.
 		 */
 		prot &= ~KVM_NV_GUEST_MAP_SZ;
-		ret = KVM_PGT_FN(kvm_pgtable_stage2_relax_perms)(pgt, fault_ipa, prot, flags);
+		ret = KVM_PGT_FN(kvm_pgtable_stage2_relax_perms)(pgt, gfn_to_gpa(gfn),
+								 prot, flags);
 	} else {
-		ret = KVM_PGT_FN(kvm_pgtable_stage2_map)(pgt, fault_ipa, vma_pagesize,
-					     __pfn_to_phys(pfn), prot,
-					     memcache, flags);
+		ret = KVM_PGT_FN(kvm_pgtable_stage2_map)(pgt, gfn_to_gpa(gfn), mapping_size,
+							 __pfn_to_phys(pfn), prot,
+							 memcache, flags);
+		/*
+		 * -EAGAIN from kvm_pgtable_stage2_map() can install mappings.
+		 * We don't know which subrange is installed, track the whole
+		 * thing.
+		 */
+		if ((ret == 0 || ret == -EAGAIN) && kvm_is_nested_s2_mmu(kvm, pgt->mmu)) {
+			kvm_record_guest_s2_mapping(pgt->mmu, canonical_ipa,
+						    gfn_to_gpa(gfn), mapping_size, mapping);
+			mapping = NULL;
+		}
 	}
 
 out_unlock:
-	kvm_release_faultin_page(kvm, page, !!ret, writable);
+	kvm_release_faultin_page(kvm, s2vi->page, !!ret, writable);
 	kvm_fault_unlock(kvm);
+	kfree(mapping);
 
-	/* Mark the page dirty only if the fault is handled successfully */
+	/*
+	 * Mark the page dirty only if the fault is handled successfully,
+	 * making sure we adjust the canonical IPA if the mapping size has
+	 * been updated (via a THP upgrade, for example).
+	 */
 	if (writable && !ret)
-		mark_page_dirty_in_slot(kvm, memslot, gfn);
+		mark_page_dirty_in_slot(kvm, s2fd->memslot,
+					gpa_to_gfn(canonical_ipa));
 
-	return ret != -EAGAIN ? ret : 0;
+	if (ret == -EAGAIN)
+		return result ? ret : 0;
+
+	if (result && !ret)
+		result->mapping_size = mapping_size;
+
+	return ret;
+}
+
+static int user_mem_abort(const struct kvm_s2_fault_desc *s2fd,
+			  struct kvm_s2_fault_result *result)
+{
+	bool perm_fault = kvm_s2_fault_is_perm(s2fd);
+	struct kvm_s2_fault_vma_info s2vi = {};
+	enum kvm_pgtable_prot prot;
+	void *memcache;
+	int ret;
+
+	/*
+	 * Permission faults just need to update the existing leaf entry,
+	 * and so normally don't require allocations from the memcache. The
+	 * only exception to this is when dirty logging is enabled at runtime
+	 * and a fault needs to collapse a block entry into a table.
+	 * Under pKVM a permission fault can also collapse pages into a block,
+	 * which needs a fresh mapping object, and the hypervisor requires the
+	 * min-pages memcache even when the install allocates nothing.
+	 */
+	memcache = get_mmu_memcache(s2fd->vcpu);
+	if (!perm_fault || memslot_is_logging(s2fd->memslot) ||
+	    is_protected_kvm_enabled()) {
+		ret = topup_mmu_memcache(s2fd->mmu, memcache);
+		if (ret)
+			return ret;
+	}
+
+	ret = kvm_s2_fault_pin_pfn(s2fd, &s2vi);
+	if (ret == -EHWPOISON) {
+		/* If result is specified, let the caller handle this. */
+		if (result)
+			return -EHWPOISON;
+		kvm_send_hwpoison_signal(s2fd->hva, __ffs(s2vi.vma_pagesize));
+		return 0;
+	}
+	if (ret != 1)
+		return ret;
+
+	ret = kvm_s2_fault_compute_prot(s2fd, &s2vi, &prot);
+	if (ret) {
+		kvm_release_page_unused(s2vi.page);
+		return ret;
+	}
+
+	return kvm_s2_fault_map(s2fd, &s2vi, prot, memcache, result);
+}
+
+static int kvm_vm_mem_abort(const struct kvm_s2_fault_desc *s2fd)
+{
+	VM_WARN_ON_ONCE(kvm_s2_fault_is_perm(s2fd) &&
+			!esr_abt_is_write_fault(s2fd->esr) &&
+			!kvm_s2_fault_is_exec(s2fd));
+
+	if (kvm_slot_has_gmem(s2fd->memslot))
+		return gmem_abort(s2fd, NULL);
+	else
+		return user_mem_abort(s2fd, NULL);
 }
 
 /* Resolve the access fault by making the page young again. */
 static void handle_access_fault(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa)
 {
-	enum kvm_pgtable_walk_flags flags = KVM_PGTABLE_WALK_HANDLE_FAULT | KVM_PGTABLE_WALK_SHARED;
+	enum kvm_pgtable_walk_flags flags = KVM_PGTABLE_WALK_SHARED;
 	struct kvm_s2_mmu *mmu;
 
 	trace_kvm_access_fault(fault_ipa);
@@ -1899,8 +2321,48 @@ static void handle_access_fault(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa)
 	read_unlock(&vcpu->kvm->mmu_lock);
 }
 
+/*
+ * Returns true if the SEA should be handled locally within KVM if the abort
+ * is caused by a kernel memory allocation (e.g. stage-2 table memory).
+ */
+static bool host_owns_sea(struct kvm_vcpu *vcpu, u64 esr)
+{
+	/*
+	 * Without FEAT_RAS HCR_EL2.TEA is RES0, meaning any external abort
+	 * taken from a guest EL to EL2 is due to a host-imposed access (e.g.
+	 * stage-2 PTW).
+	 */
+	if (!cpus_have_final_cap(ARM64_HAS_RAS_EXTN))
+		return true;
+
+	/* KVM owns the VNCR when the vCPU isn't in a nested context. */
+	if (is_hyp_ctxt(vcpu) && !kvm_vcpu_trap_is_iabt(vcpu) && (esr & ESR_ELx_VNCR))
+		return true;
+
+	/*
+	 * Determining if an external abort during a table walk happened at
+	 * stage-2 is only possible with S1PTW is set. Otherwise, since KVM
+	 * sets HCR_EL2.TEA, SEAs due to a stage-1 walk (i.e. accessing the
+	 * PA of the stage-1 descriptor) can reach here and are reported
+	 * with a TTW ESR value.
+	 */
+	return (esr_fsc_is_sea_ttw(esr) && (esr & ESR_ELx_S1PTW));
+}
+
 int kvm_handle_guest_sea(struct kvm_vcpu *vcpu)
 {
+	struct kvm *kvm = vcpu->kvm;
+	struct kvm_run *run = vcpu->run;
+	u64 esr = kvm_vcpu_get_esr(vcpu);
+	u64 esr_mask = ESR_ELx_EC_MASK	|
+		       ESR_ELx_IL	|
+		       ESR_ELx_FnV	|
+		       ESR_ELx_EA	|
+		       ESR_ELx_CM	|
+		       ESR_ELx_WNR	|
+		       ESR_ELx_FSC;
+	u64 ipa;
+
 	/*
 	 * Give APEI the opportunity to claim the abort before handling it
 	 * within KVM. apei_claim_sea() expects to be called with IRQs enabled.
@@ -1909,7 +2371,33 @@ int kvm_handle_guest_sea(struct kvm_vcpu *vcpu)
 	if (apei_claim_sea(NULL) == 0)
 		return 1;
 
-	return kvm_inject_serror(vcpu);
+	if (host_owns_sea(vcpu, esr) ||
+	    !test_bit(KVM_ARCH_FLAG_EXIT_SEA, &vcpu->kvm->arch.flags))
+		return kvm_inject_serror(vcpu);
+
+	/* ESR_ELx.SET is RES0 when FEAT_RAS isn't implemented. */
+	if (kvm_has_ras(kvm))
+		esr_mask |= ESR_ELx_SET_MASK;
+
+	/*
+	 * Exit to userspace, and provide faulting guest virtual and physical
+	 * addresses in case userspace wants to emulate SEA to guest by
+	 * writing to FAR_ELx and HPFAR_ELx registers.
+	 */
+	memset(&run->arm_sea, 0, sizeof(run->arm_sea));
+	run->exit_reason = KVM_EXIT_ARM_SEA;
+	run->arm_sea.esr = esr & esr_mask;
+
+	if (!(esr & ESR_ELx_FnV))
+		run->arm_sea.gva = kvm_vcpu_get_hfar(vcpu);
+
+	ipa = kvm_vcpu_get_fault_ipa(vcpu);
+	if (ipa != INVALID_GPA) {
+		run->arm_sea.flags |= KVM_EXIT_ARM_SEA_FLAG_GPA_VALID;
+		run->arm_sea.gpa = ipa;
+	}
+
+	return 0;
 }
 
 /**
@@ -1926,7 +2414,9 @@ int kvm_handle_guest_sea(struct kvm_vcpu *vcpu)
 int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
 {
 	struct kvm_s2_trans nested_trans, *nested = NULL;
-	unsigned long esr;
+	unsigned long esr = kvm_vcpu_get_esr(vcpu);
+	struct kvm_s2_mmu *mmu = vcpu->arch.hw_mmu;
+	struct kvm *kvm = vcpu->kvm;
 	phys_addr_t fault_ipa; /* The address we faulted on */
 	phys_addr_t ipa; /* Always the IPA in the L1 guest phys space */
 	struct kvm_memory_slot *memslot;
@@ -1935,20 +2425,18 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
 	gfn_t gfn;
 	int ret, idx;
 
-	if (kvm_vcpu_abt_issea(vcpu))
+	if (esr_abt_is_sea(esr))
 		return kvm_handle_guest_sea(vcpu);
-
-	esr = kvm_vcpu_get_esr(vcpu);
 
 	/*
 	 * The fault IPA should be reliable at this point as we're not dealing
 	 * with an SEA.
 	 */
 	ipa = fault_ipa = kvm_vcpu_get_fault_ipa(vcpu);
-	if (KVM_BUG_ON(ipa == INVALID_GPA, vcpu->kvm))
+	if (KVM_BUG_ON(ipa == INVALID_GPA, kvm))
 		return -EFAULT;
 
-	is_iabt = kvm_vcpu_trap_is_iabt(vcpu);
+	is_iabt = esr_trap_is_iabt(esr);
 
 	if (esr_fsc_is_translation_fault(esr)) {
 		/* Beyond sanitised PARange (which is the IPA limit) */
@@ -1958,28 +2446,29 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
 		}
 
 		/* Falls between the IPA range and the PARange? */
-		if (fault_ipa >= BIT_ULL(VTCR_EL2_IPA(vcpu->arch.hw_mmu->vtcr))) {
-			fault_ipa |= kvm_vcpu_get_hfar(vcpu) & GENMASK(11, 0);
+		if (fault_ipa >= BIT_ULL(VTCR_EL2_IPA(mmu->vtcr))) {
+			fault_ipa |= FAR_TO_FIPA_OFFSET(kvm_vcpu_get_hfar(vcpu));
 
 			return kvm_inject_sea(vcpu, is_iabt, fault_ipa);
 		}
 	}
 
-	trace_kvm_guest_fault(*vcpu_pc(vcpu), kvm_vcpu_get_esr(vcpu),
+	trace_kvm_guest_fault(*vcpu_pc(vcpu), esr,
 			      kvm_vcpu_get_hfar(vcpu), fault_ipa);
 
 	/* Check the stage-2 fault is trans. fault or write fault */
 	if (!esr_fsc_is_translation_fault(esr) &&
 	    !esr_fsc_is_permission_fault(esr) &&
-	    !esr_fsc_is_access_flag_fault(esr)) {
-		kvm_err("Unsupported FSC: EC=%#x xFSC=%#lx ESR_EL2=%#lx\n",
-			kvm_vcpu_trap_get_class(vcpu),
-			(unsigned long)kvm_vcpu_trap_get_fault(vcpu),
-			(unsigned long)kvm_vcpu_get_esr(vcpu));
+	    !esr_fsc_is_access_flag_fault(esr) &&
+	    !esr_fsc_is_excl_atomic_fault(esr)) {
+		kvm_err("Unsupported FSC: EC=%#lx xFSC=%#lx ESR_EL2=%#lx\n",
+			ESR_ELx_EC(esr),
+			(unsigned long)(esr & ESR_ELx_FSC),
+			(unsigned long)esr);
 		return -EFAULT;
 	}
 
-	idx = srcu_read_lock(&vcpu->kvm->srcu);
+	idx = srcu_read_lock(&kvm->srcu);
 
 	/*
 	 * We may have faulted on a shadow stage 2 page table if we are
@@ -1994,11 +2483,15 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
 	 * nothing to walk and we treat it as a 1:1 before going through the
 	 * canonical translation.
 	 */
-	if (kvm_is_nested_s2_mmu(vcpu->kvm,vcpu->arch.hw_mmu) &&
-	    vcpu->arch.hw_mmu->nested_stage2_enabled) {
+	if (kvm_is_nested_s2_mmu(kvm, mmu) && mmu->nested_stage2_enabled) {
 		u32 esr;
 
 		ret = kvm_walk_nested_s2(vcpu, fault_ipa, &nested_trans);
+		if (ret == -EAGAIN) {
+			ret = 1;
+			goto out_unlock;
+		}
+
 		if (ret) {
 			esr = kvm_s2_trans_esr(&nested_trans);
 			kvm_inject_s2_fault(vcpu, esr);
@@ -2017,9 +2510,9 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
 	}
 
 	gfn = ipa >> PAGE_SHIFT;
-	memslot = gfn_to_memslot(vcpu->kvm, gfn);
+	memslot = gfn_to_memslot(kvm, gfn);
 	hva = gfn_to_hva_memslot_prot(memslot, gfn, &writable);
-	write_fault = kvm_is_write_fault(vcpu);
+	write_fault = esr_abt_is_write_fault(esr);
 	if (kvm_is_error_hva(hva) || (write_fault && !writable)) {
 		/*
 		 * The guest has put either its instructions or its page-tables
@@ -2032,7 +2525,7 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
 			goto out;
 		}
 
-		if (kvm_vcpu_abt_iss1tw(vcpu)) {
+		if (esr_abt_is_s1ptw(esr)) {
 			ret = kvm_inject_sea_dabt(vcpu, kvm_vcpu_get_hfar(vcpu));
 			goto out_unlock;
 		}
@@ -2047,7 +2540,7 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
 		 * So let's assume that the guest is just being
 		 * cautious, and skip the instruction.
 		 */
-		if (kvm_is_error_hva(hva) && kvm_vcpu_dabt_is_cm(vcpu)) {
+		if (kvm_is_error_hva(hva) && esr_dabt_is_cm(esr)) {
 			kvm_incr_pc(vcpu);
 			ret = 1;
 			goto out_unlock;
@@ -2059,13 +2552,13 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
 		 * faulting VA. This is always 12 bits, irrespective
 		 * of the page size.
 		 */
-		ipa |= kvm_vcpu_get_hfar(vcpu) & GENMASK(11, 0);
+		ipa |= FAR_TO_FIPA_OFFSET(kvm_vcpu_get_hfar(vcpu));
 		ret = io_mem_abort(vcpu, ipa);
 		goto out_unlock;
 	}
 
 	/* Userspace should not be able to register out-of-bounds IPAs */
-	VM_BUG_ON(ipa >= kvm_phys_size(vcpu->arch.hw_mmu));
+	VM_BUG_ON(ipa >= kvm_phys_size(mmu));
 
 	if (esr_fsc_is_access_flag_fault(esr)) {
 		handle_access_fault(vcpu, fault_ipa);
@@ -2073,64 +2566,102 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
 		goto out_unlock;
 	}
 
-	VM_WARN_ON_ONCE(kvm_vcpu_trap_is_permission_fault(vcpu) &&
-			!write_fault && !kvm_vcpu_trap_is_exec_fault(vcpu));
+	const struct kvm_s2_fault_desc s2fd = {
+		.vcpu		= vcpu,
+		.fault_ipa	= fault_ipa,
+		.nested		= nested,
+		.memslot	= memslot,
+		.hva		= hva,
+		.esr		= esr,
+		.mmu		= mmu,
+	};
 
-	if (kvm_slot_has_gmem(memslot))
-		ret = gmem_abort(vcpu, fault_ipa, nested, memslot,
-				 esr_fsc_is_permission_fault(esr));
-	else
-		ret = user_mem_abort(vcpu, fault_ipa, nested, memslot, hva,
-				     esr_fsc_is_permission_fault(esr));
+	ret = kvm->arch.vm_s2_ops->vm_mem_abort(&s2fd);
 	if (ret == 0)
 		ret = 1;
 out:
 	if (ret == -ENOEXEC)
 		ret = kvm_inject_sea_iabt(vcpu, kvm_vcpu_get_hfar(vcpu));
 out_unlock:
-	srcu_read_unlock(&vcpu->kvm->srcu, idx);
+	srcu_read_unlock(&kvm->srcu, idx);
 	return ret;
 }
 
 bool kvm_unmap_gfn_range(struct kvm *kvm, struct kvm_gfn_range *range)
 {
+	gpa_t gpa = range->start << PAGE_SHIFT;
+	size_t size = (range->end - range->start) << PAGE_SHIFT;
+	bool may_block = range->may_block;
+
 	if (!kvm->arch.mmu.pgt)
 		return false;
 
-	__unmap_stage2_range(&kvm->arch.mmu, range->start << PAGE_SHIFT,
-			     (range->end - range->start) << PAGE_SHIFT,
-			     range->may_block);
+	kvm_stage2_unmap_range(&kvm->arch.mmu, gpa, size, may_block);
+	kvm_nested_unmap_cipa_range(kvm, gpa, size, may_block);
 
-	kvm_nested_s2_unmap(kvm, range->may_block);
+	return false;
+}
+
+static bool kvm_vm_age_gfn(struct kvm *kvm, struct kvm_gfn_range *range)
+{
+	u64 size = (range->end - range->start) << PAGE_SHIFT;
+
+	return kvm_pgtable_stage2_test_clear_young(kvm->arch.mmu.pgt,
+						   range->start << PAGE_SHIFT,
+						   size, true);
+}
+
+static bool pkvm_age_gfn(struct kvm *kvm, struct kvm_gfn_range *range)
+{
+	u64 size = (range->end - range->start) << PAGE_SHIFT;
+
+	return pkvm_pgtable_stage2_test_clear_young(kvm->arch.mmu.pgt,
+						    range->start << PAGE_SHIFT,
+						    size, true);
+}
+
+static bool no_age_gfn(struct kvm *kvm, struct kvm_gfn_range *range)
+{
+	/* The hypervisor doesn't support aging */
 	return false;
 }
 
 bool kvm_age_gfn(struct kvm *kvm, struct kvm_gfn_range *range)
 {
-	u64 size = (range->end - range->start) << PAGE_SHIFT;
-
 	if (!kvm->arch.mmu.pgt)
 		return false;
 
-	return KVM_PGT_FN(kvm_pgtable_stage2_test_clear_young)(kvm->arch.mmu.pgt,
-						   range->start << PAGE_SHIFT,
-						   size, true);
+	return kvm->arch.vm_s2_ops->vm_age_gfn(kvm, range);
 	/*
 	 * TODO: Handle nested_mmu structures here using the reverse mapping in
 	 * a later version of patch series.
 	 */
 }
 
-bool kvm_test_age_gfn(struct kvm *kvm, struct kvm_gfn_range *range)
+static bool kvm_vm_test_age_gfn(struct kvm *kvm, struct kvm_gfn_range *range)
 {
 	u64 size = (range->end - range->start) << PAGE_SHIFT;
 
+	return kvm_pgtable_stage2_test_clear_young(kvm->arch.mmu.pgt,
+						   range->start << PAGE_SHIFT,
+						   size, false);
+}
+
+static bool pkvm_test_age_gfn(struct kvm *kvm, struct kvm_gfn_range *range)
+{
+	u64 size = (range->end - range->start) << PAGE_SHIFT;
+
+	return pkvm_pgtable_stage2_test_clear_young(kvm->arch.mmu.pgt,
+						    range->start << PAGE_SHIFT,
+						    size, false);
+}
+
+bool kvm_test_age_gfn(struct kvm *kvm, struct kvm_gfn_range *range)
+{
 	if (!kvm->arch.mmu.pgt)
 		return false;
 
-	return KVM_PGT_FN(kvm_pgtable_stage2_test_clear_young)(kvm->arch.mmu.pgt,
-						   range->start << PAGE_SHIFT,
-						   size, false);
+	return kvm->arch.vm_s2_ops->vm_test_age_gfn(kvm, range);
 }
 
 phys_addr_t kvm_mmu_get_httbr(void)
@@ -2168,11 +2699,9 @@ static struct kvm_pgtable_mm_ops kvm_hyp_mm_ops = {
 	.virt_to_phys		= kvm_host_pa,
 };
 
-int __init kvm_mmu_init(u32 *hyp_va_bits)
+int __init kvm_mmu_init(u32 hyp_va_bits)
 {
 	int err;
-	u32 idmap_bits;
-	u32 kernel_bits;
 
 	hyp_idmap_start = __pa_symbol(__hyp_idmap_text_start);
 	hyp_idmap_start = ALIGN_DOWN(hyp_idmap_start, PAGE_SIZE);
@@ -2186,25 +2715,7 @@ int __init kvm_mmu_init(u32 *hyp_va_bits)
 	 */
 	BUG_ON((hyp_idmap_start ^ (hyp_idmap_end - 1)) & PAGE_MASK);
 
-	/*
-	 * The ID map is always configured for 48 bits of translation, which
-	 * may be fewer than the number of VA bits used by the regular kernel
-	 * stage 1, when VA_BITS=52.
-	 *
-	 * At EL2, there is only one TTBR register, and we can't switch between
-	 * translation tables *and* update TCR_EL2.T0SZ at the same time. Bottom
-	 * line: we need to use the extended range with *both* our translation
-	 * tables.
-	 *
-	 * So use the maximum of the idmap VA bits and the regular kernel stage
-	 * 1 VA bits to assure that the hypervisor can both ID map its code page
-	 * and map any kernel memory.
-	 */
-	idmap_bits = IDMAP_VA_BITS;
-	kernel_bits = vabits_actual;
-	*hyp_va_bits = max(idmap_bits, kernel_bits);
-
-	kvm_debug("Using %u-bit virtual addresses at EL2\n", *hyp_va_bits);
+	kvm_debug("Using %u-bit virtual addresses at EL2\n", hyp_va_bits);
 	kvm_debug("IDMAP page: %lx\n", hyp_idmap_start);
 	kvm_debug("HYP VA range: %lx:%lx\n",
 		  kern_hyp_va(PAGE_OFFSET),
@@ -2222,14 +2733,14 @@ int __init kvm_mmu_init(u32 *hyp_va_bits)
 		goto out;
 	}
 
-	hyp_pgtable = kzalloc(sizeof(*hyp_pgtable), GFP_KERNEL);
+	hyp_pgtable = kzalloc_obj(*hyp_pgtable);
 	if (!hyp_pgtable) {
 		kvm_err("Hyp mode page-table not allocated\n");
 		err = -ENOMEM;
 		goto out;
 	}
 
-	err = kvm_pgtable_hyp_init(hyp_pgtable, *hyp_va_bits, &kvm_hyp_mm_ops);
+	err = kvm_pgtable_hyp_init(hyp_pgtable, hyp_va_bits, &kvm_hyp_mm_ops);
 	if (err)
 		goto out_free_pgtable;
 
@@ -2238,7 +2749,7 @@ int __init kvm_mmu_init(u32 *hyp_va_bits)
 		goto out_destroy_pgtable;
 
 	io_map_base = hyp_idmap_start;
-	__hyp_va_bits = *hyp_va_bits;
+	__hyp_va_bits = hyp_va_bits;
 	return 0;
 
 out_destroy_pgtable:
@@ -2302,6 +2813,19 @@ int kvm_arch_prepare_memory_region(struct kvm *kvm,
 	hva_t hva, reg_end;
 	int ret = 0;
 
+	if (kvm_vm_is_protected(kvm)) {
+		/* Cannot modify memslots once a pVM has run. */
+		if (pkvm_hyp_vm_is_created(kvm) &&
+		    (change == KVM_MR_DELETE || change == KVM_MR_MOVE)) {
+			return -EPERM;
+		}
+
+		if (new &&
+		    new->flags & (KVM_MEM_LOG_DIRTY_PAGES | KVM_MEM_READONLY)) {
+			return -EPERM;
+		}
+	}
+
 	if (change != KVM_MR_CREATE && change != KVM_MR_MOVE &&
 			change != KVM_MR_FLAGS_ONLY)
 		return 0;
@@ -2318,6 +2842,10 @@ int kvm_arch_prepare_memory_region(struct kvm *kvm,
 	 * there aren't any CoCo VMs that support only private memory on arm64.
 	 */
 	if (kvm_slot_has_gmem(new) && !kvm_memslot_is_gmem_only(new))
+		return -EINVAL;
+
+	/* guest_memfd is incompatible with MTE. */
+	if (kvm_slot_has_gmem(new) && kvm_has_mte(kvm))
 		return -EINVAL;
 
 	hva = new->userspace_addr;
@@ -2386,7 +2914,7 @@ void kvm_arch_flush_shadow_memslot(struct kvm *kvm,
 
 	write_lock(&kvm->mmu_lock);
 	kvm_stage2_unmap_range(&kvm->arch.mmu, gpa, size, true);
-	kvm_nested_s2_unmap(kvm, true);
+	kvm_nested_unmap_cipa_range(kvm, gpa, size, true);
 	write_unlock(&kvm->mmu_lock);
 }
 
@@ -2456,4 +2984,194 @@ void kvm_toggle_cache(struct kvm_vcpu *vcpu, bool was_enabled)
 		*vcpu_hcr(vcpu) &= ~HCR_TVM;
 
 	trace_kvm_toggle_cache(*vcpu_pc(vcpu), was_enabled, now_enabled);
+}
+
+/*
+ * Try to walk to the specified GPA in canonical mmu - if unmapped returns 0, if
+ * mapped returns the granule size, otherwise returns an error.
+ */
+static long kvm_walk_s2(struct kvm_pgtable *pgt,
+			gpa_t gpa, s8 *level)
+{
+	struct kvm *kvm = kvm_s2_mmu_to_kvm(pgt->mmu);
+	kvm_pte_t pte;
+	long ret;
+
+	guard(read_lock)(&kvm->mmu_lock);
+
+	ret = kvm_pgtable_get_leaf(pgt, gpa, &pte, level,
+				   KVM_PGTABLE_WALK_SHARED);
+	if (ret)
+		return ret;
+	/* Unpopulated, must fault. */
+	if (!kvm_pte_valid(pte))
+		return 0;
+	return kvm_granule_size(*level);
+}
+
+/* Synthesised data abort at specified page table level. */
+#define PRE_FAULT_ESR(level)				\
+	 ((ESR_ELx_EC_DABT_LOW << ESR_ELx_EC_SHIFT) |	\
+	  ESR_ELx_IL | ESR_ELx_FSC_FAULT_L(level))
+
+/* Retrieve either a read-only or a read/write hva. */
+static hva_t gfn_to_hva_memslot_read(struct kvm_memory_slot *slot, gfn_t gfn)
+{
+	return gfn_to_hva_memslot_prot(slot, gfn, /*writable=*/NULL);
+}
+
+static long __pre_fault_s2(struct kvm_s2_mmu *mmu, struct kvm_vcpu *vcpu,
+			   gpa_t gpa, struct kvm_memory_slot *memslot, s8 level)
+{
+	const bool is_gmem = kvm_slot_has_gmem(memslot);
+	const gfn_t gfn = gpa_to_gfn(gpa);
+	const hva_t hva = is_gmem ? 0 : gfn_to_hva_memslot_read(memslot, gfn);
+	const struct kvm_s2_fault_desc s2fd = {
+		.vcpu		= vcpu,
+		.fault_ipa	= gpa,
+		.nested		= NULL,
+		.memslot	= memslot,
+		.hva		= hva,
+		.esr		= PRE_FAULT_ESR(level),
+		.mmu		= mmu,
+	};
+	struct kvm_s2_fault_result result = {};
+	long ret;
+
+	if (kvm_is_error_hva(hva))
+		return -EFAULT;
+
+	if (is_gmem)
+		ret = gmem_abort(&s2fd, &result);
+	else
+		ret = user_mem_abort(&s2fd, &result);
+	if (IS_ERR_VALUE(ret))
+		return ret;
+	return result.mapping_size;
+}
+
+static long pre_fault_s2(struct kvm_s2_mmu *mmu, struct kvm_vcpu *vcpu,
+			 gpa_t gpa, struct kvm_memory_slot *memslot)
+{
+	s8 level;
+	long ret;
+
+	/* Try a walk first. */
+	ret = kvm_walk_s2(mmu->pgt, gpa, &level);
+	if (ret)
+		return ret;
+	/* OK, have to fault page in. */
+	return __pre_fault_s2(mmu, vcpu, gpa, memslot, level);
+}
+
+static unsigned long
+pre_fault_bytes_consumed(gpa_t gpa, unsigned long granule_size,
+			 unsigned long bytes_remaining)
+{
+	/* Granules are always a power-of-2. */
+	const unsigned long granule_bytes_remaining =
+		granule_size - (gpa % granule_size);
+
+	return min(granule_bytes_remaining, bytes_remaining);
+}
+
+/* If you lose the race this many times, time to give up. */
+#define MAX_PRE_FAULT_RETRIES 3
+
+int kvm_arch_pre_fault_allowed(struct kvm_vcpu *vcpu)
+{
+	if (is_protected_kvm_enabled())
+		return -EOPNOTSUPP;
+	if (!kvm_vcpu_initialized(vcpu))
+		return -ENOEXEC;
+
+	return 0;
+}
+
+/**
+ * kvm_arch_vcpu_pre_fault_memory - pre-fault stage-2 page tables for the
+ * specified GPA.
+ * @vcpu:	The VCPU pointer
+ * @range:	{gpa, size, flags} tuple
+ *
+ * The mapping performed is always best-effort - faulting in is necessarily
+ * racey. The ranges faulted in are canonical, nested page tables are ignored.
+ *
+ * @range->gpa specifies the GPA to pre-fault, @range->size specifies how many
+ * bytes remain to be pre-faulted and @range->flags is reserved and must be 0.
+ *
+ * Returns: the number of bytes the pre-fault consumed, or an error.
+ */
+long kvm_arch_vcpu_pre_fault_memory(struct kvm_vcpu *vcpu,
+				    struct kvm_pre_fault_memory *range)
+{
+	struct kvm *kvm = vcpu->kvm;
+	const u64 bytes_remaining = range->size;
+	struct kvm_s2_mmu *mmu = &kvm->arch.mmu; /* Canonical. */
+	struct kvm_memory_slot *memslot;
+	const gpa_t gpa = range->gpa;
+	int num_retries = 0;
+	long ret;
+
+	memslot = gfn_to_memslot(kvm, gpa_to_gfn(gpa));
+	if (!memslot)
+		return -ENOENT;
+	/* SRCU must be released for progress and only userland can do that. */
+	if (memslot->flags & KVM_MEMSLOT_INVALID)
+		return -EAGAIN;
+
+	do {
+		ret = pre_fault_s2(mmu, vcpu, gpa, memslot);
+	} while (ret == -EAGAIN && num_retries++ < MAX_PRE_FAULT_RETRIES);
+
+	if (IS_ERR_VALUE(ret))
+		return ret;
+	return pre_fault_bytes_consumed(gpa, ret, bytes_remaining);
+}
+
+static const struct kvm_vm_s2_ops protected_pkvm_vm_s2_ops = {
+	.vm_flush_remote_tlbs		= pkvm_flush_remote_tlbs,
+	.vm_flush_remote_tlbs_range	= pkvm_flush_remote_tlbs_range,
+	.vm_age_gfn			= no_age_gfn,
+	.vm_test_age_gfn		= no_age_gfn,
+	.vm_stage2_unmap_range		= no_stage2_unmap_range,
+	.vm_mem_abort			= protected_pkvm_mem_abort,
+};
+
+static const struct kvm_vm_s2_ops pkvm_vm_s2_ops = {
+	.vm_flush_remote_tlbs		= pkvm_flush_remote_tlbs,
+	.vm_flush_remote_tlbs_range	= pkvm_flush_remote_tlbs_range,
+	.vm_age_gfn			= pkvm_age_gfn,
+	.vm_test_age_gfn		= pkvm_test_age_gfn,
+	.vm_stage2_unmap_range		= pkvm_stage2_unmap_range,
+	.vm_mem_abort			= kvm_vm_mem_abort,
+};
+
+static const struct kvm_vm_s2_ops kvm_default_vm_s2_ops = {
+	.vm_flush_remote_tlbs		= kvm_vm_flush_remote_tlbs,
+	.vm_flush_remote_tlbs_range	= kvm_vm_flush_remote_tlbs_range,
+	.vm_age_gfn			= kvm_vm_age_gfn,
+	.vm_test_age_gfn		= kvm_vm_test_age_gfn,
+	.vm_stage2_unmap_range		= kvm_vm_stage2_unmap_range,
+	.vm_mem_abort			= kvm_vm_mem_abort,
+};
+
+#define KVM_VM_S2_OPS(flavor, ops)		\
+		[(flavor)] = &(ops)
+
+static const struct kvm_vm_s2_ops *arm64_vm_s2_ops[] = {
+	KVM_VM_S2_OPS(VM_VHE, kvm_default_vm_s2_ops),
+	KVM_VM_S2_OPS(VM_NVHE, kvm_default_vm_s2_ops),
+	KVM_VM_S2_OPS(VM_PKVM, pkvm_vm_s2_ops),
+	KVM_VM_S2_OPS(VM_PROTECTED_PKVM, protected_pkvm_vm_s2_ops),
+};
+
+static int kvm_vm_init_vm_s2_ops(struct kvm *kvm)
+{
+	BUILD_BUG_ON(ARRAY_SIZE(arm64_vm_s2_ops) != VM_FLAVOR_MAX);
+
+	kvm->arch.vm_s2_ops = arm64_vm_s2_ops[kvm->arch.vm_flavor];
+	if (WARN_ON(!kvm->arch.vm_s2_ops))
+		return -EINVAL;
+	return 0;
 }

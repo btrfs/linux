@@ -11,7 +11,6 @@
 #include <linux/miscdevice.h>
 #include <linux/mm.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
 #include <linux/set_memory.h>
@@ -160,8 +159,10 @@ static void tdx_mr_deinit(const struct attribute_group *mr_grp)
 /*
  * Intel's SGX QE implementation generally uses Quote size less
  * than 8K (2K Quote data + ~5K of certificate blob).
+ * DICE-based attestation uses layered evidence that requires
+ * larger Quote size (~100K).
  */
-#define GET_QUOTE_BUF_SIZE		SZ_8K
+#define TDX_DEFAULT_QUOTE_SIZE		SZ_128K
 
 #define GET_QUOTE_CMD_VER		1
 
@@ -188,8 +189,7 @@ struct tdx_quote_buf {
 	u8 data[];
 };
 
-/* Quote data buffer */
-static void *quote_data;
+static struct tdx_quote_buf *quote_buf;
 
 /* Lock to streamline quote requests */
 static DEFINE_MUTEX(quote_lock);
@@ -206,38 +206,61 @@ static long tdx_get_report0(struct tdx_report_req __user *req)
 			     USER_SOCKPTR(req->tdreport));
 }
 
-static void free_quote_buf(void *buf)
+/* Size of the header metadata plus the largest possible raw Quote. */
+static size_t get_quote_buf_size(void)
 {
-	size_t len = PAGE_ALIGN(GET_QUOTE_BUF_SIZE);
-	unsigned int count = len >> PAGE_SHIFT;
+	size_t buf_size;
+	u64 max_size;
+
+	/* Start with the default buffer size, which includes the header */
+	buf_size = TDX_DEFAULT_QUOTE_SIZE;
+
+	/*
+	 * Override the default when the TDX module reports a size. Add room
+	 * for the header metadata. The size is fixed during TD runtime.
+	 */
+	if (!tdx_get_max_quote_size(&max_size))
+		buf_size = struct_size_t(struct tdx_quote_buf, data, max_size);
+
+	return buf_size;
+}
+
+static void free_quote_buf(struct tdx_quote_buf *buf)
+{
+	size_t alloc_size = PAGE_ALIGN(get_quote_buf_size());
+	unsigned int count;
+
+	count = alloc_size >> PAGE_SHIFT;
 
 	if (set_memory_encrypted((unsigned long)buf, count)) {
 		pr_err("Failed to restore encryption mask for Quote buffer, leak it\n");
 		return;
 	}
 
-	free_pages_exact(buf, len);
+	free_pages_exact(buf, alloc_size);
 }
 
-static void *alloc_quote_buf(void)
+static struct tdx_quote_buf *alloc_quote_buf(void)
 {
-	size_t len = PAGE_ALIGN(GET_QUOTE_BUF_SIZE);
-	unsigned int count = len >> PAGE_SHIFT;
-	void *addr;
+	size_t alloc_size = PAGE_ALIGN(get_quote_buf_size());
+	struct tdx_quote_buf *buf;
+	unsigned int count;
 
-	addr = alloc_pages_exact(len, GFP_KERNEL | __GFP_ZERO);
-	if (!addr)
+	count = alloc_size >> PAGE_SHIFT;
+
+	buf = alloc_pages_exact(alloc_size, GFP_KERNEL | __GFP_ZERO);
+	if (!buf)
 		return NULL;
 
-	if (set_memory_decrypted((unsigned long)addr, count))
+	if (set_memory_decrypted((unsigned long)buf, count))
 		return NULL;
 
-	return addr;
+	return buf;
 }
 
 /*
  * wait_for_quote_completion() - Wait for Quote request completion
- * @quote_buf: Address of Quote buffer.
+ * @buf: Address of Quote buffer.
  * @timeout: Timeout in seconds to wait for the Quote generation.
  *
  * As per TDX GHCI v1.0 specification, sec titled "TDG.VP.VMCALL<GetQuote>",
@@ -246,7 +269,7 @@ static void *alloc_quote_buf(void)
  * or error code after processing is complete. So wait till the status
  * changes from GET_QUOTE_IN_FLIGHT or the request being timed out.
  */
-static int wait_for_quote_completion(struct tdx_quote_buf *quote_buf, u32 timeout)
+static int wait_for_quote_completion(struct tdx_quote_buf *buf, u32 timeout)
 {
 	int i = 0;
 
@@ -254,7 +277,7 @@ static int wait_for_quote_completion(struct tdx_quote_buf *quote_buf, u32 timeou
 	 * Quote requests usually take a few seconds to complete, so waking up
 	 * once per second to recheck the status is fine for this use case.
 	 */
-	while (quote_buf->status == GET_QUOTE_IN_FLIGHT && i++ < timeout) {
+	while (buf->status == GET_QUOTE_IN_FLIGHT && i++ < timeout) {
 		if (msleep_interruptible(MSEC_PER_SEC))
 			return -EINTR;
 	}
@@ -262,11 +285,12 @@ static int wait_for_quote_completion(struct tdx_quote_buf *quote_buf, u32 timeou
 	return (i == timeout) ? -ETIMEDOUT : 0;
 }
 
-static int tdx_report_new_locked(struct tsm_report *report, void *data)
+static int tdx_report_new_locked(struct tsm_report *report)
 {
 	u8 *buf;
-	struct tdx_quote_buf *quote_buf = quote_data;
 	struct tsm_report_desc *desc = &report->desc;
+	size_t quote_buf_size = get_quote_buf_size();
+	u32 out_len;
 	int ret;
 	u64 err;
 
@@ -281,7 +305,7 @@ static int tdx_report_new_locked(struct tsm_report *report, void *data)
 	if (desc->inblob_len != TDX_REPORTDATA_LEN)
 		return -EINVAL;
 
-	memset(quote_data, 0, GET_QUOTE_BUF_SIZE);
+	memset(quote_buf, 0, quote_buf_size);
 
 	/* Update Quote buffer header */
 	quote_buf->version = GET_QUOTE_CMD_VER;
@@ -292,7 +316,7 @@ static int tdx_report_new_locked(struct tsm_report *report, void *data)
 	if (ret)
 		return ret;
 
-	err = tdx_hcall_get_quote(quote_data, GET_QUOTE_BUF_SIZE);
+	err = tdx_hcall_get_quote(quote_buf, PAGE_ALIGN(quote_buf_size));
 	if (err) {
 		pr_err("GetQuote hypercall failed, status:%llx\n", err);
 		return -EIO;
@@ -304,12 +328,22 @@ static int tdx_report_new_locked(struct tsm_report *report, void *data)
 		return ret;
 	}
 
-	buf = kvmemdup(quote_buf->data, quote_buf->out_len, GFP_KERNEL);
+	if (quote_buf->status != GET_QUOTE_SUCCESS) {
+		pr_debug("GetQuote request failed, status:%llx\n", quote_buf->status);
+		return -EIO;
+	}
+
+	out_len = READ_ONCE(quote_buf->out_len);
+
+	if (struct_size(quote_buf, data, out_len) > quote_buf_size)
+		return -EFBIG;
+
+	buf = kvmemdup(quote_buf->data, out_len, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
 
 	report->outblob = buf;
-	report->outblob_len = quote_buf->out_len;
+	report->outblob_len = out_len;
 
 	/*
 	 * TODO: parse the PEM-formatted cert chain out of the quote buffer when
@@ -319,10 +353,10 @@ static int tdx_report_new_locked(struct tsm_report *report, void *data)
 	return ret;
 }
 
-static int tdx_report_new(struct tsm_report *report, void *data)
+static int tdx_report_new(struct tsm_report *report, void *unused)
 {
 	scoped_cond_guard(mutex_intr, return -EINTR, &quote_lock)
-		return tdx_report_new_locked(report, data);
+		return tdx_report_new_locked(report);
 }
 
 static bool tdx_report_attr_visible(int n)
@@ -403,8 +437,8 @@ static int __init tdx_guest_init(void)
 	if (ret)
 		goto deinit_mr;
 
-	quote_data = alloc_quote_buf();
-	if (!quote_data) {
+	quote_buf = alloc_quote_buf();
+	if (!quote_buf) {
 		pr_err("Failed to allocate Quote buffer\n");
 		ret = -ENOMEM;
 		goto free_misc;
@@ -417,7 +451,7 @@ static int __init tdx_guest_init(void)
 	return 0;
 
 free_quote:
-	free_quote_buf(quote_data);
+	free_quote_buf(quote_buf);
 free_misc:
 	misc_deregister(&tdx_misc_dev);
 deinit_mr:
@@ -430,7 +464,7 @@ module_init(tdx_guest_init);
 static void __exit tdx_guest_exit(void)
 {
 	tsm_report_unregister(&tdx_tsm_ops);
-	free_quote_buf(quote_data);
+	free_quote_buf(quote_buf);
 	misc_deregister(&tdx_misc_dev);
 	tdx_mr_deinit(tdx_attr_groups[0]);
 }

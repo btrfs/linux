@@ -279,7 +279,7 @@ static int spi_st_probe(struct platform_device *pdev)
 	int irq, ret = 0;
 	u32 var;
 
-	host = spi_alloc_host(&pdev->dev, sizeof(*spi_st));
+	host = devm_spi_alloc_host(&pdev->dev, sizeof(*spi_st));
 	if (!host)
 		return -ENOMEM;
 
@@ -296,13 +296,12 @@ static int spi_st_probe(struct platform_device *pdev)
 	spi_st->clk = devm_clk_get(&pdev->dev, "ssc");
 	if (IS_ERR(spi_st->clk)) {
 		dev_err(&pdev->dev, "Unable to request clock\n");
-		ret = PTR_ERR(spi_st->clk);
-		goto put_host;
+		return PTR_ERR(spi_st->clk);
 	}
 
 	ret = clk_prepare_enable(spi_st->clk);
 	if (ret)
-		goto put_host;
+		return ret;
 
 	init_completion(&spi_st->done);
 
@@ -349,7 +348,7 @@ static int spi_st_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, host);
 
-	ret = devm_spi_register_controller(&pdev->dev, host);
+	ret = spi_register_controller(host);
 	if (ret) {
 		dev_err(&pdev->dev, "Failed to register host\n");
 		goto rpm_disable;
@@ -361,8 +360,7 @@ rpm_disable:
 	pm_runtime_disable(&pdev->dev);
 clk_disable:
 	clk_disable_unprepare(spi_st->clk);
-put_host:
-	spi_controller_put(host);
+
 	return ret;
 }
 
@@ -370,6 +368,8 @@ static void spi_st_remove(struct platform_device *pdev)
 {
 	struct spi_controller *host = platform_get_drvdata(pdev);
 	struct spi_st *spi_st = spi_controller_get_devdata(host);
+
+	spi_unregister_controller(host);
 
 	pm_runtime_disable(&pdev->dev);
 
@@ -403,7 +403,7 @@ static int spi_st_runtime_resume(struct device *dev)
 	return ret;
 }
 
-static int __maybe_unused spi_st_suspend(struct device *dev)
+static int spi_st_suspend(struct device *dev)
 {
 	struct spi_controller *host = dev_get_drvdata(dev);
 	int ret;
@@ -415,7 +415,7 @@ static int __maybe_unused spi_st_suspend(struct device *dev)
 	return pm_runtime_force_suspend(dev);
 }
 
-static int __maybe_unused spi_st_resume(struct device *dev)
+static int spi_st_resume(struct device *dev)
 {
 	struct spi_controller *host = dev_get_drvdata(dev);
 	int ret;

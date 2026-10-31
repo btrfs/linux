@@ -136,6 +136,61 @@ int qcom_icc_set(struct icc_node *src, struct icc_node *dst)
 }
 EXPORT_SYMBOL_GPL(qcom_icc_set);
 
+static int qcom_icc_get_bw(struct icc_node *node, u32 *avg, u32 *peak)
+{
+	struct qcom_icc_node *qn = node->data;
+	u32 avg_max = 0;
+	u32 peak_max = 0;
+	u64 x, y;
+	int i;
+
+	if (!qn->num_bcms) {
+		*avg = INT_MAX;
+		*peak = INT_MAX;
+
+		return 0;
+	}
+
+	for (i = 0; i < qn->num_bcms; ++i) {
+		struct qcom_icc_bcm *bcm = qn->bcms[i];
+
+		/* Use AMC vote for boot-up */
+		x = bcm->vote_x[QCOM_ICC_BUCKET_AMC];
+		y = bcm->vote_y[QCOM_ICC_BUCKET_AMC];
+
+		/* Consider enable mask and convert to INT_MAX */
+		if (bcm->enable_mask) {
+			if (x & bcm->enable_mask)
+				avg_max = INT_MAX;
+			if (y & bcm->enable_mask)
+				peak_max = INT_MAX;
+		} else {
+			if (x) {
+				x *= le32_to_cpu(bcm->aux_data.unit);
+				do_div(x, bcm->vote_scale);
+				x *= qn->buswidth * qn->channels;
+				do_div(x, le16_to_cpu(bcm->aux_data.width));
+
+				avg_max = max(avg_max, x);
+			}
+
+			if (y) {
+				y *= le32_to_cpu(bcm->aux_data.unit);
+				do_div(y, bcm->vote_scale);
+				y *= qn->buswidth;
+				do_div(y, le16_to_cpu(bcm->aux_data.width));
+
+				peak_max = max(peak_max, y);
+			}
+		}
+	}
+
+	*avg = avg_max;
+	*peak = peak_max;
+
+	return 0;
+}
+
 /**
  * qcom_icc_bcm_init - populates bcm aux data and connect qnodes
  * @bcm: bcm to be initialized
@@ -173,10 +228,7 @@ int qcom_icc_bcm_init(struct qcom_icc_bcm *bcm, struct device *dev)
 		return -EINVAL;
 	}
 
-	bcm->aux_data.unit = le32_to_cpu(data->unit);
-	bcm->aux_data.width = le16_to_cpu(data->width);
-	bcm->aux_data.vcd = data->vcd;
-	bcm->aux_data.reserved = data->reserved;
+	bcm->aux_data = *data;
 	INIT_LIST_HEAD(&bcm->list);
 	INIT_LIST_HEAD(&bcm->ws_list);
 
@@ -255,6 +307,13 @@ int qcom_icc_rpmh_probe(struct platform_device *pdev)
 	provider = &qp->provider;
 	provider->dev = dev;
 	provider->set = qcom_icc_set;
+	/*
+	 * Programming the QoS registers below requires the NoC to be clocked,
+	 * which during probe is only guaranteed by the INT_MAX initial votes
+	 * the interconnect core applies when get_bw() is absent.
+	 */
+	if (!desc->config)
+		provider->get_bw = qcom_icc_get_bw;
 	provider->pre_aggregate = qcom_icc_pre_aggregate;
 	provider->aggregate = qcom_icc_aggregate;
 	provider->xlate_extended = qcom_icc_xlate_extended;
@@ -272,22 +331,20 @@ int qcom_icc_rpmh_probe(struct platform_device *pdev)
 	if (IS_ERR(qp->voter))
 		return PTR_ERR(qp->voter);
 
-	for (i = 0; i < qp->num_bcms; i++)
+	for (i = 0; i < qp->num_bcms; i++) {
 		qcom_icc_bcm_init(qp->bcms[i], dev);
+		qcom_icc_bcm_get_bw(qp->voter, qp->bcms[i]);
+	}
 
 	for (i = 0; i < num_nodes; i++) {
 		qn = qnodes[i];
 		if (!qn)
 			continue;
 
-		if (desc->alloc_dyn_id) {
-			if (!qn->node)
-				qn->node = icc_node_create_dyn();
-			node = qn->node;
-		} else {
-			node = icc_node_create(qn->id);
-		}
+		if (!qn->node)
+			qn->node = icc_node_create_dyn();
 
+		node = qn->node;
 		if (IS_ERR(node)) {
 			ret = PTR_ERR(node);
 			goto err_remove_nodes;
@@ -302,12 +359,8 @@ int qcom_icc_rpmh_probe(struct platform_device *pdev)
 		node->data = qn;
 		icc_node_add(node, provider);
 
-		for (j = 0; j < qn->num_links; j++) {
-			if (desc->alloc_dyn_id)
-				icc_link_nodes(node, &qn->link_nodes[j]->node);
-			else
-				icc_link_create(node, qn->links[j]);
-		}
+		for (j = 0; j < qn->num_links; j++)
+			icc_link_nodes(node, &qn->link_nodes[j]->node);
 
 		data->nodes[i] = node;
 	}
@@ -316,14 +369,19 @@ int qcom_icc_rpmh_probe(struct platform_device *pdev)
 		struct resource *res;
 		void __iomem *base;
 
-		base = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
-		if (IS_ERR(base))
-			goto skip_qos_config;
+		/* Try parent's regmap first */
+		qp->regmap = dev_get_regmap(dev->parent, NULL);
+		if (!qp->regmap) {
+			base = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
+			if (IS_ERR(base))
+				goto skip_qos_config;
 
-		qp->regmap = devm_regmap_init_mmio(dev, base, desc->config);
-		if (IS_ERR(qp->regmap)) {
-			dev_info(dev, "Skipping QoS, regmap failed; %ld\n", PTR_ERR(qp->regmap));
-			goto skip_qos_config;
+			qp->regmap = devm_regmap_init_mmio(dev, base, desc->config);
+			if (IS_ERR(qp->regmap)) {
+				dev_info(dev, "Skipping QoS, regmap failed; %ld\n",
+					 PTR_ERR(qp->regmap));
+				goto skip_qos_config;
+			}
 		}
 
 		qp->num_clks = devm_clk_bulk_get_all(qp->dev, &qp->clks);

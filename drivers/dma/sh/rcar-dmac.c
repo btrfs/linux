@@ -219,10 +219,12 @@ struct rcar_dmac {
  * struct rcar_dmac_of_data - This driver's OF data
  * @chan_offset_base: DMAC channels base offset
  * @chan_offset_stride: DMAC channels offset stride
+ * @broken_ipmmu_microTLB0: flag if the connected IPMMU has microTLB0 issues
  */
 struct rcar_dmac_of_data {
 	u32 chan_offset_base;
 	u32 chan_offset_stride;
+	unsigned int broken_ipmmu_microTLB0:1;
 };
 
 /* -----------------------------------------------------------------------------
@@ -1254,7 +1256,7 @@ rcar_dmac_prep_dma_cyclic(struct dma_chan *chan, dma_addr_t buf_addr,
 	 * Allocate the sg list dynamically as it would consume too much stack
 	 * space.
 	 */
-	sgl = kmalloc_array(sg_len, sizeof(*sgl), GFP_NOWAIT);
+	sgl = kmalloc_objs(*sgl, sg_len, GFP_NOWAIT);
 	if (!sgl)
 		return NULL;
 
@@ -1728,19 +1730,12 @@ static struct dma_chan *rcar_dmac_of_xlate(struct of_phandle_args *dma_spec,
  * Power management
  */
 
-#ifdef CONFIG_PM
-static int rcar_dmac_runtime_suspend(struct device *dev)
-{
-	return 0;
-}
-
 static int rcar_dmac_runtime_resume(struct device *dev)
 {
 	struct rcar_dmac *dmac = dev_get_drvdata(dev);
 
 	return rcar_dmac_init(dmac);
 }
-#endif
 
 static const struct dev_pm_ops rcar_dmac_pm = {
 	/*
@@ -1748,10 +1743,9 @@ static const struct dev_pm_ops rcar_dmac_pm = {
 	 *   - Wait for the current transfer to complete and stop the device,
 	 *   - Resume transfers, if any.
 	 */
-	SET_NOIRQ_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
-				      pm_runtime_force_resume)
-	SET_RUNTIME_PM_OPS(rcar_dmac_runtime_suspend, rcar_dmac_runtime_resume,
-			   NULL)
+	NOIRQ_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
+				  pm_runtime_force_resume)
+	RUNTIME_PM_OPS(NULL, rcar_dmac_runtime_resume, NULL)
 };
 
 /* -----------------------------------------------------------------------------
@@ -1885,8 +1879,9 @@ static int rcar_dmac_probe(struct platform_device *pdev)
 	 * can't use it with the IPMMU. As the IOMMU API operates at the device
 	 * level we can't disable it selectively, so ignore channel 0 for now if
 	 * the device is part of an IOMMU group.
+	 * Not applicable if system uses something else than IPMMU like SMMU.
 	 */
-	if (device_iommu_mapped(&pdev->dev))
+	if (data->broken_ipmmu_microTLB0 && device_iommu_mapped(&pdev->dev))
 		dmac->channels_mask &= ~BIT(0);
 
 	dmac->channels = devm_kcalloc(&pdev->dev, dmac->n_channels,
@@ -2006,13 +2001,21 @@ static void rcar_dmac_shutdown(struct platform_device *pdev)
 }
 
 static const struct rcar_dmac_of_data rcar_dmac_data = {
-	.chan_offset_base	= 0x8000,
-	.chan_offset_stride	= 0x80,
+	.chan_offset_base = 0x8000,
+	.chan_offset_stride = 0x80,
+	.broken_ipmmu_microTLB0 = 1,
 };
 
 static const struct rcar_dmac_of_data rcar_gen4_dmac_data = {
-	.chan_offset_base	= 0x0,
-	.chan_offset_stride	= 0x1000,
+	.chan_offset_base = 0x0,
+	.chan_offset_stride = 0x1000,
+	/* Set to play safe. Needs testing if Gen4 is really affected */
+	.broken_ipmmu_microTLB0 = 1,
+};
+
+static const struct rcar_dmac_of_data rcar_gen5_dmac_data = {
+	.chan_offset_base = 0x0,
+	.chan_offset_stride = 0x1000,
 };
 
 static const struct of_device_id rcar_dmac_of_ids[] = {
@@ -2022,6 +2025,9 @@ static const struct of_device_id rcar_dmac_of_ids[] = {
 	}, {
 		.compatible = "renesas,rcar-gen4-dmac",
 		.data = &rcar_gen4_dmac_data,
+	}, {
+		.compatible = "renesas,rcar-gen5-dmac",
+		.data = &rcar_gen5_dmac_data,
 	}, {
 		/*
 		 * Backward compatibility for between v5.12 - v5.19
@@ -2036,7 +2042,7 @@ MODULE_DEVICE_TABLE(of, rcar_dmac_of_ids);
 
 static struct platform_driver rcar_dmac_driver = {
 	.driver		= {
-		.pm	= &rcar_dmac_pm,
+		.pm	= pm_ptr(&rcar_dmac_pm),
 		.name	= "rcar-dmac",
 		.of_match_table = rcar_dmac_of_ids,
 	},
@@ -2047,6 +2053,6 @@ static struct platform_driver rcar_dmac_driver = {
 
 module_platform_driver(rcar_dmac_driver);
 
-MODULE_DESCRIPTION("R-Car Gen2 DMA Controller Driver");
+MODULE_DESCRIPTION("R-Car DMA Controller Driver");
 MODULE_AUTHOR("Laurent Pinchart <laurent.pinchart@ideasonboard.com>");
 MODULE_LICENSE("GPL v2");

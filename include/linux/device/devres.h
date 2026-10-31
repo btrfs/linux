@@ -9,6 +9,7 @@
 #include <linux/stdarg.h>
 #include <linux/types.h>
 #include <asm/bug.h>
+#include <asm/percpu.h>
 
 struct device;
 struct device_node;
@@ -25,10 +26,6 @@ __devres_alloc_node(dr_release_t release, size_t size, gfp_t gfp, int nid, const
 #define devres_alloc_node(release, size, gfp, nid) \
 	__devres_alloc_node(release, size, gfp, nid, #release)
 
-void devres_for_each_res(struct device *dev, dr_release_t release,
-			 dr_match_t match, void *match_data,
-			 void (*fn)(struct device *, void *, void *),
-			 void *data);
 void devres_free(void *res);
 void devres_add(struct device *dev, void *res);
 void *devres_find(struct device *dev, dr_release_t release, dr_match_t match, void *match_data);
@@ -65,6 +62,108 @@ static inline void *devm_kcalloc(struct device *dev, size_t n, size_t size, gfp_
 {
 	return devm_kmalloc_array(dev, n, size, flags | __GFP_ZERO);
 }
+
+/**
+ * __devm_alloc_objs - Device-managed allocation of objects of a given type
+ * @DEVM_ALLOC: which device-managed size-based allocator to use.
+ * @DEV: device to scope the allocation lifetime to.
+ * @GFP: GFP flags for the allocation.
+ * @TYPE: type to allocate space for.
+ * @COUNT: how many @TYPE objects to allocate.
+ *
+ * Device-managed counterpart of __alloc_objs().
+ * @DEVM_ALLOC takes (@DEV, size, gfp).
+ *
+ * Returns: Newly allocated pointer to (first) @TYPE of @COUNT-many allocated
+ * @TYPE objects, or NULL on failure.
+ */
+#define __devm_alloc_objs(DEVM_ALLOC, DEV, GFP, TYPE, COUNT)		\
+({									\
+	const size_t __obj_size = size_mul(sizeof(TYPE), COUNT);	\
+	(TYPE *)DEVM_ALLOC(DEV, __obj_size, GFP);			\
+})
+
+/**
+ * devm_kmalloc_obj - Device-managed allocation of a single typed object
+ * @DEV: Device to scope the allocation lifetime to.
+ * @VAR_OR_TYPE: Variable or type to allocate.
+ * @GFP: Optional GFP flags (defaults to %GFP_KERNEL).
+ *
+ * Device-managed counterpart of kmalloc_obj(): the allocation is sized from
+ * @VAR_OR_TYPE and returned as a pointer to that type, not void *.
+ *
+ * Returns: newly allocated pointer to a @VAR_OR_TYPE on success, or NULL on
+ * failure.
+ */
+#define devm_kmalloc_obj(DEV, VAR_OR_TYPE, ...)				\
+	__devm_alloc_objs(devm_kmalloc, DEV, default_gfp(__VA_ARGS__),	\
+			  typeof(VAR_OR_TYPE), 1)
+
+/**
+ * devm_kmalloc_objs - Device-managed allocation of an array of a typed object
+ * @DEV: Device to scope the allocation lifetime to.
+ * @VAR_OR_TYPE: Variable or type to allocate an array of.
+ * @COUNT: How many elements in the array.
+ * @GFP: Optional GFP flags (defaults to %GFP_KERNEL).
+ *
+ * Returns: newly allocated pointer to an array of @VAR_OR_TYPE on success, or
+ * NULL on failure (including when the total size overflows).
+ */
+#define devm_kmalloc_objs(DEV, VAR_OR_TYPE, COUNT, ...) \
+	__devm_alloc_objs(devm_kmalloc, DEV, default_gfp(__VA_ARGS__), \
+			  typeof(VAR_OR_TYPE), COUNT)
+
+/**
+ * __devm_alloc_flex - Device-managed allocation of a trailing-flex-array object
+ * @DEVM_ALLOC: which device-managed allocator to use.
+ * @DEV: device to scope the allocation lifetime to.
+ * @GFP: GFP flags for the allocation.
+ * @TYPE: type of structure to allocate space for.
+ * @FAM: name of the flexible array member of @TYPE.
+ * @COUNT: how many @FAM elements to allocate space for.
+ *
+ * Device-managed counterpart of __alloc_flex().
+ * @DEVM_ALLOC takes (@DEV, size, gfp).
+ *
+ * Returns: Newly allocated pointer to @TYPE with @COUNT-many trailing @FAM
+ * elements, or NULL on failure.
+ */
+#define __devm_alloc_flex(DEVM_ALLOC, DEV, GFP, TYPE, FAM, COUNT)	\
+({									\
+	const size_t __count = (COUNT);					\
+	const size_t __obj_size = struct_size_t(TYPE, FAM, __count);	\
+	TYPE *__obj_ptr = DEVM_ALLOC(DEV, __obj_size, GFP);		\
+	if (__obj_ptr)							\
+		__set_flex_counter(__obj_ptr->FAM, __count);		\
+	__obj_ptr;							\
+})
+
+/**
+ * devm_kmalloc_flex - Device-managed allocation of a flexible-array structure
+ * @DEV: Device to scope the allocation lifetime to.
+ * @VAR_OR_TYPE: Variable or type to allocate (with its flexible array).
+ * @FAM: The name of the flexible array member of the structure.
+ * @COUNT: How many flexible array member elements to allocate.
+ * @GFP: Optional GFP flags (defaults to %GFP_KERNEL).
+ *
+ * Returns: newly allocated pointer to @VAR_OR_TYPE on success, or NULL on
+ * failure. If @FAM has been annotated with __counted_by(), its counter is set
+ * to @COUNT.
+ */
+#define devm_kmalloc_flex(DEV, VAR_OR_TYPE, FAM, COUNT, ...) \
+	__devm_alloc_flex(devm_kmalloc, DEV, default_gfp(__VA_ARGS__), \
+			  typeof(VAR_OR_TYPE), FAM, COUNT)
+
+/* All devm_kzalloc aliases for devm_kmalloc_(obj|objs|flex). */
+#define devm_kzalloc_obj(DEV, P, ...) \
+	__devm_alloc_objs(devm_kzalloc, DEV, default_gfp(__VA_ARGS__), typeof(P), 1)
+#define devm_kzalloc_objs(DEV, P, COUNT, ...) \
+	__devm_alloc_objs(devm_kzalloc, DEV, default_gfp(__VA_ARGS__), \
+			  typeof(P), COUNT)
+#define devm_kzalloc_flex(DEV, P, FAM, COUNT, ...) \
+	__devm_alloc_flex(devm_kzalloc, DEV, default_gfp(__VA_ARGS__), \
+			  typeof(P), FAM, COUNT)
+
 static inline __realloc_size(3, 4) void * __must_check
 devm_krealloc_array(struct device *dev, void *p, size_t new_n, size_t new_size, gfp_t flags)
 {
@@ -95,6 +194,22 @@ char * __printf(3, 0) __malloc
 devm_kvasprintf(struct device *dev, gfp_t gfp, const char *fmt, va_list ap);
 char * __printf(3, 4) __malloc
 devm_kasprintf(struct device *dev, gfp_t gfp, const char *fmt, ...);
+
+/**
+ * devm_alloc_percpu - Resource-managed alloc_percpu
+ * @dev: Device to allocate per-cpu memory for
+ * @type: Type to allocate per-cpu memory for
+ *
+ * Managed alloc_percpu. Per-cpu memory allocated with this function is
+ * automatically freed on driver detach.
+ *
+ * RETURNS:
+ * Pointer to allocated memory on success, NULL on failure.
+ */
+#define devm_alloc_percpu(dev, type)      \
+	((typeof(type) __percpu *)__devm_alloc_percpu((dev), sizeof(type), __alignof__(type)))
+
+void __percpu *__devm_alloc_percpu(struct device *dev, size_t size, size_t align);
 
 unsigned long devm_get_free_pages(struct device *dev, gfp_t gfp_mask, unsigned int order);
 void devm_free_pages(struct device *dev, unsigned long addr);

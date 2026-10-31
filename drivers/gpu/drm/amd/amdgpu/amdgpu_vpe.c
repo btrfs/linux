@@ -29,6 +29,8 @@
 #include "amdgpu_smu.h"
 #include "soc15_common.h"
 #include "vpe_v6_1.h"
+#include "vpe_v2_0.h"
+#include "vpe_v3_0.h"
 
 #define AMDGPU_CSA_VPE_SIZE 	64
 /* VPE CSA resides in the 4th page of CSA */
@@ -310,6 +312,14 @@ static int vpe_early_init(struct amdgpu_ip_block *ip_block)
 		vpe_v6_1_set_funcs(vpe);
 		vpe->collaborate_mode = true;
 		break;
+	case IP_VERSION(2, 0, 0):
+	case IP_VERSION(2, 2, 0):
+		vpe_v2_0_set_funcs(vpe);
+		break;
+	case IP_VERSION(3, 0, 0):
+	case IP_VERSION(3, 0, 1):
+		vpe_v3_0_set_funcs(vpe);
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -368,7 +378,7 @@ static int vpe_common_init(struct amdgpu_vpe *vpe)
 	int r;
 
 	r = amdgpu_bo_create_kernel(adev, PAGE_SIZE, PAGE_SIZE,
-				    AMDGPU_GEM_DOMAIN_GTT,
+				    AMDGPU_GEM_DOMAIN_VRAM | AMDGPU_GEM_DOMAIN_GTT,
 				    &adev->vpe.cmdbuf_obj,
 				    &adev->vpe.cmdbuf_gpu_addr,
 				    (void **)&adev->vpe.cmdbuf_cpu_addr);
@@ -562,6 +572,11 @@ static void vpe_ring_emit_fence(struct amdgpu_ring *ring, uint64_t addr,
 		amdgpu_ring_write(ring, 0);
 	}
 
+	/* WA: Force sync after TRAP to avoid VPE1 fail to power off */
+	if (ring->adev->vpe.collaborate_mode) {
+		amdgpu_ring_write(ring, VPE_CMD_HEADER(VPE_CMD_OPCODE_COLLAB_SYNC, 0));
+		amdgpu_ring_write(ring, 0xabcd);
+	}
 }
 
 static void vpe_ring_emit_pipeline_sync(struct amdgpu_ring *ring)
@@ -684,8 +699,10 @@ static int vpe_set_powergating_state(struct amdgpu_ip_block *ip_block,
 	struct amdgpu_device *adev = ip_block->adev;
 	struct amdgpu_vpe *vpe = &adev->vpe;
 
-	if (!adev->pm.dpm_enabled)
+	if (!adev->pm.dpm_enabled) {
 		dev_err(adev->dev, "Without PM, cannot support powergating\n");
+		return 0;
+	}
 
 	dev_dbg(adev->dev, "%s: %s!\n", __func__, (state == AMD_PG_STATE_GATE) ? "GATE":"UNGATE");
 
@@ -779,7 +796,7 @@ static int vpe_ring_test_ring(struct amdgpu_ring *ring)
 	uint64_t wb_addr;
 	int ret;
 
-	ret = amdgpu_device_wb_get(adev, &index);
+	ret = amdgpu_wb_get(adev, &index);
 	if (ret) {
 		dev_err(adev->dev, "(%d) failed to allocate wb slot\n", ret);
 		return ret;
@@ -790,7 +807,7 @@ static int vpe_ring_test_ring(struct amdgpu_ring *ring)
 
 	ret = amdgpu_ring_alloc(ring, 4);
 	if (ret) {
-		dev_err(adev->dev, "amdgpu: dma failed to lock ring %d (%d).\n", ring->idx, ret);
+		dev_err(adev->dev, "dma failed to lock ring %d (%d).\n", ring->idx, ret);
 		goto out;
 	}
 
@@ -808,7 +825,7 @@ static int vpe_ring_test_ring(struct amdgpu_ring *ring)
 
 	ret = -ETIMEDOUT;
 out:
-	amdgpu_device_wb_free(adev, index);
+	amdgpu_wb_free(adev, index);
 
 	return ret;
 }
@@ -817,13 +834,14 @@ static int vpe_ring_test_ib(struct amdgpu_ring *ring, long timeout)
 {
 	struct amdgpu_device *adev = ring->adev;
 	const uint32_t test_pattern = 0xdeadbeef;
-	struct amdgpu_ib ib = {};
+	struct amdgpu_job *job;
+	struct amdgpu_ib *ib;
 	struct dma_fence *f = NULL;
 	uint32_t index;
 	uint64_t wb_addr;
 	int ret;
 
-	ret = amdgpu_device_wb_get(adev, &index);
+	ret = amdgpu_wb_get(adev, &index);
 	if (ret) {
 		dev_err(adev->dev, "(%d) failed to allocate wb slot\n", ret);
 		return ret;
@@ -832,23 +850,29 @@ static int vpe_ring_test_ib(struct amdgpu_ring *ring, long timeout)
 	adev->wb.wb[index] = 0;
 	wb_addr = adev->wb.gpu_addr + (index * 4);
 
-	ret = amdgpu_ib_get(adev, NULL, 256, AMDGPU_IB_POOL_DIRECT, &ib);
+	ret = amdgpu_job_alloc_with_ib(ring->adev, NULL, NULL, 256,
+				       AMDGPU_IB_POOL_DIRECT,
+				       AMDGPU_KERNEL_JOB_ID_VPE_RING_TEST,
+				       &job);
 	if (ret)
 		goto err0;
+	ib = &job->ibs[0];
 
-	ib.ptr[0] = VPE_CMD_HEADER(VPE_CMD_OPCODE_FENCE, 0);
-	ib.ptr[1] = lower_32_bits(wb_addr);
-	ib.ptr[2] = upper_32_bits(wb_addr);
-	ib.ptr[3] = test_pattern;
-	ib.ptr[4] = VPE_CMD_HEADER(VPE_CMD_OPCODE_NOP, 0);
-	ib.ptr[5] = VPE_CMD_HEADER(VPE_CMD_OPCODE_NOP, 0);
-	ib.ptr[6] = VPE_CMD_HEADER(VPE_CMD_OPCODE_NOP, 0);
-	ib.ptr[7] = VPE_CMD_HEADER(VPE_CMD_OPCODE_NOP, 0);
-	ib.length_dw = 8;
+	ib->ptr[0] = VPE_CMD_HEADER(VPE_CMD_OPCODE_FENCE, 0);
+	ib->ptr[1] = lower_32_bits(wb_addr);
+	ib->ptr[2] = upper_32_bits(wb_addr);
+	ib->ptr[3] = test_pattern;
+	ib->ptr[4] = VPE_CMD_HEADER(VPE_CMD_OPCODE_NOP, 0);
+	ib->ptr[5] = VPE_CMD_HEADER(VPE_CMD_OPCODE_NOP, 0);
+	ib->ptr[6] = VPE_CMD_HEADER(VPE_CMD_OPCODE_NOP, 0);
+	ib->ptr[7] = VPE_CMD_HEADER(VPE_CMD_OPCODE_NOP, 0);
+	ib->length_dw = 8;
 
-	ret = amdgpu_ib_schedule(ring, 1, &ib, NULL, &f);
-	if (ret)
+	ret = amdgpu_job_submit_direct(job, ring, &f);
+	if (ret) {
+		amdgpu_job_free(job);
 		goto err1;
+	}
 
 	ret = dma_fence_wait_timeout(f, false, timeout);
 	if (ret <= 0) {
@@ -859,10 +883,9 @@ static int vpe_ring_test_ib(struct amdgpu_ring *ring, long timeout)
 	ret = (le32_to_cpu(adev->wb.wb[index]) == test_pattern) ? 0 : -EINVAL;
 
 err1:
-	amdgpu_ib_free(&ib, NULL);
 	dma_fence_put(f);
 err0:
-	amdgpu_device_wb_free(adev, index);
+	amdgpu_wb_free(adev, index);
 
 	return ret;
 }
@@ -968,7 +991,7 @@ static const struct amdgpu_ring_funcs vpe_ring_funcs = {
 	.emit_frame_size =
 		5 + /* vpe_ring_init_cond_exec */
 		6 + /* vpe_ring_emit_pipeline_sync */
-		10 + 10 + 10 + /* vpe_ring_emit_fence */
+		12 + 12 + 12 + /* vpe_ring_emit_fence */
 		/* vpe_ring_emit_vm_flush */
 		SOC15_FLUSH_GPU_TLB_NUM_WREG * 3 +
 		SOC15_FLUSH_GPU_TLB_NUM_REG_WAIT * 6,
@@ -1009,10 +1032,52 @@ const struct amd_ip_funcs vpe_ip_funcs = {
 	.set_powergating_state = vpe_set_powergating_state,
 };
 
+const struct amd_ip_funcs vpe2_ip_funcs = {
+	.name = "vpe_v2_0",
+	.early_init = vpe_early_init,
+	.sw_init = vpe_sw_init,
+	.sw_fini = vpe_sw_fini,
+	.hw_init = vpe_hw_init,
+	.hw_fini = vpe_hw_fini,
+	.suspend = vpe_suspend,
+	.resume = vpe_resume,
+	.set_clockgating_state = vpe_set_clockgating_state,
+	.set_powergating_state = vpe_set_powergating_state,
+};
+
+const struct amd_ip_funcs vpe3_ip_funcs = {
+	.name = "vpe_v3_0",
+	.early_init = vpe_early_init,
+	.sw_init = vpe_sw_init,
+	.sw_fini = vpe_sw_fini,
+	.hw_init = vpe_hw_init,
+	.hw_fini = vpe_hw_fini,
+	.suspend = vpe_suspend,
+	.resume = vpe_resume,
+	.set_clockgating_state = vpe_set_clockgating_state,
+	.set_powergating_state = vpe_set_powergating_state,
+};
+
 const struct amdgpu_ip_block_version vpe_v6_1_ip_block = {
 	.type = AMD_IP_BLOCK_TYPE_VPE,
 	.major = 6,
 	.minor = 1,
 	.rev = 0,
 	.funcs = &vpe_ip_funcs,
+};
+
+const struct amdgpu_ip_block_version vpe_v2_0_ip_block = {
+	.type = AMD_IP_BLOCK_TYPE_VPE,
+	.major = 2,
+	.minor = 0,
+	.rev = 0,
+	.funcs = &vpe2_ip_funcs,
+};
+
+const struct amdgpu_ip_block_version vpe_v3_0_ip_block = {
+	.type = AMD_IP_BLOCK_TYPE_VPE,
+	.major = 3,
+	.minor = 0,
+	.rev = 0,
+	.funcs = &vpe3_ip_funcs,
 };

@@ -2,7 +2,7 @@
 /*
  * Utilities for mac80211 unit testing
  *
- * Copyright (C) 2024 Intel Corporation
+ * Copyright (C) 2024, 2026 Intel Corporation
  */
 #include <linux/ieee80211.h>
 #include <net/mac80211.h>
@@ -195,16 +195,16 @@ int t_sdata_init(struct kunit_resource *resource, void *ctx)
 	struct kunit *test = kunit_get_current_test();
 	struct t_sdata *t_sdata;
 
-	t_sdata = kzalloc(sizeof(*t_sdata), GFP_KERNEL);
+	t_sdata = kzalloc_obj(*t_sdata);
 	KUNIT_ASSERT_NOT_NULL(test, t_sdata);
 
 	resource->data = t_sdata;
 	resource->name = "sdata";
 
-	t_sdata->sdata = kzalloc(sizeof(*t_sdata->sdata), GFP_KERNEL);
+	t_sdata->sdata = kzalloc_obj(*t_sdata->sdata);
 	KUNIT_ASSERT_NOT_NULL(test, t_sdata->sdata);
 
-	t_sdata->wiphy = kzalloc(sizeof(*t_sdata->wiphy), GFP_KERNEL);
+	t_sdata->wiphy = kzalloc_obj(*t_sdata->wiphy);
 	KUNIT_ASSERT_NOT_NULL(test, t_sdata->wiphy);
 
 	strscpy(t_sdata->sdata->name, "kunit");
@@ -225,10 +225,6 @@ int t_sdata_init(struct kunit_resource *resource, void *ctx)
 
 		sband = t_sdata->wiphy->bands[band];
 		sband->band = band;
-
-		sband->bitrates =
-			kmemdup(bitrates, sizeof(bitrates), GFP_KERNEL);
-		sband->n_bitrates = ARRAY_SIZE(bitrates);
 
 		/* Initialize channels, feel free to add more channels/bands */
 		switch (band) {

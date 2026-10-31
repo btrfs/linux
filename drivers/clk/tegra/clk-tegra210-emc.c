@@ -274,11 +274,11 @@ static const struct clk_ops tegra210_clk_emc_ops = {
 struct clk *tegra210_clk_register_emc(struct device_node *np,
 				      void __iomem *regs)
 {
+	struct clk_init_data init = {};
 	struct tegra210_clk_emc *emc;
-	struct clk_init_data init;
 	struct clk *clk;
 
-	emc = kzalloc(sizeof(*emc), GFP_KERNEL);
+	emc = kzalloc_obj(*emc);
 	if (!emc)
 		return ERR_PTR(-ENOMEM);
 

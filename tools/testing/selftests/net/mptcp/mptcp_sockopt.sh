@@ -15,8 +15,6 @@ cin=""
 cout=""
 timeout_poll=30
 timeout_test=$((timeout_poll * 2 + 1))
-iptables="iptables"
-ip6tables="ip6tables"
 
 ns1=""
 ns2=""
@@ -49,16 +47,22 @@ add_mark_rules()
 	local ns=$1
 	local m=$2
 
-	local t
-	for t in ${iptables} ${ip6tables}; do
-		# just to debug: check we have multiple subflows connection requests
-		ip netns exec $ns $t -A OUTPUT -p tcp --syn -m mark --mark $m -j ACCEPT
+	local table
+	for table in ip ip6; do
+		ip netns exec "$ns" nft -f - <<-EOF
+			add table $table filter
+			add chain $table filter OUTPUT \
+				{ type filter hook output priority 0; policy accept; }
 
-		# RST packets might be handled by a internal dummy socket
-		ip netns exec $ns $t -A OUTPUT -p tcp --tcp-flags RST RST -m mark --mark 0 -j ACCEPT
+			# RST packets might be handled by a internal dummy socket
+			add rule $table filter OUTPUT \
+				tcp flags & rst == rst meta mark 0x0 accept
 
-		ip netns exec $ns $t -A OUTPUT -p tcp -m mark --mark $m -j ACCEPT
-		ip netns exec $ns $t -A OUTPUT -p tcp -m mark --mark 0 -j DROP
+			add rule $table filter OUTPUT \
+				meta l4proto tcp meta mark $m accept
+			add rule $table filter OUTPUT \
+				meta l4proto tcp meta mark 0 counter drop
+		EOF
 	done
 }
 
@@ -105,32 +109,31 @@ cleanup()
 
 mptcp_lib_check_mptcp
 mptcp_lib_check_kallsyms
-mptcp_lib_check_tools ip "${iptables}" "${ip6tables}"
+mptcp_lib_check_tools ip nft jq
 
 check_mark()
 {
 	local ns=$1
 	local af=$2
 
-	local tables=${iptables}
+	local tables="ip"
 
 	if [ $af -eq 6 ];then
-		tables=${ip6tables}
+		tables="ip6"
 	fi
 
-	local counters values
-	counters=$(ip netns exec $ns $tables -v -L OUTPUT | grep DROP)
-	values=${counters%DROP*}
+	local drops
+	drops=$(ip netns exec "$ns" nft -j list table "$tables" filter | \
+		jq '.nftables[] | select(has("rule")) | .rule |
+			select (.chain=="OUTPUT" and any(.expr[]; has("drop"))) |
+			.expr[] | select(has("counter")) | .counter.packets')
 
-	local v
-	for v in $values; do
-		if [ $v -ne 0 ]; then
-			mptcp_lib_pr_fail "got $tables $values in ns $ns," \
-					  "not 0 - not all expected packets marked"
-			ret=${KSFT_FAIL}
-			return 1
-		fi
-	done
+	if [ -z "$drops" ] || [ "$drops" -ne 0 ]; then
+		mptcp_lib_pr_fail "got $tables $drops in ns $ns," \
+				  "not 0 - not all expected packets marked"
+		ret=${KSFT_FAIL}
+		return 1
+	fi
 
 	return 0
 }
@@ -169,41 +172,44 @@ do_transfer()
 		cmsg+=",TCPINQ"
 	fi
 
-	NSTAT_HISTORY=/tmp/${listener_ns}.nstat ip netns exec ${listener_ns} \
-		nstat -n
-	NSTAT_HISTORY=/tmp/${connector_ns}.nstat ip netns exec ${connector_ns} \
-		nstat -n
+	mptcp_lib_nstat_init "${listener_ns}"
+	mptcp_lib_nstat_init "${connector_ns}"
 
-	timeout ${timeout_test} \
-		ip netns exec ${listener_ns} \
-			$mptcp_connect -t ${timeout_poll} -l -M 1 -p $port -s ${srv_proto} -c "${cmsg}" \
-				${local_addr} < "$sin" > "$sout" &
+	ip netns exec ${listener_ns} \
+		$mptcp_connect -t ${timeout_poll} -l -M 1 -p $port -s ${srv_proto} -c "${cmsg}" \
+			${local_addr} < "$sin" > "$sout" &
 	local spid=$!
 
-	sleep 1
+	mptcp_lib_wait_local_port_listen "${listener_ns}" "${port}"
 
-	timeout ${timeout_test} \
-		ip netns exec ${connector_ns} \
-			$mptcp_connect -t ${timeout_poll} -M 2 -p $port -s ${cl_proto} -c "${cmsg}" \
-				$connect_addr < "$cin" > "$cout" &
+	ip netns exec ${connector_ns} \
+		$mptcp_connect -t ${timeout_poll} -M 2 -p $port -s ${cl_proto} -c "${cmsg}" \
+			$connect_addr < "$cin" > "$cout" &
 
 	local cpid=$!
+
+	mptcp_lib_wait_timeout "${timeout_test}" "${listener_ns}" \
+		"${connector_ns}" "${port}" "${cpid}" "${spid}" &
+	local timeout_pid=$!
 
 	wait $cpid
 	local retc=$?
 	wait $spid
 	local rets=$?
 
-	NSTAT_HISTORY=/tmp/${listener_ns}.nstat ip netns exec ${listener_ns} \
-		nstat | grep Tcp > /tmp/${listener_ns}.out
-	NSTAT_HISTORY=/tmp/${connector_ns}.nstat ip netns exec ${connector_ns} \
-		nstat | grep Tcp > /tmp/${connector_ns}.out
+	if kill -0 $timeout_pid; then
+		# Finished before the timeout: kill the background job
+		mptcp_lib_kill_group_wait $timeout_pid
+		timeout_pid=0
+	fi
+
+	mptcp_lib_nstat_get "${listener_ns}"
+	mptcp_lib_nstat_get "${connector_ns}"
 
 	print_title "Transfer ${ip:2}"
-	if [ ${rets} -ne 0 ] || [ ${retc} -ne 0 ]; then
+	if [ ${rets} -ne 0 ] || [ ${retc} -ne 0 ] || [ ${timeout_pid} -ne 0 ]; then
 		mptcp_lib_pr_fail "client exit code $retc, server $rets"
-		mptcp_lib_pr_err_stats "${listener_ns}" "${connector_ns}" "${port}" \
-			"/tmp/${listener_ns}.out" "/tmp/${connector_ns}.out"
+		mptcp_lib_pr_err_stats "${listener_ns}" "${connector_ns}" "${port}"
 
 		mptcp_lib_result_fail "transfer ${ip}"
 
@@ -352,10 +358,10 @@ sin=$(mktemp)
 sout=$(mktemp)
 cin=$(mktemp)
 cout=$(mktemp)
+trap cleanup EXIT
 init
 make_file "$cin" "client" 1
 make_file "$sin" "server" 1
-trap cleanup EXIT
 mptcp_lib_subtests_last_ts_reset
 
 run_tests $ns1 $ns2 10.0.1.1

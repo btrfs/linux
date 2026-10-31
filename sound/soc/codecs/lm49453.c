@@ -1255,6 +1255,7 @@ static int lm49453_set_bias_level(struct snd_soc_component *component,
 				  enum snd_soc_bias_level level)
 {
 	struct lm49453_priv *lm49453 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 
 	switch (level) {
 	case SND_SOC_BIAS_ON:
@@ -1262,7 +1263,7 @@ static int lm49453_set_bias_level(struct snd_soc_component *component,
 		break;
 
 	case SND_SOC_BIAS_STANDBY:
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_OFF)
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF)
 			regcache_sync(lm49453->regmap);
 
 		snd_soc_component_update_bits(component, LM49453_P0_PMC_SETUP_REG,
@@ -1282,11 +1283,18 @@ static int lm49453_set_bias_level(struct snd_soc_component *component,
 #define LM49453_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S20_3LE |\
 			 SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S32_LE)
 
+static const u64 lm49453_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B;
+
 static const struct snd_soc_dai_ops lm49453_headset_dai_ops = {
 	.hw_params	= lm49453_hw_params,
 	.set_sysclk	= lm49453_set_dai_sysclk,
 	.set_fmt	= lm49453_set_dai_fmt,
 	.mute_stream	= lm49453_hp_mute,
+	.auto_selectable_formats	= &lm49453_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 	.no_capture_mute = 1,
 };
 
@@ -1295,6 +1303,8 @@ static const struct snd_soc_dai_ops lm49453_speaker_dai_ops = {
 	.set_sysclk	= lm49453_set_dai_sysclk,
 	.set_fmt	= lm49453_set_dai_fmt,
 	.mute_stream	= lm49453_ls_mute,
+	.auto_selectable_formats	= &lm49453_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 	.no_capture_mute = 1,
 };
 
@@ -1303,6 +1313,8 @@ static const struct snd_soc_dai_ops lm49453_haptic_dai_ops = {
 	.set_sysclk	= lm49453_set_dai_sysclk,
 	.set_fmt	= lm49453_set_dai_fmt,
 	.mute_stream	= lm49453_ha_mute,
+	.auto_selectable_formats	= &lm49453_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 	.no_capture_mute = 1,
 };
 
@@ -1311,6 +1323,8 @@ static const struct snd_soc_dai_ops lm49453_ep_dai_ops = {
 	.set_sysclk	= lm49453_set_dai_sysclk,
 	.set_fmt	= lm49453_set_dai_fmt,
 	.mute_stream	= lm49453_ep_mute,
+	.auto_selectable_formats	= &lm49453_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 	.no_capture_mute = 1,
 };
 
@@ -1319,6 +1333,8 @@ static const struct snd_soc_dai_ops lm49453_lineout_dai_ops = {
 	.set_sysclk	= lm49453_set_dai_sysclk,
 	.set_fmt	= lm49453_set_dai_fmt,
 	.mute_stream	= lm49453_lo_mute,
+	.auto_selectable_formats	= &lm49453_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 	.no_capture_mute = 1,
 };
 
@@ -1442,7 +1458,7 @@ static int lm49453_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id lm49453_i2c_id[] = {
-	{ "lm49453" },
+	{ .name = "lm49453" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, lm49453_i2c_id);

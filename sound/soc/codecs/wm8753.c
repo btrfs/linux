@@ -26,7 +26,6 @@
  * an alsa kcontrol. This allows the PCM to remain open.
  */
 
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -224,7 +223,7 @@ SOC_ENUM_SINGLE(WM8753_OUTCTL, 2, 2, wm8753_rout2_phase),
 static int wm8753_get_dai(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct wm8753_priv *wm8753 = snd_soc_component_get_drvdata(component);
 
 	ucontrol->value.enumerated.item[0] = wm8753->dai_func;
@@ -234,7 +233,7 @@ static int wm8753_get_dai(struct snd_kcontrol *kcontrol,
 static int wm8753_set_dai(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct wm8753_priv *wm8753 = snd_soc_component_get_drvdata(component);
 	u16 ioctl;
 
@@ -1331,6 +1330,7 @@ static int wm8753_set_bias_level(struct snd_soc_component *component,
 				 enum snd_soc_bias_level level)
 {
 	struct wm8753_priv *wm8753 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	u16 pwr_reg = snd_soc_component_read(component, WM8753_PWR1) & 0xfe3e;
 
 	switch (level) {
@@ -1343,7 +1343,7 @@ static int wm8753_set_bias_level(struct snd_soc_component *component,
 		flush_delayed_work(&wm8753->charge_work);
 		break;
 	case SND_SOC_BIAS_STANDBY:
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_OFF) {
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF) {
 			/* set vmid to 5k for quick power up */
 			snd_soc_component_write(component, WM8753_PWR1, pwr_reg | 0x01c1);
 			schedule_delayed_work(&wm8753->charge_work,
@@ -1380,6 +1380,22 @@ static int wm8753_set_bias_level(struct snd_soc_component *component,
  * 3. Voice disabled - HIFI over HIFI
  * 4. Voice disabled - HIFI over HIFI, uses voice DAI LRC for capture
  */
+static const u64 wm8753_selectable_formats[] = {
+	/* 1st priority */
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF,
+	/* 2nd priority */
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF,
+};
+
 static const struct snd_soc_dai_ops wm8753_dai_ops_hifi_mode = {
 	.hw_params	= wm8753_i2s_hw_params,
 	.mute_stream	= wm8753_mute,
@@ -1388,6 +1404,8 @@ static const struct snd_soc_dai_ops wm8753_dai_ops_hifi_mode = {
 	.set_pll	= wm8753_set_dai_pll,
 	.set_sysclk	= wm8753_set_dai_sysclk,
 	.no_capture_mute = 1,
+	.auto_selectable_formats	= wm8753_selectable_formats,
+	.num_auto_selectable_formats	= ARRAY_SIZE(wm8753_selectable_formats),
 };
 
 static const struct snd_soc_dai_ops wm8753_dai_ops_voice_mode = {
@@ -1398,6 +1416,8 @@ static const struct snd_soc_dai_ops wm8753_dai_ops_voice_mode = {
 	.set_pll	= wm8753_set_dai_pll,
 	.set_sysclk	= wm8753_set_dai_sysclk,
 	.no_capture_mute = 1,
+	.auto_selectable_formats	= wm8753_selectable_formats,
+	.num_auto_selectable_formats	= ARRAY_SIZE(wm8753_selectable_formats),
 };
 
 static struct snd_soc_dai_driver wm8753_dai[] = {
@@ -1580,7 +1600,7 @@ static int wm8753_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id wm8753_i2c_id[] = {
-	{ "wm8753" },
+	{ .name = "wm8753" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wm8753_i2c_id);

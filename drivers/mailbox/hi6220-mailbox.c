@@ -79,12 +79,12 @@ struct hi6220_mbox {
 	/* region for mailbox */
 	void __iomem *base;
 
-	unsigned int chan_num;
-	struct hi6220_mbox_chan *mchan;
-
 	void *irq_map_chan[MBOX_CHAN_MAX];
 	struct mbox_chan *chan;
 	struct mbox_controller controller;
+
+	unsigned int chan_num;
+	struct hi6220_mbox_chan mchan[] __counted_by(chan_num);
 };
 
 static void mbox_set_state(struct hi6220_mbox *mbox,
@@ -267,16 +267,12 @@ static int hi6220_mbox_probe(struct platform_device *pdev)
 	struct hi6220_mbox *mbox;
 	int i, err;
 
-	mbox = devm_kzalloc(dev, sizeof(*mbox), GFP_KERNEL);
+	mbox = devm_kzalloc(dev, struct_size(mbox, mchan, MBOX_CHAN_MAX), GFP_KERNEL);
 	if (!mbox)
 		return -ENOMEM;
 
-	mbox->dev = dev;
 	mbox->chan_num = MBOX_CHAN_MAX;
-	mbox->mchan = devm_kcalloc(dev,
-		mbox->chan_num, sizeof(*mbox->mchan), GFP_KERNEL);
-	if (!mbox->mchan)
-		return -ENOMEM;
+	mbox->dev = dev;
 
 	mbox->chan = devm_kcalloc(dev,
 		mbox->chan_num, sizeof(*mbox->chan), GFP_KERNEL);
@@ -301,11 +297,8 @@ static int hi6220_mbox_probe(struct platform_device *pdev)
 
 	err = devm_request_irq(dev, mbox->irq, hi6220_mbox_interrupt, 0,
 			dev_name(dev), mbox);
-	if (err) {
-		dev_err(dev, "Failed to register a mailbox IRQ handler: %d\n",
-			err);
+	if (err)
 		return -ENODEV;
-	}
 
 	mbox->controller.dev = dev;
 	mbox->controller.chans = &mbox->chan[0];

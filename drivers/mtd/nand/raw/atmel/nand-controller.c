@@ -1799,8 +1799,7 @@ atmel_nand_controller_legacy_add_nands(struct atmel_nand_controller *nc)
 	 * Legacy bindings only allow connecting a single NAND with a unique CS
 	 * line to the controller.
 	 */
-	nand = devm_kzalloc(nc->dev, sizeof(*nand) + sizeof(*nand->cs),
-			    GFP_KERNEL);
+	nand = devm_kzalloc(nc->dev, struct_size(nand, cs, 1), GFP_KERNEL);
 	if (!nand)
 		return -ENOMEM;
 
@@ -2086,7 +2085,7 @@ static int atmel_nand_controller_init(struct atmel_nand_controller *nc,
 	if (!np) {
 		dev_err(dev, "Missing or invalid atmel,smc property\n");
 		ret = -EINVAL;
-		goto out_release_dma;
+		goto out_put_mck;
 	}
 
 	nc->smc = syscon_node_to_regmap(np);
@@ -2094,11 +2093,13 @@ static int atmel_nand_controller_init(struct atmel_nand_controller *nc,
 	if (IS_ERR(nc->smc)) {
 		ret = PTR_ERR(nc->smc);
 		dev_err(dev, "Could not get SMC regmap (err = %d)\n", ret);
-		goto out_release_dma;
+		goto out_put_mck;
 	}
 
 	return 0;
 
+out_put_mck:
+	clk_put(nc->mck);
 out_release_dma:
 	if (nc->dmac)
 		dma_release_channel(nc->dmac);
@@ -2304,10 +2305,8 @@ atmel_hsmc_nand_controller_init(struct atmel_hsmc_nand_controller *nc)
 
 	nc->sram.pool = of_gen_pool_get(nc->base.dev->of_node,
 					 "atmel,nfc-sram", 0);
-	if (!nc->sram.pool) {
-		dev_err(nc->base.dev, "Missing SRAM\n");
-		return -ENOMEM;
-	}
+	if (!nc->sram.pool)
+		return dev_err_probe(nc->base.dev, -EPROBE_DEFER, "Missing SRAM\n");
 
 	nc->sram.virt = (void __iomem *)gen_pool_dma_alloc(nc->sram.pool,
 							   ATMEL_NFC_SRAM_SIZE,

@@ -56,13 +56,11 @@
  */
 
 #include <linux/delay.h>
-#include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/i2c.h>
 #include <linux/kernel.h>
 #include <linux/linear_range.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/power_supply.h>
 #include <linux/property.h>
 #include <linux/regmap.h>

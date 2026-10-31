@@ -11,11 +11,11 @@
 #include <linux/init.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
+#include <linux/stringify.h>
 #include <linux/types.h>
 #include <linux/watchdog.h>
 
@@ -219,7 +219,7 @@ MODULE_PARM_DESC(timeout, "Watchdog heartbeat in seconds");
 module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout,
 		 "Watchdog cannot be stopped once started (default="
-		 __MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
+		 __stringify(WATCHDOG_NOWAYOUT) ")");
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Carlo Caione <carlo@caione.org>");

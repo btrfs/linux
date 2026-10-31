@@ -77,6 +77,16 @@ static void pcim_msi_release(void *pcidev)
 /*
  * Needs to be separate from pcim_release to prevent an ordering problem
  * vs. msi_device_data_release() in the MSI core code.
+ *
+ * TODO: Remove the legacy side-effect of pcim_enable_device() that
+ * activates automatic IRQ vector management. This design is dangerous
+ * and confusing because it switches normally un-managed functions
+ * into managed mode. Drivers should explicitly manage their IRQ vectors
+ * without this implicit behavior.
+ *
+ * The current implementation uses both pdev->is_managed and
+ * pdev->is_msi_managed flags, which adds unnecessary complexity.
+ * This should be simplified in a future kernel version.
  */
 static int pcim_setup_msi_release(struct pci_dev *dev)
 {
@@ -123,7 +133,9 @@ void pci_msi_update_mask(struct msi_desc *desc, u32 clear, u32 set)
 	raw_spin_lock_irqsave(lock, flags);
 	desc->pci.msi_mask &= ~clear;
 	desc->pci.msi_mask |= set;
-	pci_write_config_dword(dev, desc->pci.mask_pos, desc->pci.msi_mask);
+	/* Cached either way, for __pci_restore_msi_state() to replay */
+	if (!pci_channel_offline(dev))
+		pci_write_config_dword(dev, desc->pci.mask_pos, desc->pci.msi_mask);
 	raw_spin_unlock_irqrestore(lock, flags);
 }
 
@@ -191,8 +203,7 @@ static inline void pci_write_msg_msi(struct pci_dev *dev, struct msi_desc *desc,
 	u16 msgctl;
 
 	pci_read_config_word(dev, pos + PCI_MSI_FLAGS, &msgctl);
-	msgctl &= ~PCI_MSI_FLAGS_QSIZE;
-	msgctl |= FIELD_PREP(PCI_MSI_FLAGS_QSIZE, desc->pci.msi_attrib.multiple);
+	FIELD_MODIFY(PCI_MSI_FLAGS_QSIZE, &msgctl, desc->pci.msi_attrib.multiple);
 	pci_write_config_word(dev, pos + PCI_MSI_FLAGS, msgctl);
 
 	pci_write_config_dword(dev, pos + PCI_MSI_ADDRESS_LO, msg->address_lo);
@@ -240,7 +251,7 @@ void __pci_write_msi_msg(struct msi_desc *entry, struct msi_msg *msg)
 {
 	struct pci_dev *dev = msi_desc_to_pci_dev(entry);
 
-	if (dev->current_state != PCI_D0 || pci_dev_is_disconnected(dev)) {
+	if (dev->current_state != PCI_D0 || pci_channel_offline(dev)) {
 		/* Don't touch the hardware now */
 	} else if (entry->pci.msi_attrib.is_msix) {
 		pci_write_msg_msix(entry, msg);
@@ -321,14 +332,16 @@ static int msi_setup_msi_desc(struct pci_dev *dev, int nvec,
 static int msi_verify_entries(struct pci_dev *dev)
 {
 	struct msi_desc *entry;
+	u64 address;
 
-	if (!dev->no_64bit_msi)
+	if (dev->msi_addr_mask == DMA_BIT_MASK(64))
 		return 0;
 
 	msi_for_each_desc(entry, &dev->dev, MSI_DESC_ALL) {
-		if (entry->msg.address_hi) {
-			pci_err(dev, "arch assigned 64-bit MSI address %#x%08x but device only supports 32 bits\n",
-				entry->msg.address_hi, entry->msg.address_lo);
+		address = (u64)entry->msg.address_hi << 32 | entry->msg.address_lo;
+		if (address & ~dev->msi_addr_mask) {
+			pci_err(dev, "arch assigned 64-bit MSI address %#llx above device MSI address mask %#llx\n",
+				address, dev->msi_addr_mask);
 			break;
 		}
 	}
@@ -520,9 +533,8 @@ void __pci_restore_msi_state(struct pci_dev *dev)
 
 	pci_read_config_word(dev, dev->msi_cap + PCI_MSI_FLAGS, &control);
 	pci_msi_update_mask(entry, 0, 0);
-	control &= ~PCI_MSI_FLAGS_QSIZE;
-	control |= PCI_MSI_FLAGS_ENABLE |
-		   FIELD_PREP(PCI_MSI_FLAGS_QSIZE, entry->pci.msi_attrib.multiple);
+	FIELD_MODIFY(PCI_MSI_FLAGS_QSIZE, &control, entry->pci.msi_attrib.multiple);
+	control |= PCI_MSI_FLAGS_ENABLE;
 	pci_write_config_word(dev, dev->msi_cap + PCI_MSI_FLAGS, control);
 }
 
@@ -860,6 +872,7 @@ void __pci_restore_msix_state(struct pci_dev *dev)
 {
 	struct msi_desc *entry;
 	bool write_msg;
+	u16 cmd;
 
 	if (!dev->msix_enabled)
 		return;
@@ -868,6 +881,14 @@ void __pci_restore_msix_state(struct pci_dev *dev)
 	pci_intx_for_msi(dev, 0);
 	pci_msix_clear_and_set_ctrl(dev, 0,
 				PCI_MSIX_FLAGS_ENABLE | PCI_MSIX_FLAGS_MASKALL);
+
+	/*
+	 * The restored device state may not have Memory Space enabled.
+	 * Since the MSI-X Table and PBA are in Memory Space, enable it
+	 * while restoring them.
+	 */
+	pci_read_config_word(dev, PCI_COMMAND, &cmd);
+	pci_write_config_word(dev, PCI_COMMAND, cmd | PCI_COMMAND_MEMORY);
 
 	write_msg = arch_restore_msi_irqs(dev);
 
@@ -879,6 +900,7 @@ void __pci_restore_msix_state(struct pci_dev *dev)
 		}
 	}
 
+	pci_write_config_word(dev, PCI_COMMAND, cmd);
 	pci_msix_clear_and_set_ctrl(dev, PCI_MSIX_FLAGS_MASKALL, 0);
 }
 
@@ -956,8 +978,16 @@ int pci_msix_write_tph_tag(struct pci_dev *pdev, unsigned int index, u16 tag)
 	if (!msi_desc || msi_desc->pci.msi_attrib.is_virtual)
 		return -ENXIO;
 
-	msi_desc->pci.msix_ctrl &= ~PCI_MSIX_ENTRY_CTRL_ST;
-	msi_desc->pci.msix_ctrl |= FIELD_PREP(PCI_MSIX_ENTRY_CTRL_ST, tag);
+	/*
+	 * The tag update below is a write to the MSI-X Table followed by a
+	 * flush read, neither of which can be completed while the Link is
+	 * down. Check as late as possible, as the Link can go down at any
+	 * point. Let the caller disable TPH.
+	 */
+	if (pci_channel_offline(pdev))
+		return -EIO;
+
+	FIELD_MODIFY(PCI_MSIX_ENTRY_CTRL_ST, &msi_desc->pci.msix_ctrl, tag);
 	pci_msix_write_vector_ctrl(msi_desc, msi_desc->pci.msix_ctrl);
 	/* Flush the write */
 	readl(pci_msix_desc_addr(msi_desc));

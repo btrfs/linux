@@ -29,6 +29,7 @@
 
 #ifndef __ASSEMBLER__
 
+#include <linux/compiler_types.h>
 #include <sysdep/ptrace.h>
 
 struct task_struct;
@@ -44,10 +45,9 @@ extern unsigned long start_vm;
 
 extern unsigned long brk_start;
 
-extern unsigned long host_task_size;
 extern unsigned long stub_start;
 
-extern int linux_main(int argc, char **argv, char **envp);
+extern void __noreturn linux_main(int argc, char **argv, char **envp);
 extern void uml_finishsetup(void);
 
 struct siginfo;

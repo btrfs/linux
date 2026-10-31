@@ -20,6 +20,7 @@
 #include <drm/drm_vblank.h>
 
 #include <linux/bitops.h>
+#include <linux/device.h>
 #include <linux/dma-mapping.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
@@ -86,12 +87,12 @@ void rcar_du_vsp_enable(struct rcar_du_crtc *crtc)
 
 	__rcar_du_plane_setup(crtc->group, &state);
 
-	vsp1_du_setup_lif(crtc->vsp->vsp, crtc->vsp_pipe, &cfg);
+	vsp1_du_enable(crtc->vsp->vsp, crtc->vsp_pipe, &cfg);
 }
 
 void rcar_du_vsp_disable(struct rcar_du_crtc *crtc)
 {
-	vsp1_du_setup_lif(crtc->vsp->vsp, crtc->vsp_pipe, NULL);
+	vsp1_du_disable(crtc->vsp->vsp, crtc->vsp_pipe);
 }
 
 void rcar_du_vsp_atomic_begin(struct rcar_du_crtc *crtc)
@@ -364,7 +365,7 @@ static void rcar_du_vsp_plane_cleanup_fb(struct drm_plane *plane,
 }
 
 static int rcar_du_vsp_plane_atomic_check(struct drm_plane *plane,
-					  struct drm_atomic_state *state)
+					  struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state,
 										 plane);
@@ -375,7 +376,7 @@ static int rcar_du_vsp_plane_atomic_check(struct drm_plane *plane,
 }
 
 static void rcar_du_vsp_plane_atomic_update(struct drm_plane *plane,
-					struct drm_atomic_state *state)
+					struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *old_state = drm_atomic_get_old_plane_state(state, plane);
 	struct drm_plane_state *new_state = drm_atomic_get_new_plane_state(state, plane);
@@ -404,7 +405,7 @@ rcar_du_vsp_plane_atomic_duplicate_state(struct drm_plane *plane)
 	if (WARN_ON(!plane->state))
 		return NULL;
 
-	copy = kzalloc(sizeof(*copy), GFP_KERNEL);
+	copy = kzalloc_obj(*copy);
 	if (copy == NULL)
 		return NULL;
 
@@ -420,26 +421,23 @@ static void rcar_du_vsp_plane_atomic_destroy_state(struct drm_plane *plane,
 	kfree(to_rcar_vsp_plane_state(state));
 }
 
-static void rcar_du_vsp_plane_reset(struct drm_plane *plane)
+static struct drm_plane_state *rcar_du_vsp_plane_create_state(struct drm_plane *plane)
 {
 	struct rcar_du_vsp_plane_state *state;
 
-	if (plane->state) {
-		rcar_du_vsp_plane_atomic_destroy_state(plane, plane->state);
-		plane->state = NULL;
-	}
+	state = kzalloc_obj(*state);
+	if (!state)
+		return ERR_PTR(-ENOMEM);
 
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
-	if (state == NULL)
-		return;
+	__drm_atomic_helper_plane_state_init(&state->state, plane);
 
-	__drm_atomic_helper_plane_reset(plane, &state->state);
+	return &state->state;
 }
 
 static const struct drm_plane_funcs rcar_du_vsp_plane_funcs = {
 	.update_plane = drm_atomic_helper_update_plane,
 	.disable_plane = drm_atomic_helper_disable_plane,
-	.reset = rcar_du_vsp_plane_reset,
+	.atomic_create_state = rcar_du_vsp_plane_create_state,
 	.destroy = drm_plane_cleanup,
 	.atomic_duplicate_state = rcar_du_vsp_plane_atomic_duplicate_state,
 	.atomic_destroy_state = rcar_du_vsp_plane_atomic_destroy_state,
@@ -457,6 +455,9 @@ static void rcar_du_vsp_cleanup(struct drm_device *dev, void *res)
 	}
 
 	kfree(vsp->planes);
+
+	if (vsp->link)
+		device_link_del(vsp->link);
 
 	put_device(vsp->vsp);
 }
@@ -482,13 +483,25 @@ int rcar_du_vsp_init(struct rcar_du_vsp *vsp, struct device_node *np,
 	if (ret < 0)
 		return ret;
 
+	/*
+	 * Enforce suspend/resume ordering between the DU (consumer) and the
+	 * VSP (supplier). The DU will be suspended before and resume after the
+	 * VSP.
+	 */
+	vsp->link = device_link_add(rcdu->dev, vsp->vsp, DL_FLAG_STATELESS);
+	if (!vsp->link) {
+		dev_err(rcdu->dev, "Failed to create device link to VSP %s\n",
+			dev_name(vsp->vsp));
+		return -EINVAL;
+	}
+
 	ret = vsp1_du_init(vsp->vsp);
 	if (ret < 0)
 		return ret;
 
 	num_planes = rcdu->info->num_rpf;
 
-	vsp->planes = kcalloc(num_planes, sizeof(*vsp->planes), GFP_KERNEL);
+	vsp->planes = kzalloc_objs(*vsp->planes, num_planes);
 	if (!vsp->planes)
 		return -ENOMEM;
 

@@ -71,7 +71,7 @@ static int snapshot_open(struct inode *inode, struct file *filp)
 	memset(&data->handle, 0, sizeof(struct snapshot_handle));
 	if ((filp->f_flags & O_ACCMODE) == O_RDONLY) {
 		/* Hibernating.  The image device should be accessible. */
-		data->swap = swap_type_of(swsusp_resume_device, 0);
+		data->swap = pin_hibernation_swap_type(swsusp_resume_device, 0);
 		data->mode = O_RDONLY;
 		data->free_bitmaps = false;
 		error = pm_notifier_call_chain_robust(PM_HIBERNATION_PREPARE, PM_POST_HIBERNATION);
@@ -90,8 +90,10 @@ static int snapshot_open(struct inode *inode, struct file *filp)
 			data->free_bitmaps = !error;
 		}
 	}
-	if (error)
+	if (error) {
+		unpin_hibernation_swap_type(data->swap);
 		hibernate_release();
+	}
 
 	data->frozen = false;
 	data->ready = false;
@@ -115,6 +117,7 @@ static int snapshot_release(struct inode *inode, struct file *filp)
 	data = filp->private_data;
 	data->dev = 0;
 	free_all_swap_pages(data->swap);
+	unpin_hibernation_swap_type(data->swap);
 	if (data->frozen) {
 		pm_restore_gfp_mask();
 		free_basic_memory_bitmaps();
@@ -215,6 +218,7 @@ static int snapshot_set_swap_area(struct snapshot_data *data,
 {
 	sector_t offset;
 	dev_t swdev;
+	int new_type;
 
 	if (swsusp_swap_in_use())
 		return -EPERM;
@@ -235,13 +239,11 @@ static int snapshot_set_swap_area(struct snapshot_data *data,
 		offset = swap_area.offset;
 	}
 
-	/*
-	 * User space encodes device types as two-byte values,
-	 * so we need to recode them
-	 */
-	data->swap = swap_type_of(swdev, offset);
-	if (data->swap < 0)
-		return swdev ? -ENODEV : -EINVAL;
+	new_type = repin_hibernation_swap_type(data->swap, swdev, offset);
+	if (new_type < 0)
+		return new_type;
+
+	data->swap = new_type;
 	data->dev = swdev;
 	return 0;
 }
@@ -278,7 +280,9 @@ static long snapshot_ioctl(struct file *filp, unsigned int cmd,
 		if (data->frozen)
 			break;
 
-		ksys_sync_helper();
+		error = pm_sleep_fs_sync();
+		if (error)
+			break;
 
 		error = freeze_processes();
 		if (error)
@@ -320,9 +324,12 @@ static long snapshot_ioctl(struct file *filp, unsigned int cmd,
 		error = snapshot_write_finalize(&data->handle);
 		if (error)
 			break;
-		if (data->mode != O_WRONLY || !data->frozen ||
-		    !snapshot_image_loaded(&data->handle)) {
+		if (data->mode != O_WRONLY || !data->frozen) {
 			error = -EPERM;
+			break;
+		}
+		if (!snapshot_image_loaded(&data->handle)) {
+			error = -ENODATA;
 			break;
 		}
 		error = hibernation_restore(data->platform_support);

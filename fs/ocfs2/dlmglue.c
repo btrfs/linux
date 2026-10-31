@@ -7,6 +7,7 @@
  * Copyright (C) 2003, 2004 Oracle.  All rights reserved.
  */
 
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/highmem.h>
@@ -18,6 +19,7 @@
 #include <linux/time.h>
 #include <linux/delay.h>
 #include <linux/quotaops.h>
+#include <linux/sched/mm.h>
 #include <linux/sched/signal.h>
 #include <linux/string_choices.h>
 
@@ -2487,7 +2489,7 @@ update:
 	 * which hasn't been populated yet, so clear the refresh flag
 	 * and let the caller handle it.
 	 */
-	if (inode->i_state & I_NEW) {
+	if (inode_state_read_once(inode) & I_NEW) {
 		status = 0;
 		if (lockres)
 			ocfs2_complete_lock_res_refresh(lockres, 0);
@@ -2861,21 +2863,34 @@ void ocfs2_rename_unlock(struct ocfs2_super *osb)
 		ocfs2_cluster_unlock(osb, lockres, DLM_LOCK_EX);
 }
 
-int ocfs2_nfs_sync_lock(struct ocfs2_super *osb, int ex)
+int ocfs2_nfs_sync_lock(struct ocfs2_super *osb, int ex, unsigned int *nofs_flag)
 {
 	int status;
+	unsigned int flags;
 	struct ocfs2_lock_res *lockres = &osb->osb_nfs_sync_lockres;
 
 	if (ocfs2_is_hard_readonly(osb))
 		return -EROFS;
+
+	/*
+	 * ocfs2_delete_inode() takes this lock from ->evict_inode(), which the
+	 * dentry shrinker reaches while holding fs_reclaim.  Anything allocated
+	 * under the lock must therefore stay out of filesystem reclaim, or
+	 * reclaim recurses back into the shrinker and tries to take this lock
+	 * again.  Cover the whole critical section, including the cluster lock
+	 * and the sysfile inode locks the callers take below it.
+	 */
+	flags = memalloc_nofs_save();
 
 	if (ex)
 		down_write(&osb->nfs_sync_rwlock);
 	else
 		down_read(&osb->nfs_sync_rwlock);
 
-	if (ocfs2_mount_local(osb))
+	if (ocfs2_mount_local(osb)) {
+		*nofs_flag = flags;
 		return 0;
+	}
 
 	status = ocfs2_cluster_lock(osb, lockres, ex ? LKM_EXMODE : LKM_PRMODE,
 				    0, 0);
@@ -2886,12 +2901,17 @@ int ocfs2_nfs_sync_lock(struct ocfs2_super *osb, int ex)
 			up_write(&osb->nfs_sync_rwlock);
 		else
 			up_read(&osb->nfs_sync_rwlock);
+		memalloc_nofs_restore(flags);
+		return status;
 	}
 
-	return status;
+	*nofs_flag = flags;
+
+	return 0;
 }
 
-void ocfs2_nfs_sync_unlock(struct ocfs2_super *osb, int ex)
+void ocfs2_nfs_sync_unlock(struct ocfs2_super *osb, int ex,
+			   unsigned int nofs_flag)
 {
 	struct ocfs2_lock_res *lockres = &osb->osb_nfs_sync_lockres;
 
@@ -2902,6 +2922,8 @@ void ocfs2_nfs_sync_unlock(struct ocfs2_super *osb, int ex)
 		up_write(&osb->nfs_sync_rwlock);
 	else
 		up_read(&osb->nfs_sync_rwlock);
+
+	memalloc_nofs_restore(nofs_flag);
 }
 
 int ocfs2_trim_fs_lock(struct ocfs2_super *osb,
@@ -3030,7 +3052,7 @@ struct ocfs2_dlm_debug *ocfs2_new_dlm_debug(void)
 {
 	struct ocfs2_dlm_debug *dlm_debug;
 
-	dlm_debug = kmalloc(sizeof(struct ocfs2_dlm_debug), GFP_KERNEL);
+	dlm_debug = kmalloc_obj(struct ocfs2_dlm_debug);
 	if (!dlm_debug) {
 		mlog_errno(-ENOMEM);
 		goto out;
@@ -3134,6 +3156,22 @@ static void *ocfs2_dlm_seq_next(struct seq_file *m, void *v, loff_t *pos)
  *	- Add last pr/ex unlock times and first lock wait time in usecs
  */
 #define OCFS2_DLM_DEBUG_STR_VERSION 4
+
+/*
+ * The debug iterator snapshots lockres by value, so a userspace-stack LVB
+ * pointer copied from the original lockres must be rebased to the copied
+ * lksb before the dump walks the raw bytes.
+ */
+static void ocfs2_dlm_seq_rebase_lvb(struct ocfs2_lock_res *lockres)
+{
+	if (!ocfs2_stack_supports_plocks())
+		return;
+
+	if (lockres->l_lksb.lksb_fsdlm.sb_lvbptr)
+		lockres->l_lksb.lksb_fsdlm.sb_lvbptr =
+			(char *)&lockres->l_lksb + sizeof(struct dlm_lksb);
+}
+
 static int ocfs2_dlm_seq_show(struct seq_file *m, void *v)
 {
 	int i;
@@ -3191,6 +3229,7 @@ static int ocfs2_dlm_seq_show(struct seq_file *m, void *v)
 		   lockres->l_blocking);
 
 	/* Dump the raw LVB */
+	ocfs2_dlm_seq_rebase_lvb(lockres);
 	lvb = ocfs2_dlm_lvb(&lockres->l_lksb);
 	for(i = 0; i < DLM_LVB_LEN; i++)
 		seq_printf(m, "0x%x\t", lvb[i]);
@@ -3294,6 +3333,7 @@ static int ocfs2_dlm_debug_open(struct inode *inode, struct file *file)
 }
 
 static const struct file_operations ocfs2_dlm_debug_fops = {
+	.owner =	THIS_MODULE,
 	.open =		ocfs2_dlm_debug_open,
 	.release =	ocfs2_dlm_debug_release,
 	.read =		seq_read,
@@ -3507,6 +3547,10 @@ void ocfs2_mark_lockres_freeing(struct ocfs2_super *osb,
 	int status;
 	struct ocfs2_mask_waiter mw;
 	unsigned long flags, flags2;
+
+	/* We didn't get anywhere near actually using this lockres. */
+	if (!(lockres->l_flags & OCFS2_LOCK_INITIALIZED))
+		return;
 
 	ocfs2_init_mask_waiter(&mw);
 
@@ -3971,7 +4015,6 @@ static int ocfs2_data_convert_worker(struct ocfs2_lock_res *lockres,
 		mlog(ML_ERROR, "Could not sync inode %llu for downconvert!",
 		     (unsigned long long)OCFS2_I(inode)->ip_blkno);
 	}
-	sync_mapping_buffers(mapping);
 	if (blocking == DLM_LOCK_EX) {
 		truncate_inode_pages(mapping, 0);
 	} else {

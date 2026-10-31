@@ -6,7 +6,6 @@
  */
 
 #include <asm/hwcap.h>
-#include <asm/neon.h>
 #include <asm/simd.h>
 #include <linux/cpufeature.h>
 #include <linux/jump_label.h>
@@ -15,9 +14,9 @@
 asmlinkage void poly1305_block_init(struct poly1305_block_state *state,
 				    const u8 raw_key[POLY1305_BLOCK_SIZE]);
 asmlinkage void poly1305_blocks_arm64(struct poly1305_block_state *state,
-				      const u8 *src, u32 len, u32 hibit);
+				      const u8 *src, size_t len, u32 hibit);
 asmlinkage void poly1305_blocks_neon(struct poly1305_block_state *state,
-				     const u8 *src, u32 len, u32 hibit);
+				     const u8 *src, size_t len, u32 hibit);
 asmlinkage void poly1305_emit(const struct poly1305_state *state,
 			      u8 digest[POLY1305_DIGEST_SIZE],
 			      const u32 nonce[4]);
@@ -25,21 +24,14 @@ asmlinkage void poly1305_emit(const struct poly1305_state *state,
 static __ro_after_init DEFINE_STATIC_KEY_FALSE(have_neon);
 
 static void poly1305_blocks(struct poly1305_block_state *state, const u8 *src,
-			    unsigned int len, u32 padbit)
+			    size_t len, u32 padbit)
 {
 	if (static_branch_likely(&have_neon) && likely(may_use_simd())) {
-		do {
-			unsigned int todo = min_t(unsigned int, len, SZ_4K);
-
-			kernel_neon_begin();
-			poly1305_blocks_neon(state, src, todo, padbit);
-			kernel_neon_end();
-
-			len -= todo;
-			src += todo;
-		} while (len);
-	} else
+		scoped_ksimd()
+			poly1305_blocks_neon(state, src, len, padbit);
+	} else {
 		poly1305_blocks_arm64(state, src, len, padbit);
+	}
 }
 
 #define poly1305_mod_init_arch poly1305_mod_init_arch

@@ -70,6 +70,11 @@ static const struct snd_soc_dapm_route rt722_sdca_map[] = {
 	{ "rt722 MIC2", NULL, "Headset Mic" },
 };
 
+static const struct snd_soc_dapm_route rt766_sdca_map[] = {
+	{ "Headphone", NULL, "rt766 HP" },
+	{ "rt766 MIC2", NULL, "Headset Mic" },
+};
+
 static struct snd_soc_jack_pin rt_sdca_jack_pins[] = {
 	{
 		.pin    = "Headphone",
@@ -93,6 +98,7 @@ static const char * const need_sdca_suffix[] = {
 int asoc_sdw_rt_sdca_jack_rtd_init(struct snd_soc_pcm_runtime *rtd, struct snd_soc_dai *dai)
 {
 	struct snd_soc_card *card = rtd->card;
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(card);
 	struct asoc_sdw_mc_private *ctx = snd_soc_card_get_drvdata(card);
 	struct snd_soc_component *component;
 	struct snd_soc_jack *jack;
@@ -118,20 +124,23 @@ int asoc_sdw_rt_sdca_jack_rtd_init(struct snd_soc_pcm_runtime *rtd, struct snd_s
 	}
 
 	if (strstr(component->name_prefix, "rt711")) {
-		ret = snd_soc_dapm_add_routes(&card->dapm, rt711_sdca_map,
+		ret = snd_soc_dapm_add_routes(dapm, rt711_sdca_map,
 					      ARRAY_SIZE(rt711_sdca_map));
 	} else if (strstr(component->name_prefix, "rt712")) {
-		ret = snd_soc_dapm_add_routes(&card->dapm, rt712_sdca_map,
+		ret = snd_soc_dapm_add_routes(dapm, rt712_sdca_map,
 					      ARRAY_SIZE(rt712_sdca_map));
 	} else if (strstr(component->name_prefix, "rt713")) {
-		ret = snd_soc_dapm_add_routes(&card->dapm, rt713_sdca_map,
+		ret = snd_soc_dapm_add_routes(dapm, rt713_sdca_map,
 					      ARRAY_SIZE(rt713_sdca_map));
 	} else if (strstr(component->name_prefix, "rt721")) {
-		ret = snd_soc_dapm_add_routes(&card->dapm, rt721_sdca_map,
+		ret = snd_soc_dapm_add_routes(dapm, rt721_sdca_map,
 					      ARRAY_SIZE(rt721_sdca_map));
 	} else if (strstr(component->name_prefix, "rt722")) {
-		ret = snd_soc_dapm_add_routes(&card->dapm, rt722_sdca_map,
+		ret = snd_soc_dapm_add_routes(dapm, rt722_sdca_map,
 					      ARRAY_SIZE(rt722_sdca_map));
+	} else if (strstr(component->name_prefix, "rt766")) {
+		ret = snd_soc_dapm_add_routes(dapm, rt766_sdca_map,
+					      ARRAY_SIZE(rt766_sdca_map));
 	} else {
 		dev_err(card->dev, "%s is not supported\n", component->name_prefix);
 		return -EINVAL;

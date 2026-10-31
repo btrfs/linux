@@ -85,44 +85,6 @@ static void gmc_v7_0_init_golden_registers(struct amdgpu_device *adev)
 	}
 }
 
-static void gmc_v7_0_mc_stop(struct amdgpu_device *adev)
-{
-	struct amdgpu_ip_block *ip_block;
-	u32 blackout;
-
-	ip_block = amdgpu_device_ip_get_ip_block(adev, AMD_IP_BLOCK_TYPE_GMC);
-	if (!ip_block)
-		return;
-
-	gmc_v7_0_wait_for_idle(ip_block);
-
-	blackout = RREG32(mmMC_SHARED_BLACKOUT_CNTL);
-	if (REG_GET_FIELD(blackout, MC_SHARED_BLACKOUT_CNTL, BLACKOUT_MODE) != 1) {
-		/* Block CPU access */
-		WREG32(mmBIF_FB_EN, 0);
-		/* blackout the MC */
-		blackout = REG_SET_FIELD(blackout,
-					 MC_SHARED_BLACKOUT_CNTL, BLACKOUT_MODE, 0);
-		WREG32(mmMC_SHARED_BLACKOUT_CNTL, blackout | 1);
-	}
-	/* wait for the MC to settle */
-	udelay(100);
-}
-
-static void gmc_v7_0_mc_resume(struct amdgpu_device *adev)
-{
-	u32 tmp;
-
-	/* unblackout the MC */
-	tmp = RREG32(mmMC_SHARED_BLACKOUT_CNTL);
-	tmp = REG_SET_FIELD(tmp, MC_SHARED_BLACKOUT_CNTL, BLACKOUT_MODE, 0);
-	WREG32(mmMC_SHARED_BLACKOUT_CNTL, tmp);
-	/* allow CPU access */
-	tmp = REG_SET_FIELD(0, BIF_FB_EN, FB_READ_EN, 1);
-	tmp = REG_SET_FIELD(tmp, BIF_FB_EN, FB_WRITE_EN, 1);
-	WREG32(mmBIF_FB_EN, tmp);
-}
-
 /**
  * gmc_v7_0_init_microcode - load ucode images from disk
  *
@@ -394,27 +356,21 @@ static int gmc_v7_0_mc_init(struct amdgpu_device *adev)
 	adev->gmc.visible_vram_size = adev->gmc.aper_size;
 
 	/* set the gart size */
-	if (amdgpu_gart_size == -1) {
-		switch (adev->asic_type) {
-		case CHIP_TOPAZ:     /* no MM engines */
-		default:
-			adev->gmc.gart_size = 256ULL << 20;
-			break;
+	switch (adev->asic_type) {
 #ifdef CONFIG_DRM_AMDGPU_CIK
-		case CHIP_BONAIRE: /* UVD, VCE do not support GPUVM */
-		case CHIP_HAWAII:  /* UVD, VCE do not support GPUVM */
-		case CHIP_KAVERI:  /* UVD, VCE do not support GPUVM */
-		case CHIP_KABINI:  /* UVD, VCE do not support GPUVM */
-		case CHIP_MULLINS: /* UVD, VCE do not support GPUVM */
-			adev->gmc.gart_size = 1024ULL << 20;
-			break;
+	case CHIP_BONAIRE: /* UVD, VCE do not support GPUVM */
+	case CHIP_HAWAII:  /* UVD, VCE do not support GPUVM */
+	case CHIP_KAVERI:  /* UVD, VCE do not support GPUVM */
+	case CHIP_KABINI:  /* UVD, VCE do not support GPUVM */
+	case CHIP_MULLINS: /* UVD, VCE do not support GPUVM */
+		amdgpu_gmc_set_gart_size(adev, SZ_1G);
+		break;
 #endif
-		}
-	} else {
-		adev->gmc.gart_size = (u64)amdgpu_gart_size << 20;
+	case CHIP_TOPAZ:     /* no MM engines */
+	default:
+		amdgpu_gmc_set_gart_size(adev, SZ_256M);
+		break;
 	}
-
-	adev->gmc.gart_size += adev->pm.smu_prv_buffer_size;
 	gmc_v7_0_vram_gtt_location(adev, &adev->gmc);
 
 	return 0;
@@ -705,7 +661,7 @@ static int gmc_v7_0_gart_enable(struct amdgpu_device *adev)
 	}
 
 	gmc_v7_0_flush_gpu_tlb(adev, 0, 0, 0);
-	DRM_INFO("PCIE GART of %uM enabled (table at 0x%016llX).\n",
+	drm_info(adev_to_drm(adev), "PCIE GART of %uM enabled (table at 0x%016llX).\n",
 		 (unsigned int)(adev->gmc.gart_size >> 20),
 		 (unsigned long long)table_addr);
 	return 0;
@@ -1016,6 +972,7 @@ static int gmc_v7_0_sw_init(struct amdgpu_ip_block *ip_block)
 	 * internal address space.
 	 */
 	adev->gmc.mc_mask = 0xffffffffffULL; /* 40 bit MC */
+	adev->gmc.pte_addr_mask = 0x000000FFFFFFF000ULL; /* 40 bit PA */
 
 	r = dma_set_mask_and_coherent(adev->dev, DMA_BIT_MASK(40));
 	if (r) {
@@ -1034,8 +991,6 @@ static int gmc_v7_0_sw_init(struct amdgpu_ip_block *ip_block)
 	if (r)
 		return r;
 
-	amdgpu_gmc_get_vbios_allocations(adev);
-
 	/* Memory manager */
 	r = amdgpu_bo_init(adev);
 	if (r)
@@ -1052,6 +1007,12 @@ static int gmc_v7_0_sw_init(struct amdgpu_ip_block *ip_block)
 	 * amdkfd will use VMIDs 8-15
 	 */
 	adev->vm_manager.first_kfd_vmid = 8;
+	amdgpu_vmid_mgr_set_vmid_mask(adev,
+				      GENMASK(adev->vm_manager.first_kfd_vmid - 1, 1),
+				      false);
+	amdgpu_vmid_mgr_set_vmid_mask(adev,
+				      GENMASK(adev->vm_manager.first_kfd_vmid - 1, 1),
+				      true);
 	amdgpu_vm_manager_init(adev);
 
 	/* base offset of vram pages */
@@ -1064,8 +1025,7 @@ static int gmc_v7_0_sw_init(struct amdgpu_ip_block *ip_block)
 		adev->vm_manager.vram_base_offset = 0;
 	}
 
-	adev->gmc.vm_fault_info = kmalloc(sizeof(struct kfd_vm_fault_info),
-					GFP_KERNEL);
+	adev->gmc.vm_fault_info = kmalloc_obj(struct kfd_vm_fault_info);
 	if (!adev->gmc.vm_fault_info)
 		return -ENOMEM;
 	atomic_set_release(&adev->gmc.vm_fault_info_updated, 0);
@@ -1170,50 +1130,6 @@ static int gmc_v7_0_wait_for_idle(struct amdgpu_ip_block *ip_block)
 
 }
 
-static int gmc_v7_0_soft_reset(struct amdgpu_ip_block *ip_block)
-{
-	struct amdgpu_device *adev = ip_block->adev;
-	u32 srbm_soft_reset = 0;
-	u32 tmp = RREG32(mmSRBM_STATUS);
-
-	if (tmp & SRBM_STATUS__VMC_BUSY_MASK)
-		srbm_soft_reset = REG_SET_FIELD(srbm_soft_reset,
-						SRBM_SOFT_RESET, SOFT_RESET_VMC, 1);
-
-	if (tmp & (SRBM_STATUS__MCB_BUSY_MASK | SRBM_STATUS__MCB_NON_DISPLAY_BUSY_MASK |
-		   SRBM_STATUS__MCC_BUSY_MASK | SRBM_STATUS__MCD_BUSY_MASK)) {
-		if (!(adev->flags & AMD_IS_APU))
-			srbm_soft_reset = REG_SET_FIELD(srbm_soft_reset,
-							SRBM_SOFT_RESET, SOFT_RESET_MC, 1);
-	}
-
-	if (srbm_soft_reset) {
-		gmc_v7_0_mc_stop(adev);
-		if (gmc_v7_0_wait_for_idle(ip_block))
-			dev_warn(adev->dev, "Wait for GMC idle timed out !\n");
-
-		tmp = RREG32(mmSRBM_SOFT_RESET);
-		tmp |= srbm_soft_reset;
-		dev_info(adev->dev, "SRBM_SOFT_RESET=0x%08X\n", tmp);
-		WREG32(mmSRBM_SOFT_RESET, tmp);
-		tmp = RREG32(mmSRBM_SOFT_RESET);
-
-		udelay(50);
-
-		tmp &= ~srbm_soft_reset;
-		WREG32(mmSRBM_SOFT_RESET, tmp);
-		tmp = RREG32(mmSRBM_SOFT_RESET);
-
-		/* Wait a little for things to settle down */
-		udelay(50);
-
-		gmc_v7_0_mc_resume(adev);
-		udelay(50);
-	}
-
-	return 0;
-}
-
 static int gmc_v7_0_vm_fault_interrupt_state(struct amdgpu_device *adev,
 					     struct amdgpu_irq_src *src,
 					     unsigned int type,
@@ -1260,6 +1176,12 @@ static int gmc_v7_0_process_interrupt(struct amdgpu_device *adev,
 				      struct amdgpu_iv_entry *entry)
 {
 	u32 addr, status, mc_client, vmid;
+
+	/* Delegate to the soft IRQ handler ring */
+	if (adev->irq.ih_soft.enabled && entry->ih != &adev->irq.ih_soft) {
+		amdgpu_irq_delegate(adev, entry, 4);
+		return 1;
+	}
 
 	addr = RREG32(mmVM_CONTEXT1_PROTECTION_FAULT_ADDR);
 	status = RREG32(mmVM_CONTEXT1_PROTECTION_FAULT_STATUS);
@@ -1348,9 +1270,7 @@ static const struct amd_ip_funcs gmc_v7_0_ip_funcs = {
 	.hw_fini = gmc_v7_0_hw_fini,
 	.suspend = gmc_v7_0_suspend,
 	.resume = gmc_v7_0_resume,
-	.is_idle = gmc_v7_0_is_idle,
 	.wait_for_idle = gmc_v7_0_wait_for_idle,
-	.soft_reset = gmc_v7_0_soft_reset,
 	.set_clockgating_state = gmc_v7_0_set_clockgating_state,
 	.set_powergating_state = gmc_v7_0_set_powergating_state,
 };

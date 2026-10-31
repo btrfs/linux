@@ -303,7 +303,7 @@ xsi:schemaLocation="https://gitlab.freedesktop.org/freedreno/ rules-fd.xsd">
 </enum>
 
 <!--
-Used in a6xx_a2d_bit_cntl.. the value mostly seems to correlate to the
+Used in a6xx_a2d_blt_cntl.. the value mostly seems to correlate to the
 component type/size, so I think it relates to internal format used for
 blending?  The one exception is that 16b unorm and 32b float use the
 same value... maybe 16b unorm is uncommon enough that it was just easier
@@ -328,6 +328,9 @@ to upconvert to 32b float internally?
 	<value value="0x2"  name="R2D_SNORM8"/>
 	<value value="0x1"  name="R2D_UNORM8_SRGB"/>
 	<value value="0x0"  name="R2D_UNORM8"/>
+
+	<!-- Not a hw enum, used internally in driver -->
+	<value value="0xff" name="R2D_NONE"/>
 </enum>
 
 <enum name="a6xx_tex_type">

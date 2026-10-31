@@ -57,8 +57,7 @@ static u32 get_bus_freq(void)
 	/* get platform freq by its clock name */
 	pltclk = clk_get(NULL, "cg-pll0-div1");
 	if (IS_ERR(pltclk)) {
-		pr_err("%s: can't get bus frequency %ld\n",
-		       __func__, PTR_ERR(pltclk));
+		pr_err("%s: can't get bus frequency %pe\n", __func__, pltclk);
 		return PTR_ERR(pltclk);
 	}
 
@@ -168,7 +167,7 @@ static int qoriq_cpufreq_cpu_init(struct cpufreq_policy *policy)
 	if (!np)
 		return -ENODEV;
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data)
 		goto err_np;
 
@@ -181,11 +180,11 @@ static int qoriq_cpufreq_cpu_init(struct cpufreq_policy *policy)
 	hwclk = __clk_get_hw(policy->clk);
 	count = clk_hw_get_num_parents(hwclk);
 
-	data->pclk = kcalloc(count, sizeof(struct clk *), GFP_KERNEL);
+	data->pclk = kzalloc_objs(struct clk *, count);
 	if (!data->pclk)
 		goto err_nomem2;
 
-	table = kcalloc(count + 1, sizeof(*table), GFP_KERNEL);
+	table = kzalloc_objs(*table, count + 1);
 	if (!table)
 		goto err_pclk;
 

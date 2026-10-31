@@ -7,7 +7,9 @@
 #include <drm/drm_file.h>
 #include <drm/drm_gem.h>
 #include <drm/rocket_accel.h>
+#include <linux/align.h>
 #include <linux/interrupt.h>
+#include <linux/overflow.h>
 #include <linux/iommu.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -19,6 +21,15 @@
 #include "rocket_registers.h"
 
 #define JOB_TIMEOUT_MS 500
+
+/*
+ * The PC unit fetches two 64-bit register commands per pc_data_amount unit,
+ * and the field holds (regcmd_count + 1) / 2 - 1.
+ */
+#define ROCKET_MAX_REGCMDS	((PC_REGISTER_AMOUNTS_PC_DATA_AMOUNT__MASK + 1) * 2U)
+
+/* Bits 3:0 of PC_BASE_ADDRESS hold the mode selection bit and reserved bits */
+#define ROCKET_REGCMD_ALIGN	16
 
 static struct rocket_job *
 to_rocket_job(struct drm_sched_job *sched_job)
@@ -45,7 +56,7 @@ static struct dma_fence *rocket_fence_create(struct rocket_core *core)
 {
 	struct dma_fence *fence;
 
-	fence = kzalloc(sizeof(*fence), GFP_KERNEL);
+	fence = kzalloc_obj(*fence);
 	if (!fence)
 		return ERR_PTR(-ENOMEM);
 
@@ -71,13 +82,13 @@ rocket_copy_tasks(struct drm_device *dev,
 	if (!rjob->task_count)
 		return 0;
 
-	rjob->tasks = kvmalloc_array(job->task_count, sizeof(*rjob->tasks), GFP_KERNEL);
+	rjob->tasks = kvmalloc_objs(*rjob->tasks, job->task_count);
 	if (!rjob->tasks) {
 		drm_dbg(dev, "Failed to allocate task array\n");
 		return -ENOMEM;
 	}
 
-	for (int i = 0; i < rjob->task_count; i++) {
+	for (unsigned int i = 0; i < rjob->task_count; i++) {
 		struct drm_rocket_task task = {0};
 
 		if (copy_from_user(&task,
@@ -94,6 +105,20 @@ rocket_copy_tasks(struct drm_device *dev,
 			goto fail;
 		}
 
+		if (task.regcmd_count > ROCKET_MAX_REGCMDS) {
+			drm_dbg(dev, "regcmd_count field in drm_rocket_task should be <= %u.\n",
+				ROCKET_MAX_REGCMDS);
+			ret = -EINVAL;
+			goto fail;
+		}
+
+		if (!IS_ALIGNED(task.regcmd, ROCKET_REGCMD_ALIGN)) {
+			drm_dbg(dev, "regcmd field in drm_rocket_task should be aligned to %u bytes.\n",
+				ROCKET_REGCMD_ALIGN);
+			ret = -EINVAL;
+			goto fail;
+		}
+
 		rjob->tasks[i].regcmd = task.regcmd;
 		rjob->tasks[i].regcmd_count = task.regcmd_count;
 	}
@@ -102,6 +127,7 @@ rocket_copy_tasks(struct drm_device *dev,
 
 fail:
 	kvfree(rjob->tasks);
+	rjob->tasks = NULL;
 	return ret;
 }
 
@@ -188,14 +214,19 @@ static int rocket_job_push(struct rocket_job *job)
 	struct rocket_device *rdev = job->rdev;
 	struct drm_gem_object **bos;
 	struct ww_acquire_ctx acquire_ctx;
+	u32 bo_count;
 	int ret = 0;
 
-	bos = kvmalloc_array(job->in_bo_count + job->out_bo_count, sizeof(void *),
-			     GFP_KERNEL);
+	if (check_add_overflow(job->in_bo_count, job->out_bo_count, &bo_count))
+		return -EINVAL;
+
+	bos = kvmalloc_objs(*bos, bo_count);
+	if (!bos)
+		return -ENOMEM;
 	memcpy(bos, job->in_bos, job->in_bo_count * sizeof(void *));
 	memcpy(&bos[job->in_bo_count], job->out_bos, job->out_bo_count * sizeof(void *));
 
-	ret = drm_gem_lock_reservations(bos, job->in_bo_count + job->out_bo_count, &acquire_ctx);
+	ret = drm_gem_lock_reservations(bos, bo_count, &acquire_ctx);
 	if (ret)
 		goto err;
 
@@ -220,7 +251,7 @@ static int rocket_job_push(struct rocket_job *job)
 	rocket_attach_object_fences(job->out_bos, job->out_bo_count, job->inference_done_fence);
 
 err_unlock:
-	drm_gem_unlock_reservations(bos, job->in_bo_count + job->out_bo_count, &acquire_ctx);
+	drm_gem_unlock_reservations(bos, bo_count, &acquire_ctx);
 err:
 	kvfree(bos);
 
@@ -276,7 +307,7 @@ static struct rocket_core *sched_to_core(struct rocket_device *rdev,
 {
 	unsigned int core;
 
-	for (core = 0; core < rdev->num_cores; core++) {
+	for (core = 0; core < rdev->max_cores; core++) {
 		if (&rdev->cores[core].sched == sched)
 			return &rdev->cores[core];
 	}
@@ -310,13 +341,13 @@ static struct dma_fence *rocket_job_run(struct drm_sched_job *sched_job)
 		dma_fence_put(job->done_fence);
 	job->done_fence = dma_fence_get(fence);
 
-	ret = pm_runtime_get_sync(core->dev);
+	ret = pm_runtime_resume_and_get(core->dev);
 	if (ret < 0)
-		return fence;
+		goto err_put_fences;
 
 	ret = iommu_attach_group(job->domain->domain, core->iommu_group);
 	if (ret < 0)
-		return fence;
+		goto err_put_pm;
 
 	scoped_guard(mutex, &core->job_lock) {
 		core->in_flight_job = job;
@@ -324,6 +355,14 @@ static struct dma_fence *rocket_job_run(struct drm_sched_job *sched_job)
 	}
 
 	return fence;
+
+err_put_pm:
+	pm_runtime_put(core->dev);
+err_put_fences:
+	dma_fence_put(job->done_fence);
+	job->done_fence = NULL;
+	dma_fence_put(fence);
+	return ERR_PTR(ret);
 }
 
 static void rocket_job_handle_irq(struct rocket_core *core)
@@ -479,8 +518,6 @@ int rocket_job_init(struct rocket_core *core)
 	return 0;
 
 err_sched:
-	drm_sched_fini(&core->sched);
-
 	destroy_workqueue(core->reset.wq);
 	return ret;
 }
@@ -496,9 +533,8 @@ void rocket_job_fini(struct rocket_core *core)
 int rocket_job_open(struct rocket_file_priv *rocket_priv)
 {
 	struct rocket_device *rdev = rocket_priv->rdev;
-	struct drm_gpu_scheduler **scheds = kmalloc_array(rdev->num_cores,
-							  sizeof(*scheds),
-							  GFP_KERNEL);
+	struct drm_gpu_scheduler **scheds = kmalloc_objs(*scheds,
+							 rdev->num_cores);
 	unsigned int core;
 	int ret;
 
@@ -543,13 +579,14 @@ static int rocket_ioctl_submit_job(struct drm_device *dev, struct drm_file *file
 	if (job->task_count == 0)
 		return -EINVAL;
 
-	rjob = kzalloc(sizeof(*rjob), GFP_KERNEL);
+	rjob = kzalloc_obj(*rjob);
 	if (!rjob)
 		return -ENOMEM;
 
 	kref_init(&rjob->refcount);
 
 	rjob->rdev = rdev;
+	rjob->domain = rocket_iommu_domain_get(file_priv);
 
 	ret = drm_sched_job_init(&rjob->base,
 				 &file_priv->sched_entity,
@@ -574,8 +611,6 @@ static int rocket_ioctl_submit_job(struct drm_device *dev, struct drm_file *file
 		goto out_cleanup_job;
 
 	rjob->out_bo_count = job->out_bo_handle_count;
-
-	rjob->domain = rocket_iommu_domain_get(file_priv);
 
 	ret = rocket_job_push(rjob);
 	if (ret)
@@ -610,7 +645,7 @@ int rocket_ioctl_submit(struct drm_device *dev, void *data, struct drm_file *fil
 		return -EINVAL;
 	}
 
-	jobs = kvmalloc_array(args->job_count, sizeof(*jobs), GFP_KERNEL);
+	jobs = kvmalloc_objs(*jobs, args->job_count);
 	if (!jobs) {
 		drm_dbg(dev, "Failed to allocate incoming job array\n");
 		return -ENOMEM;

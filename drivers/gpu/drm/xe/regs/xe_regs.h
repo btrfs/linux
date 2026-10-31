@@ -7,6 +7,8 @@
 
 #include "regs/xe_reg_defs.h"
 
+#define SWF_SCRATCHPAD(_idx)			XE_REG(0x4f000 + (_idx) * 4)
+
 #define SOC_BASE				0x280000
 
 #define GU_CNTL_PROTECTED			XE_REG(0x10100C)
@@ -28,6 +30,8 @@
 #define XEHP_MTCFG_ADDR				XE_REG(0x101800)
 #define   TILE_COUNT				REG_GENMASK(15, 8)
 
+#define CRI_DEVICE_UID				XE_REG(0x102008)
+
 #define GGC					XE_REG(0x108040)
 #define   GMS_MASK				REG_GENMASK(15, 8)
 #define   GGMS_MASK				REG_GENMASK(7, 6)
@@ -39,6 +43,8 @@
 
 #define STOLEN_RESERVED				XE_REG(0x1082c0)
 #define   WOPCM_SIZE_MASK			REG_GENMASK64(9, 7)
+
+#define SG_TILE_ADDR_RANGE(_idx)		XE_REG(0x1083a0 + (_idx) * 4)
 
 #define MTL_RP_STATE_CAP			XE_REG(0x138000)
 

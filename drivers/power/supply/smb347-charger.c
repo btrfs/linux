@@ -149,7 +149,7 @@
  * @pre_charge_current: current (in uA) to use in pre-charging phase
  * @termination_current: current (in uA) used to determine when the
  *			 charging cycle terminates
- * @pre_to_fast_voltage: voltage (in uV) treshold used for transitioning to
+ * @pre_to_fast_voltage: voltage (in uV) threshold used for transitioning to
  *			 pre-charge to fast charge mode
  * @mains_current_limit: maximum input current drawn from AC/DC input (in uA)
  * @usb_hc_current_limit: maximum input high current (in uA) drawn from USB
@@ -302,7 +302,7 @@ static int current_to_hw(const unsigned int *tbl, size_t size, unsigned int val)
  *
  * Function checks whether any power source is connected to the charger and
  * updates internal state accordingly. If there is a change to previous state
- * function returns %1, otherwise %0 and negative errno in case of errror.
+ * function returns %1, otherwise %0 and negative errno in case of error.
  */
 static int smb347_update_ps_status(struct smb347_charger *smb)
 {
@@ -1083,7 +1083,7 @@ static int smb347_get_charging_status(struct smb347_charger *smb,
 		} else {
 			/*
 			 * in this case no charger error or termination
-			 * occured but charging is not in progress!!!
+			 * occurred but charging is not in progress!!!
 			 */
 			status = POWER_SUPPLY_STATUS_NOT_CHARGING;
 		}
@@ -1609,10 +1609,10 @@ static void smb347_shutdown(struct i2c_client *client)
 }
 
 static const struct i2c_device_id smb347_id[] = {
-	{ "smb345", SMB345 },
-	{ "smb347", SMB347 },
-	{ "smb358", SMB358 },
-	{ },
+	{ .name = "smb345", .driver_data = SMB345 },
+	{ .name = "smb347", .driver_data = SMB347 },
+	{ .name = "smb358", .driver_data = SMB358 },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, smb347_id);
 

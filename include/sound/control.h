@@ -7,6 +7,7 @@
  *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  */
 
+#include <linux/rwsem.h>
 #include <linux/wait.h>
 #include <linux/nospec.h>
 #include <sound/asound.h>
@@ -167,6 +168,8 @@ snd_ctl_find_id_mixer(struct snd_card *card, const char *name)
 
 int snd_ctl_create(struct snd_card *card);
 
+extern struct rw_semaphore snd_ioctl_rwsem;
+
 int snd_ctl_register_ioctl(snd_kctl_ioctl_func_t fcn);
 int snd_ctl_unregister_ioctl(snd_kctl_ioctl_func_t fcn);
 #ifdef CONFIG_COMPAT
@@ -241,7 +244,7 @@ int _snd_ctl_add_follower(struct snd_kcontrol *master,
  * @follower: follower element to add
  *
  * Add a virtual follower control to the given master element created via
- * snd_ctl_create_virtual_master() beforehand.
+ * snd_ctl_make_virtual_master() beforehand.
  *
  * All followers must be the same type (returning the same information
  * via info callback).  The function doesn't check it, so it's your
@@ -286,7 +289,7 @@ snd_ctl_add_follower_uncached(struct snd_kcontrol *master,
 	return _snd_ctl_add_follower(master, follower, SND_CTL_FOLLOWER_NEED_UPDATE);
 }
 
-int snd_ctl_add_vmaster_hook(struct snd_kcontrol *kctl,
+int snd_ctl_add_vmaster_hook(struct snd_card *card, struct snd_kcontrol *kctl,
 			     void (*hook)(void *private_data, int),
 			     void *private_data);
 void snd_ctl_sync_vmaster(struct snd_kcontrol *kctl, bool hook_only);

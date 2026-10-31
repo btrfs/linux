@@ -260,7 +260,7 @@ static const struct snd_soc_ops tm2_hdmi_ops = {
 static int tm2_mic_bias(struct snd_soc_dapm_widget *w,
 				struct snd_kcontrol *kcontrol, int event)
 {
-	struct snd_soc_card *card = w->dapm->card;
+	struct snd_soc_card *card = snd_soc_dapm_to_card(w->dapm);
 	struct tm2_machine_priv *priv = snd_soc_card_get_drvdata(card);
 
 	switch (event) {
@@ -279,16 +279,17 @@ static int tm2_set_bias_level(struct snd_soc_card *card,
 				struct snd_soc_dapm_context *dapm,
 				enum snd_soc_bias_level level)
 {
+	struct snd_soc_dapm_context *card_dapm = snd_soc_card_to_dapm(card);
 	struct snd_soc_pcm_runtime *rtd;
 
 	rtd = snd_soc_get_pcm_runtime(card, &card->dai_link[0]);
 
-	if (dapm->dev != snd_soc_rtd_to_codec(rtd, 0)->dev)
+	if (snd_soc_dapm_to_dev(dapm) != snd_soc_rtd_to_codec(rtd, 0)->dev)
 		return 0;
 
 	switch (level) {
 	case SND_SOC_BIAS_STANDBY:
-		if (card->dapm.bias_level == SND_SOC_BIAS_OFF)
+		if (snd_soc_dapm_get_bias_level(card_dapm) == SND_SOC_BIAS_OFF)
 			tm2_start_sysclk(card);
 		break;
 	case SND_SOC_BIAS_OFF:
@@ -517,19 +518,15 @@ static int tm2_probe(struct platform_device *pdev)
 	}
 
 	ret = snd_soc_of_parse_card_name(card, "model");
-	if (ret < 0) {
-		dev_err(dev, "Card name is not specified\n");
+	if (ret < 0)
 		return ret;
-	}
 
 	ret = snd_soc_of_parse_audio_routing(card, "audio-routing");
 	if (ret < 0) {
 		/* Backwards compatible way */
 		ret = snd_soc_of_parse_audio_routing(card, "samsung,audio-routing");
-		if (ret < 0) {
-			dev_err(dev, "Audio routing is not specified or invalid\n");
+		if (ret < 0)
 			return ret;
-		}
 	}
 
 	card->aux_dev[0].dlc.of_node = of_parse_phandle(dev->of_node,
@@ -608,10 +605,8 @@ static int tm2_probe(struct platform_device *pdev)
 
 	ret = devm_snd_soc_register_component(dev, &tm2_component,
 				tm2_ext_dai, ARRAY_SIZE(tm2_ext_dai));
-	if (ret < 0) {
-		dev_err(dev, "Failed to register component: %d\n", ret);
+	if (ret < 0)
 		goto dai_node_put;
-	}
 
 	ret = devm_snd_soc_register_card(dev, card);
 	if (ret < 0) {

@@ -4,7 +4,7 @@
 ADXL380 driver
 ===============
 
-This driver supports Analog Device's ADXL380/382 on SPI/I2C bus.
+This driver supports Analog Devices' ADXL380/382 on SPI/I2C bus.
 
 1. Supported devices
 ====================
@@ -39,19 +39,19 @@ specific device folder path ``/sys/bus/iio/devices/iio:deviceX``.
 +---------------------------------------------------+----------------------------------------------------------+
 | in_accel_scale                                    | Scale for the accelerometer channels.                    |
 +---------------------------------------------------+----------------------------------------------------------+
-| in_accel_filter_high_pass_3db_frequency           | Low pass filter bandwidth.                               |
+| in_accel_filter_high_pass_3db_frequency           | High pass filter bandwidth.                              |
 +---------------------------------------------------+----------------------------------------------------------+
-| in_accel_filter_high_pass_3db_frequency_available | Available low pass filter bandwidth configurations.      |
+| in_accel_filter_high_pass_3db_frequency_available | Available high pass filter bandwidth configurations.     |
 +---------------------------------------------------+----------------------------------------------------------+
-| in_accel_filter_low_pass_3db_frequency            | High pass filter bandwidth.                              |
+| in_accel_filter_low_pass_3db_frequency            | Low pass filter bandwidth.                               |
 +---------------------------------------------------+----------------------------------------------------------+
-| in_accel_filter_low_pass_3db_frequency_available  | Available high pass filter bandwidth configurations.     |
+| in_accel_filter_low_pass_3db_frequency_available  | Available low pass filter bandwidth configurations.      |
 +---------------------------------------------------+----------------------------------------------------------+
 | in_accel_x_calibbias                              | Calibration offset for the X-axis accelerometer channel. |
 +---------------------------------------------------+----------------------------------------------------------+
 | in_accel_x_raw                                    | Raw X-axis accelerometer channel value.                  |
 +---------------------------------------------------+----------------------------------------------------------+
-| in_accel_y_calibbias                              | y-axis acceleration offset correction                    |
+| in_accel_y_calibbias                              | Calibration offset for the Y-axis accelerometer channel. |
 +---------------------------------------------------+----------------------------------------------------------+
 | in_accel_y_raw                                    | Raw Y-axis accelerometer channel value.                  |
 +---------------------------------------------------+----------------------------------------------------------+
@@ -223,11 +223,11 @@ Obtain buffered data:
         002bc3c0  f7 fd 00 cb fb 94 24 80  f7 e3 00 f2 fb b8 24 80  |......$.......$.|
         ...
 
-See ``Documentation/iio/iio_devbuf.rst`` for more information about how buffered
+See Documentation/iio/iio_devbuf.rst for more information about how buffered
 data is structured.
 
 4. IIO Interfacing Tools
 ========================
 
-See ``Documentation/iio/iio_tools.rst`` for the description of the available IIO
+See Documentation/iio/iio_tools.rst for the description of the available IIO
 interfacing tools.

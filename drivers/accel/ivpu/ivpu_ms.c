@@ -8,6 +8,7 @@
 
 #include "ivpu_drv.h"
 #include "ivpu_gem.h"
+#include "ivpu_hw.h"
 #include "ivpu_jsm_msg.h"
 #include "ivpu_ms.h"
 #include "ivpu_pm.h"
@@ -37,8 +38,8 @@ int ivpu_ms_start_ioctl(struct drm_device *dev, void *data, struct drm_file *fil
 	struct drm_ivpu_metric_streamer_start *args = data;
 	struct ivpu_device *vdev = file_priv->vdev;
 	struct ivpu_ms_instance *ms;
-	u64 single_buff_size;
 	u32 sample_size;
+	u64 buf_size;
 	int ret;
 
 	if (!args->metric_group_mask || !args->read_period_samples ||
@@ -52,12 +53,13 @@ int ivpu_ms_start_ioctl(struct drm_device *dev, void *data, struct drm_file *fil
 	mutex_lock(&file_priv->ms_lock);
 
 	if (get_instance_by_mask(file_priv, args->metric_group_mask)) {
-		ivpu_err(vdev, "Instance already exists (mask %#llx)\n", args->metric_group_mask);
+		ivpu_dbg(vdev, IOCTL, "Instance already exists (mask %#llx)\n",
+			 args->metric_group_mask);
 		ret = -EALREADY;
 		goto unlock;
 	}
 
-	ms = kzalloc(sizeof(*ms), GFP_KERNEL);
+	ms = kzalloc_obj(*ms);
 	if (!ms) {
 		ret = -ENOMEM;
 		goto unlock;
@@ -67,16 +69,22 @@ int ivpu_ms_start_ioctl(struct drm_device *dev, void *data, struct drm_file *fil
 
 	ret = ivpu_jsm_metric_streamer_info(vdev, ms->mask, 0, 0, &sample_size, NULL);
 	if (ret)
-		goto err_free_ms;
+		goto err_free;
 
-	single_buff_size = sample_size *
-		((u64)args->read_period_samples * MS_READ_PERIOD_MULTIPLIER);
-	ms->bo = ivpu_bo_create_global(vdev, PAGE_ALIGN(single_buff_size * MS_NUM_BUFFERS),
-				       DRM_IVPU_BO_CACHED | DRM_IVPU_BO_MAPPABLE);
+	buf_size = PAGE_ALIGN((u64)args->read_period_samples * sample_size *
+			      MS_READ_PERIOD_MULTIPLIER * MS_NUM_BUFFERS);
+	if (buf_size > ivpu_hw_range_size(&vdev->hw->ranges.global)) {
+		ivpu_dbg(vdev, IOCTL, "Requested MS buffer size %llu exceeds range size %llu\n",
+			 buf_size, ivpu_hw_range_size(&vdev->hw->ranges.global));
+		ret = -EINVAL;
+		goto err_free;
+	}
+
+	ms->bo = ivpu_bo_create_global(vdev, buf_size, DRM_IVPU_BO_CACHED | DRM_IVPU_BO_MAPPABLE);
 	if (!ms->bo) {
-		ivpu_err(vdev, "Failed to allocate MS buffer (size %llu)\n", single_buff_size);
+		ivpu_dbg(vdev, IOCTL, "Failed to allocate MS buffer (size %llu)\n", buf_size);
 		ret = -ENOMEM;
-		goto err_free_ms;
+		goto err_free;
 	}
 
 	ms->buff_size = ivpu_bo_size(ms->bo) / MS_NUM_BUFFERS;
@@ -88,16 +96,15 @@ int ivpu_ms_start_ioctl(struct drm_device *dev, void *data, struct drm_file *fil
 	ret = ivpu_jsm_metric_streamer_start(vdev, ms->mask, args->sampling_period_ns,
 					     ms->active_buff_vpu_addr, ms->buff_size);
 	if (ret)
-		goto err_free_bo;
+		goto err_free;
 
 	args->sample_size = sample_size;
 	args->max_data_size = ivpu_bo_size(ms->bo);
 	list_add_tail(&ms->ms_instance_node, &file_priv->ms_instance_list);
 	goto unlock;
 
-err_free_bo:
+err_free:
 	ivpu_bo_free(ms->bo);
-err_free_ms:
 	kfree(ms);
 unlock:
 	mutex_unlock(&file_priv->ms_lock);
@@ -175,7 +182,8 @@ int ivpu_ms_get_data_ioctl(struct drm_device *dev, void *data, struct drm_file *
 
 	ms = get_instance_by_mask(file_priv, args->metric_group_mask);
 	if (!ms) {
-		ivpu_err(vdev, "Instance doesn't exist for mask: %#llx\n", args->metric_group_mask);
+		ivpu_dbg(vdev, IOCTL, "Instance doesn't exist for mask: %#llx\n",
+			 args->metric_group_mask);
 		ret = -EINVAL;
 		goto unlock;
 	}
@@ -282,6 +290,13 @@ int ivpu_ms_get_info_ioctl(struct drm_device *dev, void *data, struct drm_file *
 	if (ret)
 		goto unlock;
 
+	if (info_size > ivpu_bo_size(bo)) {
+		ivpu_warn_ratelimited(vdev, "MS info overflow: %#llx > %#zx\n",
+				      info_size, ivpu_bo_size(bo));
+		ret = -EOVERFLOW;
+		goto unlock;
+	}
+
 	if (args->buffer_size < info_size) {
 		ret = -ENOSPC;
 		goto unlock;
@@ -306,10 +321,8 @@ void ivpu_ms_cleanup(struct ivpu_file_priv *file_priv)
 
 	mutex_lock(&file_priv->ms_lock);
 
-	if (file_priv->ms_info_bo) {
-		ivpu_bo_free(file_priv->ms_info_bo);
-		file_priv->ms_info_bo = NULL;
-	}
+	ivpu_bo_free(file_priv->ms_info_bo);
+	file_priv->ms_info_bo = NULL;
 
 	list_for_each_entry_safe(ms, tmp, &file_priv->ms_instance_list, ms_instance_node)
 		free_instance(file_priv, ms);

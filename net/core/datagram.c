@@ -712,6 +712,9 @@ zerocopy_fill_skb_from_devmem(struct sk_buff *skb, struct iov_iter *from,
 	size_t virt_addr, size, off;
 	struct net_iov *niov;
 
+	if (i && skb_frags_readable(skb))
+		return -EFAULT;
+
 	/* Devmem filling works by taking an IOVEC from the user where the
 	 * iov_addrs are interpreted as an offset in bytes into the dma-buf to
 	 * send from. We do not support other iter types.
@@ -732,7 +735,7 @@ zerocopy_fill_skb_from_devmem(struct sk_buff *skb, struct iov_iter *from,
 		size = min_t(size_t, size, length);
 		size = min_t(size_t, size, iter_iov_len(from));
 
-		get_netmem(net_iov_to_netmem(niov));
+		netmem_inc_ref(net_iov_to_netmem(niov));
 		skb_add_rx_frag_netmem(skb, i, net_iov_to_netmem(niov), off,
 				       size, PAGE_SIZE);
 		iov_iter_advance(from, size);

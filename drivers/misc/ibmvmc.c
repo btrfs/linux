@@ -154,7 +154,7 @@ static void ibmvmc_release_crq_queue(struct crq_server_adapter *adapter)
 	dma_unmap_single(adapter->dev,
 			 queue->msg_token,
 			 queue->size * sizeof(*queue->msgs), DMA_BIDIRECTIONAL);
-	free_page((unsigned long)queue->msgs);
+	kfree(queue->msgs);
 }
 
 /**
@@ -830,7 +830,7 @@ static int ibmvmc_open(struct inode *inode, struct file *file)
 		 (unsigned long)inode, (unsigned long)file,
 		 ibmvmc.state);
 
-	session = kzalloc(sizeof(*session), GFP_KERNEL);
+	session = kzalloc_obj(*session);
 	if (!session)
 		return -ENOMEM;
 
@@ -1040,7 +1040,7 @@ static ssize_t ibmvmc_write(struct file *file, const char *buffer,
 			    size_t count, loff_t *ppos)
 {
 	struct inode *inode;
-	struct ibmvmc_buffer *vmc_buffer;
+	struct ibmvmc_buffer *vmc_buffer = NULL;
 	struct ibmvmc_file_session *session;
 	struct crq_server_adapter *adapter;
 	struct ibmvmc_hmc *hmc;
@@ -1130,9 +1130,15 @@ static ssize_t ibmvmc_write(struct file *file, const char *buffer,
 	dev_dbg(adapter->dev, "write: file = 0x%lx, count = 0x%lx\n",
 		(unsigned long)file, (unsigned long)count);
 
-	ibmvmc_send_msg(adapter, vmc_buffer, hmc, count);
+	if (ibmvmc_send_msg(adapter, vmc_buffer, hmc, count)) {
+		ret = -EIO;
+		goto out;
+	}
+	vmc_buffer = NULL;
 	ret = p - buffer;
  out:
+	if (vmc_buffer)
+		vmc_buffer->free = 1;
 	spin_unlock_irqrestore(&hmc->lock, flags);
 	return (ssize_t)(ret);
 }
@@ -1653,6 +1659,13 @@ static int ibmvmc_recv_msg(struct crq_server_adapter *adapter,
 		return -1;
 	}
 
+	if (msg_len > buffer->size) {
+		dev_err(adapter->dev, "Recv_msg: msg_len 0x%lx exceeds buffer size 0x%x\n",
+			msg_len, buffer->size);
+		spin_unlock_irqrestore(&hmc->lock, flags);
+		return -1;
+	}
+
 	/* RDMA the data into the partition. */
 	rc = h_copy_rdma(msg_len,
 			 adapter->riobn,
@@ -2117,7 +2130,7 @@ static int ibmvmc_init_crq_queue(struct crq_server_adapter *adapter)
 	int rc = 0;
 	int retrc = 0;
 
-	queue->msgs = (struct ibmvmc_crq_msg *)get_zeroed_page(GFP_KERNEL);
+	queue->msgs = kzalloc(PAGE_SIZE, GFP_KERNEL);
 
 	if (!queue->msgs)
 		goto malloc_failed;
@@ -2163,6 +2176,7 @@ static int ibmvmc_init_crq_queue(struct crq_server_adapter *adapter)
 	rc = vio_enable_interrupts(vdev);
 	if (rc != 0) {
 		dev_err(adapter->dev, "Error %d enabling interrupts!!!\n", rc);
+		free_irq(vdev->irq, (void *)adapter);
 		goto req_irq_failed;
 	}
 
@@ -2179,7 +2193,7 @@ reg_crq_failed:
 			 queue->msg_token,
 			 queue->size * sizeof(*queue->msgs), DMA_BIDIRECTIONAL);
 map_failed:
-	free_page((unsigned long)queue->msgs);
+	kfree(queue->msgs);
 malloc_failed:
 	return -ENOMEM;
 }
@@ -2298,8 +2312,8 @@ static void ibmvmc_remove(struct vio_dev *vdev)
 }
 
 static struct vio_device_id ibmvmc_device_table[] = {
-	{ "ibm,vmc", "IBM,vmc" },
-	{ "", "" }
+	{ .type = "ibm,vmc", .compat = "IBM,vmc" },
+	{ }
 };
 MODULE_DEVICE_TABLE(vio, ibmvmc_device_table);
 

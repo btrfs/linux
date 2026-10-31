@@ -186,7 +186,7 @@ enum {
 #define BD71828_REG_RTC_ALM2		0x63
 #define BD71828_REG_RTC_START		BD71828_REG_RTC_SEC
 
-/* Charger/Battey */
+/* Charger/Battery */
 #define BD71828_REG_CHG_STATE		0x65
 #define BD71828_REG_CHG_FULL		0xd2
 #define BD71828_REG_CHG_EN		0x6F
@@ -249,6 +249,8 @@ enum {
 #define BD71828_REG_BATCAP_MON_LIMIT_U	0xcc
 #define BD71828_REG_CONF		0x64
 
+#define BD71828_REG_ILIM_STAT		0x6d
+#define BD71828_REG_DCIN_SET		0x70
 #define BD71828_REG_DCIN_CLPS		0x71
 
 #define BD71828_REG_MEAS_CLEAR		0xaf

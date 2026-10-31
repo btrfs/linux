@@ -371,9 +371,8 @@ static int allocate_idle_time(struct cpufreq_cooling_device *cpufreq_cdev)
 {
 	unsigned int num_cpus = cpumask_weight(cpufreq_cdev->policy->related_cpus);
 
-	cpufreq_cdev->idle_time = kcalloc(num_cpus,
-					  sizeof(*cpufreq_cdev->idle_time),
-					  GFP_KERNEL);
+	cpufreq_cdev->idle_time = kzalloc_objs(*cpufreq_cdev->idle_time,
+					       num_cpus);
 	if (!cpufreq_cdev->idle_time)
 		return -ENOMEM;
 
@@ -489,12 +488,12 @@ static int cpufreq_set_cur_state(struct thermal_cooling_device *cdev,
 	frequency = get_state_freq(cpufreq_cdev, state);
 
 	ret = freq_qos_update_request(&cpufreq_cdev->qos_req, frequency);
-	if (ret >= 0) {
-		cpufreq_cdev->cpufreq_state = state;
-		ret = 0;
-	}
+	if (ret < 0)
+		return ret;
 
-	return ret;
+	cpufreq_cdev->cpufreq_state = state;
+
+	return 0;
 }
 
 /**
@@ -543,7 +542,7 @@ __cpufreq_cooling_register(struct device_node *np,
 		return ERR_PTR(-ENODEV);
 	}
 
-	cpufreq_cdev = kzalloc(sizeof(*cpufreq_cdev), GFP_KERNEL);
+	cpufreq_cdev = kzalloc_obj(*cpufreq_cdev);
 	if (!cpufreq_cdev)
 		return ERR_PTR(-ENOMEM);
 
@@ -593,7 +592,7 @@ __cpufreq_cooling_register(struct device_node *np,
 	if (!name)
 		goto remove_qos_req;
 
-	cdev = thermal_of_cooling_device_register(np, name, cpufreq_cdev,
+	cdev = thermal_of_cooling_device_register(np, 0, name, cpufreq_cdev,
 						  cooling_ops);
 	kfree(name);
 
@@ -662,8 +661,8 @@ of_cpufreq_cooling_register(struct cpufreq_policy *policy)
 
 		cdev = __cpufreq_cooling_register(np, policy, em);
 		if (IS_ERR(cdev)) {
-			pr_err("cpufreq_cooling: cpu%d failed to register as cooling device: %ld\n",
-			       policy->cpu, PTR_ERR(cdev));
+			pr_err("cpufreq_cooling: cpu%d failed to register as cooling device: %pe\n",
+			       policy->cpu, cdev);
 			cdev = NULL;
 		}
 	}

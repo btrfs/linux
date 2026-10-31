@@ -834,6 +834,9 @@ bool v4l2_ctrl_radio_filter(const struct v4l2_ctrl *ctrl);
  *
  * @ncontrols:	The number of controls in this cluster.
  * @controls:	The cluster control array of size @ncontrols.
+ *
+ *		If controls[0] is NULL, then this function does nothing and just
+ *		returns.
  */
 void v4l2_ctrl_cluster(unsigned int ncontrols, struct v4l2_ctrl **controls);
 
@@ -845,6 +848,9 @@ void v4l2_ctrl_cluster(unsigned int ncontrols, struct v4l2_ctrl **controls);
  * @ncontrols:	The number of controls in this cluster.
  * @controls:	The cluster control array of size @ncontrols. The first control
  *		must be the 'auto' control (e.g. autogain, autoexposure, etc.)
+ *
+ *		If controls[0] is NULL, then this function does nothing and just
+ *		returns.
  * @manual_val: The value for the first control in the cluster that equals the
  *		manual setting.
  * @set_volatile: If true, then all controls except the first auto control will
@@ -1580,6 +1586,9 @@ int v4l2_ctrl_subdev_log_status(struct v4l2_subdev *sd);
  * Controls already registered by the caller with the @hdl control handler are
  * not overwritten. Callers should register the controls they want to handle
  * themselves before calling this function.
+ *
+ * This function will set the control handler's error field on failure, just as
+ * other functions adding controls to the handler.
  *
  * Return: 0 on success, a negative error code on failure.
  */

@@ -7,8 +7,7 @@
  * Copyright IBM Corp. 2002, 2020
  */
 
-#define KMSG_COMPONENT "zfcp"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "zfcp: " fmt
 
 #include <linux/lockdep.h>
 #include <linux/slab.h>
@@ -282,6 +281,7 @@ static int zfcp_qdio_sbal_check(struct zfcp_qdio *qdio)
  * Returns: 0 on success, -EIO if there is no free sbal after waiting.
  */
 int zfcp_qdio_sbal_get(struct zfcp_qdio *qdio)
+	__must_hold(qdio->req_q_lock)
 {
 	long ret;
 
@@ -550,7 +550,7 @@ int zfcp_qdio_setup(struct zfcp_adapter *adapter)
 {
 	struct zfcp_qdio *qdio;
 
-	qdio = kzalloc(sizeof(struct zfcp_qdio), GFP_KERNEL);
+	qdio = kzalloc_obj(struct zfcp_qdio);
 	if (!qdio)
 		return -ENOMEM;
 

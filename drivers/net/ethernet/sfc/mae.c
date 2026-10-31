@@ -255,14 +255,12 @@ more:
 		if (desc->scheme)
 			goto fail;
 		rc = -ENOMEM;
-		desc->keys = kcalloc(desc->n_keys,
-				     sizeof(struct efx_tc_table_field_fmt),
-				     GFP_KERNEL);
+		desc->keys = kzalloc_objs(struct efx_tc_table_field_fmt,
+					  desc->n_keys);
 		if (!desc->keys)
 			goto fail;
-		desc->resps = kcalloc(desc->n_resps,
-				      sizeof(struct efx_tc_table_field_fmt),
-				      GFP_KERNEL);
+		desc->resps = kzalloc_objs(struct efx_tc_table_field_fmt,
+					   desc->n_resps);
 		if (!desc->resps)
 			goto fail;
 	}
@@ -1032,6 +1030,8 @@ int efx_mae_lookup_mport(struct efx_nic *efx, u32 vf_idx, u32 *id)
 	rhashtable_walk_enter(&mae->mports_ht, &walk);
 	rhashtable_walk_start(&walk);
 	while ((m = rhashtable_walk_next(&walk)) != NULL) {
+		if (IS_ERR(m))
+			continue;
 		if (m->mport_type == MAE_MPORT_DESC_MPORT_TYPE_VNIC &&
 		    m->interface_idx == nic_data->local_mae_intf &&
 		    m->pf_idx == 0 &&
@@ -1160,7 +1160,7 @@ int efx_mae_enumerate_mports(struct efx_nic *efx)
 		for (i = 0; i < count; i++) {
 			struct mae_mport_desc *d;
 
-			d = kzalloc(sizeof(*d), GFP_KERNEL);
+			d = kzalloc_obj(*d);
 			if (!d) {
 				rc = -ENOMEM;
 				goto fail;
@@ -2315,7 +2315,7 @@ int efx_init_mae(struct efx_nic *efx)
 	if (!nic_data->have_mport)
 		return -EINVAL;
 
-	mae = kmalloc(sizeof(*mae), GFP_KERNEL);
+	mae = kmalloc_obj(*mae);
 	if (!mae)
 		return -ENOMEM;
 

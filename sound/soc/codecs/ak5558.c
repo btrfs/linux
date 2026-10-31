@@ -38,7 +38,6 @@ static const char *ak5558_supply_names[AK5558_NUM_SUPPLIES] = {
 /* AK5558 Codec Private Data */
 struct ak5558_priv {
 	struct regulator_bulk_data supplies[AK5558_NUM_SUPPLIES];
-	struct snd_soc_component component;
 	struct regmap *regmap;
 	struct i2c_client *i2c;
 	struct gpio_desc *reset_gpiod; /* Reset & Power down GPIO */
@@ -286,12 +285,19 @@ static int ak5558_startup(struct snd_pcm_substream *substream,
 					  &ak5558_rate_constraints);
 }
 
+static const u64 ak5558_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B;
+
 static const struct snd_soc_dai_ops ak5558_dai_ops = {
 	.startup        = ak5558_startup,
 	.hw_params	= ak5558_hw_params,
 
 	.set_fmt	= ak5558_set_dai_fmt,
 	.set_tdm_slot   = ak5558_set_tdm_slot,
+	.auto_selectable_formats	= &ak5558_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 static struct snd_soc_dai_driver ak5558_dai = {
@@ -372,7 +378,15 @@ static int ak5558_runtime_resume(struct device *dev)
 	regcache_cache_only(ak5558->regmap, false);
 	regcache_mark_dirty(ak5558->regmap);
 
-	return regcache_sync(ak5558->regmap);
+	ret = regcache_sync(ak5558->regmap);
+	if (ret)
+		goto err;
+
+	return 0;
+err:
+	regcache_cache_only(ak5558->regmap, true);
+	regulator_bulk_disable(ARRAY_SIZE(ak5558->supplies), ak5558->supplies);
+	return ret;
 }
 
 static const struct dev_pm_ops ak5558_pm = {

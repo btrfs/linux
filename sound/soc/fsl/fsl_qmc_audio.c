@@ -54,8 +54,8 @@ struct qmc_dai_prtd {
 	struct snd_pcm_substream *substream;
 };
 
-static int qmc_audio_pcm_construct(struct snd_soc_component *component,
-				   struct snd_soc_pcm_runtime *rtd)
+static int qmc_audio_pcm_new(struct snd_soc_component *component,
+			     struct snd_soc_pcm_runtime *rtd)
 {
 	struct snd_card *card = rtd->card->snd_card;
 	int ret;
@@ -316,7 +316,7 @@ static int qmc_audio_pcm_open(struct snd_soc_component *component,
 	if (ret < 0)
 		return ret;
 
-	prtd = kzalloc(sizeof(*prtd), GFP_KERNEL);
+	prtd = kzalloc_obj(*prtd);
 	if (!prtd)
 		return -ENOMEM;
 
@@ -340,7 +340,7 @@ static const struct snd_soc_component_driver qmc_audio_soc_platform = {
 	.hw_params		= qmc_audio_pcm_hw_params,
 	.trigger		= qmc_audio_pcm_trigger,
 	.pointer		= qmc_audio_pcm_pointer,
-	.pcm_construct		= qmc_audio_pcm_construct,
+	.pcm_new		= qmc_audio_pcm_new,
 	.of_xlate_dai_name	= qmc_audio_of_xlate_dai_name,
 };
 
@@ -503,8 +503,8 @@ static int qmc_dai_constraints_interleaved(struct snd_pcm_substream *substream,
 		return ret;
 	}
 
-	access = 1ULL << (__force int)SNDRV_PCM_ACCESS_MMAP_INTERLEAVED |
-		 1ULL << (__force int)SNDRV_PCM_ACCESS_RW_INTERLEAVED;
+	access = 1ULL << SNDRV_PCM_ACCESS_MMAP_INTERLEAVED |
+		 1ULL << SNDRV_PCM_ACCESS_RW_INTERLEAVED;
 	ret = snd_pcm_hw_constraint_mask64(substream->runtime, SNDRV_PCM_HW_PARAM_ACCESS,
 					   access);
 	if (ret) {
@@ -532,8 +532,8 @@ static int qmc_dai_constraints_noninterleaved(struct snd_pcm_substream *substrea
 		return ret;
 	}
 
-	access = 1ULL << (__force int)SNDRV_PCM_ACCESS_MMAP_NONINTERLEAVED |
-		 1ULL << (__force int)SNDRV_PCM_ACCESS_RW_NONINTERLEAVED;
+	access = 1ULL << SNDRV_PCM_ACCESS_MMAP_NONINTERLEAVED |
+		 1ULL << SNDRV_PCM_ACCESS_RW_NONINTERLEAVED;
 	ret = snd_pcm_hw_constraint_mask64(substream->runtime, SNDRV_PCM_HW_PARAM_ACCESS,
 					   access);
 	if (ret) {
@@ -905,7 +905,6 @@ static int qmc_audio_probe(struct platform_device *pdev)
 {
 	struct device_node *np = pdev->dev.of_node;
 	struct qmc_audio *qmc_audio;
-	struct device_node *child;
 	unsigned int i;
 	int ret;
 
@@ -931,14 +930,12 @@ static int qmc_audio_probe(struct platform_device *pdev)
 	}
 
 	i = 0;
-	for_each_available_child_of_node(np, child) {
+	for_each_available_child_of_node_scoped(np, child) {
 		ret = qmc_audio_dai_parse(qmc_audio, child,
 					  qmc_audio->dais + i,
 					  qmc_audio->dai_drivers + i);
-		if (ret) {
-			of_node_put(child);
+		if (ret)
 			return ret;
-		}
 		i++;
 	}
 

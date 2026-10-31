@@ -16,7 +16,6 @@
 #include <linux/interrupt.h>
 #include <linux/jiffies.h>
 #include <linux/module.h>
-#include <linux/gpio.h>
 #include <linux/input/matrix_keypad.h>
 #include <linux/slab.h>
 #include <linux/of.h>
@@ -134,9 +133,6 @@ static void matrix_keypad_scan(struct work_struct *work)
 	activate_all_cols(keypad, false);
 
 	memset(new_state, 0, sizeof(new_state));
-
-	for (row = 0; row < keypad->num_row_gpios; row++)
-		gpiod_direction_input(keypad->row_gpios[row]);
 
 	/* assert each column and read the row status out */
 	for (col = 0; col < keypad->num_col_gpios; col++) {
@@ -444,7 +440,7 @@ static int matrix_keypad_probe(struct platform_device *pdev)
 					 NULL, input_dev);
 	if (err) {
 		dev_err(&pdev->dev, "failed to build keymap\n");
-		return -ENOMEM;
+		return err;
 	}
 
 	if (!device_property_read_bool(&pdev->dev, "linux,no-autorepeat"))

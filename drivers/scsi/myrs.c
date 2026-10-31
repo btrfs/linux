@@ -538,11 +538,11 @@ static bool myrs_enable_mmio_mbox(struct myrs_hba *cs,
 		cs->fwstat_buf = NULL;
 		goto out_free;
 	}
-	cs->ctlr_info = kzalloc(sizeof(struct myrs_ctlr_info), GFP_KERNEL);
+	cs->ctlr_info = kzalloc_obj(struct myrs_ctlr_info);
 	if (!cs->ctlr_info)
 		goto out_free;
 
-	cs->event_buf = kzalloc(sizeof(struct myrs_event), GFP_KERNEL);
+	cs->event_buf = kzalloc_obj(struct myrs_event);
 	if (!cs->event_buf)
 		goto out_free;
 
@@ -816,7 +816,7 @@ static void myrs_log_event(struct myrs_hba *cs, struct myrs_event *ev)
 	struct Scsi_Host *shost = cs->host;
 	struct scsi_device *sdev;
 	struct scsi_sense_hdr sshdr = {0};
-	unsigned char sense_info[4];
+	unsigned char asc, sense_info[4];
 	unsigned char cmd_specific[4];
 
 	if (ev->ev_code == 0x1C) {
@@ -829,9 +829,11 @@ static void myrs_log_event(struct myrs_hba *cs, struct myrs_event *ev)
 			memcpy(cmd_specific, &ev->sense_data[7], 4);
 		}
 	}
+	asc = scsi_sense_asc(&sshdr);
 	if (sshdr.sense_key == VENDOR_SPECIFIC &&
-	    (sshdr.asc == 0x80 || sshdr.asc == 0x81))
-		ev->ev_code = ((sshdr.asc - 0x80) << 8 | sshdr.ascq);
+	    (asc == 0x80 || asc == 0x81))
+		ev->ev_code = scsi_sense_code(asc - 0x80,
+					      scsi_sense_ascq(&sshdr));
 	while (true) {
 		ev_code = myrs_ev_list[ev_idx].ev_code;
 		if (ev_code == ev->ev_code || ev_code == 0)
@@ -891,8 +893,9 @@ static void myrs_log_event(struct myrs_hba *cs, struct myrs_event *ev)
 	case 'S':
 		if (sshdr.sense_key == NO_SENSE ||
 		    (sshdr.sense_key == NOT_READY &&
-		     sshdr.asc == 0x04 && (sshdr.ascq == 0x01 ||
-					    sshdr.ascq == 0x02)))
+		     (sshdr.sense_code == LU_IS_IN_PROCESS_OF_BECOMING_READY ||
+		      sshdr.sense_code ==
+		      LU_NOT_READY_INITIALIZING_COMMAND_REQUIRED)))
 			break;
 		shost_printk(KERN_INFO, shost,
 			     "event %d: Physical Device %d:%d %s\n",
@@ -900,7 +903,8 @@ static void myrs_log_event(struct myrs_hba *cs, struct myrs_event *ev)
 		shost_printk(KERN_INFO, shost,
 			     "Physical Device %d:%d Sense Key = %X, ASC = %02X, ASCQ = %02X\n",
 			     ev->channel, ev->target,
-			     sshdr.sense_key, sshdr.asc, sshdr.ascq);
+			     sshdr.sense_key, scsi_sense_asc(&sshdr),
+			     scsi_sense_ascq(&sshdr));
 		shost_printk(KERN_INFO, shost,
 			     "Physical Device %d:%d Sense Information = %02X%02X%02X%02X %02X%02X%02X%02X\n",
 			     ev->channel, ev->target,
@@ -1581,8 +1585,8 @@ static void myrs_mode_sense(struct myrs_hba *cs, struct scsi_cmnd *scmd,
 	scsi_sg_copy_from_buffer(scmd, modes, mode_len);
 }
 
-static int myrs_queuecommand(struct Scsi_Host *shost,
-		struct scsi_cmnd *scmd)
+static enum scsi_qc_status myrs_queuecommand(struct Scsi_Host *shost,
+					     struct scsi_cmnd *scmd)
 {
 	struct request *rq = scsi_cmd_to_rq(scmd);
 	struct myrs_hba *cs = shost_priv(shost);
@@ -1603,7 +1607,8 @@ static int myrs_queuecommand(struct Scsi_Host *shost,
 
 	switch (scmd->cmnd[0]) {
 	case REPORT_LUNS:
-		scsi_build_sense(scmd, 0, ILLEGAL_REQUEST, 0x20, 0x0);
+		scsi_set_sense(scmd, 0, ILLEGAL_REQUEST,
+			       INVALID_COMMAND_OP_CODE);
 		scsi_done(scmd);
 		return 0;
 	case MODE_SENSE:
@@ -1612,8 +1617,8 @@ static int myrs_queuecommand(struct Scsi_Host *shost,
 
 			if ((scmd->cmnd[2] & 0x3F) != 0x3F &&
 			    (scmd->cmnd[2] & 0x3F) != 0x08) {
-				/* Illegal request, invalid field in CDB */
-				scsi_build_sense(scmd, 0, ILLEGAL_REQUEST, 0x24, 0);
+				scsi_set_sense(scmd, 0, ILLEGAL_REQUEST,
+					       INVALID_FIELD_IN_CDB);
 			} else {
 				myrs_mode_sense(cs, scmd, ldev_info);
 				scmd->result = (DID_OK << 16);
@@ -1803,7 +1808,7 @@ static int myrs_sdev_init(struct scsi_device *sdev)
 
 		ldev_num = myrs_translate_ldev(cs, sdev);
 
-		ldev_info = kzalloc(sizeof(*ldev_info), GFP_KERNEL);
+		ldev_info = kzalloc_obj(*ldev_info);
 		if (!ldev_info)
 			return -ENOMEM;
 
@@ -1865,7 +1870,7 @@ static int myrs_sdev_init(struct scsi_device *sdev)
 	} else {
 		struct myrs_pdev_info *pdev_info;
 
-		pdev_info = kzalloc(sizeof(*pdev_info), GFP_KERNEL);
+		pdev_info = kzalloc_obj(*pdev_info);
 		if (!pdev_info)
 			return -ENOMEM;
 

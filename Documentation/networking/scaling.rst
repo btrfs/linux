@@ -38,11 +38,24 @@ that is not the focus of these techniques.
 The filter used in RSS is typically a hash function over the network
 and/or transport layer headers-- for example, a 4-tuple hash over
 IP addresses and TCP ports of a packet. The most common hardware
-implementation of RSS uses a 128-entry indirection table where each entry
+implementation of RSS uses an indirection table where each entry
 stores a queue number. The receive queue for a packet is determined
-by masking out the low order seven bits of the computed hash for the
-packet (usually a Toeplitz hash), taking this number as a key into the
-indirection table and reading the corresponding value.
+by indexing the indirection table with the low order bits of the
+computed hash for the packet (usually a Toeplitz hash).
+
+The indirection table helps even out the traffic distribution when queue
+count is not a power of two. NICs should provide an indirection table
+at least 4 times larger than the queue count. 4x table results in ~16%
+imbalance between the queues, which is acceptable for most applications.
+
+The Toeplitz hash is linear over GF(2), so the quality of the hash key
+matters as much as its randomness. For a key made of uniformly random
+bytes, the q lowest order bits of a given header field fail to spread
+flows over all 2^q queues with probability 1/2, and a burst of connections
+picking nearly consecutive ephemeral ports then lands on a fraction of the
+queues while the others stay idle. The netdev_rss_key_fill() helper draws
+a random key that is free of this defect; drivers should use it rather
+than seeding a key of their own.
 
 Some NICs support symmetric RSS hashing where, if the IP (source address,
 destination address) and TCP/UDP (source port, destination port) tuples
@@ -399,16 +412,21 @@ Both of these need to be set before RFS is enabled for a receive queue.
 Values for both are rounded up to the nearest power of two. The
 suggested flow count depends on the expected number of active connections
 at any given time, which may be significantly less than the number of open
-connections. We have found that a value of 32768 for rps_sock_flow_entries
-works fairly well on a moderately loaded server.
+connections. We have found that a value of 65536 for rps_sock_flow_entries
+works fairly well on a moderately loaded server. Big servers might
+need 1048576 or even higher values.
+
+On a NUMA host it is advisable to spread rps_sock_flow_entries on all nodes.
+
+numactl --interleave=all bash -c "echo 1048576 >/proc/sys/net/core/rps_sock_flow_entries"
 
 For a single queue device, the rps_flow_cnt value for the single queue
 would normally be configured to the same value as rps_sock_flow_entries.
 For a multi-queue device, the rps_flow_cnt for each queue might be
 configured as rps_sock_flow_entries / N, where N is the number of
-queues. So for instance, if rps_sock_flow_entries is set to 32768 and there
+queues. So for instance, if rps_sock_flow_entries is set to 131072 and there
 are 16 configured receive queues, rps_flow_cnt for each queue might be
-configured as 2048.
+configured as 8192.
 
 
 Accelerated RFS

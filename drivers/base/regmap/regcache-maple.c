@@ -95,12 +95,13 @@ static int regcache_maple_write(struct regmap *map, unsigned int reg,
 
 	mas_unlock(&mas);
 
-	if (ret == 0) {
-		kfree(lower);
-		kfree(upper);
+	if (ret) {
+		kfree(entry);
+		return ret;
 	}
-	
-	return ret;
+	kfree(lower);
+	kfree(upper);
+	return 0;
 }
 
 static int regcache_maple_drop(struct regmap *map, unsigned int min,
@@ -111,7 +112,7 @@ static int regcache_maple_drop(struct regmap *map, unsigned int min,
 	unsigned long *entry, *lower, *upper;
 	/* initialized to work around false-positive -Wuninitialized warning */
 	unsigned long lower_index = 0, lower_last = 0;
-	unsigned long upper_index, upper_last;
+	unsigned long upper_index = 0, upper_last = 0;
 	int ret = 0;
 
 	lower = NULL;
@@ -289,26 +290,46 @@ out:
 	return ret;
 }
 
-static int regcache_maple_exit(struct regmap *map)
+static int regcache_maple_init(struct regmap *map)
+{
+	struct maple_tree *mt;
+
+	mt = kmalloc_obj(*mt, map->alloc_flags);
+	if (!mt)
+		return -ENOMEM;
+	map->cache = mt;
+
+	mt_init(mt);
+
+	if (!mt_external_lock(mt) && map->lock_key)
+		lockdep_set_class_and_subclass(&mt->ma_lock, map->lock_key, 1);
+
+	return 0;
+}
+
+static void regcache_maple_exit(struct regmap *map)
 {
 	struct maple_tree *mt = map->cache;
 	MA_STATE(mas, mt, 0, UINT_MAX);
 	unsigned int *entry;
+	unsigned long flags;
 
 	/* if we've already been called then just return */
 	if (!mt)
-		return 0;
+		return;
 
-	mas_lock(&mas);
+	/*
+	 * Register access may take the Maple lock from hard IRQ context, so
+	 * preserve its IRQ-safe lockdep state during teardown.
+	 */
+	mas_lock_irqsave(&mas, flags);
 	mas_for_each(&mas, entry, UINT_MAX)
 		kfree(entry);
 	__mt_destroy(mt);
-	mas_unlock(&mas);
+	mas_unlock_irqrestore(&mas, flags);
 
 	kfree(mt);
 	map->cache = NULL;
-
-	return 0;
 }
 
 static int regcache_maple_insert_block(struct regmap *map, int first,
@@ -340,25 +361,11 @@ static int regcache_maple_insert_block(struct regmap *map, int first,
 	return ret;
 }
 
-static int regcache_maple_init(struct regmap *map)
+static int regcache_maple_populate(struct regmap *map)
 {
-	struct maple_tree *mt;
 	int i;
 	int ret;
 	int range_start;
-
-	mt = kmalloc(sizeof(*mt), map->alloc_flags);
-	if (!mt)
-		return -ENOMEM;
-	map->cache = mt;
-
-	mt_init(mt);
-
-	if (!mt_external_lock(mt) && map->lock_key)
-		lockdep_set_class_and_subclass(&mt->ma_lock, map->lock_key, 1);
-
-	if (!map->num_reg_defaults)
-		return 0;
 
 	range_start = 0;
 
@@ -369,23 +376,14 @@ static int regcache_maple_init(struct regmap *map)
 			ret = regcache_maple_insert_block(map, range_start,
 							  i - 1);
 			if (ret != 0)
-				goto err;
+				return ret;
 
 			range_start = i;
 		}
 	}
 
 	/* Add the last block */
-	ret = regcache_maple_insert_block(map, range_start,
-					  map->num_reg_defaults - 1);
-	if (ret != 0)
-		goto err;
-
-	return 0;
-
-err:
-	regcache_maple_exit(map);
-	return ret;
+	return regcache_maple_insert_block(map, range_start, map->num_reg_defaults - 1);
 }
 
 struct regcache_ops regcache_maple_ops = {
@@ -393,6 +391,7 @@ struct regcache_ops regcache_maple_ops = {
 	.name = "maple",
 	.init = regcache_maple_init,
 	.exit = regcache_maple_exit,
+	.populate = regcache_maple_populate,
 	.read = regcache_maple_read,
 	.write = regcache_maple_write,
 	.drop = regcache_maple_drop,

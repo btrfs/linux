@@ -282,14 +282,14 @@ __msg("mark_precise: frame0: regs=r0,r6 stack= before 10: (bf) r6 = r0")
 __msg("mark_precise: frame0: regs=r0 stack= before 9: (85) call bpf_loop")
 /* State entering callback body popped from states stack */
 __msg("from 9 to 17: frame1:")
-__msg("17: frame1: R1=scalar() R2=0 R10=fp0 cb")
+__msg("17: frame1: R10=fp0 cb")
 __msg("17: (b7) r0 = 0")
 __msg("18: (95) exit")
 __msg("returning from callee:")
 __msg("to caller at 9:")
-__msg("frame 0: propagating r1,r4")
+__msg("frame 0: propagating r1,r3,r4")
 __msg("mark_precise: frame0: last_idx 9 first_idx 9 subseq_idx -1")
-__msg("mark_precise: frame0: regs=r1,r4 stack= before 18: (95) exit")
+__msg("mark_precise: frame0: regs=r1,r3,r4 stack= before 18: (95) exit")
 __msg("from 18 to 9: safe")
 __naked int callback_result_precise(void)
 {
@@ -411,7 +411,7 @@ __msg("mark_precise: frame0: regs=r6 stack= before 5: (b7) r1 = 1")
 __msg("mark_precise: frame0: regs=r6 stack= before 4: (b7) r6 = 3")
 /* State entering callback body popped from states stack */
 __msg("from 9 to 15: frame1:")
-__msg("15: frame1: R1=scalar() R2=0 R10=fp0 cb")
+__msg("15: frame1: R10=fp0 cb")
 __msg("15: (b7) r0 = 0")
 __msg("16: (95) exit")
 __msg("returning from callee:")
@@ -419,9 +419,9 @@ __msg("to caller at 9:")
 /* r1, r4 are always precise for bpf_loop(),
  * r6 was marked before backtracking to callback body.
  */
-__msg("frame 0: propagating r1,r4,r6")
+__msg("frame 0: propagating r1,r3,r4,r6")
 __msg("mark_precise: frame0: last_idx 9 first_idx 9 subseq_idx -1")
-__msg("mark_precise: frame0: regs=r1,r4,r6 stack= before 16: (95) exit")
+__msg("mark_precise: frame0: regs=r1,r3,r4,r6 stack= before 16: (95) exit")
 __msg("mark_precise: frame1: regs= stack= before 15: (b7) r0 = 0")
 __msg("mark_precise: frame1: regs= stack= before 9: (85) call bpf_loop")
 __msg("mark_precise: frame0: parent state regs= stack=:")
@@ -567,7 +567,7 @@ __msg("mark_precise: frame0: regs= stack=-8 before 5: (7b) *(u64 *)(r10 -8) = r6
 __msg("mark_precise: frame0: regs=r6 stack= before 4: (b7) r6 = 3")
 /* State entering callback body popped from states stack */
 __msg("from 10 to 17: frame1:")
-__msg("17: frame1: R1=scalar() R2=0 R10=fp0 cb")
+__msg("17: frame1: R10=fp0 cb")
 __msg("17: (b7) r0 = 0")
 __msg("18: (95) exit")
 __msg("returning from callee:")
@@ -575,9 +575,9 @@ __msg("to caller at 10:")
 /* r1, r4 are always precise for bpf_loop(),
  * fp-8 was marked before backtracking to callback body.
  */
-__msg("frame 0: propagating r1,r4,fp-8")
+__msg("frame 0: propagating r1,r3,r4,fp-8")
 __msg("mark_precise: frame0: last_idx 10 first_idx 10 subseq_idx -1")
-__msg("mark_precise: frame0: regs=r1,r4 stack=-8 before 18: (95) exit")
+__msg("mark_precise: frame0: regs=r1,r3,r4 stack=-8 before 18: (95) exit")
 __msg("mark_precise: frame1: regs= stack= before 17: (b7) r0 = 0")
 __msg("mark_precise: frame1: regs= stack= before 10: (85) call bpf_loop#181")
 __msg("mark_precise: frame0: parent state regs= stack=:")
@@ -681,7 +681,7 @@ __msg("mark_precise: frame0: last_idx 10 first_idx 7 subseq_idx -1")
 __msg("mark_precise: frame0: regs=r7 stack= before 9: (bf) r1 = r8")
 __msg("mark_precise: frame0: regs=r7 stack= before 8: (27) r7 *= 4")
 __msg("mark_precise: frame0: regs=r7 stack= before 7: (79) r7 = *(u64 *)(r10 -8)")
-__msg("mark_precise: frame0: parent state regs= stack=-8:  R0=2 R6=1 R8=map_value(map=.data.vals,ks=4,vs=16) R10=fp0 fp-8=P1")
+__msg("mark_precise: frame0: parent state regs= stack=-8:  R8=map_value(map=.data.vals,ks=4,vs=16) R10=fp0 fp-8=P1")
 __msg("mark_precise: frame0: last_idx 18 first_idx 0 subseq_idx 7")
 __msg("mark_precise: frame0: regs= stack=-8 before 18: (95) exit")
 __msg("mark_precise: frame1: regs= stack= before 17: (0f) r0 += r2")
@@ -790,6 +790,110 @@ __naked int stack_slot_aliases_precision(void)
 		:
 		: __imm_ptr(vals)
 		: __clobber_common, "r6"
+	);
+}
+
+struct {
+        __uint(type, BPF_MAP_TYPE_PROG_ARRAY);
+        __uint(max_entries, 1);
+        __type(key, __u32);
+        __type(value, __u32);
+} map_array SEC(".maps");
+
+__naked __noinline __used
+static unsigned long identity_tail_call(void)
+{
+	/* the simplest identity function involving a tail call */
+        asm volatile (
+		"r6 = r2;"
+		"r2 = %[map_array] ll;"
+		"r3 = 0;"
+		"call %[bpf_tail_call];"
+		"r0 = r6;"
+		"exit;"
+		:
+		: __imm(bpf_tail_call),
+		  __imm_addr(map_array)
+		: __clobber_all);
+}
+
+SEC("?raw_tp")
+__failure __log_level(2)
+__msg("13: (85) call bpf_tail_call#12")
+__msg("mark_precise: frame1: last_idx 13 first_idx 0 subseq_idx -1 ")
+__msg("returning from callee:")
+__msg("frame1: R0=scalar() R6=3 R10=fp0")
+__msg("to caller at 4:")
+__msg("R0=scalar() R6=map_value(map=.data.vals,ks=4,vs=16) R10=fp0")
+__msg("6: (0f) r1 += r0")
+__msg("mark_precise: frame0: regs=r0 stack= before 5: (bf) r1 = r6")
+__msg("mark_precise: frame0: regs=r0 stack= before 4: (27) r0 *= 4")
+__msg("mark_precise: frame0: parent state regs=r0 stack=:  R0=Pscalar() R6=map_value(map=.data.vals,ks=4,vs=16) R10=fp0")
+__msg("math between map_value pointer and register with unbounded min value is not allowed")
+__naked int subprog_result_tail_call(void)
+{
+	asm volatile (
+		"r2 = 3;"
+		"call identity_tail_call;"
+		"r0 *= 4;"
+		"r1 = %[vals];"
+		"r1 += r0;"
+		"r0 = *(u32 *)(r1 + 0);"
+		"exit;"
+		:
+		: __imm_ptr(vals)
+		: __clobber_common
+	);
+}
+
+__naked __noinline __used
+static int ld_abs_subprog(void)
+{
+	asm volatile (
+		"r6 = r1;"
+		"r7 = r1;"
+		".8byte %[ld_abs];"
+		"exit;"
+		:
+		: __imm_insn(ld_abs, BPF_LD_ABS(BPF_W, 0))
+		: __clobber_all);
+}
+
+/*
+ * Buggy verifier did not properly backtrack early subprogram exit
+ * modelled for BPF_LD | BPF_ABS instruction, causing a segfault.
+ */
+SEC("socket")
+__success
+__log_level(2)
+/* early exit path */
+__msg("3: (0f) r1 += r7")
+__msg("mark_precise: frame0: regs=r7 stack= before 2: (bf) r1 = r10")
+__msg("mark_precise: frame0: regs=r7 stack= before 9: (20) r0 = *(u32 *)skb[0]")
+__msg("mark_precise: frame1: regs= stack= before 8: (bf) r7 = r1")
+__msg("mark_precise: frame1: regs= stack= before 7: (bf) r6 = r1")
+__msg("mark_precise: frame1: regs= stack= before 1: (85) call pc+5")
+__msg("mark_precise: frame0: regs=r7 stack= before 0: (b7) r7 = -8")
+/* fallthrough path */
+__msg("3: (0f) r1 += r7")
+__msg("mark_precise: frame0: regs=r7 stack= before 2: (bf) r1 = r10")
+__msg("mark_precise: frame0: regs=r7 stack= before 10: (95) exit")
+__msg("mark_precise: frame1: regs= stack= before 9: (20) r0 = *(u32 *)skb[0]")
+__msg("mark_precise: frame1: regs= stack= before 8: (bf) r7 = r1")
+__msg("mark_precise: frame1: regs= stack= before 7: (bf) r6 = r1")
+__msg("mark_precise: frame1: regs= stack= before 1: (85) call pc+5")
+__msg("mark_precise: frame0: regs=r7 stack= before 0: (b7) r7 = -8")
+__naked int ld_abs_backtrack_both_paths(void)
+{
+	asm volatile (
+		"r7 = -8;"
+		"call ld_abs_subprog;"
+		"r1 = r10;"
+		"r1 += r7;" /* mark r7 as precise */
+		"*(u64 *)(r1 + 0) = 0;"
+		"r0 = 0;"
+		"exit;"
+		::: __clobber_all
 	);
 }
 

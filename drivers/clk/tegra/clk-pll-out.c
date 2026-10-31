@@ -90,10 +90,10 @@ struct clk *tegra_clk_register_pll_out(const char *name,
 		spinlock_t *lock)
 {
 	struct tegra_clk_pll_out *pll_out;
+	struct clk_init_data init = {};
 	struct clk *clk;
-	struct clk_init_data init;
 
-	pll_out = kzalloc(sizeof(*pll_out), GFP_KERNEL);
+	pll_out = kzalloc_obj(*pll_out);
 	if (!pll_out)
 		return ERR_PTR(-ENOMEM);
 

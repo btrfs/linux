@@ -30,8 +30,10 @@ extern struct aa_dfa *stacksplitdfa;
 #define DEBUG_DOMAIN 4
 #define DEBUG_POLICY 8
 #define DEBUG_INTERFACE 0x10
+#define DEBUG_UNPACK 0x20
+#define DEBUG_TAGS 0x40
 
-#define DEBUG_ALL 0x1f		/* update if new DEBUG_X added */
+#define DEBUG_ALL 0x7f		/* update if new DEBUG_X added */
 #define DEBUG_PARSE_ERROR (-1)
 
 #define DEBUG_ON (aa_g_debug != DEBUG_NONE)
@@ -45,8 +47,10 @@ extern struct aa_dfa *stacksplitdfa;
 #define AA_DEBUG_LABEL(LAB, X, fmt, args...)				\
 do {									\
 	if ((LAB)->flags & FLAG_DEBUG1)					\
-		AA_DEBUG(X, fmt, args);					\
+		AA_DEBUG(X, fmt, ##args);				\
 } while (0)
+
+#define AA_DEBUG_PROFILE(PROF, X, fmt...) AA_DEBUG_LABEL(&(PROF)->label, X, ##fmt)
 
 #define AA_WARN(X) WARN((X), "APPARMOR WARN %s: %s\n", __func__, #X)
 
@@ -76,6 +80,19 @@ int aa_print_debug_params(char *buffer);
 /* Flag indicating whether initialization completed */
 extern int apparmor_initialized;
 
+/* semantic split of scope and view */
+#define aa_in_scope(SUBJ, OBJ)						\
+	aa_ns_visible(SUBJ, OBJ, false)
+
+#define aa_in_view(SUBJ, OBJ)						\
+	aa_ns_visible(SUBJ, OBJ, true)
+
+#define label_for_each_in_scope(I, NS, L, P)				\
+	label_for_each_in_ns(I, NS, L, P)
+
+#define fn_for_each_in_scope(L, P, FN)					\
+	fn_for_each_in_ns(L, P, FN)
+
 /* fn's in lib */
 const char *skipn_spaces(const char *str, size_t n);
 const char *aa_splitn_fqname(const char *fqname, size_t n, const char **ns_name,
@@ -84,6 +101,18 @@ void aa_info_message(const char *str);
 
 /* Security blob offsets */
 extern struct lsm_blob_sizes apparmor_blob_sizes;
+
+enum reftype {
+	REF_NS,
+	REF_PROXY,
+	REF_RAWDATA,
+};
+
+/* common reference count used by data the shows up in aafs */
+struct aa_common_ref {
+	struct kref count;
+	enum reftype reftype;
+};
 
 /**
  * aa_strneq - compare null terminated @str to a non null terminated substring
@@ -107,7 +136,7 @@ static inline bool aa_strneq(const char *str, const char *sub, int len)
  * character which is not used in standard matching and is only
  * used to separate pairs.
  */
-static inline aa_state_t aa_dfa_null_transition(struct aa_dfa *dfa,
+static inline aa_state_t aa_dfa_null_transition(const struct aa_dfa *dfa,
 						aa_state_t start)
 {
 	/* the null transition only needs the string's null terminator byte */
@@ -119,13 +148,19 @@ static inline bool path_mediated_fs(struct dentry *dentry)
 	return !(dentry->d_sb->s_flags & SB_NOUSER);
 }
 
-struct aa_str_table {
+struct aa_str_table_ent {
+	int count;
 	int size;
-	char **table;
+	char *strs;
 };
 
-void aa_free_str_table(struct aa_str_table *table);
+struct aa_str_table {
+	int size;
+	struct aa_str_table_ent *table;
+};
+
 bool aa_resize_str_table(struct aa_str_table *t, int newsize, gfp_t gfp);
+void aa_destroy_str_table(struct aa_str_table *table);
 
 struct counted_str {
 	struct kref count;
@@ -246,15 +281,15 @@ void aa_policy_destroy(struct aa_policy *policy);
  * @FN: fn to call for each profile transition. @P is set to the profile
  *
  * Returns: new label on success
+ *	    NULL if all callbacks decline to specify a transition
  *          ERR_PTR if build @FN fails
- *          NULL if label_build fails due to low memory conditions
  *
- * @FN must return a label or ERR_PTR on failure. NULL is not allowed
+ * @FN must return a label or ERR_PTR on failure.
  */
 #define fn_label_build(L, P, GFP, FN)					\
 ({									\
 	__label__ __do_cleanup, __done;					\
-	struct aa_label *__new_;					\
+	struct aa_label *__new_ = NULL;					\
 									\
 	if ((L)->size > 1) {						\
 		/* TODO: add cache of transitions already done */	\
@@ -263,17 +298,21 @@ void aa_policy_destroy(struct aa_policy *policy);
 		DEFINE_VEC(label, __lvec);				\
 		DEFINE_VEC(profile, __pvec);				\
 		if (vec_setup(label, __lvec, (L)->size, (GFP)))	{	\
-			__new_ = NULL;					\
+			__new_ = ERR_PTR(-ENOMEM);			\
 			goto __done;					\
 		}							\
 		__j = 0;						\
 		label_for_each(__i, (L), (P)) {				\
 			__new_ = (FN);					\
-			AA_BUG(!__new_);				\
+			if (!__new_)					\
+				continue;				\
 			if (IS_ERR(__new_))				\
 				goto __do_cleanup;			\
 			__lvec[__j++] = __new_;				\
 		}							\
+		if (__j == 0)						\
+			/* no components adding to build */		\
+			goto __do_cleanup;				\
 		for (__j = __count = 0; __j < (L)->size; __j++)		\
 			__count += __lvec[__j]->size;			\
 		if (!vec_setup(profile, __pvec, __count, (GFP))) {	\
@@ -285,14 +324,13 @@ void aa_policy_destroy(struct aa_policy *policy);
 			if (__count > 1) {				\
 				__new_ = aa_vec_find_or_create_label(__pvec,\
 						     __count, (GFP));	\
-				/* only fails if out of Mem */		\
 				if (!__new_)				\
-					__new_ = NULL;			\
+					__new_ = ERR_PTR(-ENOMEM);	\
 			} else						\
 				__new_ = aa_get_label(&__pvec[0]->label); \
 			vec_cleanup(profile, __pvec, __count);		\
 		} else							\
-			__new_ = NULL;					\
+			__new_ = ERR_PTR(-ENOMEM);			\
 __do_cleanup:								\
 		vec_cleanup(label, __lvec, (L)->size);			\
 	} else {							\
@@ -300,13 +338,13 @@ __do_cleanup:								\
 		__new_ = (FN);						\
 	}								\
 __done:									\
-	if (!__new_)							\
-		AA_DEBUG(DEBUG_LABEL, "label build failed\n");		\
+	if (IS_ERR(__new_))						\
+		AA_DEBUG(DEBUG_LABEL, "label build failed %ld\n", PTR_ERR(__new_)); \
 	(__new_);							\
 })
 
 
-#define __fn_build_in_ns(NS, P, NS_FN, OTHER_FN)			\
+#define __fn_build_in_scope(NS, P, NS_FN, OTHER_FN)			\
 ({									\
 	struct aa_label *__new;						\
 	if ((P)->ns != (NS))						\
@@ -316,10 +354,10 @@ __done:									\
 	(__new);							\
 })
 
-#define fn_label_build_in_ns(L, P, GFP, NS_FN, OTHER_FN)		\
+#define fn_label_build_in_scope(L, P, GFP, NS_FN, OTHER_FN)		\
 ({									\
 	fn_label_build((L), (P), (GFP),					\
-		__fn_build_in_ns(labels_ns(L), (P), (NS_FN), (OTHER_FN))); \
+		__fn_build_in_scope(labels_ns(L), (P), (NS_FN), (OTHER_FN))); \
 })
 
 #endif /* __AA_LIB_H */

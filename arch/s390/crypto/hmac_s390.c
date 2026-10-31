@@ -5,8 +5,7 @@
  * s390 specific HMAC support.
  */
 
-#define KMSG_COMPONENT	"hmac_s390"
-#define pr_fmt(fmt)	KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "hmac_s390: " fmt
 
 #include <asm/cpacf.h>
 #include <crypto/internal/hash.h>
@@ -151,7 +150,10 @@ static int hash_data(const u8 *in, unsigned int inlen,
 
 #undef PARAM_INIT
 
-	cpacf_klmd(func, &param, in, inlen);
+	if (final)
+		cpacf_klmd(func, &param, in, inlen);
+	else
+		cpacf_kimd(func, &param, in, inlen);
 
 	memcpy(digest, &param, digestsize);
 

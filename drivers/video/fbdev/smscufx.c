@@ -932,7 +932,6 @@ static int ufx_ops_ioctl(struct fb_info *info, unsigned int cmd,
 			 unsigned long arg)
 {
 	struct ufx_data *dev = info->par;
-	struct dloarea *area = NULL;
 
 	if (!atomic_read(&dev->usb_active))
 		return 0;
@@ -947,6 +946,10 @@ static int ufx_ops_ioctl(struct fb_info *info, unsigned int cmd,
 
 	/* TODO: Help propose a standard fb.h ioctl to report mmap damage */
 	if (cmd == UFX_IOCTL_REPORT_DAMAGE) {
+		struct dloarea *area __free(kfree) = kmalloc_obj(*area);
+		if (!area)
+			return -ENOMEM;
+
 		/* If we have a damage-aware client, turn fb_defio "off"
 		 * To avoid perf imact of unnecessary page fault handling.
 		 * Done by resetting the delay for this fb_info to a very
@@ -956,7 +959,8 @@ static int ufx_ops_ioctl(struct fb_info *info, unsigned int cmd,
 		if (info->fbdefio)
 			info->fbdefio->delay = UFX_DEFIO_WRITE_DISABLE;
 
-		area = (struct dloarea *)arg;
+		if (copy_from_user(area, (u8 __user *)arg, sizeof(*area)))
+			return -EFAULT;
 
 		if (area->x < 0)
 			area->x = 0;
@@ -1033,14 +1037,17 @@ static int ufx_ops_open(struct fb_info *info, int user)
 
 		struct fb_deferred_io *fbdefio;
 
-		fbdefio = kzalloc(sizeof(*fbdefio), GFP_KERNEL);
+		fbdefio = kzalloc_obj(*fbdefio);
 		if (fbdefio) {
 			fbdefio->delay = UFX_DEFIO_WRITE_DELAY;
 			fbdefio->deferred_io = ufx_dpy_deferred_io;
-		}
 
-		info->fbdefio = fbdefio;
-		fb_deferred_io_init(info);
+			info->fbdefio = fbdefio;
+			if (fb_deferred_io_init(info)) {
+				kfree(fbdefio);
+				info->fbdefio = NULL;
+			}
+		}
 	}
 
 	pr_debug("open /dev/fb%d user=%d fb_info=%p count=%d",
@@ -1590,7 +1597,7 @@ static int ufx_usb_probe(struct usb_interface *interface,
 	usbdev = interface_to_usbdev(interface);
 	BUG_ON(!usbdev);
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (dev == NULL) {
 		dev_err(&usbdev->dev, "ufx_usb_probe: failed alloc of dev struct\n");
 		return -ENOMEM;
@@ -1847,7 +1854,7 @@ static int ufx_alloc_urb_list(struct ufx_data *dev, int count, size_t size)
 	INIT_LIST_HEAD(&dev->urbs.list);
 
 	while (i < count) {
-		unode = kzalloc(sizeof(*unode), GFP_KERNEL);
+		unode = kzalloc_obj(*unode);
 		if (!unode)
 			break;
 		unode->dev = dev;

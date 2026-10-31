@@ -338,7 +338,7 @@ static int hqd_dump_v10_3(struct amdgpu_device *adev,
 		(*dump)[i++][1] = RREG32_SOC15_IP(GC, addr);		\
 	} while (0)
 
-	*dump = kmalloc_array(HQD_N_REGS, sizeof(**dump), GFP_KERNEL);
+	*dump = kmalloc_objs(**dump, HQD_N_REGS);
 	if (*dump == NULL)
 		return -ENOMEM;
 
@@ -435,7 +435,7 @@ static int hqd_sdma_dump_v10_3(struct amdgpu_device *adev,
 #undef HQD_N_REGS
 #define HQD_N_REGS (19+6+7+12)
 
-	*dump = kmalloc_array(HQD_N_REGS, sizeof(**dump), GFP_KERNEL);
+	*dump = kmalloc_objs(**dump, HQD_N_REGS);
 	if (*dump == NULL)
 		return -ENOMEM;
 
@@ -683,5 +683,6 @@ const struct kfd2kgd_calls gfx_v10_3_kfd2kgd = {
 	.clear_address_watch = kgd_gfx_v10_clear_address_watch,
 	.hqd_get_pq_addr = kgd_gfx_v10_hqd_get_pq_addr,
 	.hqd_reset = kgd_gfx_v10_hqd_reset,
+	.get_cu_occupancy = kgd_gfx_v10_get_cu_occupancy,
 	.hqd_sdma_get_doorbell = kgd_gfx_v10_hqd_sdma_get_doorbell
 };

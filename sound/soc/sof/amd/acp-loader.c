@@ -14,6 +14,7 @@
 #include <linux/firmware.h>
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/unaligned.h>
 
 #include "../ops.h"
 #include "acp-dsp-offset.h"
@@ -167,16 +168,101 @@ int acp_dsp_pre_fw_run(struct snd_sof_dev *sdev)
 	struct pci_dev *pci = to_pci_dev(sdev->dev);
 	const struct sof_amd_acp_desc *desc = get_chip_info(sdev->pdata);
 	struct acp_dev_data *adata;
+	u64 carveout_offset;
 	unsigned int src_addr, size_fw, dest_addr;
 	u32 page_count, dma_size;
+	u32 acp_logical_addr;
 	int ret;
 
 	adata = sdev->pdata->hw_pdata;
 
-	if (adata->quirks && adata->quirks->signed_fw_image)
+	if (adata->asp_carveout_base) {
+		size_fw = adata->fw_code_raw_size;
+		page_count = PAGE_ALIGN(size_fw) >> PAGE_SHIFT;
+		adata->fw_bin_page_count = page_count;
+
+		if (adata->fw_code_carveout_addr < adata->asp_carveout_base ||
+		    adata->fw_code_carveout_addr - adata->asp_carveout_base +
+		    size_fw > adata->asp_carveout_size) {
+			dev_err(sdev->dev,
+				"carveout addr 0x%llx out of window [0x%llx+0x%x]\n",
+				adata->fw_code_carveout_addr,
+				adata->asp_carveout_base,
+				adata->asp_carveout_size);
+			return -EINVAL;
+		}
+		carveout_offset = adata->fw_code_carveout_addr - adata->asp_carveout_base;
+		acp_logical_addr = ACP_SYSTEM_MEMORY_WINDOW +
+				   (adata->asp_carveout_group_start * 8 * SZ_1M) +
+				   (u32)carveout_offset;
+
+		ret = configure_and_run_sha_dma(adata, NULL,
+						acp_logical_addr,
+						ACP_IRAM_BASE_ADDRESS, size_fw);
+		if (ret < 0) {
+			dev_err(sdev->dev, "SHA DMA from carveout failed: %d\n", ret);
+			return ret;
+		}
+
+		if (adata->is_sram_in_use) {
+			configure_pte_for_fw_loading(FW_SRAM_DATA_BIN,
+						     ACP_SRAM_PAGE_COUNT, adata);
+			src_addr = ACP_SYSTEM_MEMORY_WINDOW + ACP_DEFAULT_SRAM_LENGTH +
+				   (page_count * ACP_PAGE_SIZE);
+			dest_addr = ACP7X_SRAM_BASE_ADDRESS;
+			ret = configure_and_run_dma(adata, src_addr, dest_addr,
+						    adata->fw_sram_data_bin_size);
+			if (ret < 0) {
+				dev_err(sdev->dev, "SRAM DMA failed: %d\n", ret);
+				dma_free_coherent(&pci->dev, ACP_DEFAULT_SRAM_LENGTH,
+						  adata->sram_data_buf, adata->sram_dma_addr);
+				adata->sram_data_buf = NULL;
+				return ret;
+			}
+			ret = acp_dma_status(adata, 0);
+			if (ret < 0)
+				dev_err(sdev->dev, "SRAM DMA status error: %d\n", ret);
+		}
+
+		/* Enable cache window */
+		snd_sof_dsp_write(sdev, ACP_DSP_BAR, ACP_DSP0_CACHE_OFFSET0,
+				  desc->sram_pte_offset);
+		snd_sof_dsp_write(sdev, ACP_DSP_BAR, ACP_DSP0_CACHE_SIZE0,
+				  SRAM1_SIZE | BIT(31));
+
+		if (adata->is_sram_in_use) {
+			dma_free_coherent(&pci->dev, ACP_DEFAULT_SRAM_LENGTH,
+					  adata->sram_data_buf, adata->sram_dma_addr);
+			adata->sram_data_buf = NULL;
+		}
+		return ret;
+	}
+
+	if (adata->pci_rev >= ACP7B_PCI_ID) {
+		if (adata->acp_sof_signed_firmware_image) {
+			if (adata->fw_bin_size <= ACP_IMAGE_HEADER_SIZE) {
+				dev_err(sdev->dev, "Invalid signed firmware size %u\n",
+					adata->fw_bin_size);
+				return -EINVAL;
+			}
+			size_fw = get_unaligned_le32(adata->bin_buf +
+						     ACP_IMAGE_HDR_SIZE_FW_SIGNED_OFF);
+			if (!size_fw ||
+			    size_fw > adata->fw_bin_size - ACP_IMAGE_HEADER_SIZE) {
+				dev_err(sdev->dev,
+					"Invalid signed firmware payload size %u (max %u)\n",
+					size_fw, adata->fw_bin_size - ACP_IMAGE_HEADER_SIZE);
+				return -EINVAL;
+			}
+			size_fw += ACP_IMAGE_HEADER_SIZE;
+		} else {
+			size_fw = adata->fw_bin_size;
+		}
+	} else if (adata->quirks && adata->quirks->signed_fw_image) {
 		size_fw = adata->fw_bin_size - ACP_FIRMWARE_SIGNATURE;
-	else
+	} else {
 		size_fw = adata->fw_bin_size;
+	}
 
 	page_count = PAGE_ALIGN(size_fw) >> PAGE_SHIFT;
 	adata->fw_bin_page_count = page_count;
@@ -312,9 +398,14 @@ int acp_sof_load_signed_firmware(struct snd_sof_dev *sdev)
 	}
 	kfree(fw_filename);
 
-	ret = snd_sof_dsp_block_write(sdev, SOF_FW_BLK_TYPE_DRAM, 0,
-				      (void *)adata->fw_dbin->data,
-				      adata->fw_dbin->size);
+	if (adata->pci_rev >= ACP7B_PCI_ID)
+		ret = snd_sof_dsp_block_write(sdev, SOF_FW_BLK_TYPE_SRAM, 0,
+					      (void *)adata->fw_dbin->data,
+					      adata->fw_dbin->size);
+	else
+		ret = snd_sof_dsp_block_write(sdev, SOF_FW_BLK_TYPE_DRAM, 0,
+					      (void *)adata->fw_dbin->data,
+					      adata->fw_dbin->size);
 	return ret;
 }
 EXPORT_SYMBOL_NS(acp_sof_load_signed_firmware, "SND_SOC_SOF_AMD_COMMON");

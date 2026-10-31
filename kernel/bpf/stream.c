@@ -2,112 +2,15 @@
 /* Copyright (c) 2025 Meta Platforms, Inc. and affiliates. */
 
 #include <linux/bpf.h>
+#include <linux/anon_inodes.h>
 #include <linux/filter.h>
 #include <linux/bpf_mem_alloc.h>
-#include <linux/percpu.h>
-#include <linux/refcount.h>
 #include <linux/gfp.h>
+#include <linux/irq_work.h>
 #include <linux/memory.h>
-#include <linux/local_lock.h>
 #include <linux/mutex.h>
-
-/*
- * Simple per-CPU NMI-safe bump allocation mechanism, backed by the NMI-safe
- * try_alloc_pages()/free_pages_nolock() primitives. We allocate a page and
- * stash it in a local per-CPU variable, and bump allocate from the page
- * whenever items need to be printed to a stream. Each page holds a global
- * atomic refcount in its first 4 bytes, and then records of variable length
- * that describe the printed messages. Once the global refcount has dropped to
- * zero, it is a signal to free the page back to the kernel's page allocator,
- * given all the individual records in it have been consumed.
- *
- * It is possible the same page is used to serve allocations across different
- * programs, which may be consumed at different times individually, hence
- * maintaining a reference count per-page is critical for correct lifetime
- * tracking.
- *
- * The bpf_stream_page code will be replaced to use kmalloc_nolock() once it
- * lands.
- */
-struct bpf_stream_page {
-	refcount_t ref;
-	u32 consumed;
-	char buf[];
-};
-
-/* Available room to add data to a refcounted page. */
-#define BPF_STREAM_PAGE_SZ (PAGE_SIZE - offsetofend(struct bpf_stream_page, consumed))
-
-static DEFINE_PER_CPU(local_trylock_t, stream_local_lock) = INIT_LOCAL_TRYLOCK(stream_local_lock);
-static DEFINE_PER_CPU(struct bpf_stream_page *, stream_pcpu_page);
-
-static bool bpf_stream_page_local_lock(unsigned long *flags)
-{
-	return local_trylock_irqsave(&stream_local_lock, *flags);
-}
-
-static void bpf_stream_page_local_unlock(unsigned long *flags)
-{
-	local_unlock_irqrestore(&stream_local_lock, *flags);
-}
-
-static void bpf_stream_page_free(struct bpf_stream_page *stream_page)
-{
-	struct page *p;
-
-	if (!stream_page)
-		return;
-	p = virt_to_page(stream_page);
-	free_pages_nolock(p, 0);
-}
-
-static void bpf_stream_page_get(struct bpf_stream_page *stream_page)
-{
-	refcount_inc(&stream_page->ref);
-}
-
-static void bpf_stream_page_put(struct bpf_stream_page *stream_page)
-{
-	if (refcount_dec_and_test(&stream_page->ref))
-		bpf_stream_page_free(stream_page);
-}
-
-static void bpf_stream_page_init(struct bpf_stream_page *stream_page)
-{
-	refcount_set(&stream_page->ref, 1);
-	stream_page->consumed = 0;
-}
-
-static struct bpf_stream_page *bpf_stream_page_replace(void)
-{
-	struct bpf_stream_page *stream_page, *old_stream_page;
-	struct page *page;
-
-	page = alloc_pages_nolock(/* Don't account */ 0, NUMA_NO_NODE, 0);
-	if (!page)
-		return NULL;
-	stream_page = page_address(page);
-	bpf_stream_page_init(stream_page);
-
-	old_stream_page = this_cpu_read(stream_pcpu_page);
-	if (old_stream_page)
-		bpf_stream_page_put(old_stream_page);
-	this_cpu_write(stream_pcpu_page, stream_page);
-	return stream_page;
-}
-
-static int bpf_stream_page_check_room(struct bpf_stream_page *stream_page, int len)
-{
-	int min = offsetof(struct bpf_stream_elem, str[0]);
-	int consumed = stream_page->consumed;
-	int total = BPF_STREAM_PAGE_SZ;
-	int rem = max(0, total - consumed - min);
-
-	/* Let's give room of at least 8 bytes. */
-	WARN_ON_ONCE(rem % 8 != 0);
-	rem = rem < 8 ? 0 : rem;
-	return min(len, rem);
-}
+#include <linux/poll.h>
+#include <linux/refcount.h>
 
 static void bpf_stream_elem_init(struct bpf_stream_elem *elem, int len)
 {
@@ -116,66 +19,27 @@ static void bpf_stream_elem_init(struct bpf_stream_elem *elem, int len)
 	elem->consumed_len = 0;
 }
 
-static struct bpf_stream_page *bpf_stream_page_from_elem(struct bpf_stream_elem *elem)
-{
-	unsigned long addr = (unsigned long)elem;
-
-	return (struct bpf_stream_page *)PAGE_ALIGN_DOWN(addr);
-}
-
-static struct bpf_stream_elem *bpf_stream_page_push_elem(struct bpf_stream_page *stream_page, int len)
-{
-	u32 consumed = stream_page->consumed;
-
-	stream_page->consumed += round_up(offsetof(struct bpf_stream_elem, str[len]), 8);
-	return (struct bpf_stream_elem *)&stream_page->buf[consumed];
-}
-
-static struct bpf_stream_elem *bpf_stream_page_reserve_elem(int len)
-{
-	struct bpf_stream_elem *elem = NULL;
-	struct bpf_stream_page *page;
-	int room = 0;
-
-	page = this_cpu_read(stream_pcpu_page);
-	if (!page)
-		page = bpf_stream_page_replace();
-	if (!page)
-		return NULL;
-
-	room = bpf_stream_page_check_room(page, len);
-	if (room != len)
-		page = bpf_stream_page_replace();
-	if (!page)
-		return NULL;
-	bpf_stream_page_get(page);
-	room = bpf_stream_page_check_room(page, len);
-	WARN_ON_ONCE(room != len);
-
-	elem = bpf_stream_page_push_elem(page, room);
-	bpf_stream_elem_init(elem, room);
-	return elem;
-}
-
 static struct bpf_stream_elem *bpf_stream_elem_alloc(int len)
 {
 	const int max_len = ARRAY_SIZE((struct bpf_bprintf_buffers){}.buf);
 	struct bpf_stream_elem *elem;
-	unsigned long flags;
+	size_t alloc_size;
 
-	BUILD_BUG_ON(max_len > BPF_STREAM_PAGE_SZ);
 	/*
-	 * Length denotes the amount of data to be written as part of stream element,
-	 * thus includes '\0' byte. We're capped by how much bpf_bprintf_buffers can
-	 * accomodate, therefore deny allocations that won't fit into them.
+	 * Length is the payload pushed into the stream, excluding the
+	 * trailing NUL of the bprintf buffer. Reject anything that cannot
+	 * fit without copying that NUL into the stream element.
 	 */
-	if (len < 0 || len > max_len)
+	if (len < 0 || len >= max_len)
 		return NULL;
 
-	if (!bpf_stream_page_local_lock(&flags))
+	alloc_size = offsetof(struct bpf_stream_elem, str[len]);
+	elem = kmalloc_nolock(alloc_size, __GFP_ZERO, -1);
+	if (!elem)
 		return NULL;
-	elem = bpf_stream_page_reserve_elem(len);
-	bpf_stream_page_local_unlock(&flags);
+
+	bpf_stream_elem_init(elem, len);
+
 	return elem;
 }
 
@@ -208,33 +72,87 @@ static int bpf_stream_consume_capacity(struct bpf_stream *stream, int len)
 	return 0;
 }
 
-static void bpf_stream_release_capacity(struct bpf_stream *stream, struct bpf_stream_elem *elem)
+static void bpf_stream_release_capacity(struct bpf_stream *stream, int len)
 {
-	int len = elem->total_len;
-
 	atomic_sub(len, &stream->capacity);
+}
+
+static void bpf_stream_notify(struct irq_work *work)
+{
+	struct bpf_stream *stream = container_of(work, struct bpf_stream, notify_work);
+
+	/*
+	 * Writers run in arbitrary program contexts, including NMI and regions
+	 * that already hold wait queue or epoll locks. Wake waiters from
+	 * irq_work instead, where taking those locks is safe.
+	 */
+	wake_up_interruptible_poll(&stream->waitq, EPOLLIN | EPOLLRDNORM);
+}
+
+static void bpf_stream_queue_notify(struct bpf_stream *stream)
+{
+	/*
+	 * Record that the work has been used so that teardown only pays for
+	 * irq_work_sync(), which may wait for an RCU grace period, when a
+	 * callback could actually be in flight.
+	 */
+	if (!READ_ONCE(stream->notify_used))
+		WRITE_ONCE(stream->notify_used, true);
+	irq_work_queue(&stream->notify_work);
+}
+
+static int bpf_stream_readable_bytes(struct bpf_stream *stream)
+{
+	return atomic_read_acquire(&stream->readable);
+}
+
+static void bpf_stream_publish(struct bpf_stream *stream, int len)
+{
+	/*
+	 * Pairs with atomic_read_acquire() in bpf_stream_readable_bytes().
+	 *
+	 * Notify only when the stream turns from empty to readable. Readers
+	 * block and pollers wait only after finding it empty, and a read never
+	 * takes the count below zero, so the publication that makes it positive
+	 * is the one they wait for. Publishing into a stream that already holds
+	 * data would only raise an interrupt for waiters that are being woken
+	 * already, or for nobody at all.
+	 */
+	if (atomic_add_return_release(len, &stream->readable) == len)
+		bpf_stream_queue_notify(stream);
 }
 
 static int bpf_stream_push_str(struct bpf_stream *stream, const char *str, int len)
 {
-	int ret = bpf_stream_consume_capacity(stream, len);
+	int ret;
 
-	return ret ?: __bpf_stream_push_str(&stream->log, str, len);
+	/* Nothing to publish; do not allocate an element for it. */
+	if (!len)
+		return 0;
+
+	ret = bpf_stream_consume_capacity(stream, len);
+	if (ret)
+		return ret;
+
+	ret = __bpf_stream_push_str(&stream->log, str, len);
+	if (ret)
+		bpf_stream_release_capacity(stream, len);
+	else
+		bpf_stream_publish(stream, len);
+
+	return ret;
 }
 
 static struct bpf_stream *bpf_stream_get(enum bpf_stream_id stream_id, struct bpf_prog_aux *aux)
 {
 	if (stream_id != BPF_STDOUT && stream_id != BPF_STDERR)
 		return NULL;
-	return &aux->stream[stream_id - 1];
+	return aux->stream[stream_id - 1];
 }
 
 static void bpf_stream_free_elem(struct bpf_stream_elem *elem)
 {
-	struct bpf_stream_page *p;
-
-	p = bpf_stream_page_from_elem(elem);
-	bpf_stream_page_put(p);
+	kfree_nolock(elem);
 }
 
 static void bpf_stream_free_list(struct llist_node *list)
@@ -297,14 +215,17 @@ static bool bpf_stream_consume_elem(struct bpf_stream_elem *elem, int *len)
 
 static int bpf_stream_read(struct bpf_stream *stream, void __user *buf, int len)
 {
-	int rem_len = len, cons_len, ret = 0;
+	int read_len, rem_len, cons_len, ret = 0;
 	struct bpf_stream_elem *elem = NULL;
 	struct llist_node *node;
 
 	mutex_lock(&stream->lock);
+	read_len = min(len, bpf_stream_readable_bytes(stream));
+	rem_len = read_len;
 
 	while (rem_len) {
-		int pos = len - rem_len;
+		int pos = read_len - rem_len;
+		int chunk, n;
 		bool cont;
 
 		node = bpf_stream_backlog_peek(stream);
@@ -318,35 +239,144 @@ static int bpf_stream_read(struct bpf_stream *stream, void __user *buf, int len)
 
 		cons_len = elem->consumed_len;
 		cont = bpf_stream_consume_elem(elem, &rem_len) == false;
+		chunk = elem->consumed_len - cons_len;
 
-		ret = copy_to_user(buf + pos, elem->str + cons_len,
-				   elem->consumed_len - cons_len);
-		/* Restore in case of error. */
-		if (ret) {
-			ret = -EFAULT;
-			elem->consumed_len = cons_len;
+		n = copy_to_user(buf + pos, elem->str + cons_len, chunk);
+		if (n) {
+			/* Keep any successfully copied bytes; -EFAULT only if none. */
+			elem->consumed_len -= n;
+			rem_len += n;
+			ret = (read_len == rem_len) ? -EFAULT : 0;
 			break;
 		}
 
 		if (cont)
 			continue;
 		bpf_stream_backlog_pop(stream);
-		bpf_stream_release_capacity(stream, elem);
+		bpf_stream_release_capacity(stream, elem->total_len);
 		bpf_stream_free_elem(elem);
 	}
 
+	atomic_sub(read_len - rem_len, &stream->readable);
 	mutex_unlock(&stream->lock);
-	return ret ? ret : len - rem_len;
+	return ret ? ret : read_len - rem_len;
 }
 
-int bpf_prog_stream_read(struct bpf_prog *prog, enum bpf_stream_id stream_id, void __user *buf, int len)
+int bpf_prog_stream_read(struct bpf_prog *prog, enum bpf_stream_id stream_id, void __user *buf, u32 len)
 {
 	struct bpf_stream *stream;
 
 	stream = bpf_stream_get(stream_id, prog->aux);
 	if (!stream)
 		return -ENOENT;
+	if (len > INT_MAX)
+		return -EINVAL;
 	return bpf_stream_read(stream, buf, len);
+}
+
+static bool bpf_stream_has_data(struct bpf_stream *stream)
+{
+	return bpf_stream_readable_bytes(stream) > 0;
+}
+
+static void bpf_stream_put(struct bpf_stream *stream)
+{
+	if (refcount_dec_and_test(&stream->refcnt)) {
+		struct llist_node *list;
+
+		/* Only a stream that ever queued its work can have a callback in flight. */
+		if (READ_ONCE(stream->notify_used))
+			irq_work_sync(&stream->notify_work);
+		list = llist_del_all(&stream->log);
+		bpf_stream_free_list(list);
+		bpf_stream_free_list(stream->backlog_head);
+		mutex_destroy(&stream->lock);
+		kfree(stream);
+	}
+}
+
+static int bpf_stream_release(struct inode *inode, struct file *file)
+{
+	bpf_stream_put(file->private_data);
+	return 0;
+}
+
+static ssize_t bpf_stream_file_read(struct file *file, char __user *buf, size_t len,
+				    loff_t *ppos)
+{
+	struct bpf_stream *stream = file->private_data;
+	bool dead;
+	int ret;
+
+	if (!len)
+		return 0;
+
+	for (;;) {
+		/*
+		 * Sample teardown state before looking for data. Nothing is
+		 * published once the program is gone, so finding the stream
+		 * empty after observing dead means EOF. The opposite order could
+		 * report EOF while data published just before teardown is still
+		 * buffered.
+		 */
+		dead = smp_load_acquire(&stream->dead);
+		ret = bpf_stream_read(stream, buf, len);
+		if (ret)
+			return ret;
+		if (dead)
+			return 0;
+		if (file->f_flags & O_NONBLOCK)
+			return -EAGAIN;
+
+		ret = wait_event_interruptible(stream->waitq,
+					       bpf_stream_has_data(stream) ||
+					       READ_ONCE(stream->dead));
+		if (ret)
+			return ret;
+	}
+}
+
+static __poll_t bpf_stream_poll(struct file *file, struct poll_table_struct *pts)
+{
+	struct bpf_stream *stream = file->private_data;
+	__poll_t events = 0;
+
+	/*
+	 * poll_wait() only registers the wait queue callback. Register before
+	 * checking persistent state so a concurrent publication or teardown is
+	 * observed either by the callback or by the checks below.
+	 */
+	poll_wait(file, &stream->waitq, pts);
+	if (bpf_stream_has_data(stream))
+		events |= EPOLLIN | EPOLLRDNORM;
+	if (READ_ONCE(stream->dead))
+		events |= EPOLLHUP;
+	return events;
+}
+
+static const struct file_operations bpf_stream_fops = {
+	.release = bpf_stream_release,
+	.read = bpf_stream_file_read,
+	.poll = bpf_stream_poll,
+};
+
+int bpf_prog_stream_new_fd(struct bpf_prog *prog, enum bpf_stream_id stream_id, u32 flags)
+{
+	struct bpf_stream *stream;
+	int fd_flags = O_RDONLY | O_CLOEXEC;
+	int fd;
+
+	stream = bpf_stream_get(stream_id, prog->aux);
+	if (!stream)
+		return -ENOENT;
+	if (flags & BPF_F_STREAM_NONBLOCK)
+		fd_flags |= O_NONBLOCK;
+
+	refcount_inc(&stream->refcnt);
+	fd = anon_inode_getfd("bpf-stream", &bpf_stream_fops, stream, fd_flags);
+	if (fd < 0)
+		bpf_stream_put(stream);
+	return fd;
 }
 
 __bpf_kfunc_start_defs();
@@ -355,14 +385,13 @@ __bpf_kfunc_start_defs();
  * Avoid using enum bpf_stream_id so that kfunc users don't have to pull in the
  * enum in headers.
  */
-__bpf_kfunc int bpf_stream_vprintk_impl(int stream_id, const char *fmt__str, const void *args,
-					u32 len__sz, void *aux__prog)
+__bpf_kfunc int bpf_stream_vprintk(int stream_id, const char *fmt__str, const void *args,
+				   u32 len__sz, struct bpf_prog_aux *aux)
 {
 	struct bpf_bprintf_data data = {
 		.get_bin_args	= true,
 		.get_buf	= true,
 	};
-	struct bpf_prog_aux *aux = aux__prog;
 	u32 fmt_size = strlen(fmt__str) + 1;
 	struct bpf_stream *stream;
 	u32 data_len = len__sz;
@@ -382,6 +411,11 @@ __bpf_kfunc int bpf_stream_vprintk_impl(int stream_id, const char *fmt__str, con
 		return ret;
 
 	ret = bstr_printf(data.buf, MAX_BPRINTF_BUF, fmt__str, data.bin_args);
+	/* Truncation: reject before capacity charge (not -ENOMEM). */
+	if (ret >= MAX_BPRINTF_BUF) {
+		bpf_bprintf_cleanup(&data);
+		return -E2BIG;
+	}
 	/* Exclude NULL byte during push. */
 	ret = bpf_stream_push_str(stream, data.buf, ret);
 	bpf_bprintf_cleanup(&data);
@@ -389,32 +423,70 @@ __bpf_kfunc int bpf_stream_vprintk_impl(int stream_id, const char *fmt__str, con
 	return ret;
 }
 
+/* Directly trigger a stack dump from the program. */
+__bpf_kfunc int bpf_stream_print_stack(int stream_id, struct bpf_prog_aux *aux)
+{
+	struct bpf_stream_stage ss;
+	struct bpf_prog *prog;
+
+	/* Make sure the stream ID is valid. */
+	if (!bpf_stream_get(stream_id, aux))
+		return -ENOENT;
+
+	prog = aux->main_prog_aux->prog;
+
+	bpf_stream_stage(ss, prog, stream_id, ({
+		bpf_stream_dump_stack(ss);
+	}));
+
+	return 0;
+}
+
 __bpf_kfunc_end_defs();
 
 /* Added kfunc to common_btf_ids */
 
-void bpf_prog_stream_init(struct bpf_prog *prog)
+int bpf_prog_stream_init(struct bpf_prog *prog, gfp_t gfp_extra_flags)
 {
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(prog->aux->stream); i++) {
-		atomic_set(&prog->aux->stream[i].capacity, 0);
-		init_llist_head(&prog->aux->stream[i].log);
-		mutex_init(&prog->aux->stream[i].lock);
-		prog->aux->stream[i].backlog_head = NULL;
-		prog->aux->stream[i].backlog_tail = NULL;
+		struct bpf_stream *stream;
+
+		/* On failure, bpf_prog_stream_free() releases the streams allocated so far. */
+		stream = kzalloc_obj(*stream,
+				     bpf_memcg_flags(GFP_KERNEL | gfp_extra_flags));
+		if (!stream)
+			return -ENOMEM;
+
+		refcount_set(&stream->refcnt, 1);
+		init_llist_head(&stream->log);
+		mutex_init(&stream->lock);
+		init_waitqueue_head(&stream->waitq);
+		init_irq_work(&stream->notify_work, bpf_stream_notify);
+		prog->aux->stream[i] = stream;
 	}
+	return 0;
 }
 
 void bpf_prog_stream_free(struct bpf_prog *prog)
 {
-	struct llist_node *list;
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(prog->aux->stream); i++) {
-		list = llist_del_all(&prog->aux->stream[i].log);
-		bpf_stream_free_list(list);
-		bpf_stream_free_list(prog->aux->stream[i].backlog_head);
+		struct bpf_stream *stream = prog->aux->stream[i];
+
+		if (!stream)
+			continue;
+		/*
+		 * Pairs with smp_load_acquire() in bpf_stream_file_read(): every
+		 * publication precedes the dead flag, so a reader that observes
+		 * it also observes all buffered data.
+		 */
+		smp_store_release(&stream->dead, true);
+		wake_up_interruptible_poll(&stream->waitq, EPOLLHUP);
+		bpf_stream_put(stream);
+		prog->aux->stream[i] = NULL;
 	}
 }
 
@@ -436,17 +508,18 @@ int bpf_stream_stage_printk(struct bpf_stream_stage *ss, const char *fmt, ...)
 {
 	struct bpf_bprintf_buffers *buf;
 	va_list args;
-	int ret;
+	int len, ret;
 
 	if (bpf_try_get_buffers(&buf))
 		return -EBUSY;
 
 	va_start(args, fmt);
-	ret = vsnprintf(buf->buf, ARRAY_SIZE(buf->buf), fmt, args);
+	len = vscnprintf(buf->buf, ARRAY_SIZE(buf->buf), fmt, args);
 	va_end(args);
-	ss->len += ret;
-	/* Exclude NULL byte during push. */
-	ret = __bpf_stream_push_str(&ss->log, buf->buf, ret);
+	/* Exclude NULL byte during push; skip empty output entirely. */
+	ret = len ? __bpf_stream_push_str(&ss->log, buf->buf, len) : 0;
+	if (!ret)
+		ss->len += len;
 	bpf_put_buffers();
 	return ret;
 }
@@ -476,6 +549,7 @@ int bpf_stream_stage_commit(struct bpf_stream_stage *ss, struct bpf_prog *prog,
 		list = tail;
 	}
 	llist_add_batch(head, tail, &stream->log);
+	bpf_stream_publish(stream, ss->len);
 	return 0;
 }
 

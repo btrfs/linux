@@ -13,12 +13,15 @@ description:
   The Venus AR50_LITE IP is a video encode and decode accelerator present
   on Qualcomm platforms.
 
-allOf:
-  - $ref: qcom,venus-common.yaml#
-
 properties:
   compatible:
-    const: qcom,qcm2290-venus
+    oneOf:
+      - items:
+          - enum:
+              - qcom,shikra-venus
+              - qcom,sm6115-venus
+          - const: qcom,qcm2290-venus
+      - const: qcom,qcm2290-venus
 
   power-domains:
     maxItems: 3
@@ -41,9 +44,6 @@ properties:
       - const: vcodec0_core
       - const: vcodec0_bus
 
-  iommus:
-    maxItems: 5
-
   interconnects:
     maxItems: 2
 
@@ -60,6 +60,22 @@ required:
   - compatible
   - power-domain-names
   - iommus
+
+allOf:
+  - $ref: qcom,venus-common.yaml#
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: qcom,shikra-venus
+    then:
+      properties:
+        iommus:
+          maxItems: 1
+    else:
+      properties:
+        iommus:
+          maxItems: 2
 
 unevaluatedProperties: false
 
@@ -102,10 +118,7 @@ examples:
         memory-region = <&pil_video_mem>;
 
         iommus = <&apps_smmu 0x860 0x0>,
-                 <&apps_smmu 0x880 0x0>,
-                 <&apps_smmu 0x861 0x04>,
-                 <&apps_smmu 0x863 0x0>,
-                 <&apps_smmu 0x804 0xe0>;
+                 <&apps_smmu 0x880 0x0>;
 
         interconnects = <&mmnrt_virt MASTER_VIDEO_P0 RPM_ALWAYS_TAG
                          &bimc SLAVE_EBI1 RPM_ALWAYS_TAG>,

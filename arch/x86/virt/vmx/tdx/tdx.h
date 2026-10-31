@@ -46,14 +46,11 @@
 #define TDH_PHYMEM_PAGE_WBINVD		41
 #define TDH_VP_WR			43
 #define TDH_SYS_CONFIG			45
-
-/*
- * SEAMCALL leaf:
- *
- * Bit 15:0	Leaf number
- * Bit 23:16	Version number
- */
-#define TDX_VERSION_SHIFT		16
+#define TDH_SYS_SHUTDOWN		52
+#define TDH_SYS_UPDATE			53
+#define TDH_PHYMEM_PAMT_ADD		58
+#define TDH_PHYMEM_PAMT_REMOVE		59
+#define TDH_SYS_DISABLE			69
 
 /* TDX page types */
 #define	PT_NDA		0x0
@@ -84,21 +81,10 @@ struct tdmr_info {
 	DECLARE_FLEX_ARRAY(struct tdmr_reserved_area, reserved_areas);
 } __packed __aligned(TDMR_INFO_ALIGNMENT);
 
-/* Bit definitions of TDX_FEATURES0 metadata field */
-#define TDX_FEATURES0_NO_RBP_MOD	BIT(18)
-
 /*
  * Do not put any hardware-defined TDX structure representations below
  * this comment!
  */
-
-/* Kernel defined TDX module status during module initialization. */
-enum tdx_module_status_t {
-	TDX_MODULE_UNINITIALIZED,
-	TDX_MODULE_INITIALIZED,
-	TDX_MODULE_ERROR
-};
-
 struct tdx_memblock {
 	struct list_head list;
 	unsigned long start_pfn;
@@ -117,5 +103,8 @@ struct tdmr_info_list {
 	int tdmr_sz;	/* Size of one 'tdmr_info' */
 	int max_tdmrs;	/* How many 'tdmr_info's are allocated */
 };
+
+int tdx_module_shutdown(void);
+int tdx_module_run_update(void);
 
 #endif

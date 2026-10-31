@@ -463,10 +463,12 @@ static int ltc294x_i2c_probe(struct i2c_client *client)
 
 	/* r_sense can be negative, when sense+ is connected to the battery
 	 * instead of the sense-. This results in reversed measurements. */
-	ret = of_property_read_u32(np, "lltc,resistor-sense", &r_sense);
-	if (ret < 0)
+	ret = of_property_read_s32(np, "lltc,resistor-sense", &r_sense);
+	if (ret < 0) {
+		of_node_put(np);
 		return dev_err_probe(&client->dev, ret,
 			"Could not find lltc,resistor-sense in devicetree\n");
+	}
 	info->r_sense = r_sense;
 
 	ret = of_property_read_u32(np, "lltc,prescaler-exponent",
@@ -476,6 +478,8 @@ static int ltc294x_i2c_probe(struct i2c_client *client)
 			"lltc,prescaler-exponent not in devicetree\n");
 		prescaler_exp = LTC2941_MAX_PRESCALER_EXP;
 	}
+
+	of_node_put(np);
 
 	if (info->id == LTC2943_ID) {
 		if (prescaler_exp > LTC2943_MAX_PRESCALER_EXP)
@@ -600,11 +604,11 @@ static SIMPLE_DEV_PM_OPS(ltc294x_pm_ops, ltc294x_suspend, ltc294x_resume);
 
 
 static const struct i2c_device_id ltc294x_i2c_id[] = {
-	{ "ltc2941", LTC2941_ID, },
-	{ "ltc2942", LTC2942_ID, },
-	{ "ltc2943", LTC2943_ID, },
-	{ "ltc2944", LTC2944_ID, },
-	{ },
+	{ .name = "ltc2941", .driver_data = LTC2941_ID },
+	{ .name = "ltc2942", .driver_data = LTC2942_ID },
+	{ .name = "ltc2943", .driver_data = LTC2943_ID },
+	{ .name = "ltc2944", .driver_data = LTC2944_ID },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ltc294x_i2c_id);
 

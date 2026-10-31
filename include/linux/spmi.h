@@ -70,12 +70,29 @@ int spmi_device_add(struct spmi_device *sdev);
 void spmi_device_remove(struct spmi_device *sdev);
 
 /**
+ * struct spmi_subdevice - Basic representation of an SPMI sub-device
+ * @sdev:	Sub-device representation of an SPMI device
+ * @devid:	Platform Device ID of an SPMI sub-device
+ */
+struct spmi_subdevice {
+	struct spmi_device	sdev;
+	unsigned int		devid;
+};
+
+struct spmi_subdevice *spmi_subdevice_alloc_and_add(struct spmi_device *sparent);
+void spmi_subdevice_remove(struct spmi_subdevice *sdev);
+
+struct spmi_subdevice *devm_spmi_subdevice_alloc_and_add(struct device *dev,
+							 struct spmi_device *sparent);
+
+/**
  * struct spmi_controller - interface to the SPMI master controller
  * @dev:	Driver model representation of the device.
  * @nr:		board-specific number identifier for this controller/bus
  * @cmd:	sends a non-data command sequence on the SPMI bus.
  * @read_cmd:	sends a register read command sequence on the SPMI bus.
  * @write_cmd:	sends a register write command sequence on the SPMI bus.
+ * @priv:	array of private data.
  */
 struct spmi_controller {
 	struct device		dev;
@@ -85,6 +102,7 @@ struct spmi_controller {
 			    u8 sid, u16 addr, u8 *buf, size_t len);
 	int	(*write_cmd)(struct spmi_controller *ctrl, u8 opcode,
 			     u8 sid, u16 addr, const u8 *buf, size_t len);
+	u8	priv[];
 };
 
 static inline struct spmi_controller *to_spmi_controller(struct device *d)
@@ -109,7 +127,7 @@ struct spmi_controller *spmi_controller_alloc(struct device *parent,
 
 /**
  * spmi_controller_put() - decrement controller refcount
- * @ctrl	SPMI controller.
+ * @ctrl:	SPMI controller.
  */
 static inline void spmi_controller_put(struct spmi_controller *ctrl)
 {
@@ -129,6 +147,7 @@ int devm_spmi_controller_add(struct device *parent, struct spmi_controller *ctrl
  *		this structure.
  * @probe:	binds this driver to a SPMI device.
  * @remove:	unbinds this driver from the SPMI device.
+ * @shutdown:	shuts down this driver.
  *
  * If PM runtime support is desired for a slave, a device driver can call
  * pm_runtime_put() from their probe() routine (and a balancing
@@ -170,6 +189,7 @@ static inline void spmi_driver_unregister(struct spmi_driver *sdrv)
 struct device_node;
 
 struct spmi_device *spmi_find_device_by_of_node(struct device_node *np);
+struct spmi_device *spmi_get_parent_spmi_device(struct device *dev);
 int spmi_register_read(struct spmi_device *sdev, u8 addr, u8 *buf);
 int spmi_ext_register_read(struct spmi_device *sdev, u8 addr, u8 *buf,
 			   size_t len);

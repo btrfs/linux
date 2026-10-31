@@ -2,6 +2,7 @@
 #include <linux/device.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/err.h>
 #include <linux/io.h>
 #include <linux/mcb.h>
 #include <linux/serial.h>
@@ -28,8 +29,6 @@
 #define MEN_UART3_MASK	0x04
 #define MEN_UART4_MASK	0x08
 
-#define MEN_Z125_UARTS_AVAILABLE	0x01
-
 #define MEN_Z025_MAX_UARTS		4
 #define MEN_UART_MEM_SIZE		0x10
 #define MEM_UART_REGISTER_SIZE		0x01
@@ -42,12 +41,10 @@
 
 #define MEN_READ_REGISTER(addr)	readb(addr)
 
-#define MAX_PORTS	4
-
 struct serial_8250_men_mcb_data {
 	int num_ports;
-	int line[MAX_PORTS];
-	unsigned int offset[MAX_PORTS];
+	struct uart_8250_port *uport[MEN_Z025_MAX_UARTS];
+	unsigned int offset[MEN_Z025_MAX_UARTS];
 };
 
 /*
@@ -126,7 +123,7 @@ static int read_serial_data(struct mcb_device *mdev,
 	if (res < 0)
 		return res;
 
-	for (i = 0; i < MAX_PORTS; i++) {
+	for (i = 0; i < MEN_Z025_MAX_UARTS; i++) {
 		mask = 0x1 << i;
 		switch (uarts_available & mask) {
 		case MEN_UART1_MASK:
@@ -150,7 +147,7 @@ static int read_serial_data(struct mcb_device *mdev,
 		}
 	}
 
-	if (count <= 0 || count > MAX_PORTS) {
+	if (count <= 0 || count > MEN_Z025_MAX_UARTS) {
 		dev_err(&mdev->dev, "unexpected number of ports: %u\n",
 			count);
 		return -ENODEV;
@@ -222,14 +219,13 @@ static int serial_8250_men_mcb_probe(struct mcb_device *mdev,
 					    + data->offset[i];
 
 		/* ok, register the port */
-		res = serial8250_register_8250_port(&uart);
-		if (res < 0) {
+		data->uport[i] = serial8250_register_8250_port(&uart);
+		if (IS_ERR(data->uport[i])) {
 			dev_err(&mdev->dev, "unable to register UART port\n");
-			return res;
+			return PTR_ERR(data->uport[i]);
 		}
 
-		data->line[i] = res;
-		dev_info(&mdev->dev, "found MCB UART: ttyS%d\n", data->line[i]);
+		dev_info(&mdev->dev, "found MCB UART: ttyS%d\n", data->uport[i]->port.line);
 	}
 
 	return 0;
@@ -244,7 +240,7 @@ static void serial_8250_men_mcb_remove(struct mcb_device *mdev)
 		return;
 
 	for (i = 0; i < data->num_ports; i++)
-		serial8250_unregister_port(data->line[i]);
+		serial8250_unregister_port(data->uport[i]);
 }
 
 static const struct mcb_device_id serial_8250_men_mcb_ids[] = {
@@ -268,7 +264,4 @@ module_mcb_driver(mcb_driver);
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("MEN 8250 UART driver");
 MODULE_AUTHOR("Michael Moese <michael.moese@men.de");
-MODULE_ALIAS("mcb:16z125");
-MODULE_ALIAS("mcb:16z025");
-MODULE_ALIAS("mcb:16z057");
 MODULE_IMPORT_NS("MCB");

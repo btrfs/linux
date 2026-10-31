@@ -3279,7 +3279,7 @@ static void onenand_check_features(struct mtd_info *mtd)
 			 *
 			 * Now it has as following
 			 * KFM4G16Q4M has NOP 4 with version ID 0x0131
-			 * KFM4G16Q5M has NOP 1 with versoin ID 0x013e
+			 * KFM4G16Q5M has NOP 1 with version ID 0x013e
 			 */
 			if ((this->version_id & 0xf) == 0xe)
 				this->options |= ONENAND_HAS_NOP_1;
@@ -3728,9 +3728,8 @@ static int onenand_probe(struct mtd_info *mtd)
 		/* Maximum possible erase regions */
 		mtd->numeraseregions = this->dies << 1;
 		mtd->eraseregions =
-			kcalloc(this->dies << 1,
-				sizeof(struct mtd_erase_region_info),
-				GFP_KERNEL);
+			kzalloc_objs(struct mtd_erase_region_info,
+				     this->dies << 1);
 		if (!mtd->eraseregions)
 			return -ENOMEM;
 	}

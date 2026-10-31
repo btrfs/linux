@@ -10,6 +10,8 @@
 #include <linux/fs_context.h>
 #include <linux/fs_parser.h>
 
+struct file_kattr;
+
 /*
  * vfat shortname flags
  */
@@ -130,6 +132,7 @@ struct msdos_inode_info {
 	struct hlist_node i_dir_hash;	/* hash by i_logstart */
 	struct rw_semaphore truncate_lock; /* protect bmap against truncate */
 	struct timespec64 i_crtime;	/* File creation (birth) time */
+	struct mapping_metadata_bhs i_metadata_bhs;
 	struct inode vfs_inode;
 };
 
@@ -246,13 +249,13 @@ static inline unsigned char fat_checksum(const __u8 *name)
 	return s;
 }
 
-static inline sector_t fat_clus_to_blknr(struct msdos_sb_info *sbi, int clus)
+static inline sector_t fat_clus_to_blknr(const struct msdos_sb_info *sbi, int clus)
 {
 	return ((sector_t)clus - FAT_START_ENT) * sbi->sec_per_clus
 		+ sbi->data_start;
 }
 
-static inline void fat_get_blknr_offset(struct msdos_sb_info *sbi,
+static inline void fat_get_blknr_offset(const struct msdos_sb_info *sbi,
 				loff_t i_pos, sector_t *blknr, int *offset)
 {
 	*blknr = i_pos >> sbi->dir_per_block_bits;
@@ -389,9 +392,10 @@ extern void fat_ent_access_init(struct super_block *sb);
 extern int fat_ent_read(struct inode *inode, struct fat_entry *fatent,
 			int entry);
 extern int fat_ent_write(struct inode *inode, struct fat_entry *fatent,
-			 int new, int wait);
+			 int new, int old, int wait);
 extern int fat_alloc_clusters(struct inode *inode, int *cluster,
 			      int nr_cluster);
+int fat_alloc_chain(struct inode *inode, int *cluster, int nr_cluster);
 extern int fat_free_clusters(struct inode *inode, int cluster);
 extern int fat_count_free_clusters(struct super_block *sb);
 extern int fat_trim_fs(struct inode *inode, struct fstrim_range *range);
@@ -401,12 +405,13 @@ extern long fat_generic_ioctl(struct file *filp, unsigned int cmd,
 			      unsigned long arg);
 extern const struct file_operations fat_file_operations;
 extern const struct inode_operations fat_file_inode_operations;
-extern int fat_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+extern int fat_setattr(const struct mnt_idmap *idmap, struct dentry *dentry,
 		       struct iattr *attr);
 extern void fat_truncate_blocks(struct inode *inode, loff_t offset);
-extern int fat_getattr(struct mnt_idmap *idmap,
+extern int fat_getattr(const struct mnt_idmap *idmap,
 		       const struct path *path, struct kstat *stat,
 		       u32 request_mask, unsigned int flags);
+int fat_fileattr_get(struct dentry *dentry, struct file_kattr *fa);
 extern int fat_file_fsync(struct file *file, loff_t start, loff_t end,
 			  int datasync);
 
@@ -417,7 +422,6 @@ extern void fat_detach(struct inode *inode);
 extern struct inode *fat_iget(struct super_block *sb, loff_t i_pos);
 extern struct inode *fat_build_inode(struct super_block *sb,
 			struct msdos_dir_entry *de, loff_t i_pos);
-extern int fat_sync_inode(struct inode *inode);
 extern int fat_fill_super(struct super_block *sb, struct fs_context *fc,
 			  void (*setup)(struct super_block *));
 extern int fat_fill_inode(struct inode *inode, struct msdos_dir_entry *de);
@@ -437,7 +441,7 @@ static inline unsigned long fat_dir_hash(int logstart)
 {
 	return hash_32(logstart, FAT_HASH_BITS);
 }
-extern int fat_add_cluster(struct inode *inode);
+extern int fat_add_clusters(struct inode *inode, int nr_cluster);
 
 /* fat/misc.c */
 extern __printf(3, 4) __cold
@@ -468,11 +472,12 @@ extern void fat_time_unix2fat(struct msdos_sb_info *sbi, struct timespec64 *ts,
 			      __le16 *time, __le16 *date, u8 *time_cs);
 extern struct timespec64 fat_truncate_atime(const struct msdos_sb_info *sbi,
 					    const struct timespec64 *ts);
-extern struct timespec64 fat_truncate_mtime(const struct msdos_sb_info *sbi,
-					    const struct timespec64 *ts);
-extern int fat_truncate_time(struct inode *inode, struct timespec64 *now,
-			     int flags);
-extern int fat_update_time(struct inode *inode, int flags);
+#define FAT_UPDATE_ATIME	(1u << 0)
+#define FAT_UPDATE_CMTIME	(1u << 1)
+void fat_truncate_time(struct inode *inode, struct timespec64 *now,
+		unsigned int flags);
+int fat_update_time(struct inode *inode, enum fs_update_time type,
+		unsigned int flags);
 extern int fat_sync_bhs(struct buffer_head **bhs, int nr_bhs);
 
 int fat_cache_init(void);

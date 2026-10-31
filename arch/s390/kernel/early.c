@@ -4,8 +4,7 @@
  *    Author(s): Hongjie Yang <hongjie@us.ibm.com>,
  */
 
-#define KMSG_COMPONENT "setup"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "setup: " fmt
 
 #include <linux/sched/debug.h>
 #include <linux/cpufeature.h>
@@ -120,21 +119,21 @@ static noinline __init void setup_arch_string(void)
 	EBCASC(mach->type, sizeof(mach->type));
 	EBCASC(mach->model, sizeof(mach->model));
 	EBCASC(mach->model_capacity, sizeof(mach->model_capacity));
-	sprintf(mstr, "%-16.16s %-4.4s %-16.16s %-16.16s",
-		mach->manufacturer, mach->type,
-		mach->model, mach->model_capacity);
+	scnprintf(mstr, sizeof(mstr), "%-16.16s %-4.4s %-16.16s %-16.16s",
+		  mach->manufacturer, mach->type,
+		  mach->model, mach->model_capacity);
 	strim_all(mstr);
 	if (stsi(vm, 3, 2, 2) == 0 && vm->count) {
 		EBCASC(vm->vm[0].cpi, sizeof(vm->vm[0].cpi));
-		sprintf(hvstr, "%-16.16s", vm->vm[0].cpi);
+		scnprintf(hvstr, sizeof(hvstr), "%-16.16s", vm->vm[0].cpi);
 		strim_all(hvstr);
 	} else {
-		sprintf(hvstr, "%s",
-			machine_is_lpar() ? "LPAR" :
-			machine_is_vm() ? "z/VM" :
-			machine_is_kvm() ? "KVM" : "unknown");
+		scnprintf(hvstr, sizeof(hvstr), "%s",
+			  machine_is_lpar() ? "LPAR" :
+			  machine_is_vm() ? "z/VM" :
+			  machine_is_kvm() ? "KVM" : "unknown");
 	}
-	sprintf(arch_hw_string, "HW: %s (%s)", mstr, hvstr);
+	scnprintf(arch_hw_string, sizeof(arch_hw_string), "HW: %s (%s)", mstr, hvstr);
 	dump_stack_set_arch_desc("%s (%s)", mstr, hvstr);
 }
 
@@ -154,16 +153,28 @@ static __init void setup_topology(void)
 void __init __do_early_pgm_check(struct pt_regs *regs)
 {
 	struct lowcore *lc = get_lowcore();
-	unsigned long ip;
 
+	regs->flags = 0;
 	regs->int_code = lc->pgm_int_code;
 	regs->int_parm_long = lc->trans_exc_code;
 	regs->last_break = lc->pgm_last_break;
-	ip = __rewind_psw(regs->psw, regs->int_code >> 16);
+	regs->monitor_code = lc->monitor_code;
+	set_pt_regs_flag(regs, PIF_PGM_CHECK);
 
 	/* Monitor Event? Might be a warning */
 	if ((regs->int_code & PGM_INT_CODE_MASK) == 0x40) {
-		if (report_bug(ip, regs) == BUG_TRAP_TYPE_WARN)
+		enum bug_trap_type btt;
+		unsigned long ip;
+
+		if (regs->monitor_code == MONCODE_BUG_ARG) {
+			regs->psw.addr = regs->gprs[14];
+			set_pt_regs_flag(regs, PIF_WARN_TRAP_SKIPPED);
+			btt = report_bug_entry((struct bug_entry *)regs->gprs[2], regs);
+		} else {
+			ip = __rewind_psw(regs->psw, regs->int_code >> 16);
+			btt = report_bug(ip, regs);
+		}
+		if (btt == BUG_TRAP_TYPE_WARN)
 			return;
 	}
 	if (fixup_exception(regs))
@@ -174,8 +185,12 @@ void __init __do_early_pgm_check(struct pt_regs *regs)
 	 * some basic information in case it is too early for printk().
 	 */
 	register_early_console();
-	early_printk("PANIC: early exception %04x PSW: %016lx %016lx\n",
-		     regs->int_code & 0xffff, regs->psw.mask, regs->psw.addr);
+	if (test_pt_regs_flag(regs, PIF_WARN_TRAP_SKIPPED))
+		early_printk("PANIC: early exception PSW: %016lx %016lx\n",
+			     regs->psw.mask, regs->psw.addr);
+	else
+		early_printk("PANIC: early exception %04x PSW: %016lx %016lx\n",
+			     regs->int_code & 0xffff, regs->psw.mask, regs->psw.addr);
 	show_regs(regs);
 	disabled_wait();
 }

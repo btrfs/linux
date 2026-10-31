@@ -326,7 +326,7 @@ static SOC_ENUM_SINGLE_DECL(da7210_hp_mode_sel,
 static int da7210_put_alc_sw(struct snd_kcontrol *kcontrol,
 			     struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 
 	if (ucontrol->value.integer.value[0]) {
 		/* Check if noise suppression is enabled */
@@ -349,7 +349,7 @@ static int da7210_put_alc_sw(struct snd_kcontrol *kcontrol,
 static int da7210_put_noise_sup_sw(struct snd_kcontrol *kcontrol,
 				   struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	u8 val;
 
 	if (ucontrol->value.integer.value[0]) {
@@ -1030,6 +1030,11 @@ err:
 	return -EINVAL;
 }
 
+static const u64 da7210_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J;
+
 /* DAI operations */
 static const struct snd_soc_dai_ops da7210_dai_ops = {
 	.hw_params	= da7210_hw_params,
@@ -1037,6 +1042,8 @@ static const struct snd_soc_dai_ops da7210_dai_ops = {
 	.set_sysclk	= da7210_set_dai_sysclk,
 	.set_pll	= da7210_set_dai_pll,
 	.mute_stream	= da7210_mute,
+	.auto_selectable_formats        = &da7210_selectable_formats,
+	.num_auto_selectable_formats    = 1,
 	.no_capture_mute = 1,
 };
 
@@ -1151,7 +1158,7 @@ static int da7210_probe(struct snd_soc_component *component)
 	snd_soc_component_write(component, DA7210_PLL_DIV3, DA7210_MCLK_RANGE_10_20_MHZ |
 					      DA7210_PLL_BYP);
 
-	/* Diable PLL and bypass it */
+	/* Disable PLL and bypass it */
 	snd_soc_component_write(component, DA7210_PLL, DA7210_PLL_FS_48000);
 
 	/* Activate all enabled subsystem */
@@ -1238,7 +1245,7 @@ static int da7210_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id da7210_i2c_id[] = {
-	{ "da7210" },
+	{ .name = "da7210" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, da7210_i2c_id);

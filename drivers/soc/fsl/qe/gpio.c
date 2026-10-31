@@ -16,6 +16,7 @@
 #include <linux/gpio/driver.h>
 #include <linux/slab.h>
 #include <linux/export.h>
+#include <linux/of_irq.h>
 #include <linux/platform_device.h>
 
 #include <soc/fsl/qe/qe.h>
@@ -23,6 +24,7 @@
 #define PIN_MASK(gpio) (1UL << (QE_PIO_PINS - 1 - (gpio)))
 
 struct qe_gpio_chip {
+	struct device_node *np;
 	struct gpio_chip gc;
 	void __iomem *regs;
 	spinlock_t lock;
@@ -30,8 +32,13 @@ struct qe_gpio_chip {
 	/* shadowed data register to clear/set bits safely */
 	u32 cpdata;
 
-	/* saved_regs used to restore dedicated functions */
-	struct qe_pio_regs saved_regs;
+	/* saved regs used to restore dedicated functions */
+	u32 saved_cpodr;
+	u32 saved_cpdata;
+	u32 saved_cpdir1;
+	u32 saved_cpdir2;
+	u32 saved_cppar1;
+	u32 saved_cppar2;
 };
 
 static void qe_gpio_save_regs(struct qe_gpio_chip *qe_gc)
@@ -39,12 +46,12 @@ static void qe_gpio_save_regs(struct qe_gpio_chip *qe_gc)
 	struct qe_pio_regs __iomem *regs = qe_gc->regs;
 
 	qe_gc->cpdata = ioread32be(&regs->cpdata);
-	qe_gc->saved_regs.cpdata = qe_gc->cpdata;
-	qe_gc->saved_regs.cpdir1 = ioread32be(&regs->cpdir1);
-	qe_gc->saved_regs.cpdir2 = ioread32be(&regs->cpdir2);
-	qe_gc->saved_regs.cppar1 = ioread32be(&regs->cppar1);
-	qe_gc->saved_regs.cppar2 = ioread32be(&regs->cppar2);
-	qe_gc->saved_regs.cpodr = ioread32be(&regs->cpodr);
+	qe_gc->saved_cpdata = qe_gc->cpdata;
+	qe_gc->saved_cpdir1 = ioread32be(&regs->cpdir1);
+	qe_gc->saved_cpdir2 = ioread32be(&regs->cpdir2);
+	qe_gc->saved_cppar1 = ioread32be(&regs->cppar1);
+	qe_gc->saved_cppar2 = ioread32be(&regs->cppar2);
+	qe_gc->saved_cpodr = ioread32be(&regs->cpodr);
 }
 
 static int qe_gpio_get(struct gpio_chip *gc, unsigned int gpio)
@@ -135,6 +142,53 @@ static int qe_gpio_dir_out(struct gpio_chip *gc, unsigned int gpio, int val)
 	return 0;
 }
 
+static int qe_gpio_get_direction(struct gpio_chip *gc, unsigned int gpio)
+{
+	struct qe_gpio_chip *qe_gc = gpiochip_get_data(gc);
+	struct qe_pio_regs __iomem *regs = qe_gc->regs;
+	unsigned long flags;
+	u32 val, mask;
+
+	spin_lock_irqsave(&qe_gc->lock, flags);
+
+	if (gpio < QE_PIO_PINS / 2)
+		val = ioread32be(&regs->cpdir1);
+	else
+		val = ioread32be(&regs->cpdir2);
+
+	spin_unlock_irqrestore(&qe_gc->lock, flags);
+
+	mask = (u32)QE_PIO_DIR_OUT << (QE_PIO_PINS - 2 - (gpio % (QE_PIO_PINS / 2)) * 2);
+
+	if (val & mask)
+		return GPIO_LINE_DIRECTION_OUT;
+	else
+		return GPIO_LINE_DIRECTION_IN;
+}
+
+static int qe_gpio_to_irq(struct gpio_chip *gc, unsigned int gpio)
+{
+	struct qe_gpio_chip *qe_gc = gpiochip_get_data(gc);
+	struct of_phandle_args oirq;
+	struct irq_domain *domain;
+	int ret;
+
+	oirq.np = qe_gc->np;
+	oirq.args_count = 2;
+	oirq.args[0] = gpio;
+	oirq.args[1] = 0;
+
+	ret = of_irq_parse_raw(NULL, &oirq);
+	if (ret)
+		return ret;
+
+	domain = irq_find_host(oirq.np);
+	if (!domain)
+		return -EPROBE_DEFER;
+
+	return irq_create_of_mapping(&oirq);
+}
+
 struct qe_pin {
 	/*
 	 * The qe_gpio_chip name is unfortunate, we should change that to
@@ -147,54 +201,39 @@ struct qe_pin {
 /**
  * qe_pin_request - Request a QE pin
  * @dev:	device to get the pin from
- * @index:	index of the pin in the device tree
+ * @gpiod:	GPIO descriptor associated with this pin
  * Context:	non-atomic
  *
  * This function return qe_pin so that you could use it with the rest of
  * the QE Pin Multiplexing API.
  */
-struct qe_pin *qe_pin_request(struct device *dev, int index)
+struct qe_pin *qe_pin_request(struct device *dev, struct gpio_desc *gpiod)
 {
+	struct gpio_device *gdev;
 	struct qe_pin *qe_pin;
 	struct gpio_chip *gc;
-	struct gpio_desc *gpiod;
-	int gpio_num;
 	int err;
 
-	qe_pin = kzalloc(sizeof(*qe_pin), GFP_KERNEL);
+	qe_pin = kzalloc_obj(*qe_pin);
 	if (!qe_pin) {
 		dev_dbg(dev, "%s: can't allocate memory\n", __func__);
 		return ERR_PTR(-ENOMEM);
 	}
 
-	/*
-	 * Request gpio as nonexclusive as it was likely reserved by the
-	 * caller, and we are not planning on controlling it, we only need
-	 * the descriptor to the to the gpio chip structure.
-	 */
-	gpiod = gpiod_get_index(dev, NULL, index,
-			        GPIOD_ASIS | GPIOD_FLAGS_BIT_NONEXCLUSIVE);
-	err = PTR_ERR_OR_ZERO(gpiod);
-	if (err)
-		goto err0;
-
-	gc = gpiod_to_chip(gpiod);
-	gpio_num = desc_to_gpio(gpiod);
-	/* We no longer need this descriptor */
-	gpiod_put(gpiod);
-
-	if (WARN_ON(!gc)) {
+	gdev = gpiod_to_gpio_device(gpiod);
+	if (WARN_ON(!gdev)) {
 		err = -ENODEV;
 		goto err0;
 	}
 
+	gc = gpio_device_get_chip(gdev);
 	qe_pin->controller = gpiochip_get_data(gc);
 	/*
 	 * FIXME: this gets the local offset on the gpio_chip so that the driver
 	 * can manipulate pin control settings through its custom API. The real
 	 * solution is to create a real pin control driver for this.
 	 */
-	qe_pin->num = gpio_num - gc->base;
+	qe_pin->num = desc_to_gpio(gpiod) - gc->base;
 
 	if (!fwnode_device_is_compatible(gc->fwnode, "fsl,mpc8323-qe-pario-bank")) {
 		dev_dbg(dev, "%s: tried to get a non-qe pin\n", __func__);
@@ -235,7 +274,6 @@ void qe_pin_set_dedicated(struct qe_pin *qe_pin)
 {
 	struct qe_gpio_chip *qe_gc = qe_pin->controller;
 	struct qe_pio_regs __iomem *regs = qe_gc->regs;
-	struct qe_pio_regs *sregs = &qe_gc->saved_regs;
 	int pin = qe_pin->num;
 	u32 mask1 = 1 << (QE_PIO_PINS - (pin + 1));
 	u32 mask2 = 0x3 << (QE_PIO_PINS - (pin % (QE_PIO_PINS / 2) + 1) * 2);
@@ -245,24 +283,20 @@ void qe_pin_set_dedicated(struct qe_pin *qe_pin)
 	spin_lock_irqsave(&qe_gc->lock, flags);
 
 	if (second_reg) {
-		qe_clrsetbits_be32(&regs->cpdir2, mask2,
-				   sregs->cpdir2 & mask2);
-		qe_clrsetbits_be32(&regs->cppar2, mask2,
-				   sregs->cppar2 & mask2);
+		qe_clrsetbits_be32(&regs->cpdir2, mask2, qe_gc->saved_cpdir2 & mask2);
+		qe_clrsetbits_be32(&regs->cppar2, mask2, qe_gc->saved_cppar2 & mask2);
 	} else {
-		qe_clrsetbits_be32(&regs->cpdir1, mask2,
-				   sregs->cpdir1 & mask2);
-		qe_clrsetbits_be32(&regs->cppar1, mask2,
-				   sregs->cppar1 & mask2);
+		qe_clrsetbits_be32(&regs->cpdir1, mask2, qe_gc->saved_cpdir1 & mask2);
+		qe_clrsetbits_be32(&regs->cppar1, mask2, qe_gc->saved_cppar1 & mask2);
 	}
 
-	if (sregs->cpdata & mask1)
+	if (qe_gc->saved_cpdata & mask1)
 		qe_gc->cpdata |= mask1;
 	else
 		qe_gc->cpdata &= ~mask1;
 
 	iowrite32be(qe_gc->cpdata, &regs->cpdata);
-	qe_clrsetbits_be32(&regs->cpodr, mask1, sregs->cpodr & mask1);
+	qe_clrsetbits_be32(&regs->cpodr, mask1, qe_gc->saved_cpodr & mask1);
 	spin_unlock_irqrestore(&qe_gc->lock, flags);
 }
 EXPORT_SYMBOL(qe_pin_set_dedicated);
@@ -299,7 +333,7 @@ static int qe_gpio_probe(struct platform_device *ofdev)
 	qe_gc = devm_kzalloc(dev, sizeof(*qe_gc), GFP_KERNEL);
 	if (!qe_gc)
 		return -ENOMEM;
-
+	qe_gc->np = np;
 	spin_lock_init(&qe_gc->lock);
 
 	gc = &qe_gc->gc;
@@ -308,9 +342,11 @@ static int qe_gpio_probe(struct platform_device *ofdev)
 	gc->ngpio = QE_PIO_PINS;
 	gc->direction_input = qe_gpio_dir_in;
 	gc->direction_output = qe_gpio_dir_out;
+	gc->get_direction = qe_gpio_get_direction;
 	gc->get = qe_gpio_get;
 	gc->set = qe_gpio_set;
 	gc->set_multiple = qe_gpio_set_multiple;
+	gc->to_irq = qe_gpio_to_irq;
 	gc->parent = dev;
 	gc->owner = THIS_MODULE;
 

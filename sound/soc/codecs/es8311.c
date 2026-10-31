@@ -760,6 +760,8 @@ static int es8311_set_bias_level(struct snd_soc_component *component,
 				 enum snd_soc_bias_level level)
 {
 	struct es8311_priv *es8311 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
+	int ret;
 
 	switch (level) {
 	case SND_SOC_BIAS_ON:
@@ -767,18 +769,22 @@ static int es8311_set_bias_level(struct snd_soc_component *component,
 	case SND_SOC_BIAS_PREPARE:
 		break;
 	case SND_SOC_BIAS_STANDBY:
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_OFF) {
-			int ret = clk_prepare_enable(es8311->mclk);
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF) {
+			ret = clk_prepare_enable(es8311->mclk);
 			if (ret) {
 				dev_err(component->dev,
 					"unable to prepare mclk\n");
 				return ret;
 			}
 
-			snd_soc_component_update_bits(
-				component, ES8311_SYS3,
-				ES8311_SYS3_PDN_VMIDSEL_MASK,
-				ES8311_SYS3_PDN_VMIDSEL_STARTUP_NORMAL_SPEED);
+			ret = snd_soc_component_update_bits(
+				      component, ES8311_SYS3,
+				      ES8311_SYS3_PDN_VMIDSEL_MASK,
+				      ES8311_SYS3_PDN_VMIDSEL_STARTUP_NORMAL_SPEED);
+			if (ret < 0) {
+				clk_disable_unprepare(es8311->mclk);
+				return ret;
+			}
 		}
 
 		break;
@@ -794,12 +800,29 @@ static int es8311_set_bias_level(struct snd_soc_component *component,
 	return 0;
 }
 
+static const u64 es8311_selectable_formats[] = {
+	/* Hi Priority */
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF,
+	/* Low Priority */
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF,
+};
+
 static const struct snd_soc_dai_ops es8311_dai_ops = {
 	.startup = es8311_startup,
 	.hw_params = es8311_hw_params,
 	.mute_stream = es8311_mute,
 	.set_sysclk = es8311_set_sysclk,
 	.set_fmt = es8311_set_dai_fmt,
+	.auto_selectable_formats = es8311_selectable_formats,
+	.num_auto_selectable_formats = ARRAY_SIZE(es8311_selectable_formats),
 	.no_capture_mute = 1,
 };
 
@@ -861,13 +884,18 @@ static int es8311_suspend(struct snd_soc_component *component)
 static int es8311_resume(struct snd_soc_component *component)
 {
 	struct es8311_priv *es8311;
+	int ret;
 
 	es8311 = snd_soc_component_get_drvdata(component);
 
 	es8311_reset(component, false);
 
 	regcache_cache_only(es8311->regmap, false);
-	regcache_sync(es8311->regmap);
+	ret = regcache_sync(es8311->regmap);
+	if (ret) {
+		dev_err(component->dev, "unable to sync regcache\n");
+		return ret;
+	}
 
 	return 0;
 }
@@ -877,12 +905,6 @@ static int es8311_component_probe(struct snd_soc_component *component)
 	struct es8311_priv *es8311;
 
 	es8311 = snd_soc_component_get_drvdata(component);
-
-	es8311->mclk = devm_clk_get_optional(component->dev, "mclk");
-	if (IS_ERR(es8311->mclk)) {
-		dev_err(component->dev, "invalid mclk\n");
-		return PTR_ERR(es8311->mclk);
-	}
 
 	es8311->mclk_freq = clk_get_rate(es8311->mclk);
 	if (es8311->mclk_freq > 0 && es8311->mclk_freq < ES8311_MCLK_MAX_FREQ)
@@ -932,6 +954,10 @@ static int es8311_i2c_probe(struct i2c_client *i2c_client)
 	if (es8311 == NULL)
 		return -ENOMEM;
 
+	es8311->mclk = devm_clk_get_optional(dev, "mclk");
+	if (IS_ERR(es8311->mclk))
+		return dev_err_probe(dev, PTR_ERR(es8311->mclk), "invalid mclk\n");
+
 	es8311->regmap =
 		devm_regmap_init_i2c(i2c_client, &es8311_regmap_config);
 	if (IS_ERR(es8311->regmap))
@@ -944,7 +970,7 @@ static int es8311_i2c_probe(struct i2c_client *i2c_client)
 }
 
 static const struct i2c_device_id es8311_id[] = {
-	{ "es8311" },
+	{ .name = "es8311" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, es8311_id);

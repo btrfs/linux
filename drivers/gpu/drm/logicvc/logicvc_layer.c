@@ -81,7 +81,7 @@ static bool logicvc_layer_format_inverted(uint32_t format)
 }
 
 static int logicvc_plane_atomic_check(struct drm_plane *drm_plane,
-				      struct drm_atomic_state *state)
+				      struct drm_atomic_commit *state)
 {
 	struct drm_device *drm_dev = drm_plane->dev;
 	struct logicvc_layer *layer = logicvc_layer(drm_plane);
@@ -96,8 +96,8 @@ static int logicvc_plane_atomic_check(struct drm_plane *drm_plane,
 	if (!new_state->crtc)
 		return 0;
 
-	crtc_state = drm_atomic_get_existing_crtc_state(new_state->state,
-							new_state->crtc);
+	crtc_state = drm_atomic_get_new_crtc_state(new_state->state,
+						   new_state->crtc);
 	if (WARN_ON(!crtc_state))
 		return -EINVAL;
 
@@ -135,7 +135,7 @@ static int logicvc_plane_atomic_check(struct drm_plane *drm_plane,
 }
 
 static void logicvc_plane_atomic_update(struct drm_plane *drm_plane,
-					struct drm_atomic_state *state)
+					struct drm_atomic_commit *state)
 {
 	struct logicvc_layer *layer = logicvc_layer(drm_plane);
 	struct logicvc_drm *logicvc = logicvc_drm(drm_plane->dev);
@@ -232,7 +232,7 @@ static void logicvc_plane_atomic_update(struct drm_plane *drm_plane,
 }
 
 static void logicvc_plane_atomic_disable(struct drm_plane *drm_plane,
-					 struct drm_atomic_state *state)
+					 struct drm_atomic_commit *state)
 {
 	struct logicvc_layer *layer = logicvc_layer(drm_plane);
 	struct logicvc_drm *logicvc = logicvc_drm(drm_plane->dev);
@@ -251,7 +251,7 @@ static const struct drm_plane_funcs logicvc_plane_funcs = {
 	.update_plane		= drm_atomic_helper_update_plane,
 	.disable_plane		= drm_atomic_helper_disable_plane,
 	.destroy		= drm_plane_cleanup,
-	.reset			= drm_atomic_helper_plane_reset,
+	.atomic_create_state	= drm_atomic_helper_plane_create_state,
 	.atomic_duplicate_state	= drm_atomic_helper_plane_duplicate_state,
 	.atomic_destroy_state	= drm_atomic_helper_plane_destroy_state,
 };

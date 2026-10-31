@@ -12,6 +12,7 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/cleanup.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -241,23 +242,17 @@ static int it87_gpio_direction_out(struct gpio_chip *chip,
 	mask = 1 << (gpio_num % 8);
 	group = (gpio_num / 8);
 
-	spin_lock(&it87_gpio->lock);
+	guard(spinlock)(&it87_gpio->lock);
 
 	rc = superio_enter();
 	if (rc)
-		goto exit;
+		return rc;
 
 	/* set the output enable bit */
 	superio_set_mask(mask, group + it87_gpio->output_base);
 
 	rc = it87_gpio_set(chip, gpio_num, val);
-	if (rc)
-		goto exit;
-
 	superio_exit();
-
-exit:
-	spin_unlock(&it87_gpio->lock);
 	return rc;
 }
 
@@ -367,7 +362,7 @@ static int __init it87_gpio_init(void)
 	 */
 	labels = kcalloc(it87_gpio->chip.ngpio, sizeof("it87_gpXY"),
 								GFP_KERNEL);
-	labels_table = kcalloc(it87_gpio->chip.ngpio, sizeof(const char *),
+	labels_table = kcalloc(it87_gpio->chip.ngpio, sizeof(*labels_table),
 								GFP_KERNEL);
 
 	if (!labels || !labels_table) {

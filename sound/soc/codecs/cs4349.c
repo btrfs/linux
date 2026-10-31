@@ -7,7 +7,6 @@
  * Authors: Tim Howe <Tim.Howe@cirrus.com>
  */
 
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/kernel.h>
@@ -229,10 +228,22 @@ static const struct snd_soc_dapm_route cs4349_routes[] = {
 
 #define CS4349_PCM_RATES SNDRV_PCM_RATE_8000_192000
 
+/*
+ * NOTE
+ *
+ * auto_select doesn't include _RIGHT_J, because 32bit width can't use it
+ * (= cs4349_pcm_hw_params()). It can be selected via Card directly if needed.
+ */
+static const u64 cs4349_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J;
+
 static const struct snd_soc_dai_ops cs4349_dai_ops = {
 	.hw_params	= cs4349_pcm_hw_params,
 	.set_fmt	= cs4349_set_dai_fmt,
 	.mute_stream	= cs4349_mute,
+	.auto_selectable_formats	= &cs4349_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 	.no_capture_mute = 1,
 };
 
@@ -341,7 +352,13 @@ static int cs4349_runtime_resume(struct device *dev)
 	gpiod_set_value_cansleep(cs4349->reset_gpio, 1);
 
 	regcache_cache_only(cs4349->regmap, false);
-	regcache_sync(cs4349->regmap);
+	ret = regcache_sync(cs4349->regmap);
+	if (ret) {
+		regcache_cache_only(cs4349->regmap, true);
+		regcache_mark_dirty(cs4349->regmap);
+		gpiod_set_value_cansleep(cs4349->reset_gpio, 0);
+		return ret;
+	}
 
 	return 0;
 }
@@ -358,8 +375,8 @@ static const struct of_device_id cs4349_of_match[] = {
 MODULE_DEVICE_TABLE(of, cs4349_of_match);
 
 static const struct i2c_device_id cs4349_i2c_id[] = {
-	{"cs4349"},
-	{}
+	{ .name = "cs4349" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, cs4349_i2c_id);

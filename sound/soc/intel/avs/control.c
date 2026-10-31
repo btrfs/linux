@@ -15,11 +15,10 @@
 
 static struct avs_dev *avs_get_kcontrol_adev(struct snd_kcontrol *kcontrol)
 {
-	struct snd_soc_dapm_widget *w;
+	struct snd_soc_dapm_context *dapm = snd_soc_dapm_kcontrol_to_dapm(kcontrol);
+	struct device *dev = snd_soc_dapm_to_dev(dapm);
 
-	w = snd_soc_dapm_kcontrol_widget(kcontrol);
-
-	return to_avs_dev(w->dapm->component->dev);
+	return to_avs_dev(dev);
 }
 
 static struct avs_path_module *avs_get_volume_module(struct avs_dev *adev, u32 id)
@@ -28,7 +27,7 @@ static struct avs_path_module *avs_get_volume_module(struct avs_dev *adev, u32 i
 	struct avs_path_pipeline *ppl;
 	struct avs_path_module *mod;
 
-	spin_lock(&adev->path_list_lock);
+	guard(spinlock)(&adev->path_list_lock);
 	list_for_each_entry(path, &adev->path_list, node) {
 		list_for_each_entry(ppl, &path->ppl_list, node) {
 			list_for_each_entry(mod, &ppl->mod_list, node) {
@@ -36,14 +35,11 @@ static struct avs_path_module *avs_get_volume_module(struct avs_dev *adev, u32 i
 
 				if ((guid_equal(type, &AVS_PEAKVOL_MOD_UUID) ||
 				     guid_equal(type, &AVS_GAIN_MOD_UUID)) &&
-				    mod->template->ctl_id == id) {
-					spin_unlock(&adev->path_list_lock);
+				    mod->template->ctl_id == id)
 					return mod;
-				}
 			}
 		}
 	}
-	spin_unlock(&adev->path_list_lock);
 
 	return NULL;
 }

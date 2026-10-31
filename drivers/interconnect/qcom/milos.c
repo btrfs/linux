@@ -137,7 +137,7 @@ static struct qcom_icc_node srvc_pcie_aggre_noc;
 static struct qcom_icc_node qns_gemnoc_gc;
 static struct qcom_icc_node qns_gemnoc_sf;
 
-static struct qcom_icc_qosbox qhm_qup1_qos = {
+static const struct qcom_icc_qosbox qhm_qup1_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0xc000 },
 	.prio = 2,
@@ -151,10 +151,10 @@ static struct qcom_icc_node qhm_qup1 = {
 	.buswidth = 4,
 	.qosbox = &qhm_qup1_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_a1noc_snoc },
+	.link_nodes = { &qns_a1noc_snoc },
 };
 
-static struct qcom_icc_qosbox xm_ufs_mem_qos = {
+static const struct qcom_icc_qosbox xm_ufs_mem_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0xf200 },
 	.prio = 2,
@@ -168,10 +168,10 @@ static struct qcom_icc_node xm_ufs_mem = {
 	.buswidth = 8,
 	.qosbox = &xm_ufs_mem_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_a1noc_snoc },
+	.link_nodes = { &qns_a1noc_snoc },
 };
 
-static struct qcom_icc_qosbox xm_usb3_0_qos = {
+static const struct qcom_icc_qosbox xm_usb3_0_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0x10000 },
 	.prio = 2,
@@ -185,10 +185,10 @@ static struct qcom_icc_node xm_usb3_0 = {
 	.buswidth = 8,
 	.qosbox = &xm_usb3_0_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_a1noc_snoc },
+	.link_nodes = { &qns_a1noc_snoc },
 };
 
-static struct qcom_icc_qosbox qhm_qdss_bam_qos = {
+static const struct qcom_icc_qosbox qhm_qdss_bam_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0x14000 },
 	.prio = 2,
@@ -202,10 +202,10 @@ static struct qcom_icc_node qhm_qdss_bam = {
 	.buswidth = 4,
 	.qosbox = &qhm_qdss_bam_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_a2noc_snoc },
+	.link_nodes = { &qns_a2noc_snoc },
 };
 
-static struct qcom_icc_qosbox qhm_qspi_qos = {
+static const struct qcom_icc_qosbox qhm_qspi_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0x12000 },
 	.prio = 2,
@@ -219,10 +219,10 @@ static struct qcom_icc_node qhm_qspi = {
 	.buswidth = 4,
 	.qosbox = &qhm_qspi_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_a2noc_snoc },
+	.link_nodes = { &qns_a2noc_snoc },
 };
 
-static struct qcom_icc_qosbox qhm_qup0_qos = {
+static const struct qcom_icc_qosbox qhm_qup0_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0x13000 },
 	.prio = 2,
@@ -236,10 +236,10 @@ static struct qcom_icc_node qhm_qup0 = {
 	.buswidth = 4,
 	.qosbox = &qhm_qup0_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_a2noc_snoc },
+	.link_nodes = { &qns_a2noc_snoc },
 };
 
-static struct qcom_icc_qosbox qxm_crypto_qos = {
+static const struct qcom_icc_qosbox qxm_crypto_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0x15000 },
 	.prio = 2,
@@ -253,10 +253,10 @@ static struct qcom_icc_node qxm_crypto = {
 	.buswidth = 8,
 	.qosbox = &qxm_crypto_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_a2noc_snoc },
+	.link_nodes = { &qns_a2noc_snoc },
 };
 
-static struct qcom_icc_qosbox qxm_ipa_qos = {
+static const struct qcom_icc_qosbox qxm_ipa_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0x16000 },
 	.prio = 2,
@@ -270,10 +270,10 @@ static struct qcom_icc_node qxm_ipa = {
 	.buswidth = 8,
 	.qosbox = &qxm_ipa_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_a2noc_snoc },
+	.link_nodes = { &qns_a2noc_snoc },
 };
 
-static struct qcom_icc_qosbox xm_qdss_etr_0_qos = {
+static const struct qcom_icc_qosbox xm_qdss_etr_0_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0x17000 },
 	.prio = 2,
@@ -287,10 +287,10 @@ static struct qcom_icc_node xm_qdss_etr_0 = {
 	.buswidth = 8,
 	.qosbox = &xm_qdss_etr_0_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_a2noc_snoc },
+	.link_nodes = { &qns_a2noc_snoc },
 };
 
-static struct qcom_icc_qosbox xm_qdss_etr_1_qos = {
+static const struct qcom_icc_qosbox xm_qdss_etr_1_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0x18000 },
 	.prio = 2,
@@ -304,10 +304,10 @@ static struct qcom_icc_node xm_qdss_etr_1 = {
 	.buswidth = 8,
 	.qosbox = &xm_qdss_etr_1_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_a2noc_snoc },
+	.link_nodes = { &qns_a2noc_snoc },
 };
 
-static struct qcom_icc_qosbox xm_sdc1_qos = {
+static const struct qcom_icc_qosbox xm_sdc1_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0x1a000 },
 	.prio = 2,
@@ -321,10 +321,10 @@ static struct qcom_icc_node xm_sdc1 = {
 	.buswidth = 8,
 	.qosbox = &xm_sdc1_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_a2noc_snoc },
+	.link_nodes = { &qns_a2noc_snoc },
 };
 
-static struct qcom_icc_qosbox xm_sdc2_qos = {
+static const struct qcom_icc_qosbox xm_sdc2_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0x19000 },
 	.prio = 2,
@@ -338,7 +338,7 @@ static struct qcom_icc_node xm_sdc2 = {
 	.buswidth = 8,
 	.qosbox = &xm_sdc2_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_a2noc_snoc },
+	.link_nodes = { &qns_a2noc_snoc },
 };
 
 static struct qcom_icc_node qup0_core_master = {
@@ -346,7 +346,7 @@ static struct qcom_icc_node qup0_core_master = {
 	.channels = 1,
 	.buswidth = 4,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qup0_core_slave },
+	.link_nodes = { &qup0_core_slave },
 };
 
 static struct qcom_icc_node qup1_core_master = {
@@ -354,7 +354,7 @@ static struct qcom_icc_node qup1_core_master = {
 	.channels = 1,
 	.buswidth = 4,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qup1_core_slave },
+	.link_nodes = { &qup1_core_slave },
 };
 
 static struct qcom_icc_node qsm_cfg = {
@@ -362,7 +362,7 @@ static struct qcom_icc_node qsm_cfg = {
 	.channels = 1,
 	.buswidth = 4,
 	.num_links = 35,
-	.link_nodes = (struct qcom_icc_node *[]) { &qhs_ahb2phy0, &qhs_ahb2phy1,
+	.link_nodes = { &qhs_ahb2phy0, &qhs_ahb2phy1,
 		   &qhs_camera_cfg, &qhs_clk_ctl,
 		   &qhs_cpr_cx, &qhs_cpr_mxa,
 		   &qhs_crypto0_cfg, &qhs_cx_rdpm,
@@ -387,7 +387,7 @@ static struct qcom_icc_node qnm_gemnoc_cnoc = {
 	.channels = 1,
 	.buswidth = 16,
 	.num_links = 14,
-	.link_nodes = (struct qcom_icc_node *[]) { &qhs_aoss, &qhs_display_cfg,
+	.link_nodes = { &qhs_aoss, &qhs_display_cfg,
 		   &qhs_ipa, &qhs_ipc_router,
 		   &qhs_pcie0_cfg, &qhs_pcie1_cfg,
 		   &qhs_prng, &qhs_tme_cfg,
@@ -401,10 +401,10 @@ static struct qcom_icc_node qnm_gemnoc_pcie = {
 	.channels = 1,
 	.buswidth = 8,
 	.num_links = 2,
-	.link_nodes = (struct qcom_icc_node *[]) { &xs_pcie_0, &xs_pcie_1 },
+	.link_nodes = { &xs_pcie_0, &xs_pcie_1 },
 };
 
-static struct qcom_icc_qosbox alm_gpu_tcu_qos = {
+static const struct qcom_icc_qosbox alm_gpu_tcu_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0xf1000 },
 	.prio = 1,
@@ -418,10 +418,10 @@ static struct qcom_icc_node alm_gpu_tcu = {
 	.buswidth = 8,
 	.qosbox = &alm_gpu_tcu_qos,
 	.num_links = 2,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_gem_noc_cnoc, &qns_llcc },
+	.link_nodes = { &qns_gem_noc_cnoc, &qns_llcc },
 };
 
-static struct qcom_icc_qosbox alm_sys_tcu_qos = {
+static const struct qcom_icc_qosbox alm_sys_tcu_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0xf3000 },
 	.prio = 6,
@@ -435,7 +435,7 @@ static struct qcom_icc_node alm_sys_tcu = {
 	.buswidth = 8,
 	.qosbox = &alm_sys_tcu_qos,
 	.num_links = 2,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_gem_noc_cnoc, &qns_llcc },
+	.link_nodes = { &qns_gem_noc_cnoc, &qns_llcc },
 };
 
 static struct qcom_icc_node chm_apps = {
@@ -443,11 +443,11 @@ static struct qcom_icc_node chm_apps = {
 	.channels = 3,
 	.buswidth = 32,
 	.num_links = 3,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_gem_noc_cnoc, &qns_llcc,
+	.link_nodes = { &qns_gem_noc_cnoc, &qns_llcc,
 		   &qns_pcie },
 };
 
-static struct qcom_icc_qosbox qnm_gpu_qos = {
+static const struct qcom_icc_qosbox qnm_gpu_qos = {
 	.num_ports = 2,
 	.port_offsets = { 0x31000, 0x71000 },
 	.prio = 0,
@@ -461,10 +461,10 @@ static struct qcom_icc_node qnm_gpu = {
 	.buswidth = 32,
 	.qosbox = &qnm_gpu_qos,
 	.num_links = 2,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_gem_noc_cnoc, &qns_llcc },
+	.link_nodes = { &qns_gem_noc_cnoc, &qns_llcc },
 };
 
-static struct qcom_icc_qosbox qnm_lpass_gemnoc_qos = {
+static const struct qcom_icc_qosbox qnm_lpass_gemnoc_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0xf5000 },
 	.prio = 0,
@@ -478,7 +478,7 @@ static struct qcom_icc_node qnm_lpass_gemnoc = {
 	.buswidth = 16,
 	.qosbox = &qnm_lpass_gemnoc_qos,
 	.num_links = 3,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_gem_noc_cnoc, &qns_llcc,
+	.link_nodes = { &qns_gem_noc_cnoc, &qns_llcc,
 		   &qns_pcie },
 };
 
@@ -487,11 +487,11 @@ static struct qcom_icc_node qnm_mdsp = {
 	.channels = 1,
 	.buswidth = 16,
 	.num_links = 3,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_gem_noc_cnoc, &qns_llcc,
+	.link_nodes = { &qns_gem_noc_cnoc, &qns_llcc,
 		   &qns_pcie },
 };
 
-static struct qcom_icc_qosbox qnm_mnoc_hf_qos = {
+static const struct qcom_icc_qosbox qnm_mnoc_hf_qos = {
 	.num_ports = 2,
 	.port_offsets = { 0x33000, 0x73000 },
 	.prio = 0,
@@ -505,10 +505,10 @@ static struct qcom_icc_node qnm_mnoc_hf = {
 	.buswidth = 32,
 	.qosbox = &qnm_mnoc_hf_qos,
 	.num_links = 2,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_gem_noc_cnoc, &qns_llcc },
+	.link_nodes = { &qns_gem_noc_cnoc, &qns_llcc },
 };
 
-static struct qcom_icc_qosbox qnm_mnoc_sf_qos = {
+static const struct qcom_icc_qosbox qnm_mnoc_sf_qos = {
 	.num_ports = 2,
 	.port_offsets = { 0x35000, 0x75000 },
 	.prio = 0,
@@ -522,10 +522,10 @@ static struct qcom_icc_node qnm_mnoc_sf = {
 	.buswidth = 32,
 	.qosbox = &qnm_mnoc_sf_qos,
 	.num_links = 2,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_gem_noc_cnoc, &qns_llcc },
+	.link_nodes = { &qns_gem_noc_cnoc, &qns_llcc },
 };
 
-static struct qcom_icc_qosbox qnm_nsp_gemnoc_qos = {
+static const struct qcom_icc_qosbox qnm_nsp_gemnoc_qos = {
 	.num_ports = 2,
 	.port_offsets = { 0x37000, 0x77000 },
 	.prio = 0,
@@ -539,11 +539,11 @@ static struct qcom_icc_node qnm_nsp_gemnoc = {
 	.buswidth = 32,
 	.qosbox = &qnm_nsp_gemnoc_qos,
 	.num_links = 3,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_gem_noc_cnoc, &qns_llcc,
+	.link_nodes = { &qns_gem_noc_cnoc, &qns_llcc,
 		   &qns_pcie },
 };
 
-static struct qcom_icc_qosbox qnm_pcie_qos = {
+static const struct qcom_icc_qosbox qnm_pcie_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0xf7000 },
 	.prio = 2,
@@ -557,10 +557,10 @@ static struct qcom_icc_node qnm_pcie = {
 	.buswidth = 8,
 	.qosbox = &qnm_pcie_qos,
 	.num_links = 2,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_gem_noc_cnoc, &qns_llcc },
+	.link_nodes = { &qns_gem_noc_cnoc, &qns_llcc },
 };
 
-static struct qcom_icc_qosbox qnm_snoc_gc_qos = {
+static const struct qcom_icc_qosbox qnm_snoc_gc_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0xf9000 },
 	.prio = 0,
@@ -574,10 +574,10 @@ static struct qcom_icc_node qnm_snoc_gc = {
 	.buswidth = 8,
 	.qosbox = &qnm_snoc_gc_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_llcc },
+	.link_nodes = { &qns_llcc },
 };
 
-static struct qcom_icc_qosbox qnm_snoc_sf_qos = {
+static const struct qcom_icc_qosbox qnm_snoc_sf_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0xfb000 },
 	.prio = 0,
@@ -591,7 +591,7 @@ static struct qcom_icc_node qnm_snoc_sf = {
 	.buswidth = 16,
 	.qosbox = &qnm_snoc_sf_qos,
 	.num_links = 3,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_gem_noc_cnoc, &qns_llcc,
+	.link_nodes = { &qns_gem_noc_cnoc, &qns_llcc,
 		   &qns_pcie },
 };
 
@@ -600,7 +600,7 @@ static struct qcom_icc_node qxm_wlan_q6 = {
 	.channels = 1,
 	.buswidth = 8,
 	.num_links = 3,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_gem_noc_cnoc, &qns_llcc,
+	.link_nodes = { &qns_gem_noc_cnoc, &qns_llcc,
 		   &qns_pcie },
 };
 
@@ -609,7 +609,7 @@ static struct qcom_icc_node qxm_lpass_dsp = {
 	.channels = 1,
 	.buswidth = 8,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_lpass_ag_noc_gemnoc },
+	.link_nodes = { &qns_lpass_ag_noc_gemnoc },
 };
 
 static struct qcom_icc_node llcc_mc = {
@@ -617,10 +617,10 @@ static struct qcom_icc_node llcc_mc = {
 	.channels = 2,
 	.buswidth = 4,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &ebi },
+	.link_nodes = { &ebi },
 };
 
-static struct qcom_icc_qosbox qnm_camnoc_hf_qos = {
+static const struct qcom_icc_qosbox qnm_camnoc_hf_qos = {
 	.num_ports = 2,
 	.port_offsets = { 0xa8000, 0xa9000 },
 	.prio = 0,
@@ -634,10 +634,10 @@ static struct qcom_icc_node qnm_camnoc_hf = {
 	.buswidth = 32,
 	.qosbox = &qnm_camnoc_hf_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_mem_noc_hf },
+	.link_nodes = { &qns_mem_noc_hf },
 };
 
-static struct qcom_icc_qosbox qnm_camnoc_icp_qos = {
+static const struct qcom_icc_qosbox qnm_camnoc_icp_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0x2a000 },
 	.prio = 5,
@@ -651,10 +651,10 @@ static struct qcom_icc_node qnm_camnoc_icp = {
 	.buswidth = 8,
 	.qosbox = &qnm_camnoc_icp_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_mem_noc_sf },
+	.link_nodes = { &qns_mem_noc_sf },
 };
 
-static struct qcom_icc_qosbox qnm_camnoc_sf_qos = {
+static const struct qcom_icc_qosbox qnm_camnoc_sf_qos = {
 	.num_ports = 2,
 	.port_offsets = { 0x2b000, 0x2c000 },
 	.prio = 0,
@@ -668,10 +668,10 @@ static struct qcom_icc_node qnm_camnoc_sf = {
 	.buswidth = 32,
 	.qosbox = &qnm_camnoc_sf_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_mem_noc_sf },
+	.link_nodes = { &qns_mem_noc_sf },
 };
 
-static struct qcom_icc_qosbox qnm_mdp_qos = {
+static const struct qcom_icc_qosbox qnm_mdp_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0xad000 },
 	.prio = 0,
@@ -685,10 +685,10 @@ static struct qcom_icc_node qnm_mdp = {
 	.buswidth = 32,
 	.qosbox = &qnm_mdp_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_mem_noc_hf },
+	.link_nodes = { &qns_mem_noc_hf },
 };
 
-static struct qcom_icc_qosbox qnm_video_qos = {
+static const struct qcom_icc_qosbox qnm_video_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0x30000 },
 	.prio = 0,
@@ -702,7 +702,7 @@ static struct qcom_icc_node qnm_video = {
 	.buswidth = 32,
 	.qosbox = &qnm_video_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_mem_noc_sf },
+	.link_nodes = { &qns_mem_noc_sf },
 };
 
 static struct qcom_icc_node qsm_hf_mnoc_cfg = {
@@ -710,7 +710,7 @@ static struct qcom_icc_node qsm_hf_mnoc_cfg = {
 	.channels = 1,
 	.buswidth = 4,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &srvc_mnoc_hf },
+	.link_nodes = { &srvc_mnoc_hf },
 };
 
 static struct qcom_icc_node qsm_sf_mnoc_cfg = {
@@ -718,7 +718,7 @@ static struct qcom_icc_node qsm_sf_mnoc_cfg = {
 	.channels = 1,
 	.buswidth = 4,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &srvc_mnoc_sf },
+	.link_nodes = { &srvc_mnoc_sf },
 };
 
 static struct qcom_icc_node qxm_nsp = {
@@ -726,7 +726,7 @@ static struct qcom_icc_node qxm_nsp = {
 	.channels = 2,
 	.buswidth = 32,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_nsp_gemnoc },
+	.link_nodes = { &qns_nsp_gemnoc },
 };
 
 static struct qcom_icc_node qsm_pcie_anoc_cfg = {
@@ -734,10 +734,10 @@ static struct qcom_icc_node qsm_pcie_anoc_cfg = {
 	.channels = 1,
 	.buswidth = 4,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &srvc_pcie_aggre_noc },
+	.link_nodes = { &srvc_pcie_aggre_noc },
 };
 
-static struct qcom_icc_qosbox xm_pcie3_0_qos = {
+static const struct qcom_icc_qosbox xm_pcie3_0_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0xb000 },
 	.prio = 2,
@@ -751,10 +751,10 @@ static struct qcom_icc_node xm_pcie3_0 = {
 	.buswidth = 8,
 	.qosbox = &xm_pcie3_0_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_pcie_mem_noc },
+	.link_nodes = { &qns_pcie_mem_noc },
 };
 
-static struct qcom_icc_qosbox xm_pcie3_1_qos = {
+static const struct qcom_icc_qosbox xm_pcie3_1_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0xc000 },
 	.prio = 2,
@@ -768,7 +768,7 @@ static struct qcom_icc_node xm_pcie3_1 = {
 	.buswidth = 8,
 	.qosbox = &xm_pcie3_1_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_pcie_mem_noc },
+	.link_nodes = { &qns_pcie_mem_noc },
 };
 
 static struct qcom_icc_node qnm_aggre1_noc = {
@@ -776,7 +776,7 @@ static struct qcom_icc_node qnm_aggre1_noc = {
 	.channels = 1,
 	.buswidth = 16,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_gemnoc_sf },
+	.link_nodes = { &qns_gemnoc_sf },
 };
 
 static struct qcom_icc_node qnm_aggre2_noc = {
@@ -784,10 +784,10 @@ static struct qcom_icc_node qnm_aggre2_noc = {
 	.channels = 1,
 	.buswidth = 16,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_gemnoc_sf },
+	.link_nodes = { &qns_gemnoc_sf },
 };
 
-static struct qcom_icc_qosbox qnm_apss_noc_qos = {
+static const struct qcom_icc_qosbox qnm_apss_noc_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0x1c000 },
 	.prio = 2,
@@ -801,10 +801,10 @@ static struct qcom_icc_node qnm_apss_noc = {
 	.buswidth = 4,
 	.qosbox = &qnm_apss_noc_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_gemnoc_sf },
+	.link_nodes = { &qns_gemnoc_sf },
 };
 
-static struct qcom_icc_qosbox qnm_cnoc_data_qos = {
+static const struct qcom_icc_qosbox qnm_cnoc_data_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0x1d000 },
 	.prio = 2,
@@ -818,10 +818,10 @@ static struct qcom_icc_node qnm_cnoc_data = {
 	.buswidth = 8,
 	.qosbox = &qnm_cnoc_data_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_gemnoc_sf },
+	.link_nodes = { &qns_gemnoc_sf },
 };
 
-static struct qcom_icc_qosbox qxm_pimem_qos = {
+static const struct qcom_icc_qosbox qxm_pimem_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0x1e000 },
 	.prio = 2,
@@ -835,10 +835,10 @@ static struct qcom_icc_node qxm_pimem = {
 	.buswidth = 8,
 	.qosbox = &qxm_pimem_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_gemnoc_gc },
+	.link_nodes = { &qns_gemnoc_gc },
 };
 
-static struct qcom_icc_qosbox xm_gic_qos = {
+static const struct qcom_icc_qosbox xm_gic_qos = {
 	.num_ports = 1,
 	.port_offsets = { 0x1f000 },
 	.prio = 2,
@@ -852,7 +852,7 @@ static struct qcom_icc_node xm_gic = {
 	.buswidth = 8,
 	.qosbox = &xm_gic_qos,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qns_gemnoc_gc },
+	.link_nodes = { &qns_gemnoc_gc },
 };
 
 static struct qcom_icc_node qns_a1noc_snoc = {
@@ -860,7 +860,7 @@ static struct qcom_icc_node qns_a1noc_snoc = {
 	.channels = 1,
 	.buswidth = 16,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qnm_aggre1_noc },
+	.link_nodes = { &qnm_aggre1_noc },
 };
 
 static struct qcom_icc_node qns_a2noc_snoc = {
@@ -868,7 +868,7 @@ static struct qcom_icc_node qns_a2noc_snoc = {
 	.channels = 1,
 	.buswidth = 16,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qnm_aggre2_noc },
+	.link_nodes = { &qnm_aggre2_noc },
 };
 
 static struct qcom_icc_node qup0_core_slave = {
@@ -1079,7 +1079,7 @@ static struct qcom_icc_node qss_mnoc_hf_cfg = {
 	.channels = 1,
 	.buswidth = 4,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qsm_hf_mnoc_cfg },
+	.link_nodes = { &qsm_hf_mnoc_cfg },
 };
 
 static struct qcom_icc_node qss_mnoc_sf_cfg = {
@@ -1087,7 +1087,7 @@ static struct qcom_icc_node qss_mnoc_sf_cfg = {
 	.channels = 1,
 	.buswidth = 4,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qsm_sf_mnoc_cfg },
+	.link_nodes = { &qsm_sf_mnoc_cfg },
 };
 
 static struct qcom_icc_node qss_nsp_qtb_cfg = {
@@ -1102,7 +1102,7 @@ static struct qcom_icc_node qss_pcie_anoc_cfg = {
 	.channels = 1,
 	.buswidth = 4,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qsm_pcie_anoc_cfg },
+	.link_nodes = { &qsm_pcie_anoc_cfg },
 };
 
 static struct qcom_icc_node qss_wlan_q6_throttle_cfg = {
@@ -1201,7 +1201,7 @@ static struct qcom_icc_node qss_cfg = {
 	.channels = 1,
 	.buswidth = 4,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qsm_cfg },
+	.link_nodes = { &qsm_cfg },
 };
 
 static struct qcom_icc_node qss_ddrss_cfg = {
@@ -1251,7 +1251,7 @@ static struct qcom_icc_node qns_gem_noc_cnoc = {
 	.channels = 1,
 	.buswidth = 16,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qnm_gemnoc_cnoc },
+	.link_nodes = { &qnm_gemnoc_cnoc },
 };
 
 static struct qcom_icc_node qns_llcc = {
@@ -1259,7 +1259,7 @@ static struct qcom_icc_node qns_llcc = {
 	.channels = 2,
 	.buswidth = 16,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &llcc_mc },
+	.link_nodes = { &llcc_mc },
 };
 
 static struct qcom_icc_node qns_pcie = {
@@ -1267,7 +1267,7 @@ static struct qcom_icc_node qns_pcie = {
 	.channels = 1,
 	.buswidth = 8,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qnm_gemnoc_pcie },
+	.link_nodes = { &qnm_gemnoc_pcie },
 };
 
 static struct qcom_icc_node qns_lpass_ag_noc_gemnoc = {
@@ -1275,7 +1275,7 @@ static struct qcom_icc_node qns_lpass_ag_noc_gemnoc = {
 	.channels = 1,
 	.buswidth = 16,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qnm_lpass_gemnoc },
+	.link_nodes = { &qnm_lpass_gemnoc },
 };
 
 static struct qcom_icc_node ebi = {
@@ -1290,7 +1290,7 @@ static struct qcom_icc_node qns_mem_noc_hf = {
 	.channels = 2,
 	.buswidth = 32,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qnm_mnoc_hf },
+	.link_nodes = { &qnm_mnoc_hf },
 };
 
 static struct qcom_icc_node qns_mem_noc_sf = {
@@ -1298,7 +1298,7 @@ static struct qcom_icc_node qns_mem_noc_sf = {
 	.channels = 2,
 	.buswidth = 32,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qnm_mnoc_sf },
+	.link_nodes = { &qnm_mnoc_sf },
 };
 
 static struct qcom_icc_node srvc_mnoc_hf = {
@@ -1320,7 +1320,7 @@ static struct qcom_icc_node qns_nsp_gemnoc = {
 	.channels = 2,
 	.buswidth = 32,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qnm_nsp_gemnoc },
+	.link_nodes = { &qnm_nsp_gemnoc },
 };
 
 static struct qcom_icc_node qns_pcie_mem_noc = {
@@ -1328,7 +1328,7 @@ static struct qcom_icc_node qns_pcie_mem_noc = {
 	.channels = 1,
 	.buswidth = 8,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qnm_pcie },
+	.link_nodes = { &qnm_pcie },
 };
 
 static struct qcom_icc_node srvc_pcie_aggre_noc = {
@@ -1343,7 +1343,7 @@ static struct qcom_icc_node qns_gemnoc_gc = {
 	.channels = 1,
 	.buswidth = 8,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qnm_snoc_gc },
+	.link_nodes = { &qnm_snoc_gc },
 };
 
 static struct qcom_icc_node qns_gemnoc_sf = {
@@ -1351,7 +1351,7 @@ static struct qcom_icc_node qns_gemnoc_sf = {
 	.channels = 1,
 	.buswidth = 16,
 	.num_links = 1,
-	.link_nodes = (struct qcom_icc_node *[]) { &qnm_snoc_sf },
+	.link_nodes = { &qnm_snoc_sf },
 };
 
 static struct qcom_icc_bcm bcm_acv = {
@@ -1522,7 +1522,6 @@ static const struct qcom_icc_desc milos_aggre1_noc = {
 	.config = &milos_aggre1_noc_regmap_config,
 	.nodes = aggre1_noc_nodes,
 	.num_nodes = ARRAY_SIZE(aggre1_noc_nodes),
-	.alloc_dyn_id = true,
 };
 
 static struct qcom_icc_bcm * const aggre2_noc_bcms[] = {
@@ -1556,7 +1555,6 @@ static const struct qcom_icc_desc milos_aggre2_noc = {
 	.num_nodes = ARRAY_SIZE(aggre2_noc_nodes),
 	.bcms = aggre2_noc_bcms,
 	.num_bcms = ARRAY_SIZE(aggre2_noc_bcms),
-	.alloc_dyn_id = true,
 };
 
 static struct qcom_icc_bcm * const clk_virt_bcms[] = {
@@ -1576,7 +1574,6 @@ static const struct qcom_icc_desc milos_clk_virt = {
 	.num_nodes = ARRAY_SIZE(clk_virt_nodes),
 	.bcms = clk_virt_bcms,
 	.num_bcms = ARRAY_SIZE(clk_virt_bcms),
-	.alloc_dyn_id = true,
 };
 
 static struct qcom_icc_bcm * const cnoc_cfg_bcms[] = {
@@ -1637,7 +1634,6 @@ static const struct qcom_icc_desc milos_cnoc_cfg = {
 	.num_nodes = ARRAY_SIZE(cnoc_cfg_nodes),
 	.bcms = cnoc_cfg_bcms,
 	.num_bcms = ARRAY_SIZE(cnoc_cfg_bcms),
-	.alloc_dyn_id = true,
 };
 
 static struct qcom_icc_bcm * const cnoc_main_bcms[] = {
@@ -1680,7 +1676,6 @@ static const struct qcom_icc_desc milos_cnoc_main = {
 	.num_nodes = ARRAY_SIZE(cnoc_main_nodes),
 	.bcms = cnoc_main_bcms,
 	.num_bcms = ARRAY_SIZE(cnoc_main_bcms),
-	.alloc_dyn_id = true,
 };
 
 static struct qcom_icc_bcm * const gem_noc_bcms[] = {
@@ -1721,7 +1716,6 @@ static const struct qcom_icc_desc milos_gem_noc = {
 	.num_nodes = ARRAY_SIZE(gem_noc_nodes),
 	.bcms = gem_noc_bcms,
 	.num_bcms = ARRAY_SIZE(gem_noc_bcms),
-	.alloc_dyn_id = true,
 };
 
 static struct qcom_icc_node * const lpass_ag_noc_nodes[] = {
@@ -1741,7 +1735,6 @@ static const struct qcom_icc_desc milos_lpass_ag_noc = {
 	.config = &milos_lpass_ag_noc_regmap_config,
 	.nodes = lpass_ag_noc_nodes,
 	.num_nodes = ARRAY_SIZE(lpass_ag_noc_nodes),
-	.alloc_dyn_id = true,
 };
 
 static struct qcom_icc_bcm * const mc_virt_bcms[] = {
@@ -1759,7 +1752,6 @@ static const struct qcom_icc_desc milos_mc_virt = {
 	.num_nodes = ARRAY_SIZE(mc_virt_nodes),
 	.bcms = mc_virt_bcms,
 	.num_bcms = ARRAY_SIZE(mc_virt_bcms),
-	.alloc_dyn_id = true,
 };
 
 static struct qcom_icc_bcm * const mmss_noc_bcms[] = {
@@ -1795,7 +1787,6 @@ static const struct qcom_icc_desc milos_mmss_noc = {
 	.num_nodes = ARRAY_SIZE(mmss_noc_nodes),
 	.bcms = mmss_noc_bcms,
 	.num_bcms = ARRAY_SIZE(mmss_noc_bcms),
-	.alloc_dyn_id = true,
 };
 
 static struct qcom_icc_bcm * const nsp_noc_bcms[] = {
@@ -1821,7 +1812,6 @@ static const struct qcom_icc_desc milos_nsp_noc = {
 	.num_nodes = ARRAY_SIZE(nsp_noc_nodes),
 	.bcms = nsp_noc_bcms,
 	.num_bcms = ARRAY_SIZE(nsp_noc_bcms),
-	.alloc_dyn_id = true,
 };
 
 static struct qcom_icc_bcm * const pcie_anoc_bcms[] = {
@@ -1850,7 +1840,6 @@ static const struct qcom_icc_desc milos_pcie_anoc = {
 	.num_nodes = ARRAY_SIZE(pcie_anoc_nodes),
 	.bcms = pcie_anoc_bcms,
 	.num_bcms = ARRAY_SIZE(pcie_anoc_bcms),
-	.alloc_dyn_id = true,
 };
 
 static struct qcom_icc_bcm * const system_noc_bcms[] = {
@@ -1885,7 +1874,6 @@ static const struct qcom_icc_desc milos_system_noc = {
 	.num_nodes = ARRAY_SIZE(system_noc_nodes),
 	.bcms = system_noc_bcms,
 	.num_bcms = ARRAY_SIZE(system_noc_bcms),
-	.alloc_dyn_id = true,
 };
 
 static const struct of_device_id qnoc_of_match[] = {

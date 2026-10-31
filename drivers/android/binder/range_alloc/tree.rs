@@ -111,7 +111,7 @@ impl<T> TreeRangeAllocator<T> {
             .count()
     }
 
-    pub(crate) fn debug_print(&self, m: &SeqFile) -> Result<()> {
+    pub(crate) fn debug_print(&self, m: &SeqFile) -> Result {
         for desc in self.tree.values() {
             let state = match &desc.state {
                 Some(state) => &state.0,
@@ -164,18 +164,9 @@ impl<T> TreeRangeAllocator<T> {
             self.free_oneway_space
         };
 
-        // Start detecting spammers once we have less than 20%
-        // of async space left (which is less than 10% of total
-        // buffer size).
-        //
-        // (This will short-circut, so `low_oneway_space` is
-        // only called when necessary.)
-        let oneway_spam_detected =
-            is_oneway && new_oneway_space < self.size / 10 && self.low_oneway_space(pid);
-
         let (found_size, found_off, tree_node, free_tree_node) = match self.find_best_match(size) {
             None => {
-                pr_warn!("ENOSPC from range_alloc.reserve_new - size: {}", size);
+                pr_warn_ratelimited!("ENOSPC from range_alloc.reserve_new - size: {}\n", size);
                 return Err(ENOSPC);
             }
             Some(desc) => {
@@ -203,13 +194,22 @@ impl<T> TreeRangeAllocator<T> {
             self.free_tree.insert(free_tree_node);
         }
 
+        // Start detecting spammers once we have less than 20%
+        // of async space left (which is less than 10% of total
+        // buffer size).
+        //
+        // (This will short-circuit, so `low_oneway_space` is
+        // only called when necessary.)
+        let oneway_spam_detected =
+            is_oneway && new_oneway_space < self.size / 10 && self.low_oneway_space(pid);
+
         Ok((found_off, oneway_spam_detected))
     }
 
     pub(crate) fn reservation_abort(&mut self, offset: usize) -> Result<FreedRange> {
-        let mut cursor = self.tree.cursor_lower_bound(&offset).ok_or_else(|| {
-            pr_warn!(
-                "EINVAL from range_alloc.reservation_abort - offset: {}",
+        let mut cursor = self.tree.cursor_lower_bound_mut(&offset).ok_or_else(|| {
+            pr_warn_ratelimited!(
+                "EINVAL from range_alloc.reservation_abort - offset: {}\n",
                 offset
             );
             EINVAL
@@ -218,8 +218,8 @@ impl<T> TreeRangeAllocator<T> {
         let (_, desc) = cursor.current_mut();
 
         if desc.offset != offset {
-            pr_warn!(
-                "EINVAL from range_alloc.reservation_abort - offset: {}",
+            pr_warn_ratelimited!(
+                "EINVAL from range_alloc.reservation_abort - offset: {}\n",
                 offset
             );
             return Err(EINVAL);
@@ -230,15 +230,15 @@ impl<T> TreeRangeAllocator<T> {
                 (None, Ok((reservation, free_node_res)))
             }
             None => {
-                pr_warn!(
-                    "EINVAL from range_alloc.reservation_abort - offset: {}",
+                pr_warn_ratelimited!(
+                    "EINVAL from range_alloc.reservation_abort - offset: {}\n",
                     offset
                 );
                 (None, Err(EINVAL))
             }
             allocated => {
-                pr_warn!(
-                    "EPERM from range_alloc.reservation_abort - offset: {}",
+                pr_warn_ratelimited!(
+                    "EPERM from range_alloc.reservation_abort - offset: {}\n",
                     offset
                 );
                 (allocated, Err(EPERM))
@@ -327,8 +327,8 @@ impl<T> TreeRangeAllocator<T> {
     /// Returns the size of the existing entry and the data associated with it.
     pub(crate) fn reserve_existing(&mut self, offset: usize) -> Result<(usize, usize, Option<T>)> {
         let desc = self.tree.get_mut(&offset).ok_or_else(|| {
-            pr_warn!(
-                "ENOENT from range_alloc.reserve_existing - offset: {}",
+            pr_warn_ratelimited!(
+                "ENOENT from range_alloc.reserve_existing - offset: {}\n",
                 offset
             );
             ENOENT
@@ -344,8 +344,8 @@ impl<T> TreeRangeAllocator<T> {
                 )
             }
             other => {
-                pr_warn!(
-                    "ENOENT from range_alloc.reserve_existing - offset: {}",
+                pr_warn_ratelimited!(
+                    "ENOENT from range_alloc.reserve_existing - offset: {}\n",
                     offset
                 );
                 (other, Err(ENOENT))

@@ -16,12 +16,13 @@
 #include "i915_gem_evict.h"
 #include "i915_gem_gtt.h"
 #include "i915_gem_ioctls.h"
-#include "i915_gem_object.h"
 #include "i915_gem_mman.h"
+#include "i915_gem_object.h"
+#include "i915_gem_ttm.h"
+#include "i915_jiffies.h"
 #include "i915_mm.h"
 #include "i915_trace.h"
 #include "i915_user_extensions.h"
-#include "i915_gem_ttm.h"
 #include "i915_vma.h"
 
 static inline bool
@@ -111,7 +112,7 @@ i915_gem_mmap_ioctl(struct drm_device *dev, void *data,
 		vma = find_vma(mm, addr);
 		if (vma && __vma_matches(vma, obj->base.filp, addr, args->size))
 			vma->vm_page_prot =
-				pgprot_writecombine(vm_get_page_prot(vma->vm_flags));
+				pgprot_writecombine(vma_get_page_prot(vma));
 		else
 			addr = -ENOMEM;
 		mmap_write_unlock(mm);
@@ -195,17 +196,17 @@ int i915_gem_mmap_gtt_version(void)
 	return 5;
 }
 
-static inline struct i915_gtt_view
+static inline struct intel_gtt_view
 compute_partial_view(const struct drm_i915_gem_object *obj,
 		     pgoff_t page_offset,
 		     unsigned int chunk)
 {
-	struct i915_gtt_view view;
+	struct intel_gtt_view view;
 
 	if (i915_gem_object_is_tiled(obj))
 		chunk = roundup(chunk, tile_row_pages(obj) ?: 1);
 
-	view.type = I915_GTT_VIEW_PARTIAL;
+	view.type = INTEL_GTT_VIEW_PARTIAL;
 	view.partial.offset = rounddown(page_offset, chunk);
 	view.partial.size =
 		min_t(unsigned int, chunk,
@@ -213,7 +214,7 @@ compute_partial_view(const struct drm_i915_gem_object *obj,
 
 	/* If the partial covers the entire object, just create a normal VMA. */
 	if (chunk >= obj->base.size >> PAGE_SHIFT)
-		view.type = I915_GTT_VIEW_NORMAL;
+		view.type = INTEL_GTT_VIEW_NORMAL;
 
 	return view;
 }
@@ -390,12 +391,12 @@ retry:
 					  PIN_NOEVICT);
 	if (IS_ERR(vma) && vma != ERR_PTR(-EDEADLK)) {
 		/* Use a partial view if it is bigger than available space */
-		struct i915_gtt_view view =
+		struct intel_gtt_view view =
 			compute_partial_view(obj, page_offset, MIN_CHUNK_PAGES);
 		unsigned int flags;
 
 		flags = PIN_MAPPABLE | PIN_NOSEARCH;
-		if (view.type == I915_GTT_VIEW_NORMAL)
+		if (intel_gtt_view_is_normal(&view))
 			flags |= PIN_NONBLOCK; /* avoid warnings for pinned */
 
 		/*
@@ -406,7 +407,7 @@ retry:
 		vma = i915_gem_object_ggtt_pin_ww(obj, &ww, &view, 0, 0, flags);
 		if (IS_ERR(vma) && vma != ERR_PTR(-EDEADLK)) {
 			flags = PIN_MAPPABLE;
-			view.type = I915_GTT_VIEW_PARTIAL;
+			view.type = INTEL_GTT_VIEW_PARTIAL;
 			vma = i915_gem_object_ggtt_pin_ww(obj, &ww, &view, 0, 0, flags);
 		}
 
@@ -729,7 +730,7 @@ mmap_offset_attach(struct drm_i915_gem_object *obj,
 	if (mmo)
 		goto out;
 
-	mmo = kmalloc(sizeof(*mmo), GFP_KERNEL);
+	mmo = kmalloc_obj(*mmo);
 	if (!mmo)
 		return ERR_PTR(-ENOMEM);
 
@@ -1023,7 +1024,7 @@ i915_gem_object_mmap(struct drm_i915_gem_object *obj,
 	fput(anon);
 
 	if (obj->ops->mmap_ops) {
-		vma->vm_page_prot = pgprot_decrypted(vm_get_page_prot(vma->vm_flags));
+		vma->vm_page_prot = pgprot_decrypted(vma_get_page_prot(vma));
 		vma->vm_ops = obj->ops->mmap_ops;
 		vma->vm_private_data = obj->base.vma_node.driver_private;
 		return 0;
@@ -1034,7 +1035,7 @@ i915_gem_object_mmap(struct drm_i915_gem_object *obj,
 	switch (mmo->mmap_type) {
 	case I915_MMAP_TYPE_WC:
 		vma->vm_page_prot =
-			pgprot_writecombine(vm_get_page_prot(vma->vm_flags));
+			pgprot_writecombine(vma_get_page_prot(vma));
 		vma->vm_ops = &vm_ops_cpu;
 		break;
 
@@ -1042,19 +1043,19 @@ i915_gem_object_mmap(struct drm_i915_gem_object *obj,
 		GEM_WARN_ON(1);
 		fallthrough;
 	case I915_MMAP_TYPE_WB:
-		vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
+		vma->vm_page_prot = vma_get_page_prot(vma);
 		vma->vm_ops = &vm_ops_cpu;
 		break;
 
 	case I915_MMAP_TYPE_UC:
 		vma->vm_page_prot =
-			pgprot_noncached(vm_get_page_prot(vma->vm_flags));
+			pgprot_noncached(vma_get_page_prot(vma));
 		vma->vm_ops = &vm_ops_cpu;
 		break;
 
 	case I915_MMAP_TYPE_GTT:
 		vma->vm_page_prot =
-			pgprot_writecombine(vm_get_page_prot(vma->vm_flags));
+			pgprot_writecombine(vma_get_page_prot(vma));
 		vma->vm_ops = &vm_ops_gtt;
 		break;
 	}

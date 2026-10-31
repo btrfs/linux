@@ -182,8 +182,10 @@ static int i2c_nuvoton_wait_for_stat(struct tpm_chip *chip, u8 mask, u8 value,
 						      timeout);
 		if (rc > 0)
 			return 0;
-		/* At this point we know that the SINT pin is asserted, so we
-		 * do not need to do i2c_nuvoton_check_status */
+
+		disable_irq(priv->irq);
+		if (rc < 0)
+			return rc;
 	} else {
 		unsigned long ten_msec, stop;
 		bool status_valid;
@@ -574,8 +576,6 @@ static int i2c_nuvoton_probe(struct i2c_client *client)
 				      dev_name(&chip->dev),
 				      chip);
 		if (rc) {
-			dev_err(dev, "%s() Unable to request irq: %d for use\n",
-				__func__, priv->irq);
 			priv->irq = 0;
 		} else {
 			chip->flags |= TPM_CHIP_FLAG_IRQ;
@@ -640,7 +640,7 @@ static const struct of_device_id i2c_nuvoton_of_match[] = {
 MODULE_DEVICE_TABLE(of, i2c_nuvoton_of_match);
 #endif
 
-static SIMPLE_DEV_PM_OPS(i2c_nuvoton_pm_ops, tpm_pm_suspend, tpm_pm_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(i2c_nuvoton_pm_ops, tpm_pm_suspend, tpm_pm_resume);
 
 static struct i2c_driver i2c_nuvoton_driver = {
 	.id_table = i2c_nuvoton_id,
@@ -648,7 +648,7 @@ static struct i2c_driver i2c_nuvoton_driver = {
 	.remove = i2c_nuvoton_remove,
 	.driver = {
 		.name = "tpm_i2c_nuvoton",
-		.pm = &i2c_nuvoton_pm_ops,
+		.pm = pm_sleep_ptr(&i2c_nuvoton_pm_ops),
 		.of_match_table = of_match_ptr(i2c_nuvoton_of_match),
 	},
 };

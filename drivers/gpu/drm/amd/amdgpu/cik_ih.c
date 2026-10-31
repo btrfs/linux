@@ -156,6 +156,9 @@ static int cik_ih_irq_init(struct amdgpu_device *adev)
 	/* enable irqs */
 	cik_ih_enable_interrupts(adev);
 
+	if (adev->irq.ih_soft.ring_size)
+		adev->irq.ih_soft.enabled = true;
+
 	return 0;
 }
 
@@ -192,6 +195,9 @@ static u32 cik_ih_get_wptr(struct amdgpu_device *adev,
 
 	wptr = le32_to_cpu(*ih->wptr_cpu);
 
+	if (ih == &adev->irq.ih_soft)
+		goto out;
+
 	if (wptr & IH_RB_WPTR__RB_OVERFLOW_MASK) {
 		wptr &= ~IH_RB_WPTR__RB_OVERFLOW_MASK;
 		/* When a ring buffer overflow happen start parsing interrupt
@@ -211,6 +217,8 @@ static u32 cik_ih_get_wptr(struct amdgpu_device *adev,
 		tmp &= ~IH_RB_CNTL__WPTR_OVERFLOW_CLEAR_MASK;
 		WREG32(mmIH_RB_CNTL, tmp);
 	}
+
+out:
 	return (wptr & ih->ptr_mask);
 }
 
@@ -306,6 +314,10 @@ static int cik_ih_sw_init(struct amdgpu_ip_block *ip_block)
 	if (r)
 		return r;
 
+	r = amdgpu_ih_ring_init(adev, &adev->irq.ih_soft, IH_SW_RING_SIZE, true);
+	if (r)
+		return r;
+
 	r = amdgpu_irq_init(adev);
 
 	return r;
@@ -345,17 +357,6 @@ static int cik_ih_resume(struct amdgpu_ip_block *ip_block)
 	return cik_ih_hw_init(ip_block);
 }
 
-static bool cik_ih_is_idle(struct amdgpu_ip_block *ip_block)
-{
-	struct amdgpu_device *adev = ip_block->adev;
-	u32 tmp = RREG32(mmSRBM_STATUS);
-
-	if (tmp & SRBM_STATUS__IH_BUSY_MASK)
-		return false;
-
-	return true;
-}
-
 static int cik_ih_wait_for_idle(struct amdgpu_ip_block *ip_block)
 {
 	unsigned i;
@@ -370,36 +371,6 @@ static int cik_ih_wait_for_idle(struct amdgpu_ip_block *ip_block)
 		udelay(1);
 	}
 	return -ETIMEDOUT;
-}
-
-static int cik_ih_soft_reset(struct amdgpu_ip_block *ip_block)
-{
-	struct amdgpu_device *adev = ip_block->adev;
-
-	u32 srbm_soft_reset = 0;
-	u32 tmp = RREG32(mmSRBM_STATUS);
-
-	if (tmp & SRBM_STATUS__IH_BUSY_MASK)
-		srbm_soft_reset |= SRBM_SOFT_RESET__SOFT_RESET_IH_MASK;
-
-	if (srbm_soft_reset) {
-		tmp = RREG32(mmSRBM_SOFT_RESET);
-		tmp |= srbm_soft_reset;
-		dev_info(adev->dev, "SRBM_SOFT_RESET=0x%08X\n", tmp);
-		WREG32(mmSRBM_SOFT_RESET, tmp);
-		tmp = RREG32(mmSRBM_SOFT_RESET);
-
-		udelay(50);
-
-		tmp &= ~srbm_soft_reset;
-		WREG32(mmSRBM_SOFT_RESET, tmp);
-		tmp = RREG32(mmSRBM_SOFT_RESET);
-
-		/* Wait a little for things to settle down */
-		udelay(50);
-	}
-
-	return 0;
 }
 
 static int cik_ih_set_clockgating_state(struct amdgpu_ip_block *ip_block,
@@ -423,9 +394,7 @@ static const struct amd_ip_funcs cik_ih_ip_funcs = {
 	.hw_fini = cik_ih_hw_fini,
 	.suspend = cik_ih_suspend,
 	.resume = cik_ih_resume,
-	.is_idle = cik_ih_is_idle,
 	.wait_for_idle = cik_ih_wait_for_idle,
-	.soft_reset = cik_ih_soft_reset,
 	.set_clockgating_state = cik_ih_set_clockgating_state,
 	.set_powergating_state = cik_ih_set_powergating_state,
 };

@@ -1232,8 +1232,8 @@ sddr09_read_map(struct us_data *us) {
 
 	kfree(info->lba_to_pba);
 	kfree(info->pba_to_lba);
-	info->lba_to_pba = kmalloc_array(numblocks, sizeof(int), GFP_NOIO);
-	info->pba_to_lba = kmalloc_array(numblocks, sizeof(int), GFP_NOIO);
+	info->lba_to_pba = kmalloc_objs(int, numblocks, GFP_NOIO);
+	info->pba_to_lba = kmalloc_objs(int, numblocks, GFP_NOIO);
 
 	if (info->lba_to_pba == NULL || info->pba_to_lba == NULL) {
 		printk(KERN_WARNING "sddr09_read_map: out of memory\n");
@@ -1339,6 +1339,15 @@ sddr09_read_map(struct us_data *us) {
 
 		lba += 1000*(i/0x400);
 
+		/* The LBA comes from the card and may exceed the table size */
+		if (lba >= numblocks) {
+			dev_warn_ratelimited(&us->pusb_dev->dev,
+					"sddr09: Bad LBA %d for block %d exceeds the translation table size %d\n",
+					lba, i, numblocks);
+			info->pba_to_lba[i] = UNUSABLE;
+			continue;
+		}
+
 		if (info->lba_to_pba[lba] != UNDEF) {
 			printk(KERN_WARNING
 			       "sddr09: LBA %d seen for PBA %d and %d\n",
@@ -1428,7 +1437,7 @@ sddr09_common_init(struct us_data *us) {
 		return -EINVAL;
 	}
 
-	us->extra = kzalloc(sizeof(struct sddr09_card_info), GFP_NOIO);
+	us->extra = kzalloc_obj(struct sddr09_card_info, GFP_NOIO);
 	if (!us->extra)
 		return -ENOMEM;
 	us->extra_destructor = sddr09_card_info_destructor;

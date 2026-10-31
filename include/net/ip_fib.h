@@ -258,6 +258,7 @@ struct fib_table {
 	struct hlist_node	tb_hlist;
 	u32			tb_id;
 	int			tb_num_default;
+	struct net		*tb_net;
 	struct rcu_head		rcu;
 	unsigned long 		*tb_data;
 	unsigned long		__data[];
@@ -269,7 +270,6 @@ struct fib_dump_filter {
 	bool			filter_set;
 	bool			dump_routes;
 	bool			dump_exceptions;
-	bool			rtnl_held;
 	unsigned char		protocol;
 	unsigned char		rt_type;
 	unsigned int		flags;
@@ -303,7 +303,8 @@ static inline struct fib_table *fib_get_table(struct net *net, u32 id)
 		&net->ipv4.fib_table_hash[TABLE_LOCAL_INDEX] :
 		&net->ipv4.fib_table_hash[TABLE_MAIN_INDEX];
 
-	tb_hlist = rcu_dereference_rtnl(hlist_first_rcu(ptr));
+	/* Only fib4_rules_init() adds fib_table. */
+	tb_hlist = rcu_dereference_protected(hlist_first_rcu(ptr), true);
 
 	return hlist_entry(tb_hlist, struct fib_table, tb_hlist);
 }
@@ -375,7 +376,7 @@ static inline int fib_lookup(struct net *net, struct flowi4 *flp,
 			     struct fib_result *res, unsigned int flags)
 {
 	struct fib_table *tb;
-	int err = -ENETUNREACH;
+	int err = -EAGAIN;
 
 	flags |= FIB_LOOKUP_NOREF;
 	if (net->ipv4.fib_has_custom_rules)
@@ -389,17 +390,16 @@ static inline int fib_lookup(struct net *net, struct flowi4 *flp,
 	if (tb)
 		err = fib_table_lookup(tb, flp, res, flags);
 
-	if (!err)
+	if (err != -EAGAIN)
 		goto out;
 
 	tb = rcu_dereference_rtnl(net->ipv4.fib_default);
 	if (tb)
 		err = fib_table_lookup(tb, flp, res, flags);
 
-out:
 	if (err == -EAGAIN)
 		err = -ENETUNREACH;
-
+out:
 	rcu_read_unlock();
 
 	return err;
@@ -559,7 +559,7 @@ static inline u32 fib_multipath_hash_from_keys(const struct net *net,
 	siphash_aligned_key_t hash_key;
 	u32 mp_seed;
 
-	mp_seed = READ_ONCE(net->ipv4.sysctl_fib_multipath_hash_seed).mp_seed;
+	mp_seed = READ_ONCE(net->ipv4.sysctl_fib_multipath_hash_seed.mp_seed);
 	fib_multipath_hash_construct_key(&hash_key, mp_seed);
 
 	return flow_hash_from_keys_seed(keys, &hash_key);
@@ -592,7 +592,8 @@ void fib_nh_common_release(struct fib_nh_common *nhc);
 /* Exported by fib_trie.c */
 void fib_alias_hw_flags_set(struct net *net, const struct fib_rt_info *fri);
 void fib_trie_init(void);
-struct fib_table *fib_trie_table(u32 id, struct fib_table *alias);
+struct fib_table *fib_trie_table(struct net *net, u32 id,
+				 struct fib_table *alias);
 bool fib_lookup_good_nhc(const struct fib_nh_common *nhc, int fib_flags,
 			 const struct flowi4 *flp);
 
@@ -627,6 +628,11 @@ void free_fib_info(struct fib_info *fi);
 static inline void fib_info_hold(struct fib_info *fi)
 {
 	refcount_inc(&fi->fib_clntref);
+}
+
+static inline bool fib_info_hold_safe(struct fib_info *fi)
+{
+	return refcount_inc_not_zero(&fi->fib_clntref);
 }
 
 static inline void fib_info_put(struct fib_info *fi)

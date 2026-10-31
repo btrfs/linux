@@ -459,8 +459,7 @@ DEFINE_INTERRUPT_HANDLER_NMI(system_reset_exception)
 	}
 
 	hv_nmi_check_nonrecoverable(regs);
-
-	__this_cpu_inc(irq_stat.sreset_irqs);
+	inc_irq_stat_and_enable(IRQ_COUNT_NMI_SRESET);
 
 	/* See if any machine dependent calls */
 	if (ppc_md.system_reset_exception) {
@@ -817,7 +816,7 @@ static void __machine_check_exception(struct pt_regs *regs)
 {
 	int recover = 0;
 
-	__this_cpu_inc(irq_stat.mce_exceptions);
+	inc_irq_stat_and_enable(IRQ_COUNT_MCE);
 
 	add_taint(TAINT_MACHINE_CHECK, LOCKDEP_NOW_UNRELIABLE);
 
@@ -1932,8 +1931,7 @@ DEFINE_INTERRUPT_HANDLER(vsx_unavailable_tm)
 DECLARE_INTERRUPT_HANDLER_NMI(performance_monitor_exception_nmi);
 DEFINE_INTERRUPT_HANDLER_NMI(performance_monitor_exception_nmi)
 {
-	__this_cpu_inc(irq_stat.pmu_irqs);
-
+	inc_irq_stat(PMI);
 	perf_irq(regs);
 
 	return 0;
@@ -1943,8 +1941,7 @@ DEFINE_INTERRUPT_HANDLER_NMI(performance_monitor_exception_nmi)
 DECLARE_INTERRUPT_HANDLER_ASYNC(performance_monitor_exception_async);
 DEFINE_INTERRUPT_HANDLER_ASYNC(performance_monitor_exception_async)
 {
-	__this_cpu_inc(irq_stat.pmu_irqs);
-
+	inc_irq_stat(PMI);
 	perf_irq(regs);
 }
 
@@ -1956,7 +1953,7 @@ DEFINE_INTERRUPT_HANDLER_RAW(performance_monitor_exception)
 	 * prevent hash faults on user addresses when reading callchains (and
 	 * looks better from an irq tracing perspective).
 	 */
-	if (IS_ENABLED(CONFIG_PPC64) && unlikely(arch_irq_disabled_regs(regs)))
+	if (IS_ENABLED(CONFIG_PPC64) && unlikely(regs_irqs_disabled(regs)))
 		performance_monitor_exception_nmi(regs);
 	else
 		performance_monitor_exception_async(regs);

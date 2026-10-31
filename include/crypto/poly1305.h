@@ -59,9 +59,9 @@ struct poly1305_desc_ctx {
 };
 
 void poly1305_init(struct poly1305_desc_ctx *desc,
-		   const u8 key[POLY1305_KEY_SIZE]);
-void poly1305_update(struct poly1305_desc_ctx *desc,
-		     const u8 *src, unsigned int nbytes);
+		   const u8 key[at_least POLY1305_KEY_SIZE]);
+void poly1305_update(struct poly1305_desc_ctx *desc, const u8 *src,
+		     size_t nbytes);
 void poly1305_final(struct poly1305_desc_ctx *desc, u8 *digest);
 
 #endif

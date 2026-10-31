@@ -57,7 +57,7 @@ static int stmmac_adjust_time(struct ptp_clock_info *ptp, s64 delta)
 	bool xmac, est_rst = false;
 	int ret;
 
-	xmac = priv->plat->has_gmac4 || priv->plat->has_xgmac;
+	xmac = dwmac_is_xmac(priv->plat->core_type);
 
 	if (delta < 0) {
 		neg_adj = 1;
@@ -89,7 +89,8 @@ static int stmmac_adjust_time(struct ptp_clock_info *ptp, s64 delta)
 		u64 cycle_time;
 
 		mutex_lock(&priv->est_lock);
-		priv->ptp_clock_ops.gettime64(&priv->ptp_clock_ops, &current_time);
+		priv->ptp_clock_ops.gettimex64(&priv->ptp_clock_ops,
+					       &current_time, NULL);
 		current_time_ns = timespec64_to_ktime(current_time);
 		time.tv_nsec = priv->est->btr_reserve[0];
 		time.tv_sec = priv->est->btr_reserve[1];
@@ -114,15 +115,15 @@ static int stmmac_adjust_time(struct ptp_clock_info *ptp, s64 delta)
 }
 
 /**
- * stmmac_get_time
- *
+ * stmmac_get_timex - read the PTP clock, with system timestamps if requested
  * @ptp: pointer to ptp_clock_info structure
  * @ts: pointer to hold time/result
+ * @sts: pointer to hold system timestamps around the read, or NULL
  *
- * Description: this function will read the current time from the
- * hardware clock and store it in @ts.
+ * Return: 0
  */
-static int stmmac_get_time(struct ptp_clock_info *ptp, struct timespec64 *ts)
+static int stmmac_get_timex(struct ptp_clock_info *ptp, struct timespec64 *ts,
+			    struct ptp_system_timestamp *sts)
 {
 	struct stmmac_priv *priv =
 	    container_of(ptp, struct stmmac_priv, ptp_clock_ops);
@@ -130,7 +131,7 @@ static int stmmac_get_time(struct ptp_clock_info *ptp, struct timespec64 *ts)
 	u64 ns = 0;
 
 	read_lock_irqsave(&priv->ptp_lock, flags);
-	stmmac_get_systime(priv, priv->ptpaddr, &ns);
+	stmmac_get_systime(priv, priv->ptpaddr, &ns, sts);
 	read_unlock_irqrestore(&priv->ptp_lock, flags);
 
 	*ts = ns_to_timespec64(ns);
@@ -200,7 +201,7 @@ static int stmmac_enable(struct ptp_clock_info *ptp,
 
 		target_ns = cfg->start.tv_nsec + ((u64)cfg->start.tv_sec * NSEC_PER_SEC);
 
-		stmmac_get_systime(priv, priv->ptpaddr, &ns);
+		stmmac_get_systime(priv, priv->ptpaddr, &ns, NULL);
 		if (ns > TIME64_MAX - PTP_SAFE_TIME_OFFSET_NS)
 			return -EINVAL;
 
@@ -304,7 +305,7 @@ const struct ptp_clock_info stmmac_ptp_clock_ops = {
 	.pps = 0,
 	.adjfine = stmmac_adjust_freq,
 	.adjtime = stmmac_adjust_time,
-	.gettime64 = stmmac_get_time,
+	.gettimex64 = stmmac_get_timex,
 	.settime64 = stmmac_set_time,
 	.enable = stmmac_enable,
 };
@@ -321,7 +322,7 @@ const struct ptp_clock_info dwmac1000_ptp_clock_ops = {
 	.pps = 0,
 	.adjfine = stmmac_adjust_freq,
 	.adjtime = stmmac_adjust_time,
-	.gettime64 = stmmac_get_time,
+	.gettimex64 = stmmac_get_timex,
 	.settime64 = stmmac_set_time,
 	.enable = dwmac1000_ptp_enable,
 };
@@ -334,27 +335,30 @@ const struct ptp_clock_info dwmac1000_ptp_clock_ops = {
  */
 void stmmac_ptp_register(struct stmmac_priv *priv)
 {
-	int i;
+	unsigned int pps_out_num = priv->dma_cap.pps_out_num;
+	unsigned int n_ext_ts;
 
-	for (i = 0; i < priv->dma_cap.pps_out_num; i++) {
-		if (i >= STMMAC_PPS_MAX)
-			break;
-		priv->pps[i].available = true;
+	if (pps_out_num > STMMAC_PPS_MAX) {
+		dev_warn(priv->device,
+			 "pps outputs (%u) exceeds driver maximum, limiting to %u\n",
+			 pps_out_num, STMMAC_PPS_MAX);
+		pps_out_num = STMMAC_PPS_MAX;
 	}
 
 	/* Calculate the clock domain crossing (CDC) error if necessary */
 	priv->plat->cdc_error_adj = 0;
-	if (priv->plat->has_gmac4)
+	if (priv->plat->core_type == DWMAC_CORE_GMAC4)
 		priv->plat->cdc_error_adj = (2 * NSEC_PER_SEC) / priv->plat->clk_ptp_rate;
 
 	/* Update the ptp clock parameters based on feature discovery, when
 	 * available
 	 */
-	if (priv->dma_cap.pps_out_num)
-		priv->ptp_clock_ops.n_per_out = priv->dma_cap.pps_out_num;
+	if (pps_out_num)
+		priv->ptp_clock_ops.n_per_out = pps_out_num;
 
-	if (priv->dma_cap.aux_snapshot_n)
-		priv->ptp_clock_ops.n_ext_ts = priv->dma_cap.aux_snapshot_n;
+	n_ext_ts = priv->dma_cap.aux_snapshot_n;
+	if (n_ext_ts)
+		priv->ptp_clock_ops.n_ext_ts = n_ext_ts;
 
 	if (priv->plat->ptp_max_adj)
 		priv->ptp_clock_ops.max_adj = priv->plat->ptp_max_adj;
@@ -362,7 +366,6 @@ void stmmac_ptp_register(struct stmmac_priv *priv)
 	if (priv->plat->crosststamp)
 		priv->ptp_clock_ops.getcrosststamp = stmmac_getcrosststamp;
 
-	rwlock_init(&priv->ptp_lock);
 	mutex_init(&priv->aux_ts_lock);
 
 	priv->ptp_clock = ptp_clock_register(&priv->ptp_clock_ops,

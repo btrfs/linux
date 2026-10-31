@@ -136,27 +136,24 @@ __bpf_kfunc static void cubictcp_init(struct sock *sk)
 		bictcp_hystart_reset(sk);
 
 	if (!hystart && initial_ssthresh)
-		tcp_sk(sk)->snd_ssthresh = initial_ssthresh;
+		WRITE_ONCE(tcp_sk(sk)->snd_ssthresh, initial_ssthresh);
 }
 
-__bpf_kfunc static void cubictcp_cwnd_event(struct sock *sk, enum tcp_ca_event event)
+__bpf_kfunc static void cubictcp_cwnd_event_tx_start(struct sock *sk)
 {
-	if (event == CA_EVENT_TX_START) {
-		struct bictcp *ca = inet_csk_ca(sk);
-		u32 now = tcp_jiffies32;
-		s32 delta;
+	struct bictcp *ca = inet_csk_ca(sk);
+	u32 now = tcp_jiffies32;
+	s32 delta;
 
-		delta = now - tcp_sk(sk)->lsndtime;
+	delta = now - tcp_sk(sk)->lsndtime;
 
-		/* We were application limited (idle) for a while.
-		 * Shift epoch_start to keep cwnd growth to cubic curve.
-		 */
-		if (ca->epoch_start && delta > 0) {
-			ca->epoch_start += delta;
-			if (after(ca->epoch_start, now))
-				ca->epoch_start = now;
-		}
-		return;
+	/* We were application limited (idle) for a while.
+	 * Shift epoch_start to keep cwnd growth to cubic curve.
+	 */
+	if (ca->epoch_start && delta > 0) {
+		ca->epoch_start += delta;
+		if (after(ca->epoch_start, now))
+			ca->epoch_start = now;
 	}
 }
 
@@ -423,7 +420,7 @@ static void hystart_update(struct sock *sk, u32 delay)
 				NET_ADD_STATS(sock_net(sk),
 					      LINUX_MIB_TCPHYSTARTTRAINCWND,
 					      tcp_snd_cwnd(tp));
-				tp->snd_ssthresh = tcp_snd_cwnd(tp);
+				WRITE_ONCE(tp->snd_ssthresh, tcp_snd_cwnd(tp));
 			}
 		}
 	}
@@ -443,7 +440,7 @@ static void hystart_update(struct sock *sk, u32 delay)
 				NET_ADD_STATS(sock_net(sk),
 					      LINUX_MIB_TCPHYSTARTDELAYCWND,
 					      tcp_snd_cwnd(tp));
-				tp->snd_ssthresh = tcp_snd_cwnd(tp);
+				WRITE_ONCE(tp->snd_ssthresh, tcp_snd_cwnd(tp));
 			}
 		}
 	}
@@ -481,7 +478,7 @@ static struct tcp_congestion_ops cubictcp __read_mostly = {
 	.cong_avoid	= cubictcp_cong_avoid,
 	.set_state	= cubictcp_state,
 	.undo_cwnd	= tcp_reno_undo_cwnd,
-	.cwnd_event	= cubictcp_cwnd_event,
+	.cwnd_event_tx_start = cubictcp_cwnd_event_tx_start,
 	.pkts_acked     = cubictcp_acked,
 	.owner		= THIS_MODULE,
 	.name		= "cubic",
@@ -492,7 +489,7 @@ BTF_ID_FLAGS(func, cubictcp_init)
 BTF_ID_FLAGS(func, cubictcp_recalc_ssthresh)
 BTF_ID_FLAGS(func, cubictcp_cong_avoid)
 BTF_ID_FLAGS(func, cubictcp_state)
-BTF_ID_FLAGS(func, cubictcp_cwnd_event)
+BTF_ID_FLAGS(func, cubictcp_cwnd_event_tx_start)
 BTF_ID_FLAGS(func, cubictcp_acked)
 BTF_KFUNCS_END(tcp_cubic_check_kfunc_ids)
 
@@ -503,16 +500,26 @@ static const struct btf_kfunc_id_set tcp_cubic_kfunc_set = {
 
 static int __init cubictcp_register(void)
 {
+	int b = READ_ONCE(beta);
 	int ret;
 
 	BUILD_BUG_ON(sizeof(struct bictcp) > ICSK_CA_PRIV_SIZE);
+
+	if (b < 0 || b >= BICTCP_BETA_SCALE ||
+	    bic_scale <= 0 || bic_scale > INT_MAX / 10) {
+		pr_err("tcp_cubic: invalid beta %d or bic_scale %d\n",
+		       b, bic_scale);
+		return -EINVAL;
+	}
 
 	/* Precompute a bunch of the scaling factors that are used per-packet
 	 * based on SRTT of 100ms
 	 */
 
-	beta_scale = 8*(BICTCP_BETA_SCALE+beta) / 3
-		/ (BICTCP_BETA_SCALE - beta);
+	beta_scale = 8 * (BICTCP_BETA_SCALE + b) / 3
+		/ (BICTCP_BETA_SCALE - b);
+	/* bictcp_update() needs (cwnd * beta_scale) >> 3 to be >= 1 */
+	beta_scale = max(beta_scale, 8U);
 
 	cube_rtt_scale = (bic_scale * 10);	/* 1024*c/rtt */
 

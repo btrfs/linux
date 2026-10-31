@@ -8,14 +8,9 @@ Serial Peripheral Interface (SPI)
    :maxdepth: 1
 
    spi-summary
+   instantiating-devices
    spidev
+   multiple-data-lanes
    butterfly
    spi-lm70llp
    spi-sc18is602
-
-.. only::  subproject and html
-
-   Indices
-   =======
-
-   * :ref:`genindex`

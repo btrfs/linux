@@ -236,7 +236,7 @@ struct clk *tegra_clk_register_sdmmc_mux_div(const char *name,
 	unsigned long flags, void *lock)
 {
 	struct clk *clk;
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	const struct tegra_clk_periph_regs *bank;
 	struct tegra_sdmmc_mux *sdmmc_mux;
 
@@ -250,7 +250,7 @@ struct clk *tegra_clk_register_sdmmc_mux_div(const char *name,
 	if (!bank)
 		return ERR_PTR(-EINVAL);
 
-	sdmmc_mux = kzalloc(sizeof(*sdmmc_mux), GFP_KERNEL);
+	sdmmc_mux = kzalloc_obj(*sdmmc_mux);
 	if (!sdmmc_mux)
 		return ERR_PTR(-ENOMEM);
 

@@ -8,6 +8,7 @@
 #include <linux/kernel.h>
 #include <linux/mcb.h>
 #include <linux/module.h>
+#include <linux/stringify.h>
 #include <linux/watchdog.h>
 
 struct men_z069_drv {
@@ -29,7 +30,7 @@ struct men_z069_drv {
 static bool nowayout = WATCHDOG_NOWAYOUT;
 module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started (default="
-			    __MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
+			    __stringify(WATCHDOG_NOWAYOUT) ")");
 
 static int men_z069_wdt_start(struct watchdog_device *wdt)
 {
@@ -163,5 +164,4 @@ module_mcb_driver(men_z069_driver);
 MODULE_AUTHOR("Johannes Thumshirn <jth@kernel.org>");
 MODULE_DESCRIPTION("Watchdog driver for the MEN z069 IP-Core");
 MODULE_LICENSE("GPL v2");
-MODULE_ALIAS("mcb:16z069");
 MODULE_IMPORT_NS("MCB");

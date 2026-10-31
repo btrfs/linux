@@ -6,6 +6,7 @@
  * Author: Bard Liao <bardliao@realtek.com>
  */
 
+#include <linux/cleanup.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/init.h>
@@ -853,8 +854,7 @@ static int rt5668_headset_detect(struct snd_soc_component *component,
 		int jack_insert)
 {
 	struct rt5668_priv *rt5668 = snd_soc_component_get_drvdata(component);
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	unsigned int val, count;
 
 	if (jack_insert) {
@@ -987,7 +987,7 @@ static void rt5668_jack_detect_handler(struct work_struct *work)
 		return;
 	}
 
-	mutex_lock(&rt5668->calibrate_mutex);
+	guard(mutex)(&rt5668->calibrate_mutex);
 
 	val = snd_soc_component_read(rt5668->component, RT5668_AJD1_CTRL)
 		& RT5668_JDH_RS_MASK;
@@ -1054,8 +1054,6 @@ static void rt5668_jack_detect_handler(struct work_struct *work)
 		schedule_delayed_work(&rt5668->jd_check_work, 0);
 	else
 		cancel_delayed_work_sync(&rt5668->jd_check_work);
-
-	mutex_unlock(&rt5668->calibrate_mutex);
 }
 
 static const struct snd_kcontrol_new rt5668_snd_controls[] = {
@@ -2256,16 +2254,38 @@ static int rt5668_resume(struct snd_soc_component *component)
 #define RT5668_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S20_3LE | \
 		SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S8)
 
+static const u64 rt5668_selectable_formats_aif1 =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF;
+
+static const u64 rt5668_selectable_formats_aif2 =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF;
+
 static const struct snd_soc_dai_ops rt5668_aif1_dai_ops = {
 	.hw_params = rt5668_hw_params,
 	.set_fmt = rt5668_set_dai_fmt,
 	.set_tdm_slot = rt5668_set_tdm_slot,
+	.auto_selectable_formats	= &rt5668_selectable_formats_aif1,
+	.num_auto_selectable_formats	= 1,
 };
 
 static const struct snd_soc_dai_ops rt5668_aif2_dai_ops = {
 	.hw_params = rt5668_hw_params,
 	.set_fmt = rt5668_set_dai_fmt,
 	.set_bclk_ratio = rt5668_set_bclk_ratio,
+	.auto_selectable_formats	= &rt5668_selectable_formats_aif2,
+	.num_auto_selectable_formats	= 1,
 };
 
 static struct snd_soc_dai_driver rt5668_dai[] = {
@@ -2335,8 +2355,8 @@ static const struct regmap_config rt5668_regmap = {
 };
 
 static const struct i2c_device_id rt5668_i2c_id[] = {
-	{"rt5668b"},
-	{}
+	{ .name = "rt5668b" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rt5668_i2c_id);
 
@@ -2357,7 +2377,7 @@ static void rt5668_calibrate(struct rt5668_priv *rt5668)
 {
 	int value, count;
 
-	mutex_lock(&rt5668->calibrate_mutex);
+	guard(mutex)(&rt5668->calibrate_mutex);
 
 	rt5668_reset(rt5668->regmap);
 	regmap_write(rt5668->regmap, RT5668_PWR_ANLG_1, 0xa2bf);
@@ -2401,9 +2421,6 @@ static void rt5668_calibrate(struct rt5668_priv *rt5668)
 	/* restore settings */
 	regmap_write(rt5668->regmap, RT5668_STO1_ADC_MIXER, 0xc0c4);
 	regmap_write(rt5668->regmap, RT5668_PWR_DIG_1, 0x0000);
-
-	mutex_unlock(&rt5668->calibrate_mutex);
-
 }
 
 static int rt5668_i2c_probe(struct i2c_client *i2c)
@@ -2459,7 +2476,7 @@ static int rt5668_i2c_probe(struct i2c_client *i2c)
 		return PTR_ERR(rt5668->ldo1_en);
 	}
 
-	/* Sleep for 300 ms miniumum */
+	/* Sleep for 300 ms minimum */
 	usleep_range(300000, 350000);
 
 	regmap_write(rt5668->regmap, RT5668_I2C_MODE, 0x1);

@@ -221,7 +221,7 @@ static int yoga_c630_ec_probe(struct i2c_client *client)
 					NULL, yoga_c630_ec_thread_intr,
 					IRQF_ONESHOT, "yoga_c630_ec", ec);
 	if (ret < 0)
-		return dev_err_probe(dev, ret, "unable to request irq\n");
+		return ret;
 
 	ret = yoga_c630_aux_init(dev, YOGA_C630_DEV_PSY, ec);
 	if (ret)
@@ -238,8 +238,8 @@ static const struct of_device_id yoga_c630_ec_of_match[] = {
 MODULE_DEVICE_TABLE(of, yoga_c630_ec_of_match);
 
 static const struct i2c_device_id yoga_c630_ec_i2c_id_table[] = {
-	{ "yoga-c630-ec", },
-	{}
+	{ .name = "yoga-c630-ec" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, yoga_c630_ec_i2c_id_table);
 

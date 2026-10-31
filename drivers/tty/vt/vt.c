@@ -38,7 +38,7 @@
  *
  *     - Arno Griffioen <arno@usn.nl>
  *     - David Carter <carter@cs.bris.ac.uk>
- * 
+ *
  *   The abstract console driver provides a generic interface for a text
  *   console. It supports VGA text mode, frame buffer based graphical consoles
  *   and special graphics processors that are only accessible through some
@@ -71,6 +71,7 @@
  * by Adam Tla/lka <atlka@pg.gda.pl>, Aug 2006
  */
 
+#include <linux/compiler.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/sched/signal.h>
@@ -79,6 +80,7 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/errno.h>
+#include <linux/hex.h>
 #include <linux/kd.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
@@ -187,18 +189,11 @@ static DECLARE_WORK(con_driver_unregister_work, con_driver_unregister_callback);
  * fg_console is the current virtual console,
  * last_console is the last used one,
  * want_console is the console we want to switch to,
- * saved_* variants are for save/restore around kernel debugger enter/leave
  */
 int fg_console;
 EXPORT_SYMBOL(fg_console);
 int last_console;
 int want_console = -1;
-
-static int saved_fg_console;
-static int saved_last_console;
-static int saved_want_console;
-static int saved_vc_mode;
-static int saved_console_blanked;
 
 /*
  * For each existing display, we have a pointer to console currently visible
@@ -235,6 +230,153 @@ enum {
 	blank_normal_wait,
 	blank_vesa_wait,
 };
+
+/*
+ * struct vc_font
+ */
+
+/**
+ * vc_font_pitch - Calculates the number of bytes between two adjacent scanlines
+ * @font: The VC font
+ *
+ * Returns:
+ * The number of bytes between two adjacent scanlines in the font data
+ */
+unsigned int vc_font_pitch(const struct vc_font *font)
+{
+	return font_glyph_pitch(font->width);
+}
+EXPORT_SYMBOL_GPL(vc_font_pitch);
+
+/**
+ * vc_font_size - Calculates the size of the font data in bytes
+ * @font: The VC font
+ *
+ * vc_font_size() calculates the number of bytes of font data in the
+ * font specified by @font. The function calculates the size from the
+ * font parameters.
+ *
+ * Returns:
+ * The size of the font data in bytes.
+ */
+unsigned int vc_font_size(const struct vc_font *font)
+{
+	return font_glyph_size(font->width, font->height) * font->charcount;
+}
+EXPORT_SYMBOL_GPL(vc_font_size);
+
+/*
+ * Cursors
+ */
+
+/**
+ * vc_cursor_valid_size - Computes a valid cursor size from the given value
+ * @cursor_size: The size constant of cursor pattern
+ *
+ * The argument given in @cursor_size is one of the CUR_ constants, as stored
+ * in struct @vc_data.vc_cursor_type. For unknown values, the helper draws the
+ * default cursor or an underline dash.
+ *
+ * Returns:
+ * A valid cursor size for the given size value
+ */
+unsigned int vc_cursor_valid_size(unsigned int cursor_size)
+{
+	const unsigned int cursor_default_size = CUR_SIZE(READ_ONCE(cur_default));
+
+	do {
+		switch (cursor_size) {
+		case CUR_NONE:
+		case CUR_UNDERLINE:
+		case CUR_LOWER_THIRD:
+		case CUR_LOWER_HALF:
+		case CUR_TWO_THIRDS:
+		case CUR_BLOCK:
+			return cursor_size;
+		default:
+			pr_warn_once("Unknown cursor %u\n", cursor_size);
+			fallthrough;
+		case CUR_DEF:
+			/*
+			 * Use user-given default size, or underline if
+			 * the given default is invalid.
+			 */
+			if (cursor_size != cursor_default_size)
+				cursor_size = cursor_default_size;
+			else
+				cursor_size = CUR_UNDERLINE;
+		}
+	} while (true);
+}
+EXPORT_SYMBOL_GPL(vc_cursor_valid_size);
+
+/**
+ * vc_cursor_start - Calculates the cursor's first scanline within a character cell
+ * @cell_height: The overall height of the character cell
+ * @cursor_size: The size constant of cursor pattern
+ *
+ * The parameter @cell_height is the height of the character cell as
+ * displayed by the console. The argument given in @cursor_size is one
+ * of the CUR_ constants. See vc_cursor_valid_size() for how to get a
+ * valid cursor-size constant.
+ *
+ * Returns:
+ * The index of the cursor's first scanline within the character cell
+ */
+unsigned int vc_cursor_start(unsigned int cell_height, unsigned int cursor_size)
+{
+	switch (cursor_size) {
+	case CUR_NONE:
+		return cell_height;
+	case CUR_UNDERLINE:
+	default:
+		if (cell_height < 10)
+			return cell_height - 1;
+		else
+			return cell_height - 3;
+	case CUR_LOWER_THIRD:
+		return cell_height - cell_height / 3;
+	case CUR_LOWER_HALF:
+		return cell_height - cell_height / 2;
+	case CUR_TWO_THIRDS:
+		return cell_height - (cell_height * 2) / 3;
+	case CUR_BLOCK:
+		return 0;
+	}
+}
+EXPORT_SYMBOL_GPL(vc_cursor_start);
+
+/**
+ * vc_cursor_end - Calculates the first scanline after the cursor within a character cell
+ * @cell_height: The overall height of the character cell
+ * @cursor_size: The size constant of cursor pattern
+ *
+ * The parameter @cell_height is the height of the character cell as
+ * displayed by the console. The argument given in @cursor_size is one
+ * of the CUR_ constants. See vc_cursor_valid_size() for how to get a
+ * valid cursor-size constant.
+ *
+ * Returns:
+ * The index of the first scanline after the cursor within the character cell
+ */
+unsigned int vc_cursor_end(unsigned int cell_height, unsigned int cursor_size)
+{
+	switch (cursor_size) {
+	case CUR_UNDERLINE:
+	default:
+		if (cell_height < 10)
+			return cell_height;
+		else
+			return cell_height - 1;
+	case CUR_NONE:
+	case CUR_LOWER_THIRD:
+	case CUR_LOWER_HALF:
+	case CUR_TWO_THIRDS:
+	case CUR_BLOCK:
+		return cell_height;
+	}
+}
+EXPORT_SYMBOL_GPL(vc_cursor_end);
 
 /*
  * /sys/class/tty/tty0/
@@ -1071,7 +1213,7 @@ int vc_allocate(unsigned int currcons)	/* return 0 on success */
 	/* although the numbers above are not valid since long ago, the
 	   point is still up-to-date and the comment still has its value
 	   even if only as a historical artifact.  --mj, July 1998 */
-	param.vc = vc = kzalloc(sizeof(struct vc_data), GFP_KERNEL);
+	param.vc = vc = kzalloc_obj(struct vc_data);
 	if (!vc)
 		return -ENOMEM;
 
@@ -1106,6 +1248,8 @@ int vc_allocate(unsigned int currcons)	/* return 0 on success */
 	return 0;
 err_free:
 	visual_deinit(vc);
+	if (*vc->uni_pagedict_loc)
+		con_free_unimap(vc);
 	kfree(vc);
 	vc_cons[currcons].d = NULL;
 	return err;
@@ -1345,6 +1489,8 @@ struct vc_data *vc_deallocate(unsigned int currcons)
 			kfree(vc->vc_saved_screen);
 			vc->vc_saved_screen = NULL;
 		}
+		vc_uniscr_free(vc->vc_saved_uni_lines);
+		vc->vc_saved_uni_lines = NULL;
 	}
 	return vc;
 }
@@ -1650,9 +1796,7 @@ static void rgb_background(struct vc_data *vc, const struct rgb *c)
 
 /*
  * ITU T.416 Higher colour modes. They break the usual properties of SGR codes
- * and thus need to be detected and ignored by hand. That standard also
- * wants : rather than ; as separators but sequences containing : are currently
- * completely ignored by the parser.
+ * and thus need to be detected and ignored by hand.
  *
  * Subcommands 3 (CMY) and 4 (CMYK) are so insane there's no point in
  * supporting them.
@@ -1709,6 +1853,7 @@ enum {
 	CSI_m_BG_COLOR_END		= 47,
 	CSI_m_BG_COLOR			= 48,
 	CSI_m_DEFAULT_BG_COLOR		= 49,
+	CSI_m_UNDERLINE_COLOR		= 58,
 	CSI_m_BRIGHT_FG_COLOR_BEG	= 90,
 	CSI_m_BRIGHT_FG_COLOR_END	= 97,
 	CSI_m_BRIGHT_FG_COLOR_OFF	= CSI_m_BRIGHT_FG_COLOR_BEG - CSI_m_FG_COLOR_BEG,
@@ -1890,6 +2035,8 @@ static void enter_alt_screen(struct vc_data *vc)
 	vc->vc_saved_screen = kmemdup((u16 *)vc->vc_origin, size, GFP_KERNEL);
 	if (vc->vc_saved_screen == NULL)
 		return;
+	vc->vc_saved_uni_lines = vc->vc_uni_lines;
+	vc->vc_uni_lines = NULL;
 	vc->vc_saved_rows = vc->vc_rows;
 	vc->vc_saved_cols = vc->vc_cols;
 	save_cur(vc);
@@ -1911,6 +2058,26 @@ static void leave_alt_screen(struct vc_data *vc)
 		dest = ((u16 *)vc->vc_origin) + r * vc->vc_cols;
 		memcpy(dest, src, 2 * cols);
 	}
+	/*
+	 * If the console was resized while in the alternate screen,
+	 * resize the saved unicode buffer to the current dimensions.
+	 * On allocation failure new_uniscr is NULL, causing the old
+	 * buffer to be freed and vc_uni_lines to be lazily rebuilt
+	 * via vc_uniscr_check() when next needed.
+	 */
+	if (vc->vc_saved_uni_lines &&
+	    (vc->vc_saved_rows != vc->vc_rows ||
+	     vc->vc_saved_cols != vc->vc_cols)) {
+		u32 **new_uniscr = vc_uniscr_alloc(vc->vc_cols, vc->vc_rows);
+
+		if (new_uniscr)
+			vc_uniscr_copy_area(new_uniscr, vc->vc_cols, vc->vc_rows,
+					    vc->vc_saved_uni_lines, cols, 0, rows);
+		vc_uniscr_free(vc->vc_saved_uni_lines);
+		vc->vc_saved_uni_lines = new_uniscr;
+	}
+	vc_uniscr_set(vc, vc->vc_saved_uni_lines);
+	vc->vc_saved_uni_lines = NULL;
 	restore_cur(vc);
 	/* Update the entire screen */
 	if (con_should_update(vc))
@@ -2166,6 +2333,7 @@ static void restore_cur(struct vc_data *vc)
  * @ESesc:		ESC parsed
  * @ESsquare:		CSI parsed -- modifiers/parameters/ctrl chars expected
  * @ESgetpars:		CSI parsed -- parameters/ctrl chars expected
+ * @ESgetsubpars:	CSI m parsed -- subparameters expected
  * @ESfunckey:		CSI [ parsed
  * @EShash:		ESC # parsed
  * @ESsetG0:		ESC ( parsed
@@ -2186,6 +2354,7 @@ enum vc_ctl_state {
 	ESesc,
 	ESsquare,
 	ESgetpars,
+	ESgetsubpars,
 	ESfunckey,
 	EShash,
 	ESsetG0,
@@ -2233,6 +2402,8 @@ static void reset_terminal(struct vc_data *vc, int do_clear)
 	if (vc->vc_saved_screen != NULL) {
 		kfree(vc->vc_saved_screen);
 		vc->vc_saved_screen = NULL;
+		vc_uniscr_free(vc->vc_saved_uni_lines);
+		vc->vc_saved_uni_lines = NULL;
 		vc->vc_saved_rows = 0;
 		vc->vc_saved_cols = 0;
 	}
@@ -2705,6 +2876,47 @@ static void do_con_trol(struct tty_struct *tty, struct vc_data *vc, u8 c)
 		fallthrough;
 	case ESgetpars: /* ESC [ aka CSI, parameters expected */
 		switch (c) {
+		case ':': /* ITU-T T.416 color subparameters */
+			if (vc->vc_par[vc->vc_npar] == CSI_m_FG_COLOR ||
+			    vc->vc_par[vc->vc_npar] == CSI_m_BG_COLOR ||
+			    vc->vc_par[vc->vc_npar] == CSI_m_UNDERLINE_COLOR)
+				vc->vc_state = ESgetsubpars;
+			else
+				break;
+			fallthrough;
+		case ';':
+			if (vc->vc_npar < NPAR - 1) {
+				vc->vc_npar++;
+				return;
+			}
+			break;
+		case '0' ... '9':
+			vc->vc_par[vc->vc_npar] *= 10;
+			vc->vc_par[vc->vc_npar] += c - '0';
+			return;
+		}
+		if (c >= ASCII_CSI_IGNORE_FIRST && c <= ASCII_CSI_IGNORE_LAST) {
+			vc->vc_state = EScsiignore;
+			return;
+		}
+
+		/* parameters done, handle the control char @c */
+
+		vc->vc_state = ESnormal;
+
+		switch (vc->vc_priv) {
+		case EPdec:
+			csi_DEC(tty, vc, c);
+			return;
+		case EPecma:
+			csi_ECMA(tty, vc, c);
+			return;
+		default:
+			return;
+		}
+	case ESgetsubpars: /* ESC [ 38/48/58, subparameters expected */
+		switch (c) {
+		case ':':
 		case ';':
 			if (vc->vc_npar < NPAR - 1) {
 				vc->vc_npar++;
@@ -2764,7 +2976,8 @@ static void do_con_trol(struct tty_struct *tty, struct vc_data *vc, u8 c)
 			csi_J(vc, CSI_J_VISIBLE);
 			vc->vc_video_erase_char =
 				(vc->vc_video_erase_char & 0xff00) | ' ';
-			do_update_region(vc, vc->vc_origin, vc->vc_screenbuf_size / 2);
+			if (con_should_update(vc))
+				do_update_region(vc, vc->vc_origin, vc->vc_screenbuf_size / 2);
 		}
 		return;
 	case ESsetG0:	/* ESC ( */
@@ -2998,8 +3211,12 @@ static void vc_con_rewind(struct vc_data *vc)
 static int vc_process_ucs(struct vc_data *vc, int *c, int *tc)
 {
 	u32 prev_c, curr_c = *c;
+	unsigned int w = ucs_get_width(curr_c);
 
-	if (ucs_is_double_width(curr_c)) {
+	if (likely(w == 1))
+		return 1;
+
+	if (w == 2) {
 		/*
 		 * The Unicode screen memory is allocated only when
 		 * required. This is one such case as we need to remember
@@ -3009,12 +3226,9 @@ static int vc_process_ucs(struct vc_data *vc, int *c, int *tc)
 		return 2;
 	}
 
-	if (!ucs_is_zero_width(curr_c))
-		return 1;
-
 	/* From here curr_c is known to be zero-width. */
 
-	if (ucs_is_double_width(vc_uniscr_getc(vc, -2))) {
+	if (ucs_get_width(vc_uniscr_getc(vc, -2)) == 2) {
 		/*
 		 * Let's merge this zero-width code point with the preceding
 		 * double-width code point by replacing the existing
@@ -3236,7 +3450,6 @@ rescan_last_byte:
 			goto rescan_last_byte;
 	}
 	con_flush(vc, &draw);
-	console_conditional_schedule();
 	notify_update(vc);
 
 	return n;
@@ -3784,7 +3997,8 @@ static int __init con_init(void)
 	}
 
 	for (currcons = 0; currcons < MIN_NR_CONSOLES; currcons++) {
-		vc_cons[currcons].d = vc = kzalloc(sizeof(struct vc_data), GFP_NOWAIT);
+		vc_cons[currcons].d = vc = kzalloc_obj(struct vc_data,
+						       GFP_NOWAIT);
 		INIT_WORK(&vc_cons[currcons].SAK_work, vc_SAK);
 		tty_port_init(&vc->port);
 		visual_init(vc, currcons, true);
@@ -3882,9 +4096,6 @@ int __init vty_init(const struct file_operations *console_fops)
 		panic("Couldn't register console driver\n");
 	kbd_init();
 	console_map_init();
-#ifdef CONFIG_MDA_CONSOLE
-	mda_console_init();
-#endif
 	return 0;
 }
 
@@ -4287,15 +4498,6 @@ EXPORT_SYMBOL(con_is_visible);
  */
 void con_debug_enter(struct vc_data *vc)
 {
-	saved_fg_console = fg_console;
-	saved_last_console = last_console;
-	saved_want_console = want_console;
-	saved_vc_mode = vc->vc_mode;
-	saved_console_blanked = console_blanked;
-	vc->vc_mode = KD_TEXT;
-	console_blanked = 0;
-	if (vc->vc_sw->con_debug_enter)
-		vc->vc_sw->con_debug_enter(vc);
 #ifdef CONFIG_KGDB_KDB
 	/* Set the initial LINES variable if it is not already set */
 	if (vc->vc_rows < 999) {
@@ -4335,19 +4537,7 @@ EXPORT_SYMBOL_GPL(con_debug_enter);
  * was invoked.
  */
 void con_debug_leave(void)
-{
-	struct vc_data *vc;
-
-	fg_console = saved_fg_console;
-	last_console = saved_last_console;
-	want_console = saved_want_console;
-	console_blanked = saved_console_blanked;
-	vc_cons[fg_console].d->vc_mode = saved_vc_mode;
-
-	vc = vc_cons[fg_console].d;
-	if (vc->vc_sw->con_debug_leave)
-		vc->vc_sw->con_debug_leave(vc);
-}
+{ }
 EXPORT_SYMBOL_GPL(con_debug_leave);
 
 static int do_register_con_driver(const struct consw *csw, int first, int last)
@@ -4598,7 +4788,7 @@ void do_blank_screen(int entering_gfx)
 	if (console_blanked) {
 		if (blank_state == blank_vesa_wait) {
 			blank_state = blank_off;
-			vc->vc_sw->con_blank(vc, vesa_blank_mode + 1, 0);
+			vc->vc_sw->con_blank(vc, vesa_blank_mode, false);
 		}
 		return;
 	}
@@ -4607,7 +4797,7 @@ void do_blank_screen(int entering_gfx)
 	if (entering_gfx) {
 		hide_cursor(vc);
 		save_screen(vc);
-		vc->vc_sw->con_blank(vc, VESA_VSYNC_SUSPEND, 1);
+		vc->vc_sw->con_blank(vc, VESA_NO_BLANKING, true);
 		console_blanked = fg_console + 1;
 		blank_state = blank_off;
 		set_origin(vc);
@@ -4628,8 +4818,9 @@ void do_blank_screen(int entering_gfx)
 
 	save_screen(vc);
 	/* In case we need to reset origin, blanking hook returns 1 */
-	i = vc->vc_sw->con_blank(vc, vesa_off_interval ? VESA_VSYNC_SUSPEND :
-				 (vesa_blank_mode + 1), 0);
+	i = vc->vc_sw->con_blank(vc,
+				 vesa_off_interval ? VESA_NO_BLANKING : vesa_blank_mode,
+				 false);
 	console_blanked = fg_console + 1;
 	if (i)
 		set_origin(vc);
@@ -4680,7 +4871,7 @@ void do_unblank_screen(int leaving_gfx)
 	}
 
 	console_blanked = 0;
-	if (vc->vc_sw->con_blank(vc, VESA_NO_BLANKING, leaving_gfx))
+	if (vc->vc_sw->con_unblank(vc, leaving_gfx))
 		/* Low-level driver cannot restore -> do it ourselves */
 		update_screen(vc);
 	if (console_blank_hook)
@@ -4862,7 +5053,7 @@ static int con_font_get(struct vc_data *vc, struct console_font_op *op)
 			return ret;
 	}
 
-	c = (font.width+7)/8 * vpitch * font.charcount;
+	c = DIV_ROUND_UP(font.width, 8) * vpitch * font.charcount;
 
 	if (op->data && font.charcount > op->charcount)
 		return -ENOSPC;
@@ -4894,7 +5085,7 @@ static int con_font_set(struct vc_data *vc, const struct console_font_op *op)
 		return -EINVAL;
 	if (vpitch < op->height)
 		return -EINVAL;
-	size = (op->width+7)/8 * vpitch * op->charcount;
+	size = DIV_ROUND_UP(op->width, 8) * vpitch * op->charcount;
 	if (size > max_font_size)
 		return -ENOSPC;
 
@@ -4913,8 +5104,8 @@ static int con_font_set(struct vc_data *vc, const struct console_font_op *op)
 	if (!vc->vc_sw->con_font_set)
 		return -ENOSYS;
 
-	if (vc_is_sel(vc))
-		clear_selection();
+	/* hide selection and cursor prior font changes */
+	hide_cursor(vc);
 
 	return vc->vc_sw->con_font_set(vc, &font, vpitch, op->flags);
 }
@@ -4938,8 +5129,9 @@ static int con_font_default(struct vc_data *vc, struct console_font_op *op)
 		if (!vc->vc_sw->con_font_default)
 			return -ENOSYS;
 
-		if (vc_is_sel(vc))
-			clear_selection();
+		/* hide selection and cursor prior font changes */
+		hide_cursor(vc);
+
 		int ret = vc->vc_sw->con_font_default(vc, &font, s);
 		if (ret)
 			return ret;

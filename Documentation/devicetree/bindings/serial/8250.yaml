@@ -23,7 +23,8 @@ allOf:
     then:
       properties:
         compatible:
-          const: aspeed,ast2500-vuart
+          contains:
+            const: aspeed,ast2500-vuart
   - if:
       properties:
         compatible:
@@ -63,7 +64,9 @@ allOf:
       properties:
         compatible:
           contains:
-            const: spacemit,k1-uart
+            enum:
+              - spacemit,k1-uart
+              - spacemit,k3-uart
     then:
       properties:
         clock-names:
@@ -76,6 +79,7 @@ allOf:
           contains:
             enum:
               - spacemit,k1-uart
+              - spacemit,k3-uart
               - nxp,lpc1850-uart
     then:
       required:
@@ -96,19 +100,25 @@ allOf:
 properties:
   compatible:
     oneOf:
-      - const: ns8250
-      - const: ns16450
-      - const: ns16550
-      - const: ns16550a
-      - const: ns16850
-      - const: aspeed,ast2400-vuart
-      - const: aspeed,ast2500-vuart
-      - const: intel,xscale-uart
-      - const: mrvl,pxa-uart
-      - const: nuvoton,wpcm450-uart
-      - const: nuvoton,npcm750-uart
-      - const: nvidia,tegra20-uart
-      - const: nxp,lpc3220-uart
+      - enum:
+          - ns8250
+          - ns16450
+          - ns16550
+          - ns16550a
+          - ns16850
+          - airoha,an7581-hsuart
+          - airoha,en7523-uart
+          - aspeed,ast2400-vuart
+          - aspeed,ast2500-vuart
+          - intel,xscale-uart
+          - mrvl,pxa-uart
+          - nuvoton,npcm750-uart
+          - nuvoton,wpcm450-uart
+          - nvidia,tegra20-uart
+          - nxp,lpc3220-uart
+      - items:
+          - const: airoha,an7581-uart
+          - const: airoha,en7523-uart
       - items:
           - enum:
               - exar,xr16l2552
@@ -125,6 +135,8 @@ properties:
               - nxp,lpc1850-uart
               - opencores,uart16550-rtlsvn105
               - ti,da830-uart
+              - loongson,ls2k0500-uart
+              - loongson,ls2k1500-uart
           - const: ns16550a
       - items:
           - enum:
@@ -158,6 +170,7 @@ properties:
           - enum:
               - mrvl,mmp-uart
               - spacemit,k1-uart
+              - spacemit,k3-uart
           - const: intel,xscale-uart
       - items:
           - enum:
@@ -169,6 +182,24 @@ properties:
               - nvidia,tegra194-uart
               - nvidia,tegra234-uart
           - const: nvidia,tegra20-uart
+      - items:
+          - enum:
+              - loongson,ls2k1000-uart
+          - const: loongson,ls2k0500-uart
+          - const: ns16550a
+      - items:
+          - enum:
+              - loongson,ls3a4000-uart
+              - loongson,ls3a5000-uart
+              - loongson,ls3a6000-uart
+              - loongson,ls2k2000-uart
+          - const: loongson,ls2k1500-uart
+          - const: ns16550a
+      - items:
+          - enum:
+              - aspeed,ast2600-vuart
+              - aspeed,ast2700-vuart
+          - const: aspeed,ast2500-vuart
 
   reg:
     maxItems: 1

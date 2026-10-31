@@ -54,7 +54,7 @@
 };
 
 &pm8921 {
-	interrupts-extended = <&msmgpio 104 IRQ_TYPE_LEVEL_LOW>;
+	interrupts-extended = <&tlmm 104 IRQ_TYPE_LEVEL_LOW>;
 };
 
 &pm8921_gpio {
@@ -93,6 +93,21 @@
 	pinctrl-names = "default";
 
 	status = "okay";
+};
+
+&riva {
+	vddcx-supply = <&pm8921_s3>;
+	vddmx-supply = <&pm8921_l24>;
+	vddpx-supply = <&pm8921_s4>;
+
+	status = "okay";
+
+	iris {
+		vdddig-supply = <&pm8921_lvs2>;
+		vddpa-supply = <&pm8921_l10>;
+		vddrfa-supply = <&pm8921_s2>;
+		vddxo-supply = <&pm8921_l4>;
+	};
 };
 
 &rpm {

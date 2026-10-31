@@ -2,8 +2,12 @@
 /*
  * AD3530R/AD3530 8-channel, 16-bit Voltage Output DAC Driver
  * AD3531R/AD3531 4-channel, 16-bit Voltage Output DAC Driver
+ * AD3532R/AD3532 16-channel, 16-bit Voltage Output DAC Driver
+ * AD3536R 16-channel, 12-bit Voltage Output DAC Driver
+ * AD5710R 8-channel, 16-bit Configurable IDAC/VDAC Driver
+ * AD5711R 8-channel, 12-bit Configurable IDAC/VDAC Driver
  *
- * Copyright 2025 Analog Devices Inc.
+ * Copyright 2025-2026 Analog Devices Inc.
  */
 
 #include <linux/array_size.h>
@@ -16,7 +20,6 @@
 #include <linux/gpio/consumer.h>
 #include <linux/iio/iio.h>
 #include <linux/kstrtox.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/property.h>
@@ -26,6 +29,8 @@
 #include <linux/sysfs.h>
 #include <linux/types.h>
 #include <linux/units.h>
+
+#include <dt-bindings/iio/addac/adi,ad74413r.h>
 
 #define AD3530R_INTERFACE_CONFIG_A		0x00
 #define AD3530R_OUTPUT_OPERATING_MODE_0		0x20
@@ -39,22 +44,42 @@
 #define AD3531R_SW_LDAC_TRIG_A			0xDD
 #define AD3531R_INPUT_CH			0xE3
 
+#define AD5710R_CHN_VMODE_EN			0xFF
+
+/* AD3532R/AD3532 bank 0 registers (channels 0-7) */
+#define AD3532R_INTERFACE_CONFIG_A_0		0x1000
+#define AD3532R_OUTPUT_OPERATING_MODE_0		0x1020
+#define AD3532R_OUTPUT_OPERATING_MODE_1		0x1021
+#define AD3532R_OUTPUT_CONTROL_0		0x102A
+#define AD3532R_REFERENCE_CONTROL_0		0x103C
+#define AD3532R_SW_LDAC_TRIG_0			0x10E5
+#define AD3532R_INPUT_CH_0			0x10EB
+
+/* AD3532R/AD3532 bank 1 registers (channels 8-15) */
+#define AD3532R_INTERFACE_CONFIG_A_1		0x3000
+#define AD3532R_OUTPUT_OPERATING_MODE_2		0x3020
+#define AD3532R_OUTPUT_OPERATING_MODE_3		0x3021
+#define AD3532R_OUTPUT_CONTROL_1		0x302A
+#define AD3532R_REFERENCE_CONTROL_1		0x303C
+#define AD3532R_SW_LDAC_TRIG_1			0x30E5
+#define AD3532R_INPUT_CH_1			0x30EB
+#define AD3532R_MAX_REG_ADDR			0x30F9
+
 #define AD3530R_SLD_TRIG_A			BIT(7)
 #define AD3530R_OUTPUT_CONTROL_RANGE		BIT(2)
 #define AD3530R_REFERENCE_CONTROL_SEL		BIT(0)
-#define AD3530R_REG_VAL_MASK			GENMASK(15, 0)
 #define AD3530R_OP_MODE_CHAN_MSK(chan)		(GENMASK(1, 0) << 2 * (chan))
+#define AD5710R_CHN_VMODE_EN_BIT(chan)		BIT(chan)
 
 #define AD3530R_SW_RESET			(BIT(7) | BIT(0))
 #define AD3530R_INTERNAL_VREF_mV		2500
+#define AD5710R_INTERNAL_IREF_mA		50
 #define AD3530R_LDAC_PULSE_US			100
 
-#define AD3530R_DAC_MAX_VAL			GENMASK(15, 0)
-#define AD3530R_MAX_CHANNELS			8
+#define AD3530R_CH_PER_REG			4
+#define AD3530R_CH_PER_BANK			8
 #define AD3531R_MAX_CHANNELS			4
-
-/* Non-constant mask variant of FIELD_PREP() */
-#define field_prep(_mask, _val)	(((_val) << (ffs(_mask) - 1)) & (_mask))
+#define AD3532R_MAX_CHANNELS			16
 
 enum ad3530r_mode {
 	AD3530R_NORMAL_OP,
@@ -71,17 +96,26 @@ struct ad3530r_chan {
 struct ad3530r_chip_info {
 	const char *name;
 	const struct iio_chan_spec *channels;
+	const struct regmap_config *regmap_config;
 	int (*input_ch_reg)(unsigned int channel);
+	int (*sw_ldac_trig_reg)(unsigned int channel);
+	const unsigned int *interface_config_a;
+	const unsigned int *output_control;
+	const unsigned int *reference_control;
+	const unsigned int *op_mode;
 	unsigned int num_channels;
-	unsigned int sw_ldac_trig_reg;
+	unsigned int num_banks;
+	unsigned int num_op_mode_regs;
+	unsigned int resolution;
 	bool internal_ref_support;
+	bool configurable_ch_func;
 };
 
 struct ad3530r_state {
 	struct regmap *regmap;
 	/* lock to protect against multiple access to the device and shared data */
 	struct mutex lock;
-	struct ad3530r_chan chan[AD3530R_MAX_CHANNELS];
+	struct ad3530r_chan chan[AD3532R_MAX_CHANNELS];
 	const struct ad3530r_chip_info *chip_info;
 	struct gpio_desc *ldac_gpio;
 	int vref_mV;
@@ -102,10 +136,30 @@ static int ad3531r_input_ch_reg(unsigned int channel)
 	return 2 * channel + AD3531R_INPUT_CH;
 }
 
+static int ad3532r_input_ch_reg(unsigned int channel)
+{
+	unsigned int bank = channel / AD3530R_CH_PER_BANK;
+	unsigned int local_ch = channel % AD3530R_CH_PER_BANK;
+
+	return 2 * local_ch + (bank ? AD3532R_INPUT_CH_1 : AD3532R_INPUT_CH_0);
+}
+
 static const char * const ad3530r_powerdown_modes[] = {
 	"1kohm_to_gnd",
 	"7.7kohm_to_gnd",
 	"32kohm_to_gnd",
+};
+
+static const char * const ad3531r_powerdown_modes[] = {
+	"500ohm_to_gnd",
+	"3.85kohm_to_gnd",
+	"16kohm_to_gnd",
+};
+
+static const char * const ad3532r_powerdown_modes[] = {
+	"1kohm_to_gnd",
+	"10kohm_to_gnd",
+	"three_state",
 };
 
 static int ad3530r_get_powerdown_mode(struct iio_dev *indio_dev,
@@ -135,6 +189,37 @@ static const struct iio_enum ad3530r_powerdown_mode_enum = {
 	.get = ad3530r_get_powerdown_mode,
 	.set = ad3530r_set_powerdown_mode,
 };
+
+static const struct iio_enum ad3531r_powerdown_mode_enum = {
+	.items = ad3531r_powerdown_modes,
+	.num_items = ARRAY_SIZE(ad3531r_powerdown_modes),
+	.get = ad3530r_get_powerdown_mode,
+	.set = ad3530r_set_powerdown_mode,
+};
+
+static const struct iio_enum ad3532r_powerdown_mode_enum = {
+	.items = ad3532r_powerdown_modes,
+	.num_items = ARRAY_SIZE(ad3532r_powerdown_modes),
+	.get = ad3530r_get_powerdown_mode,
+	.set = ad3530r_set_powerdown_mode,
+};
+
+static ssize_t ad5710r_read_powerdown_mode(struct iio_dev *indio_dev,
+					   uintptr_t private,
+					   const struct iio_chan_spec *chan,
+					   char *buf)
+{
+	struct ad3530r_state *st = iio_priv(indio_dev);
+	int ret;
+
+	/* Voltage output pulls to 15kohm_to_gnd, current goes three_state. */
+	ret = regmap_test_bits(st->regmap, AD5710R_CHN_VMODE_EN,
+			       AD5710R_CHN_VMODE_EN_BIT(chan->channel));
+	if (ret < 0)
+		return ret;
+
+	return sysfs_emit(buf, "%s\n", ret ? "15kohm_to_gnd" : "three_state");
+}
 
 static ssize_t ad3530r_get_dac_powerdown(struct iio_dev *indio_dev,
 					 uintptr_t private,
@@ -180,6 +265,117 @@ static ssize_t ad3530r_set_dac_powerdown(struct iio_dev *indio_dev,
 	return len;
 }
 
+static ssize_t ad3532r_set_dac_powerdown(struct iio_dev *indio_dev,
+					 uintptr_t private,
+					 const struct iio_chan_spec *chan,
+					 const char *buf, size_t len)
+{
+	struct ad3530r_state *st = iio_priv(indio_dev);
+	unsigned int bank, local_ch, reg_in_bank, ch_in_reg;
+	unsigned int reg, mask, val;
+	bool powerdown;
+	int ret;
+
+	ret = kstrtobool(buf, &powerdown);
+	if (ret)
+		return ret;
+
+	bank = chan->channel / AD3530R_CH_PER_BANK;
+	local_ch = chan->channel % AD3530R_CH_PER_BANK;
+	reg_in_bank = local_ch / AD3530R_CH_PER_REG;
+	ch_in_reg = local_ch % AD3530R_CH_PER_REG;
+
+	reg = reg_in_bank + (bank ? AD3532R_OUTPUT_OPERATING_MODE_2 :
+				    AD3532R_OUTPUT_OPERATING_MODE_0);
+	mask = AD3530R_OP_MODE_CHAN_MSK(ch_in_reg);
+
+	guard(mutex)(&st->lock);
+	if (powerdown) {
+		val = field_prep(mask, st->chan[chan->channel].powerdown_mode);
+		ret = regmap_update_bits(st->regmap, reg, mask, val);
+	} else {
+		ret = regmap_clear_bits(st->regmap, reg, mask);
+	}
+	if (ret)
+		return ret;
+
+	st->chan[chan->channel].powerdown = powerdown;
+
+	return len;
+}
+
+static void ad5710r_get_op_mode_reg(unsigned int channel, unsigned int *reg,
+				    unsigned int *mask)
+{
+	unsigned int local_ch, reg_in_bank, ch_in_reg;
+
+	local_ch = channel % AD3530R_CH_PER_BANK;
+	reg_in_bank = local_ch / AD3530R_CH_PER_REG;
+	ch_in_reg = local_ch % AD3530R_CH_PER_REG;
+
+	*reg = AD3530R_OUTPUT_OPERATING_MODE_0 + reg_in_bank;
+	*mask = AD3530R_OP_MODE_CHAN_MSK(ch_in_reg);
+}
+
+static ssize_t ad5710r_get_dac_powerdown(struct iio_dev *indio_dev,
+					 uintptr_t private,
+					 const struct iio_chan_spec *chan,
+					 char *buf)
+{
+	struct ad3530r_state *st = iio_priv(indio_dev);
+	unsigned int reg, mask;
+	int ret;
+
+	ad5710r_get_op_mode_reg(chan->channel, &reg, &mask);
+
+	ret = regmap_test_bits(st->regmap, reg, field_prep(mask, 1));
+	if (ret < 0)
+		return ret;
+
+	return sysfs_emit(buf, "%d\n", ret);
+}
+
+static ssize_t ad5710r_set_dac_powerdown(struct iio_dev *indio_dev,
+					 uintptr_t private,
+					 const struct iio_chan_spec *chan,
+					 const char *buf, size_t len)
+{
+	struct ad3530r_state *st = iio_priv(indio_dev);
+	unsigned int reg, mask;
+	bool powerdown;
+	int ret;
+
+	ret = kstrtobool(buf, &powerdown);
+	if (ret)
+		return ret;
+
+	ad5710r_get_op_mode_reg(chan->channel, &reg, &mask);
+
+	ret = regmap_update_bits(st->regmap, reg, mask,
+				 field_prep(mask, powerdown));
+	if (ret)
+		return ret;
+
+	return len;
+}
+
+static int ad3530r_trigger_sw_ldac_reg(unsigned int channel)
+{
+	return AD3530R_SW_LDAC_TRIG_A;
+}
+
+static int ad3531r_trigger_sw_ldac_reg(unsigned int channel)
+{
+	return AD3531R_SW_LDAC_TRIG_A;
+}
+
+static int ad3532r_trigger_sw_ldac_reg(unsigned int channel)
+{
+	unsigned int bank = channel / AD3530R_CH_PER_BANK;
+
+	return bank ? AD3532R_SW_LDAC_TRIG_1 : AD3532R_SW_LDAC_TRIG_0;
+}
+
 static int ad3530r_trigger_hw_ldac(struct gpio_desc *ldac_gpio)
 {
 	gpiod_set_value_cansleep(ldac_gpio, 1);
@@ -195,7 +391,7 @@ static int ad3530r_dac_write(struct ad3530r_state *st, unsigned int chan,
 	int ret;
 
 	guard(mutex)(&st->lock);
-	st->buf = cpu_to_be16(val);
+	st->buf = cpu_to_be16(val << (16 - st->chip_info->resolution));
 
 	ret = regmap_bulk_write(st->regmap, st->chip_info->input_ch_reg(chan),
 				&st->buf, sizeof(st->buf));
@@ -205,7 +401,7 @@ static int ad3530r_dac_write(struct ad3530r_state *st, unsigned int chan,
 	if (st->ldac_gpio)
 		return ad3530r_trigger_hw_ldac(st->ldac_gpio);
 
-	return regmap_set_bits(st->regmap, st->chip_info->sw_ldac_trig_reg,
+	return regmap_set_bits(st->regmap, st->chip_info->sw_ldac_trig_reg(chan),
 			       AD3530R_SLD_TRIG_A);
 }
 
@@ -225,12 +421,15 @@ static int ad3530r_read_raw(struct iio_dev *indio_dev,
 		if (ret)
 			return ret;
 
-		*val = FIELD_GET(AD3530R_REG_VAL_MASK, be16_to_cpu(st->buf));
+		*val = be16_to_cpu(st->buf) >> (16 - st->chip_info->resolution);
 
 		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_SCALE:
-		*val = st->vref_mV;
-		*val2 = 16;
+		if (chan->type == IIO_CURRENT)
+			*val = AD5710R_INTERNAL_IREF_mA;
+		else
+			*val = st->vref_mV;
+		*val2 = st->chip_info->resolution;
 
 		return IIO_VAL_FRACTIONAL_LOG2;
 	default:
@@ -246,7 +445,7 @@ static int ad3530r_write_raw(struct iio_dev *indio_dev,
 
 	switch (info) {
 	case IIO_CHAN_INFO_RAW:
-		if (val < 0 || val > AD3530R_DAC_MAX_VAL)
+		if (val < 0 || val > GENMASK(st->chip_info->resolution - 1, 0))
 			return -EINVAL;
 
 		return ad3530r_dac_write(st, chan->channel, val);
@@ -279,7 +478,48 @@ static const struct iio_chan_spec_ext_info ad3530r_ext_info[] = {
 	{ }
 };
 
-#define AD3530R_CHAN(_chan)					\
+static const struct iio_chan_spec_ext_info ad3531r_ext_info[] = {
+	{
+		.name = "powerdown",
+		.shared = IIO_SEPARATE,
+		.read = ad3530r_get_dac_powerdown,
+		.write = ad3530r_set_dac_powerdown,
+	},
+	IIO_ENUM("powerdown_mode", IIO_SEPARATE, &ad3531r_powerdown_mode_enum),
+	IIO_ENUM_AVAILABLE("powerdown_mode", IIO_SHARED_BY_TYPE,
+			   &ad3531r_powerdown_mode_enum),
+	{ }
+};
+
+static const struct iio_chan_spec_ext_info ad3532r_ext_info[] = {
+	{
+		.name = "powerdown",
+		.shared = IIO_SEPARATE,
+		.read = ad3530r_get_dac_powerdown,
+		.write = ad3532r_set_dac_powerdown,
+	},
+	IIO_ENUM("powerdown_mode", IIO_SEPARATE, &ad3532r_powerdown_mode_enum),
+	IIO_ENUM_AVAILABLE("powerdown_mode", IIO_SHARED_BY_TYPE,
+			   &ad3532r_powerdown_mode_enum),
+	{ }
+};
+
+static const struct iio_chan_spec_ext_info ad5710r_ext_info[] = {
+	{
+		.name = "powerdown",
+		.shared = IIO_SEPARATE,
+		.read = ad5710r_get_dac_powerdown,
+		.write = ad5710r_set_dac_powerdown,
+	},
+	{
+		.name = "powerdown_mode",
+		.shared = IIO_SEPARATE,
+		.read = ad5710r_read_powerdown_mode,
+	},
+	{ }
+};
+
+#define AD3530R_CHAN(_chan, _ext_info)				\
 {								\
 	.type = IIO_VOLTAGE,					\
 	.indexed = 1,						\
@@ -287,69 +527,398 @@ static const struct iio_chan_spec_ext_info ad3530r_ext_info[] = {
 	.output = 1,						\
 	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW) |		\
 			      BIT(IIO_CHAN_INFO_SCALE),		\
-	.ext_info = ad3530r_ext_info,				\
+	.ext_info = _ext_info,					\
 }
 
 static const struct iio_chan_spec ad3530r_channels[] = {
-	AD3530R_CHAN(0),
-	AD3530R_CHAN(1),
-	AD3530R_CHAN(2),
-	AD3530R_CHAN(3),
-	AD3530R_CHAN(4),
-	AD3530R_CHAN(5),
-	AD3530R_CHAN(6),
-	AD3530R_CHAN(7),
+	AD3530R_CHAN(0, ad3530r_ext_info),
+	AD3530R_CHAN(1, ad3530r_ext_info),
+	AD3530R_CHAN(2, ad3530r_ext_info),
+	AD3530R_CHAN(3, ad3530r_ext_info),
+	AD3530R_CHAN(4, ad3530r_ext_info),
+	AD3530R_CHAN(5, ad3530r_ext_info),
+	AD3530R_CHAN(6, ad3530r_ext_info),
+	AD3530R_CHAN(7, ad3530r_ext_info),
 };
 
 static const struct iio_chan_spec ad3531r_channels[] = {
-	AD3530R_CHAN(0),
-	AD3530R_CHAN(1),
-	AD3530R_CHAN(2),
-	AD3530R_CHAN(3),
+	AD3530R_CHAN(0, ad3531r_ext_info),
+	AD3530R_CHAN(1, ad3531r_ext_info),
+	AD3530R_CHAN(2, ad3531r_ext_info),
+	AD3530R_CHAN(3, ad3531r_ext_info),
+};
+
+static const struct iio_chan_spec ad3532r_channels[] = {
+	AD3530R_CHAN(0, ad3532r_ext_info),
+	AD3530R_CHAN(1, ad3532r_ext_info),
+	AD3530R_CHAN(2, ad3532r_ext_info),
+	AD3530R_CHAN(3, ad3532r_ext_info),
+	AD3530R_CHAN(4, ad3532r_ext_info),
+	AD3530R_CHAN(5, ad3532r_ext_info),
+	AD3530R_CHAN(6, ad3532r_ext_info),
+	AD3530R_CHAN(7, ad3532r_ext_info),
+	AD3530R_CHAN(8, ad3532r_ext_info),
+	AD3530R_CHAN(9, ad3532r_ext_info),
+	AD3530R_CHAN(10, ad3532r_ext_info),
+	AD3530R_CHAN(11, ad3532r_ext_info),
+	AD3530R_CHAN(12, ad3532r_ext_info),
+	AD3530R_CHAN(13, ad3532r_ext_info),
+	AD3530R_CHAN(14, ad3532r_ext_info),
+	AD3530R_CHAN(15, ad3532r_ext_info),
+};
+
+static const struct iio_chan_spec ad5710r_channels[] = {
+	AD3530R_CHAN(0, ad5710r_ext_info),
+	AD3530R_CHAN(1, ad5710r_ext_info),
+	AD3530R_CHAN(2, ad5710r_ext_info),
+	AD3530R_CHAN(3, ad5710r_ext_info),
+	AD3530R_CHAN(4, ad5710r_ext_info),
+	AD3530R_CHAN(5, ad5710r_ext_info),
+	AD3530R_CHAN(6, ad5710r_ext_info),
+	AD3530R_CHAN(7, ad5710r_ext_info),
+};
+
+static const unsigned int ad3530r_if_config[] = {
+	AD3530R_INTERFACE_CONFIG_A,
+};
+
+static const unsigned int ad3530r_out_ctrl[] = {
+	AD3530R_OUTPUT_CONTROL_0,
+};
+
+static const unsigned int ad3530r_ref_ctrl[] = {
+	AD3530R_REFERENCE_CONTROL_0,
+};
+
+static const unsigned int ad3530r_op_mode[] = {
+	AD3530R_OUTPUT_OPERATING_MODE_0,
+	AD3530R_OUTPUT_OPERATING_MODE_1,
+};
+
+static const unsigned int ad3531r_op_mode[] = {
+	AD3530R_OUTPUT_OPERATING_MODE_0,
+};
+
+static const unsigned int ad3532r_if_config[] = {
+	AD3532R_INTERFACE_CONFIG_A_0,
+	AD3532R_INTERFACE_CONFIG_A_1,
+};
+
+static const unsigned int ad3532r_out_ctrl[] = {
+	AD3532R_OUTPUT_CONTROL_0,
+	AD3532R_OUTPUT_CONTROL_1,
+};
+
+static const unsigned int ad3532r_ref_ctrl[] = {
+	AD3532R_REFERENCE_CONTROL_0,
+	AD3532R_REFERENCE_CONTROL_1,
+};
+
+static const unsigned int ad3532r_op_mode[] = {
+	AD3532R_OUTPUT_OPERATING_MODE_0,
+	AD3532R_OUTPUT_OPERATING_MODE_1,
+	AD3532R_OUTPUT_OPERATING_MODE_2,
+	AD3532R_OUTPUT_OPERATING_MODE_3,
+};
+
+static const struct regmap_config ad3530r_regmap_config = {
+	.reg_bits = 16,
+	.val_bits = 8,
+	.max_register = AD3530R_MAX_REG_ADDR,
+};
+
+static const struct regmap_config ad3532r_regmap_config = {
+	.reg_bits = 16,
+	.val_bits = 8,
+	.max_register = AD3532R_MAX_REG_ADDR,
+};
+
+static const struct regmap_config ad5710r_regmap_config = {
+	.reg_bits = 16,
+	.val_bits = 8,
+	.max_register = AD5710R_CHN_VMODE_EN,
 };
 
 static const struct ad3530r_chip_info ad3530_chip = {
 	.name = "ad3530",
+	.resolution = 16,
 	.channels = ad3530r_channels,
+	.regmap_config = &ad3530r_regmap_config,
 	.num_channels = ARRAY_SIZE(ad3530r_channels),
-	.sw_ldac_trig_reg = AD3530R_SW_LDAC_TRIG_A,
+	.sw_ldac_trig_reg = ad3530r_trigger_sw_ldac_reg,
 	.input_ch_reg = ad3530r_input_ch_reg,
+	.interface_config_a = ad3530r_if_config,
+	.output_control = ad3530r_out_ctrl,
+	.reference_control = ad3530r_ref_ctrl,
+	.op_mode = ad3530r_op_mode,
+	.num_banks = ARRAY_SIZE(ad3530r_if_config),
+	.num_op_mode_regs = ARRAY_SIZE(ad3530r_op_mode),
 	.internal_ref_support = false,
+	.configurable_ch_func = false,
 };
 
 static const struct ad3530r_chip_info ad3530r_chip = {
 	.name = "ad3530r",
+	.resolution = 16,
 	.channels = ad3530r_channels,
+	.regmap_config = &ad3530r_regmap_config,
 	.num_channels = ARRAY_SIZE(ad3530r_channels),
-	.sw_ldac_trig_reg = AD3530R_SW_LDAC_TRIG_A,
+	.sw_ldac_trig_reg = ad3530r_trigger_sw_ldac_reg,
 	.input_ch_reg = ad3530r_input_ch_reg,
+	.interface_config_a = ad3530r_if_config,
+	.output_control = ad3530r_out_ctrl,
+	.reference_control = ad3530r_ref_ctrl,
+	.op_mode = ad3530r_op_mode,
+	.num_banks = ARRAY_SIZE(ad3530r_if_config),
+	.num_op_mode_regs = ARRAY_SIZE(ad3530r_op_mode),
 	.internal_ref_support = true,
+	.configurable_ch_func = false,
 };
 
 static const struct ad3530r_chip_info ad3531_chip = {
 	.name = "ad3531",
+	.resolution = 16,
 	.channels = ad3531r_channels,
+	.regmap_config = &ad3530r_regmap_config,
 	.num_channels = ARRAY_SIZE(ad3531r_channels),
-	.sw_ldac_trig_reg = AD3531R_SW_LDAC_TRIG_A,
+	.sw_ldac_trig_reg = ad3531r_trigger_sw_ldac_reg,
 	.input_ch_reg = ad3531r_input_ch_reg,
+	.interface_config_a = ad3530r_if_config,
+	.output_control = ad3530r_out_ctrl,
+	.reference_control = ad3530r_ref_ctrl,
+	.op_mode = ad3531r_op_mode,
+	.num_banks = ARRAY_SIZE(ad3530r_if_config),
+	.num_op_mode_regs = ARRAY_SIZE(ad3531r_op_mode),
 	.internal_ref_support = false,
+	.configurable_ch_func = false,
 };
 
 static const struct ad3530r_chip_info ad3531r_chip = {
 	.name = "ad3531r",
+	.resolution = 16,
 	.channels = ad3531r_channels,
+	.regmap_config = &ad3530r_regmap_config,
 	.num_channels = ARRAY_SIZE(ad3531r_channels),
-	.sw_ldac_trig_reg = AD3531R_SW_LDAC_TRIG_A,
+	.sw_ldac_trig_reg = ad3531r_trigger_sw_ldac_reg,
 	.input_ch_reg = ad3531r_input_ch_reg,
+	.interface_config_a = ad3530r_if_config,
+	.output_control = ad3530r_out_ctrl,
+	.reference_control = ad3530r_ref_ctrl,
+	.op_mode = ad3531r_op_mode,
+	.num_banks = ARRAY_SIZE(ad3530r_if_config),
+	.num_op_mode_regs = ARRAY_SIZE(ad3531r_op_mode),
 	.internal_ref_support = true,
+	.configurable_ch_func = false,
 };
 
-static int ad3530r_setup(struct ad3530r_state *st, int external_vref_uV)
+static const struct ad3530r_chip_info ad3532_chip = {
+	.name = "ad3532",
+	.resolution = 16,
+	.channels = ad3532r_channels,
+	.regmap_config = &ad3532r_regmap_config,
+	.num_channels = ARRAY_SIZE(ad3532r_channels),
+	.sw_ldac_trig_reg = ad3532r_trigger_sw_ldac_reg,
+	.input_ch_reg = ad3532r_input_ch_reg,
+	.interface_config_a = ad3532r_if_config,
+	.output_control = ad3532r_out_ctrl,
+	.reference_control = ad3532r_ref_ctrl,
+	.op_mode = ad3532r_op_mode,
+	.num_banks = ARRAY_SIZE(ad3532r_if_config),
+	.num_op_mode_regs = ARRAY_SIZE(ad3532r_op_mode),
+	.internal_ref_support = false,
+	.configurable_ch_func = false,
+};
+
+static const struct ad3530r_chip_info ad3532r_chip = {
+	.name = "ad3532r",
+	.resolution = 16,
+	.channels = ad3532r_channels,
+	.regmap_config = &ad3532r_regmap_config,
+	.num_channels = ARRAY_SIZE(ad3532r_channels),
+	.sw_ldac_trig_reg = ad3532r_trigger_sw_ldac_reg,
+	.input_ch_reg = ad3532r_input_ch_reg,
+	.interface_config_a = ad3532r_if_config,
+	.output_control = ad3532r_out_ctrl,
+	.reference_control = ad3532r_ref_ctrl,
+	.op_mode = ad3532r_op_mode,
+	.num_banks = ARRAY_SIZE(ad3532r_if_config),
+	.num_op_mode_regs = ARRAY_SIZE(ad3532r_op_mode),
+	.internal_ref_support = true,
+	.configurable_ch_func = false,
+};
+
+static const struct ad3530r_chip_info ad3536r_chip = {
+	.name = "ad3536r",
+	.resolution = 12,
+	.channels = ad3532r_channels,
+	.regmap_config = &ad3532r_regmap_config,
+	.num_channels = ARRAY_SIZE(ad3532r_channels),
+	.sw_ldac_trig_reg = ad3532r_trigger_sw_ldac_reg,
+	.input_ch_reg = ad3532r_input_ch_reg,
+	.interface_config_a = ad3532r_if_config,
+	.output_control = ad3532r_out_ctrl,
+	.reference_control = ad3532r_ref_ctrl,
+	.op_mode = ad3532r_op_mode,
+	.num_banks = ARRAY_SIZE(ad3532r_if_config),
+	.num_op_mode_regs = ARRAY_SIZE(ad3532r_op_mode),
+	.internal_ref_support = true,
+	.configurable_ch_func = false,
+};
+
+static const struct ad3530r_chip_info ad5710r_chip = {
+	.name = "ad5710r",
+	.resolution = 16,
+	.regmap_config = &ad5710r_regmap_config,
+	.num_channels = ARRAY_SIZE(ad5710r_channels),
+	.sw_ldac_trig_reg = ad3530r_trigger_sw_ldac_reg,
+	.input_ch_reg = ad3530r_input_ch_reg,
+	.interface_config_a = ad3530r_if_config,
+	.output_control = ad3530r_out_ctrl,
+	.reference_control = ad3530r_ref_ctrl,
+	.op_mode = ad3530r_op_mode,
+	.num_banks = ARRAY_SIZE(ad3530r_if_config),
+	.num_op_mode_regs = ARRAY_SIZE(ad3530r_op_mode),
+	.internal_ref_support = true,
+	.configurable_ch_func = true,
+};
+
+static const struct ad3530r_chip_info ad5711r_chip = {
+	.name = "ad5711r",
+	.resolution = 12,
+	.regmap_config = &ad5710r_regmap_config,
+	.num_channels = ARRAY_SIZE(ad5710r_channels),
+	.sw_ldac_trig_reg = ad3530r_trigger_sw_ldac_reg,
+	.input_ch_reg = ad3530r_input_ch_reg,
+	.interface_config_a = ad3530r_if_config,
+	.output_control = ad3530r_out_ctrl,
+	.reference_control = ad3530r_ref_ctrl,
+	.op_mode = ad3530r_op_mode,
+	.num_banks = ARRAY_SIZE(ad3530r_if_config),
+	.num_op_mode_regs = ARRAY_SIZE(ad3530r_op_mode),
+	.internal_ref_support = true,
+	.configurable_ch_func = true,
+};
+
+static int ad3530r_parse_channel_cfg(struct iio_dev *indio_dev)
 {
+	struct ad3530r_state *st = iio_priv(indio_dev);
+	struct device *dev = regmap_get_device(st->regmap);
+	struct iio_chan_spec *channels;
+	unsigned int num_chan, i;
+	int ret;
+
+	num_chan = device_get_child_node_count(dev);
+	if (!num_chan)
+		return dev_err_probe(dev, -ENOENT, "No channels configured\n");
+
+	channels = devm_kcalloc(dev, num_chan, sizeof(*channels), GFP_KERNEL);
+	if (!channels)
+		return -ENOMEM;
+
+	i = 0;
+	device_for_each_child_node_scoped(dev, child) {
+		unsigned int mode_reg, mode_mask, ch_func;
+		enum iio_chan_type chan_type;
+		u32 reg;
+
+		ret = fwnode_property_read_u32(child, "reg", &reg);
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "Failed to read reg property of %pfwP\n",
+					     child);
+
+		if (reg >= st->chip_info->num_channels)
+			return dev_err_probe(dev, -ECHRNG,
+					     "reg out of range in %pfwP\n",
+					     child);
+
+		ret = fwnode_property_read_u32(child, "adi,ch-func", &ch_func);
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "Missing adi,ch-func property for %pfwP\n",
+					     child);
+
+		switch (ch_func) {
+		case CH_FUNC_VOLTAGE_OUTPUT:
+			ret = regmap_set_bits(st->regmap, AD5710R_CHN_VMODE_EN,
+					      AD5710R_CHN_VMODE_EN_BIT(reg));
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "Failed to set voltage output for %pfwP\n",
+						     child);
+
+			chan_type = IIO_VOLTAGE;
+			break;
+		case CH_FUNC_CURRENT_OUTPUT:
+			chan_type = IIO_CURRENT;
+			break;
+		default:
+			return dev_err_probe(dev, -EINVAL,
+					     "Invalid adi,ch-func %u for %pfwP\n",
+					     ch_func, child);
+		}
+
+		channels[i] = ad5710r_channels[reg];
+		channels[i].type = chan_type;
+		i++;
+
+		ad5710r_get_op_mode_reg(reg, &mode_reg, &mode_mask);
+
+		/* Enable the channel in normal operation mode */
+		ret = regmap_update_bits(st->regmap, mode_reg, mode_mask,
+					 field_prep(mode_mask, AD3530R_NORMAL_OP));
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "Failed to set normal operating mode for %pfwP\n",
+					     child);
+	}
+
+	indio_dev->channels = channels;
+	indio_dev->num_channels = num_chan;
+
+	return 0;
+}
+
+static int ad3530r_set_reg_bank_bits(const struct ad3530r_state *st,
+				     const unsigned int *regs,
+				     unsigned int num_regs,
+				     unsigned int mask)
+{
+	int ret;
+
+	for (unsigned int i = 0; i < num_regs; i++) {
+		ret = regmap_set_bits(st->regmap, regs[i], mask);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static int ad3530r_write_reg_banks(const struct ad3530r_state *st,
+				   const unsigned int *regs,
+				   unsigned int num_regs,
+				   unsigned int val)
+{
+	int ret;
+
+	for (unsigned int i = 0; i < num_regs; i++) {
+		ret = regmap_write(st->regmap, regs[i], val);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static int ad3530r_setup(struct iio_dev *indio_dev, int external_vref_uV)
+{
+	struct ad3530r_state *st = iio_priv(indio_dev);
+	const struct ad3530r_chip_info *chip_info = st->chip_info;
 	struct device *dev = regmap_get_device(st->regmap);
 	struct gpio_desc *reset_gpio;
-	int i, ret;
 	u8 range_multiplier, val;
+	int ret;
 
 	reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
 	if (IS_ERR(reset_gpio))
@@ -362,8 +931,9 @@ static int ad3530r_setup(struct ad3530r_state *st, int external_vref_uV)
 		gpiod_set_value_cansleep(reset_gpio, 0);
 	} else {
 		/* Perform software reset */
-		ret = regmap_update_bits(st->regmap, AD3530R_INTERFACE_CONFIG_A,
-					 AD3530R_SW_RESET, AD3530R_SW_RESET);
+		ret = ad3530r_set_reg_bank_bits(st, chip_info->interface_config_a,
+						chip_info->num_banks,
+						AD3530R_SW_RESET);
 		if (ret)
 			return ret;
 	}
@@ -372,8 +942,9 @@ static int ad3530r_setup(struct ad3530r_state *st, int external_vref_uV)
 
 	range_multiplier = 1;
 	if (device_property_read_bool(dev, "adi,range-double")) {
-		ret = regmap_set_bits(st->regmap, AD3530R_OUTPUT_CONTROL_0,
-				      AD3530R_OUTPUT_CONTROL_RANGE);
+		ret = ad3530r_set_reg_bank_bits(st, chip_info->output_control,
+						chip_info->num_banks,
+						AD3530R_OUTPUT_CONTROL_RANGE);
 		if (ret)
 			return ret;
 
@@ -383,33 +954,38 @@ static int ad3530r_setup(struct ad3530r_state *st, int external_vref_uV)
 	if (external_vref_uV) {
 		st->vref_mV = range_multiplier * external_vref_uV / MILLI;
 	} else {
-		ret = regmap_set_bits(st->regmap, AD3530R_REFERENCE_CONTROL_0,
-				      AD3530R_REFERENCE_CONTROL_SEL);
+		ret = ad3530r_set_reg_bank_bits(st, chip_info->reference_control,
+						chip_info->num_banks,
+						AD3530R_REFERENCE_CONTROL_SEL);
 		if (ret)
 			return ret;
 
 		st->vref_mV = range_multiplier * AD3530R_INTERNAL_VREF_mV;
 	}
 
-	/* Set normal operating mode for all channels */
-	val = FIELD_PREP(AD3530R_OP_MODE_CHAN_MSK(0), AD3530R_NORMAL_OP) |
-	      FIELD_PREP(AD3530R_OP_MODE_CHAN_MSK(1), AD3530R_NORMAL_OP) |
-	      FIELD_PREP(AD3530R_OP_MODE_CHAN_MSK(2), AD3530R_NORMAL_OP) |
-	      FIELD_PREP(AD3530R_OP_MODE_CHAN_MSK(3), AD3530R_NORMAL_OP);
-
-	ret = regmap_write(st->regmap, AD3530R_OUTPUT_OPERATING_MODE_0, val);
-	if (ret)
-		return ret;
-
-	if (st->chip_info->num_channels > 4) {
-		ret = regmap_write(st->regmap, AD3530R_OUTPUT_OPERATING_MODE_1,
-				   val);
+	if (chip_info->configurable_ch_func) {
+		/* Channels and their operating mode are configured from DT */
+		ret = ad3530r_parse_channel_cfg(indio_dev);
 		if (ret)
 			return ret;
-	}
+	} else {
+		/* Set normal operating mode for all channels */
+		val = FIELD_PREP(AD3530R_OP_MODE_CHAN_MSK(0), AD3530R_NORMAL_OP) |
+		      FIELD_PREP(AD3530R_OP_MODE_CHAN_MSK(1), AD3530R_NORMAL_OP) |
+		      FIELD_PREP(AD3530R_OP_MODE_CHAN_MSK(2), AD3530R_NORMAL_OP) |
+		      FIELD_PREP(AD3530R_OP_MODE_CHAN_MSK(3), AD3530R_NORMAL_OP);
 
-	for (i = 0; i < st->chip_info->num_channels; i++)
-		st->chan[i].powerdown_mode = AD3530R_POWERDOWN_32K;
+		ret = ad3530r_write_reg_banks(st, chip_info->op_mode,
+					      chip_info->num_op_mode_regs, val);
+		if (ret)
+			return ret;
+
+		for (unsigned int i = 0; i < chip_info->num_channels; i++)
+			st->chan[i].powerdown_mode = AD3530R_POWERDOWN_32K;
+
+		indio_dev->channels = chip_info->channels;
+		indio_dev->num_channels = chip_info->num_channels;
+	}
 
 	st->ldac_gpio = devm_gpiod_get_optional(dev, "ldac", GPIOD_OUT_LOW);
 	if (IS_ERR(st->ldac_gpio))
@@ -418,12 +994,6 @@ static int ad3530r_setup(struct ad3530r_state *st, int external_vref_uV)
 
 	return 0;
 }
-
-static const struct regmap_config ad3530r_regmap_config = {
-	.reg_bits = 16,
-	.val_bits = 8,
-	.max_register = AD3530R_MAX_REG_ADDR,
-};
 
 static const struct iio_info ad3530r_info = {
 	.read_raw = ad3530r_read_raw,
@@ -445,7 +1015,11 @@ static int ad3530r_probe(struct spi_device *spi)
 
 	st = iio_priv(indio_dev);
 
-	st->regmap = devm_regmap_init_spi(spi, &ad3530r_regmap_config);
+	st->chip_info = spi_get_device_match_data(spi);
+	if (!st->chip_info)
+		return -ENODEV;
+
+	st->regmap = devm_regmap_init_spi(spi, st->chip_info->regmap_config);
 	if (IS_ERR(st->regmap))
 		return dev_err_probe(dev, PTR_ERR(st->regmap),
 				     "Failed to init regmap");
@@ -453,10 +1027,6 @@ static int ad3530r_probe(struct spi_device *spi)
 	ret = devm_mutex_init(dev, &st->lock);
 	if (ret)
 		return ret;
-
-	st->chip_info = spi_get_device_match_data(spi);
-	if (!st->chip_info)
-		return -ENODEV;
 
 	ret = devm_regulator_bulk_get_enable(dev, ARRAY_SIZE(regulators),
 					     regulators);
@@ -473,24 +1043,27 @@ static int ad3530r_probe(struct spi_device *spi)
 	if (!st->chip_info->internal_ref_support && external_vref_uV == 0)
 		return -ENODEV;
 
-	ret = ad3530r_setup(st, external_vref_uV);
+	ret = ad3530r_setup(indio_dev, external_vref_uV);
 	if (ret)
 		return ret;
 
 	indio_dev->name = st->chip_info->name;
 	indio_dev->info = &ad3530r_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
-	indio_dev->channels = st->chip_info->channels;
-	indio_dev->num_channels = st->chip_info->num_channels;
 
 	return devm_iio_device_register(&spi->dev, indio_dev);
 }
 
 static const struct spi_device_id ad3530r_id[] = {
-	{ "ad3530", (kernel_ulong_t)&ad3530_chip },
-	{ "ad3530r", (kernel_ulong_t)&ad3530r_chip },
-	{ "ad3531", (kernel_ulong_t)&ad3531_chip },
-	{ "ad3531r", (kernel_ulong_t)&ad3531r_chip },
+	{ .name = "ad3530", .driver_data = (kernel_ulong_t)&ad3530_chip },
+	{ .name = "ad3530r", .driver_data = (kernel_ulong_t)&ad3530r_chip },
+	{ .name = "ad3531", .driver_data = (kernel_ulong_t)&ad3531_chip },
+	{ .name = "ad3531r", .driver_data = (kernel_ulong_t)&ad3531r_chip },
+	{ .name = "ad3532", .driver_data = (kernel_ulong_t)&ad3532_chip },
+	{ .name = "ad3532r", .driver_data = (kernel_ulong_t)&ad3532r_chip },
+	{ .name = "ad3536r", .driver_data = (kernel_ulong_t)&ad3536r_chip },
+	{ .name = "ad5710r", .driver_data = (kernel_ulong_t)&ad5710r_chip },
+	{ .name = "ad5711r", .driver_data = (kernel_ulong_t)&ad5711r_chip },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad3530r_id);
@@ -500,6 +1073,11 @@ static const struct of_device_id ad3530r_of_match[] = {
 	{ .compatible = "adi,ad3530r", .data = &ad3530r_chip },
 	{ .compatible = "adi,ad3531", .data = &ad3531_chip },
 	{ .compatible = "adi,ad3531r", .data = &ad3531r_chip },
+	{ .compatible = "adi,ad3532", .data = &ad3532_chip },
+	{ .compatible = "adi,ad3532r", .data = &ad3532r_chip },
+	{ .compatible = "adi,ad3536r", .data = &ad3536r_chip },
+	{ .compatible = "adi,ad5710r", .data = &ad5710r_chip },
+	{ .compatible = "adi,ad5711r", .data = &ad5711r_chip },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, ad3530r_of_match);

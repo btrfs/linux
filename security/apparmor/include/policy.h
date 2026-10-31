@@ -26,7 +26,6 @@
 #include "file.h"
 #include "lib.h"
 #include "label.h"
-#include "net.h"
 #include "perms.h"
 #include "resource.h"
 
@@ -37,7 +36,6 @@ extern int unprivileged_userns_apparmor_policy;
 extern int aa_unprivileged_unconfined_restricted;
 
 extern const char *const aa_profile_mode_names[];
-#define APPARMOR_MODE_NAMES_MAX_INDEX 4
 
 #define PROFILE_MODE(_profile, _mode)		\
 	((aa_g_profile_mode == (_mode)) ||	\
@@ -76,14 +74,37 @@ enum profile_mode {
 	APPARMOR_KILL,		/* kill task on access violation */
 	APPARMOR_UNCONFINED,	/* profile set to unconfined */
 	APPARMOR_USER,		/* modified complain mode to userspace */
+	PROFILE_MODE_NAMES_COUNT	/* Must be last entry */
 };
 
 
+struct aa_tags_header {
+	u32 mask;	/* bit mask matching permissions */
+	u32 count;	/* number of strings per entry */
+	u32 size;	/* size of all strings covered by count */
+	u32 tags;	/* index into string table */
+};
+
+struct aa_tags_struct {
+	struct {
+		u32 size;		/* number of entries in tagsets */
+		u32 *table;		/* indexes into headers & strs */
+	} sets;
+	struct {
+		u32 size;		/* number of headers == num of strs */
+		struct aa_tags_header *table;
+	} hdrs;
+	struct aa_str_table strs;
+};
+
 /* struct aa_policydb - match engine for a policy
- * count: refcount for the pdb
- * dfa: dfa pattern match
- * perms: table of permissions
- * strs: table of strings, index by x
+ * @count: refcount for the pdb
+ * @dfa: dfa pattern match
+ * @perms: table of permissions
+ * @size: number of entries in @perms
+ * @trans: table of strings, index by x
+ * @tags: table of tags that perms->tag indexes
+ * @start:_states to start in for each class
  * start: set of start states for the different classes of data
  */
 struct aa_policydb {
@@ -94,11 +115,13 @@ struct aa_policydb {
 		u32 size;
 	};
 	struct aa_str_table trans;
+	struct aa_tags_struct tags;
 	aa_state_t start[AA_CLASS_LAST + 1];
 };
 
 extern struct aa_policydb *nullpdb;
 
+void aa_destroy_tags(struct aa_tags_struct *tags);
 struct aa_policydb *aa_alloc_pdb(gfp_t gfp);
 void aa_pdb_free_kref(struct kref *kref);
 
@@ -271,6 +294,9 @@ struct aa_profile *aa_alloc_profile(const char *name, struct aa_proxy *proxy,
 				    gfp_t gfp);
 struct aa_profile *aa_alloc_null(struct aa_profile *parent, const char *name,
 				 gfp_t gfp);
+struct aa_profile *__aa_new_learning_profile(struct aa_profile *parent,
+					     bool hat, const char *base,
+					     gfp_t gfp);
 struct aa_profile *aa_new_learning_profile(struct aa_profile *parent, bool hat,
 					   const char *base, gfp_t gfp);
 void aa_free_profile(struct aa_profile *profile);
@@ -281,7 +307,8 @@ struct aa_profile *aa_fqlookupn_profile(struct aa_label *base,
 					const char *fqname, size_t n);
 
 ssize_t aa_replace_profiles(struct aa_ns *view, struct aa_label *label,
-			    u32 mask, struct aa_loaddata *udata);
+			    u32 mask, struct aa_loaddata *udata,
+			    char *compressed_profile, size_t compressed_size);
 ssize_t aa_remove_profiles(struct aa_ns *view, struct aa_label *label,
 			   char *name, size_t size);
 void __aa_profile_list_release(struct list_head *head);
@@ -327,8 +354,12 @@ static inline aa_state_t RULE_MEDIATES_NET(struct aa_ruleset *rules)
 	/* fallback and check v7/8 if v9 is NOT mediated */
 	if (!state)
 		state = RULE_MEDIATES(rules, AA_CLASS_NET);
-
 	return state;
+}
+
+static inline aa_state_t RULE_MEDIATES_UNIX(struct aa_ruleset *rules)
+{
+	return RULE_MEDIATES_v9NET(rules);
 }
 
 
@@ -355,7 +386,7 @@ static inline bool profile_mediates_safe(struct aa_profile *profile,
 static inline struct aa_profile *aa_get_profile(struct aa_profile *p)
 {
 	if (p)
-		kref_get(&(p->label.count));
+		kref_get(&(p->label.count.count));
 
 	return p;
 }
@@ -369,7 +400,7 @@ static inline struct aa_profile *aa_get_profile(struct aa_profile *p)
  */
 static inline struct aa_profile *aa_get_profile_not0(struct aa_profile *p)
 {
-	if (p && kref_get_unless_zero(&p->label.count))
+	if (p && kref_get_unless_zero(&p->label.count.count))
 		return p;
 
 	return NULL;
@@ -389,7 +420,7 @@ static inline struct aa_profile *aa_get_profile_rcu(struct aa_profile __rcu **p)
 	rcu_read_lock();
 	do {
 		c = rcu_dereference(*p);
-	} while (c && !kref_get_unless_zero(&c->label.count));
+	} while (c && !kref_get_unless_zero(&c->label.count.count));
 	rcu_read_unlock();
 
 	return c;
@@ -402,10 +433,10 @@ static inline struct aa_profile *aa_get_profile_rcu(struct aa_profile __rcu **p)
 static inline void aa_put_profile(struct aa_profile *p)
 {
 	if (p)
-		kref_put(&p->label.count, aa_label_kref);
+		kref_put(&p->label.count.count, aa_label_kref);
 }
 
-static inline int AUDIT_MODE(struct aa_profile *profile)
+static inline int AUDIT_MODE(const struct aa_profile *profile)
 {
 	if (aa_g_audit != AUDIT_NORMAL)
 		return aa_g_audit;
@@ -419,7 +450,7 @@ bool aa_policy_admin_capable(const struct cred *subj_cred,
 			     struct aa_label *label, struct aa_ns *ns);
 int aa_may_manage_policy(const struct cred *subj_cred,
 			 struct aa_label *label, struct aa_ns *ns,
-			 u32 mask);
+			 const struct cred *ocred, u32 mask);
 bool aa_current_policy_view_capable(struct aa_ns *ns);
 bool aa_current_policy_admin_capable(struct aa_ns *ns);
 

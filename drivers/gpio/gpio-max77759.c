@@ -14,7 +14,6 @@
 #include <linux/irqreturn.h>
 #include <linux/lockdep.h>
 #include <linux/mfd/max77759.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/overflow.h>
 #include <linux/platform_device.h>
@@ -435,8 +434,6 @@ static int max77759_gpio_probe(struct platform_device *pdev)
 	int irq;
 	struct gpio_irq_chip *girq;
 	int ret;
-	unsigned long irq_flags;
-	struct irq_data *irqd;
 
 	chip = devm_kzalloc(&pdev->dev, sizeof(*chip), GFP_KERNEL);
 	if (!chip)
@@ -486,13 +483,9 @@ static int max77759_gpio_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, ret,
 				     "Failed to add GPIO chip\n");
 
-	irq_flags = IRQF_ONESHOT | IRQF_SHARED;
-	irqd = irq_get_irq_data(irq);
-	if (irqd)
-		irq_flags |= irqd_get_trigger_type(irqd);
-
 	ret = devm_request_threaded_irq(&pdev->dev, irq, NULL,
-					max77759_gpio_irqhandler, irq_flags,
+					max77759_gpio_irqhandler,
+					IRQF_ONESHOT | IRQF_SHARED,
 					dev_name(&pdev->dev), chip);
 	if (ret < 0)
 		return dev_err_probe(&pdev->dev, ret,
@@ -508,7 +501,7 @@ static const struct of_device_id max77759_gpio_of_id[] = {
 MODULE_DEVICE_TABLE(of, max77759_gpio_of_id);
 
 static const struct platform_device_id max77759_gpio_platform_id[] = {
-	{ "max77759-gpio", },
+	{ .name = "max77759-gpio" },
 	{ }
 };
 MODULE_DEVICE_TABLE(platform, max77759_gpio_platform_id);

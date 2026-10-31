@@ -9,7 +9,7 @@
  * Copyright 2007, Michael Wu <flamingice@sourmilk.net>
  * Copyright 2013-2015  Intel Mobile Communications GmbH
  * Copyright 2016-2017  Intel Deutschland GmbH
- * Copyright (C) 2018-2025 Intel Corporation
+ * Copyright (C) 2018-2026 Intel Corporation
  */
 
 #include <linux/if_arp.h>
@@ -68,6 +68,14 @@ void ieee80211_inform_bss(struct wiphy *wiphy,
 	struct ieee80211_local *local = wiphy_priv(wiphy);
 	struct inform_bss_update_data *update_data = data;
 	struct ieee80211_bss *bss = (void *)cbss->priv;
+	struct ieee80211_elems_parse_params params = {
+		.mode = cbss->channel->band == NL80211_BAND_S1GHZ ?
+				IEEE80211_CONN_MODE_S1G :
+				IEEE80211_CONN_MODE_HIGHEST,
+		.start = ies->data,
+		.len = ies->len,
+		.link_id = -1,
+	};
 	struct ieee80211_rx_status *rx_status;
 	struct ieee802_11_elems *elems;
 	int clen, srlen;
@@ -76,7 +84,11 @@ void ieee80211_inform_bss(struct wiphy *wiphy,
 	if (!update_data)
 		return;
 
-	elems = ieee802_11_parse_elems(ies->data, ies->len, false, NULL);
+	params.type = update_data->beacon ?
+			      IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_BEACON :
+			      IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_PROBE_RESP;
+
+	elems = ieee802_11_parse_elems_full(&params);
 	if (!elems)
 		return;
 
@@ -200,19 +212,17 @@ ieee80211_bss_info_update(struct ieee80211_local *local,
 		 * an indication on which of the links the frame was received
 		 */
 		if (ieee80211_vif_is_mld(&scan_sdata->vif)) {
-			if (rx_status->link_valid) {
-				s8 link_id = rx_status->link_id;
+			s8 link_id = rx_status->link_id;
 
-				link_conf =
-					rcu_dereference(scan_sdata->vif.link_conf[link_id]);
-			}
+			link_conf =
+				rcu_dereference(scan_sdata->vif.link_conf[link_id]);
 		} else {
 			link_conf = &scan_sdata->vif.bss_conf;
 		}
 
 		if (link_conf) {
 			bss_meta.parent_tsf =
-				ieee80211_calculate_rx_timestamp(local,
+				ieee80211_calculate_rx_timestamp(&local->hw,
 								 rx_status,
 								 len + FCS_LEN,
 								 24);
@@ -343,8 +353,13 @@ void ieee80211_scan_rx(struct ieee80211_local *local, struct sk_buff *skb)
 						 mgmt->da))
 			return;
 	} else {
-		/* Beacons are expected only with broadcast address */
-		if (!is_broadcast_ether_addr(mgmt->da))
+		/*
+		 * Non-S1G beacons are expected only with broadcast address.
+		 * S1G beacons only carry the SA so no DA check is required
+		 * nor possible.
+		 */
+		if (!ieee80211_is_s1g_beacon(mgmt->frame_control) &&
+		    !is_broadcast_ether_addr(mgmt->da))
 			return;
 	}
 
@@ -1233,7 +1248,7 @@ int ieee80211_request_ibss_scan(struct ieee80211_sub_if_data *sdata,
 			}
 		}
 
-		if (WARN_ON_ONCE(n_ch == 0))
+		if (n_ch == 0)
 			return -EINVAL;
 
 		local->int_scan_req->n_channels = n_ch;

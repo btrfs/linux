@@ -325,6 +325,7 @@ static int rt5514_dsp_voice_wake_up_put(struct snd_kcontrol *kcontrol,
 		struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct rt5514_priv *rt5514 = snd_soc_component_get_drvdata(component);
 	const struct firmware *fw = NULL;
 	u8 buf[8];
@@ -332,7 +333,7 @@ static int rt5514_dsp_voice_wake_up_put(struct snd_kcontrol *kcontrol,
 	if (ucontrol->value.integer.value[0] == rt5514->dsp_enabled)
 		return 0;
 
-	if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_OFF) {
+	if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF) {
 		rt5514->dsp_enabled = ucontrol->value.integer.value[0];
 
 		if (rt5514->dsp_enabled) {
@@ -1050,11 +1051,12 @@ static int rt5514_set_bias_level(struct snd_soc_component *component,
 			enum snd_soc_bias_level level)
 {
 	struct rt5514_priv *rt5514 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	int ret;
 
 	switch (level) {
 	case SND_SOC_BIAS_PREPARE:
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_ON) {
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_ON) {
 			clk_disable_unprepare(rt5514->mclk);
 		} else {
 			ret = clk_prepare_enable(rt5514->mclk);
@@ -1064,19 +1066,25 @@ static int rt5514_set_bias_level(struct snd_soc_component *component,
 		break;
 
 	case SND_SOC_BIAS_STANDBY:
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_OFF) {
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF) {
 			/*
 			 * If the DSP is enabled in start of recording, the DSP
 			 * should be disabled, and sync back to normal recording
 			 * settings to make sure recording properly.
 			 */
 			if (rt5514->dsp_enabled) {
-				rt5514->dsp_enabled = 0;
-				regmap_multi_reg_write(rt5514->i2c_regmap,
-					rt5514_i2c_patch,
-					ARRAY_SIZE(rt5514_i2c_patch));
+				ret = regmap_multi_reg_write(rt5514->i2c_regmap,
+							     rt5514_i2c_patch,
+							     ARRAY_SIZE(rt5514_i2c_patch));
+				if (ret)
+					return ret;
+
 				regcache_mark_dirty(rt5514->regmap);
-				regcache_sync(rt5514->regmap);
+				ret = regcache_sync(rt5514->regmap);
+				if (ret)
+					return ret;
+
+				rt5514->dsp_enabled = 0;
 			}
 		}
 		break;
@@ -1091,18 +1099,6 @@ static int rt5514_set_bias_level(struct snd_soc_component *component,
 static int rt5514_probe(struct snd_soc_component *component)
 {
 	struct rt5514_priv *rt5514 = snd_soc_component_get_drvdata(component);
-	struct platform_device *pdev = to_platform_device(component->dev);
-
-	rt5514->mclk = devm_clk_get_optional(component->dev, "mclk");
-	if (IS_ERR(rt5514->mclk))
-		return PTR_ERR(rt5514->mclk);
-
-	if (rt5514->pdata.dsp_calib_clk_name) {
-		rt5514->dsp_calib_clk = devm_clk_get(&pdev->dev,
-				rt5514->pdata.dsp_calib_clk_name);
-		if (PTR_ERR(rt5514->dsp_calib_clk) == -EPROBE_DEFER)
-			return -EPROBE_DEFER;
-	}
 
 	rt5514->component = component;
 	rt5514->pll3_cal_value = 0x0078b000;
@@ -1134,12 +1130,24 @@ static int rt5514_i2c_write(void *context, unsigned int reg, unsigned int val)
 #define RT5514_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S20_3LE | \
 			SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S8)
 
+static const u64 rt5514_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF;
+
 static const struct snd_soc_dai_ops rt5514_aif_dai_ops = {
 	.hw_params = rt5514_hw_params,
 	.set_fmt = rt5514_set_dai_fmt,
 	.set_sysclk = rt5514_set_dai_sysclk,
 	.set_pll = rt5514_set_dai_pll,
 	.set_tdm_slot = rt5514_set_tdm_slot,
+	.auto_selectable_formats = &rt5514_selectable_formats,
+	.num_auto_selectable_formats = 1,
 };
 
 static struct snd_soc_dai_driver rt5514_dai[] = {
@@ -1198,7 +1206,7 @@ static const struct regmap_config rt5514_regmap = {
 };
 
 static const struct i2c_device_id rt5514_i2c_id[] = {
-	{ "rt5514" },
+	{ .name = "rt5514" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rt5514_i2c_id);
@@ -1265,6 +1273,17 @@ static int rt5514_i2c_probe(struct i2c_client *i2c)
 	else
 		rt5514_parse_dp(rt5514, &i2c->dev);
 
+	rt5514->mclk = devm_clk_get_optional(&i2c->dev, "mclk");
+	if (IS_ERR(rt5514->mclk))
+		return PTR_ERR(rt5514->mclk);
+
+	if (rt5514->pdata.dsp_calib_clk_name) {
+		rt5514->dsp_calib_clk = devm_clk_get(&i2c->dev,
+						     rt5514->pdata.dsp_calib_clk_name);
+		if (PTR_ERR(rt5514->dsp_calib_clk) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
+	}
+
 	rt5514->i2c_regmap = devm_regmap_init_i2c(i2c, &rt5514_i2c_regmap);
 	if (IS_ERR(rt5514->i2c_regmap)) {
 		ret = PTR_ERR(rt5514->i2c_regmap);
@@ -1312,7 +1331,7 @@ static int rt5514_i2c_probe(struct i2c_client *i2c)
 			rt5514_dai, ARRAY_SIZE(rt5514_dai));
 }
 
-static const struct dev_pm_ops rt5514_i2_pm_ops = {
+static const struct dev_pm_ops rt5514_i2c_pm_ops = {
 	SYSTEM_SLEEP_PM_OPS(NULL, rt5514_i2c_resume)
 };
 
@@ -1321,7 +1340,7 @@ static struct i2c_driver rt5514_i2c_driver = {
 		.name = "rt5514",
 		.acpi_match_table = ACPI_PTR(rt5514_acpi_match),
 		.of_match_table = of_match_ptr(rt5514_of_match),
-		.pm = pm_ptr(&rt5514_i2_pm_ops),
+		.pm = pm_ptr(&rt5514_i2c_pm_ops),
 	},
 	.probe = rt5514_i2c_probe,
 	.id_table = rt5514_i2c_id,

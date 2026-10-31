@@ -530,7 +530,7 @@ static int xlp9xx_i2c_probe(struct platform_device *pdev)
 	err = devm_request_irq(&pdev->dev, priv->irq, xlp9xx_i2c_isr, 0,
 			       pdev->name, priv);
 	if (err)
-		return dev_err_probe(&pdev->dev, err, "IRQ request failed!\n");
+		return err;
 
 	init_completion(&priv->msg_complete);
 	priv->adapter.dev.parent = &pdev->dev;
@@ -570,9 +570,9 @@ static void xlp9xx_i2c_remove(struct platform_device *pdev)
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id xlp9xx_i2c_acpi_ids[] = {
-	{"BRCM9007", 0},
-	{"CAV9007",  0},
-	{}
+	{ .id = "BRCM9007" },
+	{ .id = "CAV9007" },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, xlp9xx_i2c_acpi_ids);
 #endif

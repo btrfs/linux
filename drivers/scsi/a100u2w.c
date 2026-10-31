@@ -909,7 +909,7 @@ static int inia100_build_scb(struct orc_host * host, struct orc_scb * scb, struc
  *	block, build the host specific scb structures and if there is room
  *	queue the command down to the controller
  */
-static int inia100_queue_lck(struct scsi_cmnd *cmd)
+static enum scsi_qc_status inia100_queue_lck(struct scsi_cmnd *cmd)
 {
 	struct orc_scb *scb;
 	struct orc_host *host;		/* Point to Host adapter control block */
@@ -1058,9 +1058,9 @@ static irqreturn_t inia100_intr(int irqno, void *devid)
 	unsigned long flags;
 	irqreturn_t res;
 
-	spin_lock_irqsave(shost->host_lock, flags);
+	spin_lock_irqsave(&shost->host_lock, flags);
 	res = orc_interrupt(host);
-	spin_unlock_irqrestore(shost->host_lock, flags);
+	spin_unlock_irqrestore(&shost->host_lock, flags);
 
 	return res;
 }

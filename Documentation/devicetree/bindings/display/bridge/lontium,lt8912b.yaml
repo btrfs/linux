@@ -39,9 +39,6 @@ properties:
             $ref: /schemas/media/video-interfaces.yaml#
             unevaluatedProperties: false
 
-            properties:
-              data-lanes: true
-
             required:
               - data-lanes
 
@@ -79,7 +76,6 @@ properties:
 required:
   - compatible
   - reg
-  - reset-gpios
   - ports
 
 additionalProperties: false
@@ -111,11 +107,11 @@ examples:
           };
 
           port@1 {
-              reg = <1>;
+            reg = <1>;
 
-              endpoint {
-                  remote-endpoint = <&hdmi_in>;
-              };
+            endpoint {
+              remote-endpoint = <&hdmi_in>;
+            };
           };
         };
       };

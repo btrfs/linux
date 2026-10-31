@@ -1261,7 +1261,7 @@ static int cx8800_initdev(struct pci_dev *pci_dev,
 	int err;
 	int i;
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev)
 		return -ENOMEM;
 
@@ -1549,7 +1549,7 @@ static void cx8800_finidev(struct pci_dev *pci_dev)
 	kfree(dev);
 }
 
-static int __maybe_unused cx8800_suspend(struct device *dev_d)
+static int cx8800_suspend(struct device *dev_d)
 {
 	struct cx8800_dev *dev = dev_get_drvdata(dev_d);
 	struct cx88_core *core = dev->core;
@@ -1576,7 +1576,7 @@ static int __maybe_unused cx8800_suspend(struct device *dev_d)
 	return 0;
 }
 
-static int __maybe_unused cx8800_resume(struct device *dev_d)
+static int cx8800_resume(struct device *dev_d)
 {
 	struct cx8800_dev *dev = dev_get_drvdata(dev_d);
 	struct cx88_core *core = dev->core;
@@ -1610,24 +1610,21 @@ static int __maybe_unused cx8800_resume(struct device *dev_d)
 
 static const struct pci_device_id cx8800_pci_tbl[] = {
 	{
-		.vendor       = 0x14f1,
-		.device       = 0x8800,
-		.subvendor    = PCI_ANY_ID,
-		.subdevice    = PCI_ANY_ID,
+		PCI_DEVICE(0x14f1, 0x8800),
 	}, {
 		/* --- end of list --- */
 	}
 };
 MODULE_DEVICE_TABLE(pci, cx8800_pci_tbl);
 
-static SIMPLE_DEV_PM_OPS(cx8800_pm_ops, cx8800_suspend, cx8800_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(cx8800_pm_ops, cx8800_suspend, cx8800_resume);
 
 static struct pci_driver cx8800_pci_driver = {
 	.name      = "cx8800",
 	.id_table  = cx8800_pci_tbl,
 	.probe     = cx8800_initdev,
 	.remove    = cx8800_finidev,
-	.driver.pm = &cx8800_pm_ops,
+	.driver.pm = pm_sleep_ptr(&cx8800_pm_ops),
 };
 
 module_pci_driver(cx8800_pci_driver);

@@ -147,6 +147,7 @@ static void report_sock_error(struct sk_buff *skb, u32 err, u8 code)
 		return;
 
 	serr = SKB_EXT_ERR(clone);
+	memset(serr, 0, sizeof(*serr));
 	serr->ee.ee_errno = err;
 	serr->ee.ee_origin = SO_EE_ORIGIN_TXTIME;
 	serr->ee.ee_type = 0;
@@ -189,7 +190,7 @@ static int etf_enqueue_timesortedlist(struct sk_buff *nskb, struct Qdisc *sch,
 	rb_insert_color_cached(&nskb->rbnode, &q->head, leftmost);
 
 	qdisc_qstats_backlog_inc(sch, nskb);
-	sch->q.qlen++;
+	qdisc_qlen_inc(sch);
 
 	/* Now we may need to re-arm the qdisc watchdog for the next packet. */
 	reset_watchdog(sch);
@@ -222,7 +223,7 @@ static void timesortedlist_drop(struct Qdisc *sch, struct sk_buff *skb,
 		qdisc_qstats_backlog_dec(sch, skb);
 		qdisc_drop(skb, sch, &to_free);
 		qdisc_qstats_overlimit(sch);
-		sch->q.qlen--;
+		qdisc_qlen_dec(sch);
 	}
 
 	kfree_skb_list(to_free);
@@ -247,7 +248,7 @@ static void timesortedlist_remove(struct Qdisc *sch, struct sk_buff *skb)
 
 	q->last = skb->tstamp;
 
-	sch->q.qlen--;
+	qdisc_qlen_dec(sch);
 }
 
 static struct sk_buff *etf_dequeue_timesortedlist(struct Qdisc *sch)
@@ -426,7 +427,7 @@ static void timesortedlist_clear(struct Qdisc *sch)
 
 		rb_erase_cached(&skb->rbnode, &q->head);
 		rtnl_kfree_skbs(skb, skb);
-		sch->q.qlen--;
+		qdisc_qlen_dec(sch);
 	}
 }
 

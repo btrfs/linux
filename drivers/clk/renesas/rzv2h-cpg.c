@@ -14,10 +14,14 @@
 #include <linux/bitfield.h>
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
+#include <linux/clk/renesas.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/iopoll.h>
-#include <linux/mod_devicetable.h>
+#include <linux/limits.h>
+#include <linux/math.h>
+#include <linux/math64.h>
+#include <linux/minmax.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -26,6 +30,7 @@
 #include <linux/refcount.h>
 #include <linux/reset-controller.h>
 #include <linux/string_choices.h>
+#include <linux/units.h>
 
 #include <dt-bindings/clock/renesas-cpg-mssr.h>
 
@@ -47,13 +52,15 @@
 
 #define CPG_PLL_STBY(x)		((x))
 #define CPG_PLL_STBY_RESETB	BIT(0)
+#define CPG_PLL_STBY_SSC_EN	BIT(2)
 #define CPG_PLL_STBY_RESETB_WEN	BIT(16)
+#define CPG_PLL_STBY_SSC_EN_WEN BIT(18)
 #define CPG_PLL_CLK1(x)		((x) + 0x004)
-#define CPG_PLL_CLK1_KDIV(x)	((s16)FIELD_GET(GENMASK(31, 16), (x)))
-#define CPG_PLL_CLK1_MDIV(x)	FIELD_GET(GENMASK(15, 6), (x))
-#define CPG_PLL_CLK1_PDIV(x)	FIELD_GET(GENMASK(5, 0), (x))
+#define CPG_PLL_CLK1_KDIV	GENMASK(31, 16)
+#define CPG_PLL_CLK1_MDIV	GENMASK(15, 6)
+#define CPG_PLL_CLK1_PDIV	GENMASK(5, 0)
 #define CPG_PLL_CLK2(x)		((x) + 0x008)
-#define CPG_PLL_CLK2_SDIV(x)	FIELD_GET(GENMASK(2, 0), (x))
+#define CPG_PLL_CLK2_SDIV	GENMASK(2, 0)
 #define CPG_PLL_MON(x)		((x) + 0x010)
 #define CPG_PLL_MON_RESETB	BIT(0)
 #define CPG_PLL_MON_LOCK	BIT(4)
@@ -65,13 +72,34 @@
 
 #define CPG_CLKSTATUS0		(0x700)
 
+/* On RZ/G3E SoC we have two DSI PLLs */
+#define MAX_CPG_DSI_PLL		2
+
+#define CPG_PLLDSI_SMUX_LVDS_DUTY_NUM		4
+#define CPG_PLLDSI_SMUX_LVDS_DUTY_DEN		7
+#define CPG_PLLDSI_SMUX_DSI_RGB_DUTY_NUM	1
+#define CPG_PLLDSI_SMUX_DSI_RGB_DUTY_DEN	2
+
+/**
+ * struct rzv2h_pll_dsi_info - PLL DSI information, holds the limits and parameters
+ *
+ * @pll_dsi_limits: PLL DSI parameters limits
+ * @pll_dsi_parameters: Calculated PLL DSI parameters
+ * @req_pll_dsi_rate: Requested PLL DSI rate
+ */
+struct rzv2h_pll_dsi_info {
+	const struct rzv2h_pll_limits *pll_dsi_limits;
+	struct rzv2h_pll_div_pars pll_dsi_parameters;
+	unsigned long req_pll_dsi_rate;
+};
+
 /**
  * struct rzv2h_cpg_priv - Clock Pulse Generator Private Data
  *
  * @dev: CPG device
  * @base: CPG register block base address
  * @rmw_lock: protects register accesses
- * @clks: Array containing all Core and Module Clocks
+ * @clks: Array containing all Core and Module clk_hw entries
  * @num_core_clks: Number of Core Clocks in clks[]
  * @num_mod_clks: Number of Module Clocks in clks[]
  * @resets: Array of resets
@@ -80,13 +108,14 @@
  * @ff_mod_status_ops: Fixed Factor Module Status Clock operations
  * @mstop_count: Array of mstop values
  * @rcdev: Reset controller entity
+ * @pll_dsi_info: Array of PLL DSI information, holds the limits and parameters
  */
 struct rzv2h_cpg_priv {
 	struct device *dev;
 	void __iomem *base;
 	spinlock_t rmw_lock;
 
-	struct clk **clks;
+	struct clk_hw **clks;
 	unsigned int num_core_clks;
 	unsigned int num_mod_clks;
 	struct rzv2h_reset *resets;
@@ -98,6 +127,8 @@ struct rzv2h_cpg_priv {
 	atomic_t *mstop_count;
 
 	struct reset_controller_dev rcdev;
+
+	struct rzv2h_pll_dsi_info pll_dsi_info[MAX_CPG_DSI_PLL];
 };
 
 #define rcdev_to_priv(x)	container_of(x, struct rzv2h_cpg_priv, rcdev)
@@ -168,6 +199,430 @@ struct rzv2h_ff_mod_status_clk {
 #define to_rzv2h_ff_mod_status_clk(_hw) \
 	container_of(_hw, struct rzv2h_ff_mod_status_clk, fix.hw)
 
+/**
+ * struct rzv2h_plldsi_div_clk - PLL DSI DDIV clock
+ *
+ * @dtable: divider table
+ * @priv: CPG private data
+ * @hw: divider clk
+ * @ddiv: divider configuration
+ */
+struct rzv2h_plldsi_div_clk {
+	const struct clk_div_table *dtable;
+	struct rzv2h_cpg_priv *priv;
+	struct clk_hw hw;
+	struct ddiv ddiv;
+};
+
+#define to_plldsi_div_clk(_hw) \
+	container_of(_hw, struct rzv2h_plldsi_div_clk, hw)
+
+#define RZV2H_MAX_DIV_TABLES		(16)
+
+/**
+ * struct rzv2h_plldsi_mux_clk - PLL DSI MUX clock
+ *
+ * @priv: CPG private data
+ * @mux: mux clk
+ */
+struct rzv2h_plldsi_mux_clk {
+	struct rzv2h_cpg_priv *priv;
+	struct clk_mux mux;
+};
+
+#define to_plldsi_clk_mux(_mux) \
+	container_of(_mux, struct rzv2h_plldsi_mux_clk, mux)
+
+static unsigned long rzv2h_cpg_plldsi_div_recalc_rate(struct clk_hw *hw,
+						      unsigned long parent_rate)
+{
+	struct rzv2h_plldsi_div_clk *dsi_div = to_plldsi_div_clk(hw);
+	struct rzv2h_cpg_priv *priv = dsi_div->priv;
+	struct ddiv ddiv = dsi_div->ddiv;
+	u32 div;
+
+	div = readl(priv->base + ddiv.offset);
+	div >>= ddiv.shift;
+	div &= clk_div_mask(ddiv.width);
+	div = dsi_div->dtable[div].div;
+
+	return DIV_ROUND_CLOSEST_ULL(parent_rate, div);
+}
+
+static int rzv2h_cpg_plldsi_div_determine_rate(struct clk_hw *hw,
+					       struct clk_rate_request *req)
+{
+	struct rzv2h_plldsi_div_clk *dsi_div = to_plldsi_div_clk(hw);
+	struct pll_clk *pll_clk = to_pll(clk_hw_get_parent(hw));
+	struct rzv2h_cpg_priv *priv = dsi_div->priv;
+	u8 table[RZV2H_MAX_DIV_TABLES] = { 0 };
+	struct rzv2h_pll_div_pars *dsi_params;
+	struct rzv2h_pll_dsi_info *dsi_info;
+	const struct clk_div_table *div;
+	unsigned int i = 0;
+	u64 rate_millihz;
+
+	dsi_info = &priv->pll_dsi_info[pll_clk->pll.instance];
+	dsi_params = &dsi_info->pll_dsi_parameters;
+
+	rate_millihz = mul_u32_u32(req->rate, MILLI);
+	if (rate_millihz == dsi_params->div.error_millihz + dsi_params->div.freq_millihz)
+		goto exit_determine_rate;
+
+	for (div = dsi_div->dtable; div->div; div++) {
+		if (i >= RZV2H_MAX_DIV_TABLES)
+			return -EINVAL;
+		table[i++] = div->div;
+	}
+
+	if (!rzv2h_get_pll_divs_pars(dsi_info->pll_dsi_limits, dsi_params, table, i,
+				     rate_millihz)) {
+		dev_err(priv->dev, "failed to determine rate for req->rate: %lu\n",
+			req->rate);
+		return -EINVAL;
+	}
+
+exit_determine_rate:
+	req->rate = DIV_ROUND_CLOSEST_ULL(dsi_params->div.freq_millihz, MILLI);
+	req->best_parent_rate = req->rate * dsi_params->div.divider_value;
+	dsi_info->req_pll_dsi_rate = req->best_parent_rate;
+
+	return 0;
+}
+
+static int rzv2h_cpg_plldsi_div_set_rate(struct clk_hw *hw,
+					 unsigned long rate,
+					 unsigned long parent_rate)
+{
+	struct rzv2h_plldsi_div_clk *dsi_div = to_plldsi_div_clk(hw);
+	struct pll_clk *pll_clk = to_pll(clk_hw_get_parent(hw));
+	struct rzv2h_cpg_priv *priv = dsi_div->priv;
+	struct rzv2h_pll_div_pars *dsi_params;
+	struct rzv2h_pll_dsi_info *dsi_info;
+	struct ddiv ddiv = dsi_div->ddiv;
+	const struct clk_div_table *clkt;
+	bool divider_found = false;
+	u32 val, shift;
+
+	dsi_info = &priv->pll_dsi_info[pll_clk->pll.instance];
+	dsi_params = &dsi_info->pll_dsi_parameters;
+
+	for (clkt = dsi_div->dtable; clkt->div; clkt++) {
+		if (clkt->div == dsi_params->div.divider_value) {
+			divider_found = true;
+			break;
+		}
+	}
+
+	if (!divider_found)
+		return -EINVAL;
+
+	shift = ddiv.shift;
+	val = readl(priv->base + ddiv.offset) | DDIV_DIVCTL_WEN(shift);
+	val &= ~(clk_div_mask(ddiv.width) << shift);
+	val |= clkt->val << shift;
+	writel(val, priv->base + ddiv.offset);
+
+	return 0;
+}
+
+static const struct clk_ops rzv2h_cpg_plldsi_div_ops = {
+	.recalc_rate = rzv2h_cpg_plldsi_div_recalc_rate,
+	.determine_rate = rzv2h_cpg_plldsi_div_determine_rate,
+	.set_rate = rzv2h_cpg_plldsi_div_set_rate,
+};
+
+static struct clk_hw * __init
+rzv2h_cpg_plldsi_div_clk_register(const struct cpg_core_clk *core,
+				  struct rzv2h_cpg_priv *priv)
+{
+	struct rzv2h_plldsi_div_clk *clk_hw_data;
+	struct clk_hw **clks = priv->clks;
+	struct clk_init_data init = {};
+	const struct clk_hw *parent;
+	const char *parent_name;
+	struct clk_hw *clk_hw;
+	int ret;
+
+	parent = clks[core->parent];
+	if (IS_ERR(parent))
+		return ERR_CAST(parent);
+
+	clk_hw_data = devm_kzalloc(priv->dev, sizeof(*clk_hw_data), GFP_KERNEL);
+	if (!clk_hw_data)
+		return ERR_PTR(-ENOMEM);
+
+	clk_hw_data->priv = priv;
+	clk_hw_data->ddiv = core->cfg.ddiv;
+	clk_hw_data->dtable = core->dtable;
+
+	parent_name = clk_hw_get_name(parent);
+	init.name = core->name;
+	init.ops = &rzv2h_cpg_plldsi_div_ops;
+	init.flags = core->flag;
+	init.parent_names = &parent_name;
+	init.num_parents = 1;
+
+	clk_hw = &clk_hw_data->hw;
+	clk_hw->init = &init;
+
+	ret = devm_clk_hw_register(priv->dev, clk_hw);
+	if (ret)
+		return ERR_PTR(ret);
+
+	return clk_hw;
+}
+
+static int rzv2h_cpg_plldsi_determine_rate(struct clk_hw *hw,
+					   struct clk_rate_request *req)
+{
+	struct pll_clk *pll_clk = to_pll(hw);
+	struct rzv2h_cpg_priv *priv = pll_clk->priv;
+	struct rzv2h_pll_dsi_info *dsi_info;
+	u64 rate_millihz;
+
+	dsi_info = &priv->pll_dsi_info[pll_clk->pll.instance];
+	/* check if the divider has already invoked the algorithm */
+	if (req->rate == dsi_info->req_pll_dsi_rate)
+		return 0;
+
+	/* If the req->rate doesn't match we do the calculation assuming there is no divider */
+	rate_millihz = mul_u32_u32(req->rate, MILLI);
+	if (!rzv2h_get_pll_pars(dsi_info->pll_dsi_limits,
+				&dsi_info->pll_dsi_parameters.pll, rate_millihz)) {
+		dev_err(priv->dev,
+			"failed to determine rate for req->rate: %lu\n",
+			req->rate);
+		return -EINVAL;
+	}
+
+	req->rate = DIV_ROUND_CLOSEST_ULL(dsi_info->pll_dsi_parameters.pll.freq_millihz, MILLI);
+	dsi_info->req_pll_dsi_rate = req->rate;
+
+	return 0;
+}
+
+static int rzv2h_cpg_pll_set_rate(struct pll_clk *pll_clk,
+				  struct rzv2h_pll_pars *params,
+				  bool ssc_disable)
+{
+	struct rzv2h_cpg_priv *priv = pll_clk->priv;
+	u16 offset = pll_clk->pll.offset;
+	u32 val;
+	int ret;
+
+	/* Put PLL into standby mode */
+	writel(CPG_PLL_STBY_RESETB_WEN, priv->base + CPG_PLL_STBY(offset));
+	ret = readl_poll_timeout_atomic(priv->base + CPG_PLL_MON(offset),
+					val, !(val & CPG_PLL_MON_LOCK),
+					100, 2000);
+	if (ret) {
+		dev_err(priv->dev, "Failed to put PLLDSI into standby mode\n");
+		return ret;
+	}
+
+	/* Output clock setting 1 */
+	writel(FIELD_PREP(CPG_PLL_CLK1_KDIV, (u16)params->k) |
+	       FIELD_PREP(CPG_PLL_CLK1_MDIV, params->m) |
+	       FIELD_PREP(CPG_PLL_CLK1_PDIV, params->p),
+	       priv->base + CPG_PLL_CLK1(offset));
+
+	/* Output clock setting 2 */
+	val = readl(priv->base + CPG_PLL_CLK2(offset));
+	writel((val & ~CPG_PLL_CLK2_SDIV) | FIELD_PREP(CPG_PLL_CLK2_SDIV, params->s),
+	       priv->base + CPG_PLL_CLK2(offset));
+
+	/* Put PLL to normal mode */
+	if (ssc_disable)
+		val = CPG_PLL_STBY_SSC_EN_WEN;
+	else
+		val = CPG_PLL_STBY_SSC_EN_WEN | CPG_PLL_STBY_SSC_EN;
+	writel(val | CPG_PLL_STBY_RESETB_WEN | CPG_PLL_STBY_RESETB,
+	       priv->base + CPG_PLL_STBY(offset));
+
+	/* PLL normal mode transition, output clock stability check */
+	ret = readl_poll_timeout_atomic(priv->base + CPG_PLL_MON(offset),
+					val, (val & CPG_PLL_MON_LOCK),
+					100, 2000);
+	if (ret) {
+		dev_err(priv->dev, "Failed to put PLLDSI into normal mode\n");
+		return ret;
+	}
+
+	return 0;
+}
+
+static int rzv2h_cpg_plldsi_set_rate(struct clk_hw *hw, unsigned long rate,
+				     unsigned long parent_rate)
+{
+	struct pll_clk *pll_clk = to_pll(hw);
+	struct rzv2h_pll_dsi_info *dsi_info;
+	struct rzv2h_cpg_priv *priv = pll_clk->priv;
+
+	dsi_info = &priv->pll_dsi_info[pll_clk->pll.instance];
+
+	return rzv2h_cpg_pll_set_rate(pll_clk, &dsi_info->pll_dsi_parameters.pll, true);
+}
+
+static u8 rzv2h_cpg_plldsi_smux_get_parent(struct clk_hw *hw)
+{
+	return clk_mux_ops.get_parent(hw);
+}
+
+static int rzv2h_cpg_plldsi_smux_set_parent(struct clk_hw *hw, u8 index)
+{
+	return clk_mux_ops.set_parent(hw, index);
+}
+
+static int rzv2h_cpg_plldsi_smux_lvds_determine_rate(struct rzv2h_cpg_priv *priv,
+						     struct pll_clk *pll_clk,
+						     struct clk_rate_request *req)
+{
+	struct rzv2h_pll_div_pars *dsi_params;
+	struct rzv2h_pll_dsi_info *dsi_info;
+	u8 lvds_table[] = { 7 };
+	u64 rate_millihz;
+
+	dsi_info = &priv->pll_dsi_info[pll_clk->pll.instance];
+	dsi_params = &dsi_info->pll_dsi_parameters;
+
+	rate_millihz = mul_u32_u32(req->rate, MILLI);
+	if (!rzv2h_get_pll_divs_pars(dsi_info->pll_dsi_limits, dsi_params,
+				     lvds_table, ARRAY_SIZE(lvds_table), rate_millihz)) {
+		dev_err(priv->dev, "failed to determine rate for req->rate: %lu\n",
+			req->rate);
+		return -EINVAL;
+	}
+
+	req->rate = DIV_ROUND_CLOSEST_ULL(dsi_params->div.freq_millihz, MILLI);
+	req->best_parent_rate = req->rate;
+	dsi_info->req_pll_dsi_rate = req->best_parent_rate * dsi_params->div.divider_value;
+
+	return 0;
+}
+
+static int rzv2h_cpg_plldsi_smux_determine_rate(struct clk_hw *hw,
+						struct clk_rate_request *req)
+{
+	struct clk_mux *mux = to_clk_mux(hw);
+	struct rzv2h_plldsi_mux_clk *dsi_mux = to_plldsi_clk_mux(mux);
+	struct pll_clk *pll_clk = to_pll(clk_hw_get_parent(hw));
+	struct rzv2h_cpg_priv *priv = dsi_mux->priv;
+
+	/*
+	 * For LVDS output (parent index 0), calculate PLL parameters with
+	 * fixed divider value of 7. For DSI/RGB output (parent index 1) skip
+	 * PLL calculation here as it's handled by determine_rate of the
+	 * divider (up one level).
+	 */
+	if (!clk_mux_ops.get_parent(hw))
+		return rzv2h_cpg_plldsi_smux_lvds_determine_rate(priv, pll_clk, req);
+
+	req->best_parent_rate = req->rate;
+	return 0;
+}
+
+static int rzv2h_cpg_plldsi_smux_get_duty_cycle(struct clk_hw *hw,
+						struct clk_duty *duty)
+{
+	u8 parent = clk_mux_ops.get_parent(hw);
+
+	/*
+	 * CDIV7_DSIx_CLK - LVDS path (div7) - duty 4/7.
+	 * CSDIV_DSIx - DSI/RGB path (csdiv) - duty 1/2.
+	 */
+	if (parent == 0) {
+		duty->num = CPG_PLLDSI_SMUX_LVDS_DUTY_NUM;
+		duty->den = CPG_PLLDSI_SMUX_LVDS_DUTY_DEN;
+	} else {
+		duty->num = CPG_PLLDSI_SMUX_DSI_RGB_DUTY_NUM;
+		duty->den = CPG_PLLDSI_SMUX_DSI_RGB_DUTY_DEN;
+	}
+
+	return 0;
+}
+
+static int rzv2h_cpg_plldsi_smux_set_duty_cycle(struct clk_hw *hw,
+						struct clk_duty *duty)
+{
+	struct clk_hw *parent_hw;
+	u8 parent_idx;
+
+	/*
+	 * Select parent based on requested duty cycle:
+	 * - If duty > 50% (num/den > 1/2), select LVDS path (parent 0)
+	 * - Otherwise, select DSI/RGB path (parent 1)
+	 */
+	if (duty->num * CPG_PLLDSI_SMUX_DSI_RGB_DUTY_DEN >
+	    duty->den * CPG_PLLDSI_SMUX_DSI_RGB_DUTY_NUM)
+		parent_idx = 0;
+	else
+		parent_idx = 1;
+
+	if (parent_idx >= clk_hw_get_num_parents(hw))
+		return -EINVAL;
+
+	parent_hw = clk_hw_get_parent_by_index(hw, parent_idx);
+	if (!parent_hw)
+		return -EINVAL;
+
+	return clk_hw_set_parent(hw, parent_hw);
+}
+
+static const struct clk_ops rzv2h_cpg_plldsi_smux_ops = {
+	.determine_rate = rzv2h_cpg_plldsi_smux_determine_rate,
+	.get_parent = rzv2h_cpg_plldsi_smux_get_parent,
+	.set_parent = rzv2h_cpg_plldsi_smux_set_parent,
+	.get_duty_cycle = rzv2h_cpg_plldsi_smux_get_duty_cycle,
+	.set_duty_cycle = rzv2h_cpg_plldsi_smux_set_duty_cycle,
+};
+
+static struct clk_hw * __init
+rzv2h_cpg_plldsi_smux_clk_register(const struct cpg_core_clk *core,
+				   struct rzv2h_cpg_priv *priv)
+{
+	struct rzv2h_plldsi_mux_clk *clk_hw_data;
+	struct clk_init_data init = {};
+	struct clk_hw *clk_hw;
+	struct smuxed smux;
+	int ret;
+
+	smux = core->cfg.smux;
+
+	if (smux.shift + smux.width > 16) {
+		dev_err(priv->dev, "mux value exceeds LOWORD field\n");
+		return ERR_PTR(-EINVAL);
+	}
+
+	clk_hw_data = devm_kzalloc(priv->dev, sizeof(*clk_hw_data), GFP_KERNEL);
+	if (!clk_hw_data)
+		return ERR_PTR(-ENOMEM);
+
+	clk_hw_data->priv = priv;
+
+	init.name = core->name;
+	init.ops = &rzv2h_cpg_plldsi_smux_ops;
+	init.flags = core->flag;
+	init.parent_names = core->parent_names;
+	init.num_parents = core->num_parents;
+
+	clk_hw_data->mux.reg = priv->base + smux.offset;
+
+	clk_hw_data->mux.shift = smux.shift;
+	clk_hw_data->mux.mask = clk_div_mask(smux.width);
+	clk_hw_data->mux.flags = core->mux_flags;
+	clk_hw_data->mux.lock = &priv->rmw_lock;
+
+	clk_hw = &clk_hw_data->mux.hw;
+	clk_hw->init = &init;
+
+	ret = devm_clk_hw_register(priv->dev, clk_hw);
+	if (ret)
+		return ERR_PTR(ret);
+
+	return clk_hw;
+}
+
 static int rzv2h_cpg_pll_clk_is_enabled(struct clk_hw *hw)
 {
 	struct pll_clk *pll_clk = to_pll(hw);
@@ -231,11 +686,18 @@ static unsigned long rzv2h_cpg_pll_clk_recalc_rate(struct clk_hw *hw,
 	clk1 = readl(priv->base + CPG_PLL_CLK1(pll.offset));
 	clk2 = readl(priv->base + CPG_PLL_CLK2(pll.offset));
 
-	rate = mul_u64_u32_shr(parent_rate, (CPG_PLL_CLK1_MDIV(clk1) << 16) +
-			       CPG_PLL_CLK1_KDIV(clk1), 16 + CPG_PLL_CLK2_SDIV(clk2));
+	rate = mul_u64_u32_shr(parent_rate, (FIELD_GET(CPG_PLL_CLK1_MDIV, clk1) << 16) +
+			       (s16)FIELD_GET(CPG_PLL_CLK1_KDIV, clk1),
+			       16 + FIELD_GET(CPG_PLL_CLK2_SDIV, clk2));
 
-	return DIV_ROUND_CLOSEST_ULL(rate, CPG_PLL_CLK1_PDIV(clk1));
+	return DIV_ROUND_CLOSEST_ULL(rate, FIELD_GET(CPG_PLL_CLK1_PDIV, clk1));
 }
+
+static const struct clk_ops rzv2h_cpg_plldsi_ops = {
+	.recalc_rate = rzv2h_cpg_pll_clk_recalc_rate,
+	.determine_rate = rzv2h_cpg_plldsi_determine_rate,
+	.set_rate = rzv2h_cpg_plldsi_set_rate,
+};
 
 static const struct clk_ops rzv2h_cpg_pll_ops = {
 	.is_enabled = rzv2h_cpg_pll_clk_is_enabled,
@@ -243,14 +705,14 @@ static const struct clk_ops rzv2h_cpg_pll_ops = {
 	.recalc_rate = rzv2h_cpg_pll_clk_recalc_rate,
 };
 
-static struct clk * __init
+static struct clk_hw * __init
 rzv2h_cpg_pll_clk_register(const struct cpg_core_clk *core,
 			   struct rzv2h_cpg_priv *priv,
 			   const struct clk_ops *ops)
 {
 	struct device *dev = priv->dev;
-	struct clk_init_data init;
-	const struct clk *parent;
+	struct clk_init_data init = {};
+	const struct clk_hw *parent;
 	const char *parent_name;
 	struct pll_clk *pll_clk;
 	int ret;
@@ -263,7 +725,11 @@ rzv2h_cpg_pll_clk_register(const struct cpg_core_clk *core,
 	if (!pll_clk)
 		return ERR_PTR(-ENOMEM);
 
-	parent_name = __clk_get_name(parent);
+	if (core->type == CLK_TYPE_PLLDSI)
+		priv->pll_dsi_info[core->cfg.pll.instance].pll_dsi_limits =
+			core->cfg.pll.limits;
+
+	parent_name = clk_hw_get_name(parent);
 	init.name = core->name;
 	init.ops = ops;
 	init.flags = 0;
@@ -278,7 +744,7 @@ rzv2h_cpg_pll_clk_register(const struct cpg_core_clk *core,
 	if (ret)
 		return ERR_PTR(ret);
 
-	return pll_clk->hw.clk;
+	return &pll_clk->hw;
 }
 
 static unsigned long rzv2h_ddiv_recalc_rate(struct clk_hw *hw,
@@ -354,7 +820,7 @@ static const struct clk_ops rzv2h_ddiv_clk_divider_ops = {
 	.set_rate = rzv2h_ddiv_set_rate,
 };
 
-static struct clk * __init
+static struct clk_hw * __init
 rzv2h_cpg_ddiv_clk_register(const struct cpg_core_clk *core,
 			    struct rzv2h_cpg_priv *priv)
 {
@@ -363,7 +829,7 @@ rzv2h_cpg_ddiv_clk_register(const struct cpg_core_clk *core,
 	struct device *dev = priv->dev;
 	u8 shift = cfg_ddiv.shift;
 	u8 width = cfg_ddiv.width;
-	const struct clk *parent;
+	const struct clk_hw *parent;
 	const char *parent_name;
 	struct clk_divider *div;
 	struct ddiv_clk *ddiv;
@@ -373,7 +839,7 @@ rzv2h_cpg_ddiv_clk_register(const struct cpg_core_clk *core,
 	if (IS_ERR(parent))
 		return ERR_CAST(parent);
 
-	parent_name = __clk_get_name(parent);
+	parent_name = clk_hw_get_name(parent);
 
 	if ((shift + width) > 16)
 		return ERR_PTR(-EINVAL);
@@ -406,15 +872,15 @@ rzv2h_cpg_ddiv_clk_register(const struct cpg_core_clk *core,
 	if (ret)
 		return ERR_PTR(ret);
 
-	return div->hw.clk;
+	return &div->hw;
 }
 
-static struct clk * __init
+static struct clk_hw * __init
 rzv2h_cpg_mux_clk_register(const struct cpg_core_clk *core,
 			   struct rzv2h_cpg_priv *priv)
 {
 	struct smuxed mux = core->cfg.smux;
-	const struct clk_hw *clk_hw;
+	struct clk_hw *clk_hw;
 
 	clk_hw = devm_clk_hw_register_mux(priv->dev, core->name,
 					  core->parent_names, core->num_parents,
@@ -424,7 +890,7 @@ rzv2h_cpg_mux_clk_register(const struct cpg_core_clk *core,
 	if (IS_ERR(clk_hw))
 		return ERR_CAST(clk_hw);
 
-	return clk_hw->clk;
+	return clk_hw;
 }
 
 static int
@@ -440,14 +906,14 @@ rzv2h_clk_ff_mod_status_is_enabled(struct clk_hw *hw)
 	return !!(val & bitmask);
 }
 
-static struct clk * __init
+static struct clk_hw * __init
 rzv2h_cpg_fixed_mod_status_clk_register(const struct cpg_core_clk *core,
 					struct rzv2h_cpg_priv *priv)
 {
 	struct rzv2h_ff_mod_status_clk *clk_hw_data;
 	struct clk_init_data init = { };
 	struct clk_fixed_factor *fix;
-	const struct clk *parent;
+	const struct clk_hw *parent;
 	const char *parent_name;
 	int ret;
 
@@ -456,10 +922,7 @@ rzv2h_cpg_fixed_mod_status_clk_register(const struct cpg_core_clk *core,
 	if (IS_ERR(parent))
 		return ERR_CAST(parent);
 
-	parent_name = __clk_get_name(parent);
-	parent = priv->clks[core->parent];
-	if (IS_ERR(parent))
-		return ERR_CAST(parent);
+	parent_name = clk_hw_get_name(parent);
 
 	clk_hw_data = devm_kzalloc(priv->dev, sizeof(*clk_hw_data), GFP_KERNEL);
 	if (!clk_hw_data)
@@ -483,18 +946,18 @@ rzv2h_cpg_fixed_mod_status_clk_register(const struct cpg_core_clk *core,
 	if (ret)
 		return ERR_PTR(ret);
 
-	return clk_hw_data->fix.hw.clk;
+	return &clk_hw_data->fix.hw;
 }
 
-static struct clk
+static struct clk_hw
 *rzv2h_cpg_clk_src_twocell_get(struct of_phandle_args *clkspec,
 			       void *data)
 {
 	unsigned int clkidx = clkspec->args[1];
 	struct rzv2h_cpg_priv *priv = data;
 	struct device *dev = priv->dev;
+	struct clk_hw *clk_hw;
 	const char *type;
-	struct clk *clk;
 
 	switch (clkspec->args[0]) {
 	case CPG_CORE:
@@ -503,7 +966,7 @@ static struct clk
 			dev_err(dev, "Invalid %s clock index %u\n", type, clkidx);
 			return ERR_PTR(-EINVAL);
 		}
-		clk = priv->clks[clkidx];
+		clk_hw = priv->clks[clkidx];
 		break;
 
 	case CPG_MOD:
@@ -512,7 +975,7 @@ static struct clk
 			dev_err(dev, "Invalid %s clock index %u\n", type, clkidx);
 			return ERR_PTR(-EINVAL);
 		}
-		clk = priv->clks[priv->num_core_clks + clkidx];
+		clk_hw = priv->clks[priv->num_core_clks + clkidx];
 		break;
 
 	default:
@@ -520,25 +983,25 @@ static struct clk
 		return ERR_PTR(-EINVAL);
 	}
 
-	if (IS_ERR(clk))
-		dev_err(dev, "Cannot get %s clock %u: %ld", type, clkidx,
-			PTR_ERR(clk));
+	if (IS_ERR(clk_hw))
+		dev_err(dev, "Cannot get %s clock %u: %ld\n", type, clkidx,
+			PTR_ERR(clk_hw));
 	else
-		dev_dbg(dev, "clock (%u, %u) is %pC at %lu Hz\n",
-			clkspec->args[0], clkspec->args[1], clk,
-			clk_get_rate(clk));
-	return clk;
+		dev_dbg(dev, "clock (%u, %u) is %s at %lu Hz\n",
+			clkspec->args[0], clkspec->args[1],
+			clk_hw_get_name(clk_hw), clk_hw_get_rate(clk_hw));
+	return clk_hw;
 }
 
 static void __init
 rzv2h_cpg_register_core_clk(const struct cpg_core_clk *core,
 			    struct rzv2h_cpg_priv *priv)
 {
-	struct clk *clk = ERR_PTR(-EOPNOTSUPP), *parent;
+	struct clk_hw *clk_hw = ERR_PTR(-EOPNOTSUPP), *parent;
 	unsigned int id = core->id, div = core->div;
 	struct device *dev = priv->dev;
 	const char *parent_name;
-	struct clk_hw *clk_hw;
+	struct clk *clk;
 
 	WARN_DEBUG(id >= priv->num_core_clks);
 	WARN_DEBUG(PTR_ERR(priv->clks[id]) != -ENOENT);
@@ -546,61 +1009,72 @@ rzv2h_cpg_register_core_clk(const struct cpg_core_clk *core,
 	switch (core->type) {
 	case CLK_TYPE_IN:
 		clk = of_clk_get_by_name(priv->dev->of_node, core->name);
+		if (IS_ERR(clk)) {
+			clk_hw = ERR_CAST(clk);
+			goto fail;
+		}
+		clk_hw = __clk_get_hw(clk);
 		break;
 	case CLK_TYPE_FF:
 		WARN_DEBUG(core->parent >= priv->num_core_clks);
 		parent = priv->clks[core->parent];
 		if (IS_ERR(parent)) {
-			clk = parent;
+			clk_hw = parent;
 			goto fail;
 		}
 
-		parent_name = __clk_get_name(parent);
+		parent_name = clk_hw_get_name(parent);
 		clk_hw = devm_clk_hw_register_fixed_factor(dev, core->name,
 							   parent_name, CLK_SET_RATE_PARENT,
 							   core->mult, div);
-		if (IS_ERR(clk_hw))
-			clk = ERR_CAST(clk_hw);
-		else
-			clk = clk_hw->clk;
 		break;
 	case CLK_TYPE_FF_MOD_STATUS:
 		if (!priv->ff_mod_status_ops) {
 			priv->ff_mod_status_ops =
 				devm_kzalloc(dev, sizeof(*priv->ff_mod_status_ops), GFP_KERNEL);
 			if (!priv->ff_mod_status_ops) {
-				clk = ERR_PTR(-ENOMEM);
+				clk_hw = ERR_PTR(-ENOMEM);
 				goto fail;
 			}
 			memcpy(priv->ff_mod_status_ops, &clk_fixed_factor_ops,
 			       sizeof(const struct clk_ops));
 			priv->ff_mod_status_ops->is_enabled = rzv2h_clk_ff_mod_status_is_enabled;
 		}
-		clk = rzv2h_cpg_fixed_mod_status_clk_register(core, priv);
+		clk_hw = rzv2h_cpg_fixed_mod_status_clk_register(core, priv);
 		break;
 	case CLK_TYPE_PLL:
-		clk = rzv2h_cpg_pll_clk_register(core, priv, &rzv2h_cpg_pll_ops);
+		clk_hw = rzv2h_cpg_pll_clk_register(core, priv, &rzv2h_cpg_pll_ops);
 		break;
 	case CLK_TYPE_DDIV:
-		clk = rzv2h_cpg_ddiv_clk_register(core, priv);
+		clk_hw = rzv2h_cpg_ddiv_clk_register(core, priv);
 		break;
 	case CLK_TYPE_SMUX:
-		clk = rzv2h_cpg_mux_clk_register(core, priv);
+		clk_hw = rzv2h_cpg_mux_clk_register(core, priv);
+		break;
+	case CLK_TYPE_PLLDSI:
+		clk_hw = rzv2h_cpg_pll_clk_register(core, priv, &rzv2h_cpg_plldsi_ops);
+		break;
+	case CLK_TYPE_PLLDSI_DIV:
+		clk_hw = rzv2h_cpg_plldsi_div_clk_register(core, priv);
+		break;
+	case CLK_TYPE_PLLDSI_SMUX:
+		clk_hw = rzv2h_cpg_plldsi_smux_clk_register(core, priv);
 		break;
 	default:
 		goto fail;
 	}
 
-	if (IS_ERR_OR_NULL(clk))
+	if (IS_ERR(clk_hw))
 		goto fail;
 
-	dev_dbg(dev, "Core clock %pC at %lu Hz\n", clk, clk_get_rate(clk));
-	priv->clks[id] = clk;
+	dev_dbg(dev, "Core clock %s at %lu Hz\n",
+		clk_hw_get_name(clk_hw), clk_hw_get_rate(clk_hw));
+	priv->clks[id] = clk_hw;
 	return;
 
 fail:
-	dev_err(dev, "Failed to register core clock %s: %ld\n",
-		core->name, PTR_ERR(clk));
+	dev_err(dev, "Failed to register core clock %s: %ld\n", core->name,
+		PTR_ERR(clk_hw));
 }
 
 static void rzv2h_mod_clock_mstop_enable(struct rzv2h_cpg_priv *priv,
@@ -647,15 +1121,10 @@ static void rzv2h_mod_clock_mstop_disable(struct rzv2h_cpg_priv *priv,
 
 static int rzv2h_parent_clk_mux_to_index(struct clk_hw *hw)
 {
-	struct clk_hw *parent_hw;
-	struct clk *parent_clk;
+	struct clk_hw *parent_hw = clk_hw_get_parent(hw);
 	struct clk_mux *mux;
 	u32 val;
 
-	/* This will always succeed, so no need to check for IS_ERR() */
-	parent_clk = clk_get_parent(hw->clk);
-
-	parent_hw = __clk_get_hw(parent_clk);
 	mux = to_clk_mux(parent_hw);
 
 	val = readl(mux->reg) >> mux->shift;
@@ -754,9 +1223,9 @@ rzv2h_cpg_register_mod_clk(const struct rzv2h_mod_clk *mod,
 {
 	struct mod_clock *clock = NULL;
 	struct device *dev = priv->dev;
-	struct clk_init_data init;
-	struct clk *parent, *clk;
+	struct clk_init_data init = {};
 	const char *parent_name;
+	struct clk_hw *parent;
 	unsigned int id;
 	int ret;
 
@@ -767,13 +1236,13 @@ rzv2h_cpg_register_mod_clk(const struct rzv2h_mod_clk *mod,
 
 	parent = priv->clks[mod->parent];
 	if (IS_ERR(parent)) {
-		clk = parent;
+		ret = PTR_ERR(parent);
 		goto fail;
 	}
 
 	clock = devm_kzalloc(dev, sizeof(*clock), GFP_KERNEL);
 	if (!clock) {
-		clk = ERR_PTR(-ENOMEM);
+		ret = -ENOMEM;
 		goto fail;
 	}
 
@@ -783,7 +1252,7 @@ rzv2h_cpg_register_mod_clk(const struct rzv2h_mod_clk *mod,
 	if (mod->critical)
 		init.flags |= CLK_IS_CRITICAL;
 
-	parent_name = __clk_get_name(parent);
+	parent_name = clk_hw_get_name(parent);
 	init.parent_names = &parent_name;
 	init.num_parents = 1;
 
@@ -798,12 +1267,10 @@ rzv2h_cpg_register_mod_clk(const struct rzv2h_mod_clk *mod,
 	clock->mstop_data = mod->mstop_data;
 
 	ret = devm_clk_hw_register(dev, &clock->hw);
-	if (ret) {
-		clk = ERR_PTR(ret);
+	if (ret)
 		goto fail;
-	}
 
-	priv->clks[id] = clock->hw.clk;
+	priv->clks[id] = &clock->hw;
 
 	/*
 	 * Ensure the module clocks and MSTOP bits are synchronized when they are
@@ -842,8 +1309,8 @@ rzv2h_cpg_register_mod_clk(const struct rzv2h_mod_clk *mod,
 	return;
 
 fail:
-	dev_err(dev, "Failed to register module clock %s: %ld\n",
-		mod->name, PTR_ERR(clk));
+	dev_err(dev, "Failed to register module clock %s: %d\n", mod->name,
+		ret);
 }
 
 static int __rzv2h_cpg_assert(struct reset_controller_dev *rcdev,
@@ -854,6 +1321,7 @@ static int __rzv2h_cpg_assert(struct reset_controller_dev *rcdev,
 	u32 mask = BIT(priv->resets[id].reset_bit);
 	u8 monbit = priv->resets[id].mon_bit;
 	u32 value = mask << 16;
+	u32 mon;
 	int ret;
 
 	dev_dbg(rcdev->dev, "%s id:%ld offset:0x%x\n",
@@ -866,10 +1334,10 @@ static int __rzv2h_cpg_assert(struct reset_controller_dev *rcdev,
 	reg = GET_RST_MON_OFFSET(priv->resets[id].mon_index);
 	mask = BIT(monbit);
 
-	ret = readl_poll_timeout_atomic(priv->base + reg, value,
-					assert == !!(value & mask), 10, 200);
-	if (ret && !assert) {
-		value = mask << 16;
+	ret = readl_poll_timeout_atomic(priv->base + reg, mon,
+					assert == !!(mon & mask), 10, 200);
+	if (ret) {
+		value ^= mask;
 		writel(value, priv->base + GET_RST_OFFSET(priv->resets[id].reset_index));
 	}
 
@@ -975,7 +1443,7 @@ static bool rzv2h_cpg_is_pm_clk(struct rzv2h_cpg_pd *pd,
 		if (priv->clks[priv->num_core_clks + id] == ERR_PTR(-ENOENT))
 			return false;
 
-		clock = to_mod_clock(__clk_get_hw(priv->clks[priv->num_core_clks + id]));
+		clock = to_mod_clock(priv->clks[priv->num_core_clks + id]);
 
 		return !clock->no_pm;
 	}
@@ -1074,19 +1542,13 @@ static int __init rzv2h_cpg_add_pm_domains(struct rzv2h_cpg_priv *priv)
 	return of_genpd_add_provider_simple(np, &pd->genpd);
 }
 
-static void rzv2h_cpg_del_clk_provider(void *data)
-{
-	of_clk_del_provider(data);
-}
-
 static int __init rzv2h_cpg_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	struct device_node *np = dev->of_node;
 	const struct rzv2h_cpg_info *info;
 	struct rzv2h_cpg_priv *priv;
 	unsigned int nclks, i;
-	struct clk **clks;
+	struct clk_hw **clks;
 	int error;
 
 	info = of_device_get_match_data(dev);
@@ -1137,11 +1599,7 @@ static int __init rzv2h_cpg_probe(struct platform_device *pdev)
 	for (i = 0; i < info->num_mod_clks; i++)
 		rzv2h_cpg_register_mod_clk(&info->mod_clks[i], priv);
 
-	error = of_clk_add_provider(np, rzv2h_cpg_clk_src_twocell_get, priv);
-	if (error)
-		return error;
-
-	error = devm_add_action_or_reset(dev, rzv2h_cpg_del_clk_provider, np);
+	error = devm_of_clk_add_hw_provider(dev, rzv2h_cpg_clk_src_twocell_get, priv);
 	if (error)
 		return error;
 
@@ -1185,11 +1643,6 @@ static struct platform_driver rzv2h_cpg_driver = {
 	},
 };
 
-static int __init rzv2h_cpg_init(void)
-{
-	return platform_driver_probe(&rzv2h_cpg_driver, rzv2h_cpg_probe);
-}
-
-subsys_initcall(rzv2h_cpg_init);
+subsys_platform_driver_probe(rzv2h_cpg_driver, rzv2h_cpg_probe);
 
 MODULE_DESCRIPTION("Renesas RZ/V2H CPG Driver");

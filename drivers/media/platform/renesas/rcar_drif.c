@@ -464,7 +464,7 @@ rcar_drif_get_fbuf(struct rcar_drif_sdr *sdr)
 					rcar_drif_frame_buf, list);
 	if (!fbuf) {
 		/*
-		 * App is late in enqueing buffers. Samples lost & there will
+		 * App is late in enqueuing buffers. Samples lost & there will
 		 * be a gap in sequence number when app recovers
 		 */
 		rdrif_dbg(sdr, "\napp late: prod %u\n", sdr->produced);
@@ -1246,6 +1246,7 @@ static struct device_node *rcar_drif_bond_enabled(struct platform_device *p)
 	if (np && of_device_is_available(np))
 		return np;
 
+	of_node_put(np);
 	return NULL;
 }
 

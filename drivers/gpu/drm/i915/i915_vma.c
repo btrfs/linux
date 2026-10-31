@@ -24,7 +24,9 @@
 
 #include <linux/sched/mm.h>
 #include <linux/dma-fence-array.h>
+
 #include <drm/drm_gem.h>
+#include <drm/drm_print.h>
 
 #include "display/intel_fb.h"
 #include "display/intel_frontbuffer.h"
@@ -145,7 +147,7 @@ static void __i915_vma_retire(struct i915_active *ref)
 static struct i915_vma *
 vma_create(struct drm_i915_gem_object *obj,
 	   struct i915_address_space *vm,
-	   const struct i915_gtt_view *view)
+	   const struct intel_gtt_view *view)
 {
 	struct i915_vma *pos = ERR_PTR(-E2BIG);
 	struct i915_vma *vma;
@@ -177,9 +179,9 @@ vma_create(struct drm_i915_gem_object *obj,
 	INIT_LIST_HEAD(&vma->obj_link);
 	RB_CLEAR_NODE(&vma->obj_node);
 
-	if (view && view->type != I915_GTT_VIEW_NORMAL) {
+	if (view && !intel_gtt_view_is_normal(view)) {
 		vma->gtt_view = *view;
-		if (view->type == I915_GTT_VIEW_PARTIAL) {
+		if (intel_gtt_view_is_partial(view)) {
 			GEM_BUG_ON(range_overflows_t(u64,
 						     view->partial.offset,
 						     view->partial.size,
@@ -187,10 +189,10 @@ vma_create(struct drm_i915_gem_object *obj,
 			vma->size = view->partial.size;
 			vma->size <<= PAGE_SHIFT;
 			GEM_BUG_ON(vma->size > obj->base.size);
-		} else if (view->type == I915_GTT_VIEW_ROTATED) {
+		} else if (intel_gtt_view_is_rotated(view)) {
 			vma->size = intel_rotation_info_size(&view->rotated);
 			vma->size <<= PAGE_SHIFT;
-		} else if (view->type == I915_GTT_VIEW_REMAPPED) {
+		} else if (intel_gtt_view_is_remapped(view)) {
 			vma->size = intel_remapped_info_size(&view->remapped);
 			vma->size <<= PAGE_SHIFT;
 		}
@@ -284,7 +286,7 @@ err_vma:
 static struct i915_vma *
 i915_vma_lookup(struct drm_i915_gem_object *obj,
 	   struct i915_address_space *vm,
-	   const struct i915_gtt_view *view)
+	   const struct intel_gtt_view *view)
 {
 	struct rb_node *rb;
 
@@ -322,7 +324,7 @@ i915_vma_lookup(struct drm_i915_gem_object *obj,
 struct i915_vma *
 i915_vma_instance(struct drm_i915_gem_object *obj,
 		  struct i915_address_space *vm,
-		  const struct i915_gtt_view *view)
+		  const struct intel_gtt_view *view)
 {
 	struct i915_vma *vma;
 
@@ -392,7 +394,7 @@ struct i915_vma_work *i915_vma_work(void)
 {
 	struct i915_vma_work *vw;
 
-	vw = kzalloc(sizeof(*vw), GFP_KERNEL);
+	vw = kzalloc_obj(*vw);
 	if (!vw)
 		return NULL;
 
@@ -1025,7 +1027,7 @@ intel_rotate_pages(struct intel_rotation_info *rot_info,
 	int i;
 
 	/* Allocate target SG list. */
-	st = kmalloc(sizeof(*st), GFP_KERNEL);
+	st = kmalloc_obj(*st);
 	if (!st)
 		goto err_st_alloc;
 
@@ -1235,7 +1237,7 @@ intel_remap_pages(struct intel_remapped_info *rem_info,
 	int i;
 
 	/* Allocate target SG list. */
-	st = kmalloc(sizeof(*st), GFP_KERNEL);
+	st = kmalloc_obj(*st);
 	if (!st)
 		goto err_st_alloc;
 
@@ -1265,7 +1267,7 @@ err_st_alloc:
 }
 
 static noinline struct sg_table *
-intel_partial_pages(const struct i915_gtt_view *view,
+intel_partial_pages(const struct intel_gtt_view *view,
 		    struct drm_i915_gem_object *obj)
 {
 	struct sg_table *st;
@@ -1273,7 +1275,7 @@ intel_partial_pages(const struct i915_gtt_view *view,
 	unsigned int count = view->partial.size;
 	int ret = -ENOMEM;
 
-	st = kmalloc(sizeof(*st), GFP_KERNEL);
+	st = kmalloc_obj(*st);
 	if (!st)
 		goto err_st_alloc;
 
@@ -1309,27 +1311,15 @@ __i915_vma_get_pages(struct i915_vma *vma)
 	 */
 	GEM_BUG_ON(!i915_gem_object_has_pinned_pages(vma->obj));
 
-	switch (vma->gtt_view.type) {
-	default:
-		GEM_BUG_ON(vma->gtt_view.type);
-		fallthrough;
-	case I915_GTT_VIEW_NORMAL:
-		pages = vma->obj->mm.pages;
-		break;
-
-	case I915_GTT_VIEW_ROTATED:
-		pages =
-			intel_rotate_pages(&vma->gtt_view.rotated, vma->obj);
-		break;
-
-	case I915_GTT_VIEW_REMAPPED:
-		pages =
-			intel_remap_pages(&vma->gtt_view.remapped, vma->obj);
-		break;
-
-	case I915_GTT_VIEW_PARTIAL:
+	if (intel_gtt_view_is_rotated(&vma->gtt_view)) {
+		pages = intel_rotate_pages(&vma->gtt_view.rotated, vma->obj);
+	} else if (intel_gtt_view_is_remapped(&vma->gtt_view)) {
+		pages = intel_remap_pages(&vma->gtt_view.remapped, vma->obj);
+	} else if (intel_gtt_view_is_partial(&vma->gtt_view)) {
 		pages = intel_partial_pages(&vma->gtt_view, vma->obj);
-		break;
+	} else {
+		GEM_BUG_ON(!intel_gtt_view_is_normal(&vma->gtt_view));
+		pages = vma->obj->mm.pages;
 	}
 
 	if (IS_ERR(pages)) {
@@ -2002,13 +1992,13 @@ int _i915_vma_move_to_active(struct i915_vma *vma,
 	}
 
 	if (flags & EXEC_OBJECT_WRITE) {
-		struct intel_frontbuffer *front;
+		struct i915_frontbuffer *front;
 
-		front = i915_gem_object_get_frontbuffer(obj);
+		front = i915_gem_object_frontbuffer_lookup(obj);
 		if (unlikely(front)) {
-			if (intel_frontbuffer_invalidate(front, ORIGIN_CS))
+			if (intel_frontbuffer_invalidate(&front->base, ORIGIN_CS))
 				i915_active_add_request(&front->write, rq);
-			intel_frontbuffer_put(front);
+			i915_gem_object_frontbuffer_put(front);
 		}
 	}
 

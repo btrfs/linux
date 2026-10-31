@@ -169,7 +169,7 @@ int ocfs2_filecheck_create_sysfs(struct ocfs2_super *osb)
 	struct ocfs2_filecheck *fcheck;
 	struct ocfs2_filecheck_sysfs_entry *entry = &osb->osb_fc_ent;
 
-	fcheck = kmalloc(sizeof(struct ocfs2_filecheck), GFP_NOFS);
+	fcheck = kmalloc_obj(struct ocfs2_filecheck, GFP_NOFS);
 	if (!fcheck)
 		return -ENOMEM;
 
@@ -179,17 +179,20 @@ int ocfs2_filecheck_create_sysfs(struct ocfs2_super *osb)
 	fcheck->fc_size = 0;
 	fcheck->fc_done = 0;
 
+	/* Publish the initialized owner before activating its sysfs callbacks. */
+	entry->fs_fcheck = fcheck;
 	entry->fs_kobj.kset = osb->osb_dev_kset;
 	init_completion(&entry->fs_kobj_unregister);
 	ret = kobject_init_and_add(&entry->fs_kobj, &ocfs2_ktype_filecheck,
 					NULL, "filecheck");
 	if (ret) {
+		/* Mount failure still calls ocfs2_filecheck_remove_sysfs(). */
+		entry->fs_fcheck = NULL;
 		kobject_put(&entry->fs_kobj);
 		kfree(fcheck);
 		return ret;
 	}
 
-	entry->fs_fcheck = fcheck;
 	return 0;
 }
 
@@ -464,7 +467,7 @@ static ssize_t ocfs2_filecheck_attr_store(struct kobject *kobj,
 		goto exit;
 	}
 
-	entry = kmalloc(sizeof(struct ocfs2_filecheck_entry), GFP_NOFS);
+	entry = kmalloc_obj(struct ocfs2_filecheck_entry, GFP_NOFS);
 	if (!entry) {
 		ret = -ENOMEM;
 		goto exit;

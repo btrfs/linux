@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Cirrus Logic CS42448/CS42888 Audio CODEC Digital Audio Interface (DAI) driver
  *
  * Copyright (C) 2014 Freescale Semiconductor, Inc.
  *
  * Author: Nicolin Chen <Guangyu.Chen@freescale.com>
- *
- * This file is licensed under the terms of the GNU General Public License
- * version 2. This program is licensed "as is" without any warranty of any
- * kind, whether express or implied.
  */
 
 #include <linux/clk.h>
@@ -43,6 +40,7 @@ struct cs42xx8_priv {
 	struct clk *clk;
 
 	bool slave_mode;
+	bool is_tdm_mode;
 	unsigned long sysclk;
 	u32 tx_channels;
 	struct gpio_desc *gpiod_reset;
@@ -217,6 +215,8 @@ static int cs42xx8_set_dai_fmt(struct snd_soc_dai *codec_dai,
 	struct cs42xx8_priv *cs42xx8 = snd_soc_component_get_drvdata(component);
 	u32 val;
 
+	cs42xx8->is_tdm_mode = false;
+
 	/* Set DAI format */
 	switch (format & SND_SOC_DAIFMT_FORMAT_MASK) {
 	case SND_SOC_DAIFMT_LEFT_J:
@@ -230,6 +230,7 @@ static int cs42xx8_set_dai_fmt(struct snd_soc_dai *codec_dai,
 		break;
 	case SND_SOC_DAIFMT_DSP_A:
 		val = CS42XX8_INTF_DAC_DIF_TDM | CS42XX8_INTF_ADC_DIF_TDM;
+		cs42xx8->is_tdm_mode = true;
 		break;
 	default:
 		dev_err(component->dev, "unsupported dai format\n");
@@ -250,6 +251,11 @@ static int cs42xx8_set_dai_fmt(struct snd_soc_dai *codec_dai,
 		break;
 	default:
 		dev_err(component->dev, "unsupported master/slave mode\n");
+		return -EINVAL;
+	}
+
+	if (cs42xx8->is_tdm_mode && !cs42xx8->slave_mode) {
+		dev_err(component->dev, "TDM mode is supported only in slave mode\n");
 		return -EINVAL;
 	}
 
@@ -335,6 +341,19 @@ static int cs42xx8_hw_params(struct snd_pcm_substream *substream,
 
 	cs42xx8->rate[tx] = params_rate(params);
 
+	if (cs42xx8->is_tdm_mode) {
+		if (cs42xx8->sysclk < 256 * cs42xx8->rate[tx]) {
+			dev_err(component->dev, "Unsupported sysclk in TDM mode\n");
+			return -EINVAL;
+		}
+
+		if (!tx && cs42xx8->rate[tx] > 100000) {
+			dev_err(component->dev,
+				"ADC does not support Quad-Speed Mode in TDM mode\n");
+			return -EINVAL;
+		}
+	}
+
 	mask = CS42XX8_FUNCMOD_MFREQ_MASK;
 	val = cs42xx8_ratios[i].mfreq;
 
@@ -374,12 +393,20 @@ static int cs42xx8_mute(struct snd_soc_dai *dai, int mute, int direction)
 	return 0;
 }
 
+static const u64 cs42xx8_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A;
+
 static const struct snd_soc_dai_ops cs42xx8_dai_ops = {
 	.set_fmt	= cs42xx8_set_dai_fmt,
 	.set_sysclk	= cs42xx8_set_dai_sysclk,
 	.hw_params	= cs42xx8_hw_params,
 	.hw_free	= cs42xx8_hw_free,
 	.mute_stream	= cs42xx8_mute,
+	.auto_selectable_formats	= &cs42xx8_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 	.no_capture_mute = 1,
 };
 
@@ -459,13 +486,16 @@ const struct regmap_config cs42xx8_regmap_config = {
 	.volatile_reg = cs42xx8_volatile_register,
 	.writeable_reg = cs42xx8_writeable_register,
 	.cache_type = REGCACHE_MAPLE,
+	.reg_format_endian  = REGMAP_ENDIAN_BIG,
+	.use_single_read = true,
+	.use_single_write = true,
 };
 EXPORT_SYMBOL_GPL(cs42xx8_regmap_config);
 
 static int cs42xx8_component_probe(struct snd_soc_component *component)
 {
 	struct cs42xx8_priv *cs42xx8 = snd_soc_component_get_drvdata(component);
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 
 	switch (cs42xx8->drvdata->num_adcs) {
 	case 3:

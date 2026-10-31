@@ -147,15 +147,17 @@ static const struct device_type ulpi_dev_type = {
  * __ulpi_register_driver - register a driver with the ULPI bus
  * @drv: driver being registered
  * @module: ends up being THIS_MODULE
+ * @mod_name: ends up being KBUILD_MODNAME
  *
  * Registers a driver with the ULPI bus.
  */
-int __ulpi_register_driver(struct ulpi_driver *drv, struct module *module)
+int __ulpi_register_driver(struct ulpi_driver *drv, struct module *module, const char *mod_name)
 {
 	if (!drv->probe)
 		return -EINVAL;
 
 	drv->driver.owner = module;
+	drv->driver.mod_name = mod_name;
 	drv->driver.bus = &ulpi_bus;
 
 	return driver_register(&drv->driver);
@@ -281,6 +283,9 @@ static int ulpi_register(struct device *dev, struct ulpi *ulpi)
 	ulpi->dev.parent = dev; /* needed early for ops */
 	ulpi->dev.bus = &ulpi_bus;
 	ulpi->dev.type = &ulpi_dev_type;
+
+	device_initialize(&ulpi->dev);
+
 	dev_set_name(&ulpi->dev, "%s.ulpi", dev_name(dev));
 
 	ACPI_COMPANION_SET(&ulpi->dev, ACPI_COMPANION(dev));
@@ -290,16 +295,12 @@ static int ulpi_register(struct device *dev, struct ulpi *ulpi)
 		return ret;
 
 	ret = ulpi_read_id(ulpi);
-	if (ret) {
-		of_node_put(ulpi->dev.of_node);
+	if (ret)
 		return ret;
-	}
 
-	ret = device_register(&ulpi->dev);
-	if (ret) {
-		put_device(&ulpi->dev);
+	ret = device_add(&ulpi->dev);
+	if (ret)
 		return ret;
-	}
 
 	root = debugfs_create_dir(dev_name(&ulpi->dev), ulpi_root);
 	debugfs_create_file("regs", 0444, root, ulpi, &ulpi_regs_fops);
@@ -324,7 +325,7 @@ struct ulpi *ulpi_register_interface(struct device *dev,
 	struct ulpi *ulpi;
 	int ret;
 
-	ulpi = kzalloc(sizeof(*ulpi), GFP_KERNEL);
+	ulpi = kzalloc_obj(*ulpi);
 	if (!ulpi)
 		return ERR_PTR(-ENOMEM);
 
@@ -332,7 +333,7 @@ struct ulpi *ulpi_register_interface(struct device *dev,
 
 	ret = ulpi_register(dev, ulpi);
 	if (ret) {
-		kfree(ulpi);
+		put_device(&ulpi->dev);
 		return ERR_PTR(ret);
 	}
 

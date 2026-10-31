@@ -17,6 +17,15 @@ static const struct snd_soc_dapm_widget generic_dmic_widgets[] = {
 	SND_SOC_DAPM_MIC("DMIC", NULL),
 };
 
+/* Senary SN624x UCM uses CaptureMixerElem "Dmic"; keep separate from generic DMIC. */
+static const struct snd_soc_dapm_widget sn624x_dmic_widgets[] = {
+	SND_SOC_DAPM_MIC("Dmic", NULL),
+};
+
+static const struct snd_kcontrol_new sn624x_dmic_controls[] = {
+	SOC_DAPM_PIN_SWITCH("Dmic"),
+};
+
 static const struct snd_soc_dapm_widget generic_jack_widgets[] = {
 	SND_SOC_DAPM_HP("Headphone", NULL),
 	SND_SOC_DAPM_MIC("Headset Mic", NULL),
@@ -40,9 +49,23 @@ static const struct snd_soc_dapm_widget lr_spk_widgets[] = {
 	SND_SOC_DAPM_SPK("Right Spk", NULL),
 };
 
+static const struct snd_soc_dapm_widget lr_4spk_widgets[] = {
+	SND_SOC_DAPM_SPK("Left Spk", NULL),
+	SND_SOC_DAPM_SPK("Right Spk", NULL),
+	SND_SOC_DAPM_SPK("Left Spk2", NULL),
+	SND_SOC_DAPM_SPK("Right Spk2", NULL),
+};
+
 static const struct snd_kcontrol_new lr_spk_controls[] = {
 	SOC_DAPM_PIN_SWITCH("Left Spk"),
 	SOC_DAPM_PIN_SWITCH("Right Spk"),
+};
+
+static const struct snd_kcontrol_new lr_4spk_controls[] = {
+	SOC_DAPM_PIN_SWITCH("Left Spk"),
+	SOC_DAPM_PIN_SWITCH("Right Spk"),
+	SOC_DAPM_PIN_SWITCH("Left Spk2"),
+	SOC_DAPM_PIN_SWITCH("Right Spk2"),
 };
 
 static const struct snd_soc_dapm_widget rt700_widgets[] = {
@@ -59,25 +82,193 @@ static const struct snd_kcontrol_new rt700_controls[] = {
 
 struct asoc_sdw_codec_info codec_info_list[] = {
 	{
-		.part_id = 0x0000, /* TAS2783A */
+		.vendor_id = 0x0102,
+		.part_id = 0x5572,
+		.name_prefix = "tac5572",
 		.dais = {
 			{
-				.direction = {true, true},
-				.dai_name = "tas2783-codec",
+				/* speaker */
+				.direction = {true, false},
+				.dai_name = "tac5xx2-aif1",
+				.component_name = "tac5572",
 				.dai_type = SOC_SDW_DAI_TYPE_AMP,
-				.dailink = {SOC_SDW_AMP_OUT_DAI_ID, SOC_SDW_AMP_IN_DAI_ID},
+				.dailink = {SOC_SDW_AMP_OUT_DAI_ID, SOC_SDW_UNUSED_DAI_ID},
 				.init = asoc_sdw_ti_amp_init,
-				.rtd_init = asoc_sdw_ti_spk_rtd_init,
+				.rtd_init = asoc_sdw_ti_tac5xx2_spk_rtd_init,
 				.controls = lr_spk_controls,
 				.num_controls = ARRAY_SIZE(lr_spk_controls),
 				.widgets = lr_spk_widgets,
 				.num_widgets = ARRAY_SIZE(lr_spk_widgets),
 			},
+			{
+				/* mic */
+				.direction = {false, true},
+				.dai_name = "tac5xx2-aif2",
+				.component_name = "tac5572",
+				.dai_type = SOC_SDW_DAI_TYPE_MIC,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_DMIC_DAI_ID},
+				.rtd_init = asoc_sdw_ti_dmic_rtd_init,
+			},
+			{
+				/* UAJ */
+				.direction = {true, true},
+				.dai_name = "tac5xx2-aif3",
+				.component_name = "tac5572",
+				.dai_type = SOC_SDW_DAI_TYPE_JACK,
+				.dailink = {SOC_SDW_JACK_OUT_DAI_ID, SOC_SDW_JACK_IN_DAI_ID},
+				.controls = generic_jack_controls,
+				.num_controls = ARRAY_SIZE(generic_jack_controls),
+				.widgets = generic_jack_widgets,
+				.num_widgets = ARRAY_SIZE(generic_jack_widgets),
+				.rtd_init = asoc_sdw_ti_sdca_jack_rtd_init,
+			},
+		},
+		.dai_num = 3,
+	},
+	{
+		.vendor_id = 0x0102,
+		.part_id = 0x5672,
+		.name_prefix = "tac5672",
+		.dais = {
+			{
+				/* speaker with IV sense feedback */
+				.direction = {true, true},
+				.dai_name = "tac5xx2-aif1",
+				.component_name = "tac5672",
+				.dai_type = SOC_SDW_DAI_TYPE_AMP,
+				.dailink = {SOC_SDW_AMP_OUT_DAI_ID, SOC_SDW_AMP_IN_DAI_ID},
+				.init = asoc_sdw_ti_amp_init,
+				.rtd_init = asoc_sdw_ti_tac5xx2_spk_rtd_init,
+				.controls = lr_spk_controls,
+				.num_controls = ARRAY_SIZE(lr_spk_controls),
+				.widgets = lr_spk_widgets,
+				.num_widgets = ARRAY_SIZE(lr_spk_widgets),
+			},
+			{
+				/* mic */
+				.direction = {false, true},
+				.dai_name = "tac5xx2-aif2",
+				.component_name = "tac5672",
+				.dai_type = SOC_SDW_DAI_TYPE_MIC,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_DMIC_DAI_ID},
+				.rtd_init = asoc_sdw_ti_dmic_rtd_init,
+			},
+			{
+				/* UAJ */
+				.direction = {true, true},
+				.dai_name = "tac5xx2-aif3",
+				.component_name = "tac5672",
+				.dai_type = SOC_SDW_DAI_TYPE_JACK,
+				.dailink = {SOC_SDW_JACK_OUT_DAI_ID, SOC_SDW_JACK_IN_DAI_ID},
+				.controls = generic_jack_controls,
+				.num_controls = ARRAY_SIZE(generic_jack_controls),
+				.widgets = generic_jack_widgets,
+				.num_widgets = ARRAY_SIZE(generic_jack_widgets),
+				.rtd_init = asoc_sdw_ti_sdca_jack_rtd_init,
+			},
+		},
+		.dai_num = 3,
+	},
+	{
+		.vendor_id = 0x0102,
+		.part_id = 0x5682,
+		.name_prefix = "tac5682",
+		.dais = {
+			{
+				/* speaker with echo reference feedback */
+				.direction = {true, true},
+				.dai_name = "tac5xx2-aif1",
+				.component_name = "tac5682",
+				.dai_type = SOC_SDW_DAI_TYPE_AMP,
+				.dailink = {SOC_SDW_AMP_OUT_DAI_ID, SOC_SDW_AMP_IN_DAI_ID},
+				.init = asoc_sdw_ti_amp_init,
+				.rtd_init = asoc_sdw_ti_tac5xx2_spk_rtd_init,
+				.controls = lr_spk_controls,
+				.num_controls = ARRAY_SIZE(lr_spk_controls),
+				.widgets = lr_spk_widgets,
+				.num_widgets = ARRAY_SIZE(lr_spk_widgets),
+			},
+			{
+				/* mic */
+				.direction = {false, true},
+				.dai_name = "tac5xx2-aif2",
+				.component_name = "tac5682",
+				.dai_type = SOC_SDW_DAI_TYPE_MIC,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_DMIC_DAI_ID},
+				.rtd_init = asoc_sdw_ti_dmic_rtd_init,
+			},
+			{
+				/* UAJ */
+				.direction = {true, true},
+				.dai_name = "tac5xx2-aif3",
+				.component_name = "tac5682",
+				.dai_type = SOC_SDW_DAI_TYPE_JACK,
+				.dailink = {SOC_SDW_JACK_OUT_DAI_ID, SOC_SDW_JACK_IN_DAI_ID},
+				.controls = generic_jack_controls,
+				.num_controls = ARRAY_SIZE(generic_jack_controls),
+				.widgets = generic_jack_widgets,
+				.num_widgets = ARRAY_SIZE(generic_jack_widgets),
+				.rtd_init = asoc_sdw_ti_sdca_jack_rtd_init,
+			},
+		},
+		.dai_num = 3,
+	},
+	{
+		.vendor_id = 0x0102,
+		.part_id = 0x2883,
+		.name_prefix = "tas2883",
+		.dais = {
+			{
+				.direction = {true, false},
+				.dai_name = "tac5xx2-aif1",
+				.component_name = "tas2883",
+				.dai_type = SOC_SDW_DAI_TYPE_AMP,
+				.dailink = {SOC_SDW_AMP_OUT_DAI_ID, SOC_SDW_UNUSED_DAI_ID},
+				.init = asoc_sdw_ti_amp_init,
+				.rtd_init = asoc_sdw_ti_tac5xx2_spk_rtd_init,
+				.controls = lr_spk_controls,
+				.num_controls = ARRAY_SIZE(lr_spk_controls),
+				.widgets = lr_spk_widgets,
+				.num_widgets = ARRAY_SIZE(lr_spk_widgets),
+			},
+			{
+				/* mic */
+				.direction = {false, true},
+				.dai_name = "tac5xx2-aif2",
+				.component_name = "tas2883",
+				.dai_type = SOC_SDW_DAI_TYPE_MIC,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_DMIC_DAI_ID},
+				.rtd_init = asoc_sdw_ti_dmic_rtd_init,
+			},
+		},
+		.dai_num = 2,
+	},
+	{
+		.vendor_id = 0x0102,
+		.part_id = 0x0000, /* TAS2783A */
+		.name_prefix = "tas2783",
+		.is_amp = true,
+		.dais = {
+			{
+				.direction = {true, true},
+				.dai_name = "tas2783-codec",
+				.component_name = "tas2783",
+				.dai_type = SOC_SDW_DAI_TYPE_AMP,
+				.dailink = {SOC_SDW_AMP_OUT_DAI_ID, SOC_SDW_AMP_IN_DAI_ID},
+				.init = asoc_sdw_ti_amp_init,
+				.rtd_init = asoc_sdw_ti_spk_rtd_init,
+				.controls = lr_4spk_controls,
+				.num_controls = ARRAY_SIZE(lr_4spk_controls),
+				.widgets = lr_4spk_widgets,
+				.num_widgets = ARRAY_SIZE(lr_4spk_widgets),
+			},
 		},
 		.dai_num = 1,
 	},
 	{
+		.vendor_id = 0x025d,
 		.part_id = 0x700,
+		.name_prefix = "rt700",
 		.dais = {
 			{
 				.direction = {true, true},
@@ -94,7 +285,9 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 		.dai_num = 1,
 	},
 	{
+		.vendor_id = 0x025d,
 		.part_id = 0x711,
+		.name_prefix = "rt711",
 		.version_id = 3,
 		.dais = {
 			{
@@ -114,7 +307,9 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 		.dai_num = 1,
 	},
 	{
+		.vendor_id = 0x025d,
 		.part_id = 0x711,
+		.name_prefix = "rt711",
 		.version_id = 2,
 		.dais = {
 			{
@@ -134,7 +329,9 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 		.dai_num = 1,
 	},
 	{
+		.vendor_id = 0x025d,
 		.part_id = 0x712,
+		.name_prefix = "rt712",
 		.version_id = 3,
 		.dais =	{
 			{
@@ -170,12 +367,16 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 				.dai_type = SOC_SDW_DAI_TYPE_MIC,
 				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_DMIC_DAI_ID},
 				.rtd_init = asoc_sdw_rt_dmic_rtd_init,
+				.quirk = SOC_SDW_CODEC_MIC,
+				.quirk_exclude = true,
 			},
 		},
 		.dai_num = 3,
 	},
 	{
+		.vendor_id = 0x025d,
 		.part_id = 0x1712,
+		.name_prefix = "rt712-dmic",
 		.version_id = 3,
 		.dais =	{
 			{
@@ -189,7 +390,9 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 		.dai_num = 1,
 	},
 	{
+		.vendor_id = 0x025d,
 		.part_id = 0x713,
+		.name_prefix = "rt713",
 		.version_id = 3,
 		.dais =	{
 			{
@@ -216,7 +419,9 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 		.dai_num = 2,
 	},
 	{
+		.vendor_id = 0x025d,
 		.part_id = 0x1713,
+		.name_prefix = "rt713-dmic",
 		.version_id = 3,
 		.dais =	{
 			{
@@ -230,8 +435,11 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 		.dai_num = 1,
 	},
 	{
+		.vendor_id = 0x025d,
 		.part_id = 0x1308,
+		.name_prefix = "rt1308",
 		.acpi_id = "10EC1308",
+		.is_amp = true,
 		.dais = {
 			{
 				.direction = {true, false},
@@ -252,7 +460,10 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 		.ops = &soc_sdw_rt1308_i2s_ops,
 	},
 	{
+		.vendor_id = 0x025d,
 		.part_id = 0x1316,
+		.name_prefix = "rt1316",
+		.is_amp = true,
 		.dais = {
 			{
 				.direction = {true, true},
@@ -272,7 +483,10 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 		.dai_num = 1,
 	},
 	{
+		.vendor_id = 0x025d,
 		.part_id = 0x1318,
+		.name_prefix = "rt1318",
+		.is_amp = true,
 		.dais = {
 			{
 				.direction = {true, true},
@@ -292,7 +506,10 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 		.dai_num = 1,
 	},
 	{
+		.vendor_id = 0x025d,
 		.part_id = 0x1320,
+		.name_prefix = "rt1320",
+		.is_amp = true,
 		.dais = {
 			{
 				.direction = {true, false},
@@ -308,11 +525,24 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 				.widgets = generic_spk_widgets,
 				.num_widgets = ARRAY_SIZE(generic_spk_widgets),
 			},
+			{
+				.direction = {false, true},
+				.dai_name = "rt1320-aif2",
+				.component_name = "rt1320",
+				.dai_type = SOC_SDW_DAI_TYPE_MIC,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_DMIC_DAI_ID},
+				.rtd_init = asoc_sdw_rt_dmic_rtd_init,
+				.widgets = generic_dmic_widgets,
+				.num_widgets = ARRAY_SIZE(generic_dmic_widgets),
+			},
 		},
-		.dai_num = 1,
+		.dai_num = 2,
 	},
 	{
+		.vendor_id = 0x025d,
 		.part_id = 0x1321,
+		.name_prefix = "rt1320",
+		.is_amp = true,
 		.dais = {
 			{
 				.direction = {true, false},
@@ -328,11 +558,23 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 				.widgets = generic_spk_widgets,
 				.num_widgets = ARRAY_SIZE(generic_spk_widgets),
 			},
+			{
+				.direction = {false, true},
+				.dai_name = "rt1320-aif2",
+				.component_name = "rt1320",
+				.dai_type = SOC_SDW_DAI_TYPE_MIC,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_DMIC_DAI_ID},
+				.rtd_init = asoc_sdw_rt_dmic_rtd_init,
+				.widgets = generic_dmic_widgets,
+				.num_widgets = ARRAY_SIZE(generic_dmic_widgets),
+			},
 		},
-		.dai_num = 1,
+		.dai_num = 2,
 	},
 	{
+		.vendor_id = 0x025d,
 		.part_id = 0x714,
+		.name_prefix = "rt714",
 		.version_id = 3,
 		.ignore_internal_dmic = true,
 		.dais = {
@@ -347,7 +589,9 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 		.dai_num = 1,
 	},
 	{
+		.vendor_id = 0x025d,
 		.part_id = 0x715,
+		.name_prefix = "rt715",
 		.version_id = 3,
 		.ignore_internal_dmic = true,
 		.dais = {
@@ -362,7 +606,9 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 		.dai_num = 1,
 	},
 	{
+		.vendor_id = 0x025d,
 		.part_id = 0x714,
+		.name_prefix = "rt714",
 		.version_id = 2,
 		.ignore_internal_dmic = true,
 		.dais = {
@@ -377,7 +623,9 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 		.dai_num = 1,
 	},
 	{
+		.vendor_id = 0x025d,
 		.part_id = 0x715,
+		.name_prefix = "rt715",
 		.version_id = 2,
 		.ignore_internal_dmic = true,
 		.dais = {
@@ -392,7 +640,9 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 		.dai_num = 1,
 	},
 	{
+		.vendor_id = 0x025d,
 		.part_id = 0x721,
+		.name_prefix = "rt721",
 		.version_id = 3,
 		.dais = {
 			{
@@ -429,12 +679,62 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 				.dai_type = SOC_SDW_DAI_TYPE_MIC,
 				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_DMIC_DAI_ID},
 				.rtd_init = asoc_sdw_rt_dmic_rtd_init,
+				.quirk = SOC_SDW_CODEC_MIC,
+				.quirk_exclude = true,
 			},
 		},
 		.dai_num = 3,
 	},
 	{
+		.vendor_id = 0x025d,
+		.part_id = 0x718,
+		.name_prefix = "rt721",
+		.version_id = 3,
+		.dais = {
+			{
+				.direction = {true, true},
+				.dai_name = "rt721-sdca-aif1",
+				.dai_type = SOC_SDW_DAI_TYPE_JACK,
+				.dailink = {SOC_SDW_JACK_OUT_DAI_ID, SOC_SDW_JACK_IN_DAI_ID},
+				.init = asoc_sdw_rt_sdca_jack_init,
+				.exit = asoc_sdw_rt_sdca_jack_exit,
+				.rtd_init = asoc_sdw_rt_sdca_jack_rtd_init,
+				.controls = generic_jack_controls,
+				.num_controls = ARRAY_SIZE(generic_jack_controls),
+				.widgets = generic_jack_widgets,
+				.num_widgets = ARRAY_SIZE(generic_jack_widgets),
+			},
+			{
+				.direction = {true, false},
+				.dai_name = "rt721-sdca-aif2",
+				.component_name = "rt721",
+				.dai_type = SOC_SDW_DAI_TYPE_AMP,
+				/* No feedback capability is provided by rt721-sdca codec driver*/
+				.dailink = {SOC_SDW_AMP_OUT_DAI_ID, SOC_SDW_UNUSED_DAI_ID},
+				.init = asoc_sdw_rt_amp_init,
+				.exit = asoc_sdw_rt_amp_exit,
+				.rtd_init = asoc_sdw_rt_mf_sdca_spk_rtd_init,
+				.controls = generic_spk_controls,
+				.num_controls = ARRAY_SIZE(generic_spk_controls),
+				.widgets = generic_spk_widgets,
+				.num_widgets = ARRAY_SIZE(generic_spk_widgets),
+			},
+			{
+				.direction = {false, true},
+				.dai_name = "rt721-sdca-aif3",
+				.dai_type = SOC_SDW_DAI_TYPE_MIC,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_DMIC_DAI_ID},
+				.rtd_init = asoc_sdw_rt_dmic_rtd_init,
+				.quirk = SOC_SDW_CODEC_MIC,
+				.quirk_exclude = true,
+			},
+		},
+		.dai_num = 3,
+	},
+	{
+		.vendor_id = 0x025d,
 		.part_id = 0x722,
+		.name_prefix = "rt722",
 		.version_id = 3,
 		.dais = {
 			{
@@ -473,12 +773,189 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 				.dai_type = SOC_SDW_DAI_TYPE_MIC,
 				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_DMIC_DAI_ID},
 				.rtd_init = asoc_sdw_rt_dmic_rtd_init,
+				.quirk = SOC_SDW_CODEC_MIC,
+				.quirk_exclude = true,
 			},
 		},
 		.dai_num = 3,
 	},
 	{
+		.vendor_id = 0x025d,
+		.part_id = 0x767,
+		.name_prefix = "rt766",
+		.version_id = 3,
+		.dais =	{
+			{
+				.direction = {true, true},
+				.dai_name = "rt766-sdca-aif1",
+				.dai_type = SOC_SDW_DAI_TYPE_JACK,
+				.dailink = {SOC_SDW_JACK_OUT_DAI_ID, SOC_SDW_JACK_IN_DAI_ID},
+				.init = asoc_sdw_rt_sdca_jack_init,
+				.exit = asoc_sdw_rt_sdca_jack_exit,
+				.rtd_init = asoc_sdw_rt_sdca_jack_rtd_init,
+				.controls = generic_jack_controls,
+				.num_controls = ARRAY_SIZE(generic_jack_controls),
+				.widgets = generic_jack_widgets,
+				.num_widgets = ARRAY_SIZE(generic_jack_widgets),
+			},
+			{
+				.direction = {true, false},
+				.dai_name = "rt766-sdca-aif2",
+				.component_name = "rt766",
+				.dai_type = SOC_SDW_DAI_TYPE_AMP,
+				.dailink = {SOC_SDW_AMP_OUT_DAI_ID, SOC_SDW_UNUSED_DAI_ID},
+				.init = asoc_sdw_rt_amp_init,
+				.exit = asoc_sdw_rt_amp_exit,
+				.rtd_init = asoc_sdw_rt_mf_sdca_spk_rtd_init,
+				.controls = generic_spk_controls,
+				.num_controls = ARRAY_SIZE(generic_spk_controls),
+				.widgets = generic_spk_widgets,
+				.num_widgets = ARRAY_SIZE(generic_spk_widgets),
+			},
+			{
+				.direction = {false, true},
+				.dai_name = "rt766-sdca-aif3",
+				.dai_type = SOC_SDW_DAI_TYPE_MIC,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_DMIC_DAI_ID},
+				.rtd_init = asoc_sdw_rt_dmic_rtd_init,
+			},
+		},
+		.dai_num = 3,
+	},
+	{
+		.vendor_id = 0x025d,
+		.part_id = 0x767,
+		.name_prefix = "rt766",
+		.version_id = 4,
+		.dais =	{
+			{
+				.direction = {true, true},
+				.dai_name = "rt766-sdca-aif1",
+				.dai_type = SOC_SDW_DAI_TYPE_JACK,
+				.dailink = {SOC_SDW_JACK_OUT_DAI_ID, SOC_SDW_JACK_IN_DAI_ID},
+				.init = asoc_sdw_rt_sdca_jack_init,
+				.exit = asoc_sdw_rt_sdca_jack_exit,
+				.rtd_init = asoc_sdw_rt_sdca_jack_rtd_init,
+				.controls = generic_jack_controls,
+				.num_controls = ARRAY_SIZE(generic_jack_controls),
+				.widgets = generic_jack_widgets,
+				.num_widgets = ARRAY_SIZE(generic_jack_widgets),
+			},
+			{
+				.direction = {true, false},
+				.dai_name = "rt766-sdca-aif2",
+				.component_name = "rt766",
+				.dai_type = SOC_SDW_DAI_TYPE_AMP,
+				.dailink = {SOC_SDW_AMP_OUT_DAI_ID, SOC_SDW_UNUSED_DAI_ID},
+				.init = asoc_sdw_rt_amp_init,
+				.exit = asoc_sdw_rt_amp_exit,
+				.rtd_init = asoc_sdw_rt_mf_sdca_spk_rtd_init,
+				.controls = generic_spk_controls,
+				.num_controls = ARRAY_SIZE(generic_spk_controls),
+				.widgets = generic_spk_widgets,
+				.num_widgets = ARRAY_SIZE(generic_spk_widgets),
+			},
+			{
+				.direction = {false, true},
+				.dai_name = "rt766-sdca-aif3",
+				.dai_type = SOC_SDW_DAI_TYPE_MIC,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_DMIC_DAI_ID},
+				.rtd_init = asoc_sdw_rt_dmic_rtd_init,
+			},
+		},
+		.dai_num = 3,
+	},
+	{
+		.vendor_id = 0x025d,
+		.part_id = 0x766,
+		.name_prefix = "rt766",
+		.version_id = 3,
+		.dais =	{
+			{
+				.direction = {true, true},
+				.dai_name = "rt766-sdca-aif1",
+				.dai_type = SOC_SDW_DAI_TYPE_JACK,
+				.dailink = {SOC_SDW_JACK_OUT_DAI_ID, SOC_SDW_JACK_IN_DAI_ID},
+				.init = asoc_sdw_rt_sdca_jack_init,
+				.exit = asoc_sdw_rt_sdca_jack_exit,
+				.rtd_init = asoc_sdw_rt_sdca_jack_rtd_init,
+				.controls = generic_jack_controls,
+				.num_controls = ARRAY_SIZE(generic_jack_controls),
+				.widgets = generic_jack_widgets,
+				.num_widgets = ARRAY_SIZE(generic_jack_widgets),
+			},
+			{
+				.direction = {true, false},
+				.dai_name = "rt766-sdca-aif2",
+				.component_name = "rt766",
+				.dai_type = SOC_SDW_DAI_TYPE_AMP,
+				.dailink = {SOC_SDW_AMP_OUT_DAI_ID, SOC_SDW_UNUSED_DAI_ID},
+				.init = asoc_sdw_rt_amp_init,
+				.exit = asoc_sdw_rt_amp_exit,
+				.rtd_init = asoc_sdw_rt_mf_sdca_spk_rtd_init,
+				.controls = generic_spk_controls,
+				.num_controls = ARRAY_SIZE(generic_spk_controls),
+				.widgets = generic_spk_widgets,
+				.num_widgets = ARRAY_SIZE(generic_spk_widgets),
+			},
+			{
+				.direction = {false, true},
+				.dai_name = "rt766-sdca-aif3",
+				.dai_type = SOC_SDW_DAI_TYPE_MIC,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_DMIC_DAI_ID},
+				.rtd_init = asoc_sdw_rt_dmic_rtd_init,
+			},
+		},
+		.dai_num = 3,
+	},
+	{
+		.vendor_id = 0x025d,
+		.part_id = 0x766,
+		.name_prefix = "rt766",
+		.version_id = 4,
+		.dais =	{
+			{
+				.direction = {true, true},
+				.dai_name = "rt766-sdca-aif1",
+				.dai_type = SOC_SDW_DAI_TYPE_JACK,
+				.dailink = {SOC_SDW_JACK_OUT_DAI_ID, SOC_SDW_JACK_IN_DAI_ID},
+				.init = asoc_sdw_rt_sdca_jack_init,
+				.exit = asoc_sdw_rt_sdca_jack_exit,
+				.rtd_init = asoc_sdw_rt_sdca_jack_rtd_init,
+				.controls = generic_jack_controls,
+				.num_controls = ARRAY_SIZE(generic_jack_controls),
+				.widgets = generic_jack_widgets,
+				.num_widgets = ARRAY_SIZE(generic_jack_widgets),
+			},
+			{
+				.direction = {true, false},
+				.dai_name = "rt766-sdca-aif2",
+				.component_name = "rt766",
+				.dai_type = SOC_SDW_DAI_TYPE_AMP,
+				.dailink = {SOC_SDW_AMP_OUT_DAI_ID, SOC_SDW_UNUSED_DAI_ID},
+				.init = asoc_sdw_rt_amp_init,
+				.exit = asoc_sdw_rt_amp_exit,
+				.rtd_init = asoc_sdw_rt_mf_sdca_spk_rtd_init,
+				.controls = generic_spk_controls,
+				.num_controls = ARRAY_SIZE(generic_spk_controls),
+				.widgets = generic_spk_widgets,
+				.num_widgets = ARRAY_SIZE(generic_spk_widgets),
+			},
+			{
+				.direction = {false, true},
+				.dai_name = "rt766-sdca-aif3",
+				.dai_type = SOC_SDW_DAI_TYPE_MIC,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_DMIC_DAI_ID},
+				.rtd_init = asoc_sdw_rt_dmic_rtd_init,
+			},
+		},
+		.dai_num = 3,
+	},
+	{
+		.vendor_id = 0x019f,
 		.part_id = 0x8373,
+		.name_prefix = "Left",
+		.is_amp = true,
 		.dais = {
 			{
 				.direction = {true, true},
@@ -497,7 +974,10 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 		.dai_num = 1,
 	},
 	{
+		.vendor_id = 0x019f,
 		.part_id = 0x8363,
+		.name_prefix = "Left",
+		.is_amp = true,
 		.dais = {
 			{
 				.direction = {true, false},
@@ -516,7 +996,9 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 		.dai_num = 1,
 	},
 	{
+		.vendor_id = 0x025d,
 		.part_id = 0x5682,
+		.name_prefix = "rt5682",
 		.dais = {
 			{
 				.direction = {true, true},
@@ -533,7 +1015,10 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 		.dai_num = 1,
 	},
 	{
+		.vendor_id = 0x01fa,
 		.part_id = 0x3556,
+		.name_prefix = "AMP",
+		.is_amp = true,
 		.dais = {
 			{
 				.direction = {true, false},
@@ -550,16 +1035,74 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 			},
 			{
 				.direction = {false, true},
-				.dai_name = "cs35l56-sdw1c",
+				.dai_name = "cs35l56-ot25",
 				.dai_type = SOC_SDW_DAI_TYPE_AMP,
 				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_AMP_IN_DAI_ID},
-				.rtd_init = asoc_sdw_cs_spk_feedback_rtd_init,
 			},
 		},
 		.dai_num = 2,
 	},
 	{
+		.vendor_id = 0x01fa,
+		.part_id = 0x3557,
+		.name_prefix = "AMP",
+		.is_amp = true,
+		.dais = {
+			{
+				.direction = {true, false},
+				.dai_name = "cs35l56-sdw1",
+				.component_name = "cs35l56",
+				.dai_type = SOC_SDW_DAI_TYPE_AMP,
+				.dailink = {SOC_SDW_AMP_OUT_DAI_ID, SOC_SDW_UNUSED_DAI_ID},
+				.init = asoc_sdw_cs_amp_init,
+				.rtd_init = asoc_sdw_cs_spk_rtd_init,
+				.controls = generic_spk_controls,
+				.num_controls = ARRAY_SIZE(generic_spk_controls),
+				.widgets = generic_spk_widgets,
+				.num_widgets = ARRAY_SIZE(generic_spk_widgets),
+			},
+			{
+				.direction = {false, true},
+				.dai_name = "cs35l56-ot25",
+				.dai_type = SOC_SDW_DAI_TYPE_AMP,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_AMP_IN_DAI_ID},
+			},
+		},
+		.dai_num = 2,
+	},
+	{
+		.vendor_id = 0x01fa,
+		.part_id = 0x3562,
+		.name_prefix = "AMP",
+		.is_amp = true,
+		.dais = {
+			{
+				.direction = {true, false},
+				.dai_name = "cs35l56-sdw1",
+				.component_name = "cs35l56",
+				.dai_type = SOC_SDW_DAI_TYPE_AMP,
+				.dailink = {SOC_SDW_AMP_OUT_DAI_ID, SOC_SDW_UNUSED_DAI_ID},
+				.init = asoc_sdw_cs_amp_init,
+				.rtd_init = asoc_sdw_cs_spk_rtd_init,
+				.controls = generic_spk_controls,
+				.num_controls = ARRAY_SIZE(generic_spk_controls),
+				.widgets = generic_spk_widgets,
+				.num_widgets = ARRAY_SIZE(generic_spk_widgets),
+			},
+			{
+				.direction = {false, true},
+				.dai_name = "cs35l56-ot25",
+				.dai_type = SOC_SDW_DAI_TYPE_AMP,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_AMP_IN_DAI_ID},
+			},
+		},
+		.dai_num = 2,
+	},
+	{
+		.vendor_id = 0x01fa,
 		.part_id = 0x3563,
+		.name_prefix = "AMP",
+		.is_amp = true,
 		.dais = {
 			{
 				.direction = {true, false},
@@ -576,16 +1119,17 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 			},
 			{
 				.direction = {false, true},
-				.dai_name = "cs35l56-sdw1c",
+				.dai_name = "cs35l56-ot25",
 				.dai_type = SOC_SDW_DAI_TYPE_AMP,
 				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_AMP_IN_DAI_ID},
-				.rtd_init = asoc_sdw_cs_spk_feedback_rtd_init,
 			},
 		},
 		.dai_num = 2,
 	},
 	{
+		.vendor_id = 0x01fa,
 		.part_id = 0x4242,
+		.name_prefix = "cs42l42",
 		.dais = {
 			{
 				.direction = {true, true},
@@ -602,13 +1146,15 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 		.dai_num = 1,
 	},
 	{
+		.vendor_id = 0x01fa,
 		.part_id = 0x4243,
-		.codec_name = "cs42l43-codec",
+		.name_prefix = "cs42l43",
 		.count_sidecar = asoc_sdw_bridge_cs35l56_count_sidecar,
 		.add_sidecar = asoc_sdw_bridge_cs35l56_add_sidecar,
 		.dais = {
 			{
 				.direction = {true, false},
+				.codec_name = "cs42l43-codec",
 				.dai_name = "cs42l43-dp5",
 				.dai_type = SOC_SDW_DAI_TYPE_JACK,
 				.dailink = {SOC_SDW_JACK_OUT_DAI_ID, SOC_SDW_UNUSED_DAI_ID},
@@ -620,6 +1166,7 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 			},
 			{
 				.direction = {false, true},
+				.codec_name = "cs42l43-codec",
 				.dai_name = "cs42l43-dp1",
 				.dai_type = SOC_SDW_DAI_TYPE_MIC,
 				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_DMIC_DAI_ID},
@@ -631,12 +1178,15 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 			},
 			{
 				.direction = {false, true},
+				.codec_name = "cs42l43-codec",
 				.dai_name = "cs42l43-dp2",
 				.dai_type = SOC_SDW_DAI_TYPE_JACK,
 				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_JACK_IN_DAI_ID},
 			},
 			{
 				.direction = {true, false},
+				.codec_name = "cs42l43-codec",
+				.component_name = "cs42l43-spk",
 				.dai_name = "cs42l43-dp6",
 				.dai_type = SOC_SDW_DAI_TYPE_AMP,
 				.dailink = {SOC_SDW_AMP_OUT_DAI_ID, SOC_SDW_UNUSED_DAI_ID},
@@ -652,7 +1202,226 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 		.dai_num = 4,
 	},
 	{
+		.vendor_id = 0x01fa,
+		.part_id = 0x2A3B,
+		.name_prefix = "cs42l43",
+		.count_sidecar = asoc_sdw_bridge_cs35l56_count_sidecar,
+		.add_sidecar = asoc_sdw_bridge_cs35l56_add_sidecar,
+		.dais = {
+			{
+				.direction = {true, false},
+				.codec_name = "cs42l43-codec",
+				.dai_name = "cs42l43-dp5",
+				.dai_type = SOC_SDW_DAI_TYPE_JACK,
+				.dailink = {SOC_SDW_JACK_OUT_DAI_ID, SOC_SDW_UNUSED_DAI_ID},
+				.rtd_init = asoc_sdw_cs42l43_hs_rtd_init,
+				.controls = generic_jack_controls,
+				.num_controls = ARRAY_SIZE(generic_jack_controls),
+				.widgets = generic_jack_widgets,
+				.num_widgets = ARRAY_SIZE(generic_jack_widgets),
+			},
+			{
+				.direction = {false, true},
+				.codec_name = "cs42l43-codec",
+				.dai_name = "cs42l43-dp1",
+				.dai_type = SOC_SDW_DAI_TYPE_MIC,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_DMIC_DAI_ID},
+				.rtd_init = asoc_sdw_cs42l43_dmic_rtd_init,
+				.widgets = generic_dmic_widgets,
+				.num_widgets = ARRAY_SIZE(generic_dmic_widgets),
+				.quirk = SOC_SDW_CODEC_MIC,
+				.quirk_exclude = true,
+			},
+			{
+				.direction = {false, true},
+				.codec_name = "cs42l43-codec",
+				.dai_name = "cs42l43-dp2",
+				.dai_type = SOC_SDW_DAI_TYPE_JACK,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_JACK_IN_DAI_ID},
+			},
+			{
+				.direction = {true, false},
+				.codec_name = "cs42l43-codec",
+				.component_name = "cs42l43-spk",
+				.dai_name = "cs42l43-dp6",
+				.dai_type = SOC_SDW_DAI_TYPE_AMP,
+				.dailink = {SOC_SDW_AMP_OUT_DAI_ID, SOC_SDW_UNUSED_DAI_ID},
+				.init = asoc_sdw_cs42l43_spk_init,
+				.rtd_init = asoc_sdw_cs42l43_spk_rtd_init,
+				.controls = generic_spk_controls,
+				.num_controls = ARRAY_SIZE(generic_spk_controls),
+				.widgets = generic_spk_widgets,
+				.num_widgets = ARRAY_SIZE(generic_spk_widgets),
+				.quirk = SOC_SDW_CODEC_SPKR | SOC_SDW_SIDECAR_AMPS,
+			},
+		},
+		.dai_num = 4,
+	},
+	{
+		.vendor_id = 0x01fa,
+		.part_id = 0x4245,
+		.name_prefix = "cs42l45",
+		.dais = {
+			{
+				.direction = {true, false},
+				.codec_name = "snd_soc_sdca.UAJ",
+				.dai_name = "IT 41",
+				.dai_type = SOC_SDW_DAI_TYPE_JACK,
+				.dailink = {SOC_SDW_JACK_OUT_DAI_ID, SOC_SDW_UNUSED_DAI_ID},
+				.rtd_init = asoc_sdw_cs42l45_hs_rtd_init,
+			},
+			{
+				.direction = {false, true},
+				.codec_name = "snd_soc_sdca.SmartMic",
+				.dai_name = "OT 113",
+				.dai_type = SOC_SDW_DAI_TYPE_MIC,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_DMIC_DAI_ID},
+				.rtd_init = asoc_sdw_cs42l45_dmic_rtd_init,
+			},
+			{
+				.direction = {false, true},
+				.codec_name = "snd_soc_sdca.UAJ",
+				.dai_name = "OT 36",
+				.dai_type = SOC_SDW_DAI_TYPE_JACK,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_JACK_IN_DAI_ID},
+			},
+		},
+		.dai_num = 3,
+		.auxs = {
+			{
+				.codec_name = "snd_soc_sdca.HID",
+			},
+		},
+		.aux_num = 1,
+	},
+	{
+		.vendor_id = 0x01fa,
+		.part_id = 0x4249,
+		.name_prefix = "cs42l45", /* Use same user-space as cs42l45 */
+		.dais = {
+			{
+				.direction = {true, false},
+				.codec_name = "snd_soc_sdca.UAJ",
+				.dai_name = "IT 41",
+				.dai_type = SOC_SDW_DAI_TYPE_JACK,
+				.dailink = {SOC_SDW_JACK_OUT_DAI_ID, SOC_SDW_UNUSED_DAI_ID},
+				.rtd_init = asoc_sdw_cs42l45_hs_rtd_init,
+			},
+			{
+				.direction = {false, true},
+				.codec_name = "snd_soc_sdca.SmartMic",
+				.dai_name = "OT 113",
+				.dai_type = SOC_SDW_DAI_TYPE_MIC,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_DMIC_DAI_ID},
+				.rtd_init = asoc_sdw_cs42l45_dmic_rtd_init,
+			},
+			{
+				.direction = {false, true},
+				.codec_name = "snd_soc_sdca.UAJ",
+				.dai_name = "OT 36",
+				.dai_type = SOC_SDW_DAI_TYPE_JACK,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_JACK_IN_DAI_ID},
+			},
+		},
+		.dai_num = 3,
+		.auxs = {
+			{
+				.codec_name = "snd_soc_sdca.HID",
+			},
+		},
+		.aux_num = 1,
+	},
+	{
+		.vendor_id = 0x01fa,
+		.part_id = 0x4747,
+		.name_prefix = "cs47l47",
+		.dais = {
+			{
+				.direction = {true, false},
+				.codec_name = "snd_soc_sdca.UAJ",
+				.dai_name = "IT 41",
+				.dai_type = SOC_SDW_DAI_TYPE_JACK,
+				.dailink = {SOC_SDW_JACK_OUT_DAI_ID, SOC_SDW_UNUSED_DAI_ID},
+				.rtd_init = asoc_sdw_cs47l47_hs_rtd_init,
+			},
+			{
+				.direction = {false, true},
+				.codec_name = "snd_soc_sdca.SmartMic",
+				.dai_name = "OT 113",
+				.dai_type = SOC_SDW_DAI_TYPE_MIC,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_DMIC_DAI_ID},
+				.rtd_init = asoc_sdw_cs47l47_dmic_rtd_init,
+			},
+			{
+				.direction = {false, true},
+				.codec_name = "snd_soc_sdca.UAJ",
+				.dai_name = "OT 36",
+				.dai_type = SOC_SDW_DAI_TYPE_JACK,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_JACK_IN_DAI_ID},
+			},
+		},
+		.dai_num = 3,
+		.auxs = {
+			{
+				.codec_name = "snd_soc_sdca.HID",
+			},
+		},
+		.aux_num = 1,
+	},
+	{
+		.vendor_id = 0x04b3,
+		.part_id = 0x9356,
+		.name_prefix = "es9356",
+		.version_id = 3,
+		.dais = {
+			{
+				.direction = {true, false},
+				.dai_name = "es9356-sdp-aif1",
+				.dai_type = SOC_SDW_DAI_TYPE_JACK,
+				.dailink = {SOC_SDW_JACK_OUT_DAI_ID, SOC_SDW_UNUSED_DAI_ID},
+				.init = asoc_sdw_es9356_init,
+				.exit = asoc_sdw_es9356_exit,
+				.rtd_init = asoc_sdw_es9356_rtd_init,
+				.controls = generic_jack_controls,
+				.num_controls = ARRAY_SIZE(generic_jack_controls),
+				.widgets = generic_jack_widgets,
+				.num_widgets = ARRAY_SIZE(generic_jack_widgets),
+			},
+			{
+				.direction = {false, true},
+				.dai_name = "es9356-sdp-aif4",
+				.dai_type = SOC_SDW_DAI_TYPE_MIC,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_DMIC_DAI_ID},
+				.rtd_init = asoc_sdw_es9356_dmic_rtd_init,
+				.widgets = generic_dmic_widgets,
+				.num_widgets = ARRAY_SIZE(generic_dmic_widgets),
+			},
+			{
+				.direction = {false, true},
+				.dai_name = "es9356-sdp-aif2",
+				.dai_type = SOC_SDW_DAI_TYPE_JACK,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_JACK_IN_DAI_ID},
+			},
+			{
+				.direction = {true, false},
+				.dai_name = "es9356-sdp-aif3",
+				.component_name = "es9356",
+				.dai_type = SOC_SDW_DAI_TYPE_AMP,
+				.dailink = {SOC_SDW_AMP_OUT_DAI_ID, SOC_SDW_UNUSED_DAI_ID},
+				.init = asoc_sdw_es9356_amp_init,
+				.rtd_init = asoc_sdw_es9356_spk_rtd_init,
+				.controls = generic_spk_controls,
+				.num_controls = ARRAY_SIZE(generic_spk_controls),
+				.widgets = generic_spk_widgets,
+				.num_widgets = ARRAY_SIZE(generic_spk_widgets),
+			},
+		},
+		.dai_num = 4,
+	},
+	{
+		.vendor_id = 0x0105,
 		.part_id = 0xaaaa, /* generic codec mockup */
+		.name_prefix = "sdw_mockup_mmulti-function",
 		.version_id = 0,
 		.dais = {
 			{
@@ -677,7 +1446,9 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 		.dai_num = 3,
 	},
 	{
+		.vendor_id = 0x0105,
 		.part_id = 0xaa55, /* headset codec mockup */
+		.name_prefix = "sdw_mockup_headset0",
 		.version_id = 0,
 		.dais = {
 			{
@@ -690,7 +1461,10 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 		.dai_num = 1,
 	},
 	{
+		.vendor_id = 0x0105,
 		.part_id = 0x55aa, /* amplifier mockup */
+		.name_prefix = "sdw_mockup_amp1",
+		.is_amp = true,
 		.version_id = 0,
 		.dais = {
 			{
@@ -703,7 +1477,9 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 		.dai_num = 1,
 	},
 	{
+		.vendor_id = 0x0105,
 		.part_id = 0x5555,
+		.name_prefix = "sdw_mockup_mic0",
 		.version_id = 0,
 		.dais = {
 			{
@@ -714,6 +1490,163 @@ struct asoc_sdw_codec_info codec_info_list[] = {
 			},
 		},
 		.dai_num = 1,
+	},
+	/*
+	 * Senary SN6242/6244/6247: same SDCA jack/amp/mic topology; only part_id
+	 * differs. name_prefix stays "sn624x" for UCM/DAI naming.
+	 */
+	{
+		.vendor_id = 0x0496,
+		.part_id = 0x6244,
+		.name_prefix = "sn624x",
+		.ignore_internal_dmic = true,
+		.dais = {
+			{
+				.direction = {true, true},
+				.dai_name = "sn624x-sdca-aif",
+				.dai_type = SOC_SDW_DAI_TYPE_JACK,
+				.dailink = {SOC_SDW_JACK_OUT_DAI_ID, SOC_SDW_JACK_IN_DAI_ID},
+				.init = asoc_sdw_senary_sdca_jack_init,
+				.exit = asoc_sdw_senary_sdca_jack_exit,
+				.rtd_init = asoc_sdw_senary_sdca_jack_rtd_init,
+				.controls = generic_jack_controls,
+				.num_controls = ARRAY_SIZE(generic_jack_controls),
+				.widgets = generic_jack_widgets,
+				.num_widgets = ARRAY_SIZE(generic_jack_widgets),
+			},
+			{
+				.direction = {true, false},
+				.dai_name = "sn624x-sdca-aif2",
+				.component_name = "sn624x",
+				.dai_type = SOC_SDW_DAI_TYPE_AMP,
+				.dailink = {SOC_SDW_AMP_OUT_DAI_ID, SOC_SDW_UNUSED_DAI_ID},
+				.init = asoc_sdw_senary_amp_init,
+				.exit = asoc_sdw_senary_amp_exit,
+				.rtd_init = asoc_sdw_senary_sdca_spk_rtd_init,
+				.controls = generic_spk_controls,
+				.num_controls = ARRAY_SIZE(generic_spk_controls),
+				.widgets = generic_spk_widgets,
+				.num_widgets = ARRAY_SIZE(generic_spk_widgets),
+				.quirk = SOC_SDW_CODEC_SPKR,
+				.quirk_exclude = true,
+			},
+			{
+				.direction = {false, true},
+				.dai_name = "sn624x-sdca-aif3",
+				.dai_type = SOC_SDW_DAI_TYPE_MIC,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_DMIC_DAI_ID},
+				.rtd_init = asoc_sdw_senary_dmic_rtd_init,
+				.widgets = sn624x_dmic_widgets,
+				.num_widgets = ARRAY_SIZE(sn624x_dmic_widgets),
+				.controls = sn624x_dmic_controls,
+				.num_controls = ARRAY_SIZE(sn624x_dmic_controls),
+				.quirk = SOC_SDW_CODEC_MIC,
+				.quirk_exclude = true,
+			},
+		},
+		.dai_num = 3,
+	},
+	{
+		.vendor_id = 0x0496,
+		.part_id = 0x6247,
+		.name_prefix = "sn624x",
+		.ignore_internal_dmic = true,
+		.dais = {
+			{
+				.direction = {true, true},
+				.dai_name = "sn624x-sdca-aif",
+				.dai_type = SOC_SDW_DAI_TYPE_JACK,
+				.dailink = {SOC_SDW_JACK_OUT_DAI_ID, SOC_SDW_JACK_IN_DAI_ID},
+				.init = asoc_sdw_senary_sdca_jack_init,
+				.exit = asoc_sdw_senary_sdca_jack_exit,
+				.rtd_init = asoc_sdw_senary_sdca_jack_rtd_init,
+				.controls = generic_jack_controls,
+				.num_controls = ARRAY_SIZE(generic_jack_controls),
+				.widgets = generic_jack_widgets,
+				.num_widgets = ARRAY_SIZE(generic_jack_widgets),
+			},
+			{
+				.direction = {true, false},
+				.dai_name = "sn624x-sdca-aif2",
+				.component_name = "sn624x",
+				.dai_type = SOC_SDW_DAI_TYPE_AMP,
+				.dailink = {SOC_SDW_AMP_OUT_DAI_ID, SOC_SDW_UNUSED_DAI_ID},
+				.init = asoc_sdw_senary_amp_init,
+				.exit = asoc_sdw_senary_amp_exit,
+				.rtd_init = asoc_sdw_senary_sdca_spk_rtd_init,
+				.controls = generic_spk_controls,
+				.num_controls = ARRAY_SIZE(generic_spk_controls),
+				.widgets = generic_spk_widgets,
+				.num_widgets = ARRAY_SIZE(generic_spk_widgets),
+				.quirk = SOC_SDW_CODEC_SPKR,
+				.quirk_exclude = true,
+			},
+			{
+				.direction = {false, true},
+				.dai_name = "sn624x-sdca-aif3",
+				.dai_type = SOC_SDW_DAI_TYPE_MIC,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_DMIC_DAI_ID},
+				.rtd_init = asoc_sdw_senary_dmic_rtd_init,
+				.widgets = sn624x_dmic_widgets,
+				.num_widgets = ARRAY_SIZE(sn624x_dmic_widgets),
+				.controls = sn624x_dmic_controls,
+				.num_controls = ARRAY_SIZE(sn624x_dmic_controls),
+				.quirk = SOC_SDW_CODEC_MIC,
+				.quirk_exclude = true,
+			},
+		},
+		.dai_num = 3,
+	},
+	{
+		.vendor_id = 0x0496,
+		.part_id = 0x6242,
+		.name_prefix = "sn624x",
+		.ignore_internal_dmic = true,
+		.dais = {
+			{
+				.direction = {true, true},
+				.dai_name = "sn624x-sdca-aif",
+				.dai_type = SOC_SDW_DAI_TYPE_JACK,
+				.dailink = {SOC_SDW_JACK_OUT_DAI_ID, SOC_SDW_JACK_IN_DAI_ID},
+				.init = asoc_sdw_senary_sdca_jack_init,
+				.exit = asoc_sdw_senary_sdca_jack_exit,
+				.rtd_init = asoc_sdw_senary_sdca_jack_rtd_init,
+				.controls = generic_jack_controls,
+				.num_controls = ARRAY_SIZE(generic_jack_controls),
+				.widgets = generic_jack_widgets,
+				.num_widgets = ARRAY_SIZE(generic_jack_widgets),
+			},
+			{
+				.direction = {true, false},
+				.dai_name = "sn624x-sdca-aif2",
+				.component_name = "sn624x",
+				.dai_type = SOC_SDW_DAI_TYPE_AMP,
+				.dailink = {SOC_SDW_AMP_OUT_DAI_ID, SOC_SDW_UNUSED_DAI_ID},
+				.init = asoc_sdw_senary_amp_init,
+				.exit = asoc_sdw_senary_amp_exit,
+				.rtd_init = asoc_sdw_senary_sdca_spk_rtd_init,
+				.controls = generic_spk_controls,
+				.num_controls = ARRAY_SIZE(generic_spk_controls),
+				.widgets = generic_spk_widgets,
+				.num_widgets = ARRAY_SIZE(generic_spk_widgets),
+				.quirk = SOC_SDW_CODEC_SPKR,
+				.quirk_exclude = true,
+			},
+			{
+				.direction = {false, true},
+				.dai_name = "sn624x-sdca-aif3",
+				.dai_type = SOC_SDW_DAI_TYPE_MIC,
+				.dailink = {SOC_SDW_UNUSED_DAI_ID, SOC_SDW_DMIC_DAI_ID},
+				.rtd_init = asoc_sdw_senary_dmic_rtd_init,
+				.widgets = sn624x_dmic_widgets,
+				.num_widgets = ARRAY_SIZE(sn624x_dmic_widgets),
+				.controls = sn624x_dmic_controls,
+				.num_controls = ARRAY_SIZE(sn624x_dmic_controls),
+				.quirk = SOC_SDW_CODEC_MIC,
+				.quirk_exclude = true,
+			},
+		},
+		.dai_num = 3,
 	},
 };
 EXPORT_SYMBOL_NS(codec_info_list, "SND_SOC_SDW_UTILS");
@@ -726,9 +1659,10 @@ EXPORT_SYMBOL_NS(asoc_sdw_get_codec_info_list_count, "SND_SOC_SDW_UTILS");
 
 struct asoc_sdw_codec_info *asoc_sdw_find_codec_info_part(const u64 adr)
 {
-	unsigned int part_id, sdw_version;
+	unsigned int vendor_id, part_id, sdw_version;
 	int i;
 
+	vendor_id = SDW_MFG_ID(adr);
 	part_id = SDW_PART_ID(adr);
 	sdw_version = SDW_VERSION(adr);
 	for (i = 0; i < ARRAY_SIZE(codec_info_list); i++)
@@ -737,6 +1671,7 @@ struct asoc_sdw_codec_info *asoc_sdw_find_codec_info_part(const u64 adr)
 		 * version_id is not specified in the codec info.
 		 */
 		if (part_id == codec_info_list[i].part_id &&
+		    vendor_id == codec_info_list[i].vendor_id &&
 		    (!codec_info_list[i].version_id ||
 		     sdw_version == codec_info_list[i].version_id))
 			return &codec_info_list[i];
@@ -744,6 +1679,20 @@ struct asoc_sdw_codec_info *asoc_sdw_find_codec_info_part(const u64 adr)
 	return NULL;
 }
 EXPORT_SYMBOL_NS(asoc_sdw_find_codec_info_part, "SND_SOC_SDW_UTILS");
+
+static struct asoc_sdw_codec_info *asoc_sdw_find_codec_info_sdw_id(const struct sdw_slave_id *id)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(codec_info_list); i++)
+		if (id->part_id == codec_info_list[i].part_id &&
+		    id->mfg_id == codec_info_list[i].vendor_id &&
+		    (!codec_info_list[i].version_id ||
+		     id->sdw_version == codec_info_list[i].version_id))
+			return &codec_info_list[i];
+
+	return NULL;
+}
 
 struct asoc_sdw_codec_info *asoc_sdw_find_codec_info_acpi(const u8 *acpi_id)
 {
@@ -777,20 +1726,46 @@ struct asoc_sdw_codec_info *asoc_sdw_find_codec_info_dai(const char *dai_name, i
 }
 EXPORT_SYMBOL_NS(asoc_sdw_find_codec_info_dai, "SND_SOC_SDW_UTILS");
 
+static int asoc_sdw_find_codec_info_dai_index(const struct asoc_sdw_codec_info *codec_info,
+					      const char *dai_name)
+{
+	int i;
+
+	for (i = 0; i < codec_info->dai_num; i++) {
+		if (!strcmp(codec_info->dais[i].dai_name, dai_name))
+			return i;
+	}
+
+	return -ENOENT;
+}
+
 int asoc_sdw_rtd_init(struct snd_soc_pcm_runtime *rtd)
 {
 	struct snd_soc_card *card = rtd->card;
+	struct asoc_sdw_mc_private *ctx = snd_soc_card_get_drvdata(card);
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(card);
 	struct asoc_sdw_codec_info *codec_info;
 	struct snd_soc_dai *dai;
-	const char *spk_components="";
+	struct sdw_slave *sdw_peripheral;
+	const char *spk_components = NULL;
 	int dai_index;
 	int ret;
 	int i;
 
 	for_each_rtd_codec_dais(rtd, i, dai) {
-		codec_info = asoc_sdw_find_codec_info_dai(dai->name, &dai_index);
+		if (is_sdw_slave(dai->component->dev))
+			sdw_peripheral = dev_to_sdw_dev(dai->component->dev);
+		else if (dai->component->dev->parent && is_sdw_slave(dai->component->dev->parent))
+			sdw_peripheral = dev_to_sdw_dev(dai->component->dev->parent);
+		else
+			continue;
+
+		codec_info = asoc_sdw_find_codec_info_sdw_id(&sdw_peripheral->id);
 		if (!codec_info)
 			return -EINVAL;
+
+		dai_index = asoc_sdw_find_codec_info_dai_index(codec_info, dai->name);
+		WARN_ON(dai_index < 0);
 
 		/*
 		 * A codec dai can be connected to different dai links for capture and playback,
@@ -800,6 +1775,10 @@ int asoc_sdw_rtd_init(struct snd_soc_pcm_runtime *rtd)
 		 */
 		if (codec_info->dais[dai_index].rtd_init_done)
 			continue;
+
+		dev_dbg(card->dev, "%#x/%s initializing for %s/%s\n",
+			codec_info->part_id, codec_info->dais[dai_index].dai_name,
+			dai->component->name, dai->name);
 
 		/*
 		 * Add card controls and dapm widgets for the first codec dai.
@@ -813,18 +1792,18 @@ int asoc_sdw_rtd_init(struct snd_soc_pcm_runtime *rtd)
 			ret = snd_soc_add_card_controls(card, codec_info->dais[dai_index].controls,
 							codec_info->dais[dai_index].num_controls);
 			if (ret) {
-				dev_err(card->dev, "%#x controls addition failed: %d\n",
-					codec_info->part_id, ret);
+				dev_err(card->dev, "%#x-%#x controls addition failed: %d\n",
+					codec_info->vendor_id, codec_info->part_id, ret);
 				return ret;
 			}
 		}
 		if (codec_info->dais[dai_index].widgets) {
-			ret = snd_soc_dapm_new_controls(&card->dapm,
+			ret = snd_soc_dapm_new_controls(dapm,
 							codec_info->dais[dai_index].widgets,
 							codec_info->dais[dai_index].num_widgets);
 			if (ret) {
-				dev_err(card->dev, "%#x widgets addition failed: %d\n",
-					codec_info->part_id, ret);
+				dev_err(card->dev, "%#x-%#x widgets addition failed: %d\n",
+					codec_info->vendor_id, codec_info->part_id, ret);
 				return ret;
 			}
 		}
@@ -839,23 +1818,35 @@ skip_add_controls_widgets:
 		/* Generate the spk component string for card->components string */
 		if (codec_info->dais[dai_index].dai_type == SOC_SDW_DAI_TYPE_AMP &&
 		    codec_info->dais[dai_index].component_name) {
-			if (strlen (spk_components) == 0)
+			const char *component;
+
+			/*
+			 * For the special case of cs42l43 with sidecar amps, use only
+			 * "cs35l56-bridge" as the component name in card->components
+			 */
+			if (ctx->mc_quirk & SOC_SDW_SIDECAR_AMPS &&
+			    !strcmp(codec_info->dais[dai_index].component_name, "cs42l43-spk"))
+				component = "cs35l56-bridge";
+			else
+				component = codec_info->dais[dai_index].component_name;
+
+			if (!spk_components)
 				spk_components =
-					devm_kasprintf(card->dev, GFP_KERNEL, "%s",
-						       codec_info->dais[dai_index].component_name);
+					devm_kasprintf(card->dev, GFP_KERNEL, "%s", component);
 			else
 				/* Append component name to spk_components */
 				spk_components =
 					devm_kasprintf(card->dev, GFP_KERNEL,
-						       "%s+%s", spk_components,
-						       codec_info->dais[dai_index].component_name);
+						       "%s+%s", spk_components, component);
+
+			if (!spk_components)
+				return -ENOMEM;
 		}
 
 		codec_info->dais[dai_index].rtd_init_done = true;
-
 	}
 
-	if (strlen (spk_components) > 0) {
+	if (spk_components) {
 		/* Update card components for speaker components */
 		card->components = devm_kasprintf(card->dev, GFP_KERNEL, "%s spk:%s",
 						  card->components, spk_components);
@@ -910,9 +1901,24 @@ int asoc_sdw_trigger(struct snd_pcm_substream *substream, int cmd)
 	}
 
 	switch (cmd) {
+	case SNDRV_PCM_TRIGGER_RESUME:
+		/*
+		 * The peripherals lose their port configuration when the
+		 * controller is power-gated during system suspend, and an
+		 * application that restarts the stream with
+		 * SNDRV_PCM_IOCTL_RESUME - which platforms advertising
+		 * SNDRV_PCM_INFO_RESUME allow - never goes through
+		 * .prepare() again.  Prepare the stream here so that the
+		 * ports are reprogrammed before they are enabled;
+		 * sdw_prepare_stream() reapplies the parameters without
+		 * recomputing them when the stream is disabled.
+		 */
+		ret = sdw_prepare_stream(sdw_stream);
+		if (ret)
+			break;
+		fallthrough;
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
-	case SNDRV_PCM_TRIGGER_RESUME:
 		ret = sdw_enable_stream(sdw_stream);
 		break;
 
@@ -939,7 +1945,7 @@ int asoc_sdw_hw_params(struct snd_pcm_substream *substream,
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_dai_link_ch_map *ch_maps;
 	int ch = params_channels(params);
-	unsigned int ch_mask;
+	unsigned int cpu_ch_mask, codec_ch_mask;
 	int num_codecs;
 	int step;
 	int i;
@@ -949,8 +1955,9 @@ int asoc_sdw_hw_params(struct snd_pcm_substream *substream,
 
 	/* Identical data will be sent to all codecs in playback */
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-		ch_mask = GENMASK(ch - 1, 0);
+		cpu_ch_mask = GENMASK(ch - 1, 0);
 		step = 0;
+		codec_ch_mask = 0;
 	} else {
 		num_codecs = rtd->dai_link->num_codecs;
 
@@ -960,17 +1967,24 @@ int asoc_sdw_hw_params(struct snd_pcm_substream *substream,
 			return -EINVAL;
 		}
 
-		ch_mask = GENMASK(ch / num_codecs - 1, 0);
-		step = hweight_long(ch_mask);
+		cpu_ch_mask = GENMASK(ch / num_codecs - 1, 0);
+		step = hweight_long(cpu_ch_mask);
+		codec_ch_mask = cpu_ch_mask;
 	}
 
 	/*
 	 * The captured data will be combined from each cpu DAI if the dai
 	 * link has more than one codec DAIs. Set codec channel mask and
 	 * ASoC will set the corresponding channel numbers for each cpu dai.
+	 *
+	 * sdw_stream_add_slave() assigns different payload offsets to each
+	 * codec in a capture stream, so that the same channels on each
+	 * codec map to different channels on the CPU.
 	 */
-	for_each_link_ch_maps(rtd->dai_link, i, ch_maps)
-		ch_maps->ch_mask = ch_mask << (i * step);
+	for_each_link_ch_maps(rtd->dai_link, i, ch_maps) {
+		ch_maps->cpu_ch_mask = cpu_ch_mask << (i * step);
+		ch_maps->codec_ch_mask = codec_ch_mask;
+	}
 
 	return 0;
 }
@@ -1036,7 +2050,6 @@ static bool asoc_sdw_is_unique_device(const struct snd_soc_acpi_link_adr *adr_li
 }
 
 static const char *_asoc_sdw_get_codec_name(struct device *dev,
-					    const struct asoc_sdw_codec_info *codec_info,
 					    const struct snd_soc_acpi_link_adr *adr_link,
 					    int adr_index)
 {
@@ -1058,14 +2071,26 @@ static const char *_asoc_sdw_get_codec_name(struct device *dev,
 }
 
 const char *asoc_sdw_get_codec_name(struct device *dev,
-				    const struct asoc_sdw_codec_info *codec_info,
+				    const struct asoc_sdw_dai_info *dai_info,
 				    const struct snd_soc_acpi_link_adr *adr_link,
 				    int adr_index)
 {
-	if (codec_info->codec_name)
-		return devm_kstrdup(dev, codec_info->codec_name, GFP_KERNEL);
+	if (dai_info->codec_name) {
+		struct snd_soc_component *component;
 
-	return _asoc_sdw_get_codec_name(dev, codec_info, adr_link, adr_index);
+		component = snd_soc_lookup_component_by_name(dai_info->codec_name);
+		if (component) {
+			dev_dbg(dev, "%s found component %s for codec_name %s\n",
+				__func__, component->name, dai_info->codec_name);
+			return devm_kstrdup(dev, component->name, GFP_KERNEL);
+		} else {
+			dev_dbg(dev, "%s component %s is not registered yet\n",
+				__func__, dai_info->codec_name);
+			return ERR_PTR(-EPROBE_DEFER);
+		}
+	}
+
+	return _asoc_sdw_get_codec_name(dev, adr_link, adr_index);
 }
 EXPORT_SYMBOL_NS(asoc_sdw_get_codec_name, "SND_SOC_SDW_UTILS");
 
@@ -1192,19 +2217,88 @@ int asoc_sdw_init_simple_dai_link(struct device *dev, struct snd_soc_dai_link *d
 }
 EXPORT_SYMBOL_NS(asoc_sdw_init_simple_dai_link, "SND_SOC_SDW_UTILS");
 
-int asoc_sdw_count_sdw_endpoints(struct snd_soc_card *card, int *num_devs, int *num_ends)
+/**
+ * is_sdca_aux_dev_present - Check if an SDCA aux device is present on the SDW peripheral
+ * @dev: Device pointer
+ * @aux_codec_name: Aux codec name from the codec info (e.g. "snd_soc_sdca.HID.2")
+ * @adr_link: ACPI link address
+ * @adr_index: Index of the ACPI link address
+ *
+ * Return: 1 if the aux is present, 0 if the aux is not present, or negative error code.
+ */
+static int is_sdca_aux_dev_present(struct device *dev,
+				   const char *aux_codec_name,
+				   const struct snd_soc_acpi_link_adr *adr_link,
+				   int adr_index)
+{
+	struct sdw_slave *slave;
+	const char *sdw_codec_name;
+	int i;
+
+	if (!aux_codec_name)
+		return 0;
+
+	sdw_codec_name = _asoc_sdw_get_codec_name(dev, adr_link, adr_index);
+	if (!sdw_codec_name)
+		return -ENOMEM;
+
+	struct device *sdw_dev __free(put_device) =
+		bus_find_device_by_name(&sdw_bus_type, NULL, sdw_codec_name);
+	if (!sdw_dev) {
+		dev_err(dev, "codec %s not found\n", sdw_codec_name);
+		return -EINVAL;
+	}
+
+	slave = dev_to_sdw_dev(sdw_dev);
+
+	if (!slave->sdca_data.interface_revision) {
+		dev_warn(dev, "No SDCA properties, assuming aux '%s' present\n", aux_codec_name);
+		return 1;
+	}
+
+	for (i = 0; i < slave->sdca_data.num_functions; i++) {
+		const char *fname = slave->sdca_data.function[i].name;
+
+		if (fname && strstr(aux_codec_name, fname))
+			return 1;
+	}
+
+	dev_dbg(dev, "SDCA function for aux '%s' NOT FOUND on slave, skipping\n", aux_codec_name);
+
+	return 0;
+}
+
+int asoc_sdw_count_sdw_endpoints(struct snd_soc_card *card,
+				 int *num_devs, int *num_ends, int *num_aux)
 {
 	struct device *dev = card->dev;
 	struct snd_soc_acpi_mach *mach = dev_get_platdata(dev);
 	struct snd_soc_acpi_mach_params *mach_params = &mach->mach_params;
 	const struct snd_soc_acpi_link_adr *adr_link;
-	int i;
+	int i, j, ret;
 
 	for (adr_link = mach_params->links; adr_link->num_adr; adr_link++) {
 		*num_devs += adr_link->num_adr;
 
-		for (i = 0; i < adr_link->num_adr; i++)
-			*num_ends += adr_link->adr_d[i].num_endpoints;
+		for (i = 0; i < adr_link->num_adr; i++) {
+			const struct snd_soc_acpi_adr_device *adr_dev = &adr_link->adr_d[i];
+			struct asoc_sdw_codec_info *codec_info;
+
+			*num_ends += adr_dev->num_endpoints;
+
+			codec_info = asoc_sdw_find_codec_info_part(adr_dev->adr);
+			if (!codec_info)
+				return -EINVAL;
+
+			for (j = 0; j < codec_info->aux_num; j++) {
+				ret = is_sdca_aux_dev_present(dev, codec_info->auxs[j].codec_name,
+							      adr_link, i);
+				if (ret < 0)
+					return ret;
+				if (ret)
+					(*num_aux)++;
+			}
+		}
 	}
 
 	dev_dbg(dev, "Found %d devices with %d endpoints\n", *num_devs, *num_ends);
@@ -1231,11 +2325,12 @@ struct asoc_sdw_dailink *asoc_sdw_find_dailink(struct asoc_sdw_dailink *dailinks
 }
 EXPORT_SYMBOL_NS(asoc_sdw_find_dailink, "SND_SOC_SDW_UTILS");
 
-static int asoc_sdw_get_dai_type(u32 type)
+int asoc_sdw_get_dai_type(u32 type)
 {
 	switch (type) {
 	case SDCA_FUNCTION_TYPE_SMART_AMP:
 	case SDCA_FUNCTION_TYPE_SIMPLE_AMP:
+	case SDCA_FUNCTION_TYPE_COMPANION_AMP:
 		return SOC_SDW_DAI_TYPE_AMP;
 	case SDCA_FUNCTION_TYPE_SMART_MIC:
 	case SDCA_FUNCTION_TYPE_SIMPLE_MIC:
@@ -1249,21 +2344,18 @@ static int asoc_sdw_get_dai_type(u32 type)
 		return -EINVAL;
 	}
 }
+EXPORT_SYMBOL_NS(asoc_sdw_get_dai_type, "SND_SOC_SDW_UTILS");
 
-/*
- * Check if the SDCA endpoint is present by the SDW peripheral
- *
+/**
+ * is_sdca_endpoint_present - Check if an SDCA endpoint is present on the SDW peripheral
  * @dev: Device pointer
  * @codec_info: Codec info pointer
  * @adr_link: ACPI link address
  * @adr_index: Index of the ACPI link address
  * @end_index: Index of the endpoint
  *
- * Return: 1 if the endpoint is present,
- *	   0 if the endpoint is not present,
- *	   negative error code.
+ * Return: 1 if the endpoint is present, 0 if the endpoint is not present, or negative error code.
  */
-
 static int is_sdca_endpoint_present(struct device *dev,
 				    struct asoc_sdw_codec_info *codec_info,
 				    const struct snd_soc_acpi_link_adr *adr_link,
@@ -1272,51 +2364,30 @@ static int is_sdca_endpoint_present(struct device *dev,
 	const struct snd_soc_acpi_adr_device *adr_dev = &adr_link->adr_d[adr_index];
 	const struct snd_soc_acpi_endpoint *adr_end;
 	const struct asoc_sdw_dai_info *dai_info;
-	struct snd_soc_dai_link_component *dlc;
-	struct snd_soc_dai *codec_dai;
 	struct sdw_slave *slave;
-	struct device *sdw_dev;
 	const char *sdw_codec_name;
-	int ret, i;
-
-	dlc = kzalloc(sizeof(*dlc), GFP_KERNEL);
-	if (!dlc)
-		return -ENOMEM;
+	int i;
 
 	adr_end = &adr_dev->endpoints[end_index];
 	dai_info = &codec_info->dais[adr_end->num];
 
-	dlc->dai_name = dai_info->dai_name;
-	codec_dai = snd_soc_find_dai_with_mutex(dlc);
-	if (!codec_dai) {
-		dev_warn(dev, "codec dai %s not registered yet\n", dlc->dai_name);
-		kfree(dlc);
-		return -EPROBE_DEFER;
-	}
-	kfree(dlc);
-
-	sdw_codec_name = _asoc_sdw_get_codec_name(dev, codec_info,
-						  adr_link, adr_index);
+	sdw_codec_name = _asoc_sdw_get_codec_name(dev, adr_link, adr_index);
 	if (!sdw_codec_name)
 		return -ENOMEM;
 
-	sdw_dev = bus_find_device_by_name(&sdw_bus_type, NULL, sdw_codec_name);
+	struct device *sdw_dev __free(put_device) =
+		bus_find_device_by_name(&sdw_bus_type, NULL, sdw_codec_name);
 	if (!sdw_dev) {
 		dev_err(dev, "codec %s not found\n", sdw_codec_name);
 		return -EINVAL;
 	}
 
 	slave = dev_to_sdw_dev(sdw_dev);
-	if (!slave) {
-		ret = -EINVAL;
-		goto put_device;
-	}
 
 	/* Make sure BIOS provides SDCA properties */
 	if (!slave->sdca_data.interface_revision) {
 		dev_warn(&slave->dev, "SDCA properties not found in the BIOS\n");
-		ret = 1;
-		goto put_device;
+		return 1;
 	}
 
 	for (i = 0; i < slave->sdca_data.num_functions; i++) {
@@ -1325,8 +2396,7 @@ static int is_sdca_endpoint_present(struct device *dev,
 		if (dai_type == dai_info->dai_type) {
 			dev_dbg(&slave->dev, "DAI type %d sdca function %s found\n",
 				dai_type, slave->sdca_data.function[i].name);
-			ret = 1;
-			goto put_device;
+			return 1;
 		}
 	}
 
@@ -1334,20 +2404,16 @@ static int is_sdca_endpoint_present(struct device *dev,
 		"SDCA device function for DAI type %d not supported, skip endpoint\n",
 		dai_info->dai_type);
 
-	ret = 0;
-
-put_device:
-	put_device(sdw_dev);
-	return ret;
+	return 0;
 }
 
-int asoc_sdw_parse_sdw_endpoints(struct snd_soc_card *card,
+int asoc_sdw_parse_sdw_endpoints(struct device *dev,
+				 struct asoc_sdw_mc_private *ctx,
+				 struct snd_soc_aux_dev *soc_aux,
 				 struct asoc_sdw_dailink *soc_dais,
 				 struct asoc_sdw_endpoint *soc_ends,
 				 int *num_devs)
 {
-	struct device *dev = card->dev;
-	struct asoc_sdw_mc_private *ctx = snd_soc_card_get_drvdata(card);
 	struct snd_soc_acpi_mach *mach = dev_get_platdata(dev);
 	struct snd_soc_acpi_mach_params *mach_params = &mach->mach_params;
 	const struct snd_soc_acpi_link_adr *adr_link;
@@ -1381,19 +2447,35 @@ int asoc_sdw_parse_sdw_endpoints(struct snd_soc_card *card,
 			if (!codec_info)
 				return -EINVAL;
 
+			for (j = 0; j < codec_info->aux_num; j++) {
+				struct snd_soc_component *component;
+
+				ret = is_sdca_aux_dev_present(dev, codec_info->auxs[j].codec_name,
+							      adr_link, i);
+				if (ret < 0)
+					return ret;
+
+				if (ret == 0)
+					continue;
+
+				component = snd_soc_lookup_component_by_name(codec_info->auxs[j].codec_name);
+				if (component) {
+					dev_dbg(dev, "%s found component %s for aux name %s\n",
+						__func__, component->name,
+						codec_info->auxs[j].codec_name);
+					soc_aux->dlc.name = component->name;
+				} else {
+					dev_dbg(dev, "%s the aux component %s is not registered yet\n",
+						__func__, codec_info->auxs[j].codec_name);
+					return -EPROBE_DEFER;
+				}
+				soc_aux++;
+			}
+
 			ctx->ignore_internal_dmic |= codec_info->ignore_internal_dmic;
 
-			codec_name = asoc_sdw_get_codec_name(dev, codec_info, adr_link, i);
-			if (!codec_name)
-				return -ENOMEM;
-
-			dev_dbg(dev, "Adding prefix %s for %s\n",
-				adr_dev->name_prefix, codec_name);
-
-			soc_end->name_prefix = adr_dev->name_prefix;
-
 			if (codec_info->count_sidecar && codec_info->add_sidecar) {
-				ret = codec_info->count_sidecar(card, &num_dais, num_devs);
+				ret = codec_info->count_sidecar(ctx, &num_dais, num_devs);
 				if (ret)
 					return ret;
 
@@ -1430,8 +2512,10 @@ int asoc_sdw_parse_sdw_endpoints(struct snd_soc_card *card,
 					 * endpoint check is not necessary
 					 */
 					if (dai_info->quirk &&
-					    !(dai_info->quirk_exclude ^ !!(dai_info->quirk & ctx->mc_quirk)))
+					    !(dai_info->quirk_exclude ^ !!(dai_info->quirk & ctx->mc_quirk))) {
+						(*num_devs)--;
 						continue;
+					}
 				} else {
 					/* Check SDCA codec endpoint if there is no matching quirk */
 					ret = is_sdca_endpoint_present(dev, codec_info, adr_link, i, j);
@@ -1439,8 +2523,10 @@ int asoc_sdw_parse_sdw_endpoints(struct snd_soc_card *card,
 						return ret;
 
 					/* The endpoint is not present, skip */
-					if (!ret)
+					if (!ret) {
+						(*num_devs)--;
 						continue;
+					}
 				}
 
 				dev_dbg(dev,
@@ -1478,6 +2564,18 @@ int asoc_sdw_parse_sdw_endpoints(struct snd_soc_card *card,
 
 				num_link_dailinks += !!list_empty(&soc_dai->endpoints);
 				list_add_tail(&soc_end->list, &soc_dai->endpoints);
+
+				codec_name = asoc_sdw_get_codec_name(dev, dai_info,
+								     adr_link, i);
+				if (IS_ERR(codec_name))
+					return PTR_ERR(codec_name);
+				if (!codec_name)
+					return -ENOMEM;
+
+				dev_dbg(dev, "Adding prefix %s for %s\n",
+					adr_dev->name_prefix, codec_name);
+
+				soc_end->name_prefix = adr_dev->name_prefix;
 
 				soc_end->link_mask = adr_link->mask;
 				soc_end->codec_name = codec_name;

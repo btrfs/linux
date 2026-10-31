@@ -128,7 +128,7 @@ static int lirc_open(struct inode *inode, struct file *file)
 {
 	struct rc_dev *dev = container_of(inode->i_cdev, struct rc_dev,
 					  lirc_cdev);
-	struct lirc_fh *fh = kzalloc(sizeof(*fh), GFP_KERNEL);
+	struct lirc_fh *fh = kzalloc_obj(*fh);
 	unsigned long flags;
 	int retval;
 
@@ -267,7 +267,7 @@ static ssize_t lirc_transmit(struct file *file, const char __user *buf,
 			goto out_unlock;
 		}
 
-		raw = kmalloc_array(LIRCBUF_SIZE, sizeof(*raw), GFP_KERNEL);
+		raw = kmalloc_objs(*raw, LIRCBUF_SIZE);
 		if (!raw) {
 			ret = -ENOMEM;
 			goto out_unlock;
@@ -491,6 +491,8 @@ static long lirc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		if (!dev->s_rx_carrier_range)
 			ret = -ENOTTY;
 		else if (val <= 0)
+			ret = -EINVAL;
+		else if (fh->carrier_low && fh->carrier_low > val)
 			ret = -EINVAL;
 		else
 			ret = dev->s_rx_carrier_range(dev, fh->carrier_low,
@@ -774,6 +776,9 @@ void lirc_unregister(struct rc_dev *dev)
 {
 	unsigned long flags;
 	struct lirc_fh *fh;
+
+	if (!device_is_registered(&dev->lirc_dev))
+		return;
 
 	dev_dbg(&dev->dev, "lirc_dev: driver %s unregistered from minor = %d\n",
 		dev->driver_name, MINOR(dev->lirc_dev.devt));

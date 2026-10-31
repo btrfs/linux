@@ -42,7 +42,7 @@ properties:
       - const: mgbe
       - const: mac
       - const: mac-divider
-      - const: ptp-ref
+      - const: ptp_ref
       - const: rx-input-m
       - const: rx-input
       - const: tx
@@ -81,14 +81,18 @@ properties:
   phy-mode:
     contains:
       enum:
-        - usxgmii
         - 10gbase-kr
+        - 10gbase-r
+        - usxgmii
 
   mdio:
     $ref: mdio.yaml#
     unevaluatedProperties: false
     description:
       Optional node for embedded MDIO controller.
+
+allOf:
+  - $ref: snps,dwmac-common.yaml#
 
 required:
   - compatible
@@ -103,7 +107,7 @@ required:
   - phy-handle
   - phy-mode
 
-additionalProperties: false
+unevaluatedProperties: false
 
 examples:
   - |
@@ -133,7 +137,7 @@ examples:
                  <&bpmp TEGRA234_CLK_MGBE0_RX_PCS_M>,
                  <&bpmp TEGRA234_CLK_MGBE0_RX_PCS>,
                  <&bpmp TEGRA234_CLK_MGBE0_TX_PCS>;
-        clock-names = "mgbe", "mac", "mac-divider", "ptp-ref", "rx-input-m",
+        clock-names = "mgbe", "mac", "mac-divider", "ptp_ref", "rx-input-m",
                       "rx-input", "tx", "eee-pcs", "rx-pcs-input", "rx-pcs-m",
                       "rx-pcs", "tx-pcs";
         resets = <&bpmp TEGRA234_RESET_MGBE0_MAC>,

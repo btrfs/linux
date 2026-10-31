@@ -15,7 +15,20 @@ struct bpf_res_spin_lock lockA __hidden SEC(".data.A");
 struct bpf_res_spin_lock lockB __hidden SEC(".data.B");
 
 SEC("?tc")
-__failure __msg("arg#0 doesn't point to an irq flag on stack")
+__failure __msg("invalid read from stack")
+__msg("Verification failed: Memory Safety: Direct read of IRQ flag stack state")
+__msg("verifier-managed IRQ flag state")
+__msg("Pass the saved IRQ flag to the matching restore kfunc")
+int irq_flag_direct_read(struct __sk_buff *ctx)
+{
+	unsigned long flags;
+
+	bpf_local_irq_save(&flags);
+	return flags;
+}
+
+SEC("?tc")
+__failure __msg("R1 type=map_value expected=fp")
 int irq_save_bad_arg(struct __sk_buff *ctx)
 {
 	bpf_local_irq_save(&global_flags);
@@ -23,7 +36,7 @@ int irq_save_bad_arg(struct __sk_buff *ctx)
 }
 
 SEC("?tc")
-__failure __msg("arg#0 doesn't point to an irq flag on stack")
+__failure __msg("R1 type=map_value expected=fp")
 int irq_restore_bad_arg(struct __sk_buff *ctx)
 {
 	bpf_local_irq_restore(&global_flags);
@@ -490,7 +503,7 @@ int irq_non_sleepable_global_subprog(void *ctx)
 }
 
 SEC("?syscall")
-__failure __msg("global functions that may sleep are not allowed in non-sleepable context")
+__failure __msg("sleepable global function")
 int irq_sleepable_helper_global_subprog(void *ctx)
 {
 	unsigned long flags;
@@ -502,7 +515,7 @@ int irq_sleepable_helper_global_subprog(void *ctx)
 }
 
 SEC("?syscall")
-__failure __msg("global functions that may sleep are not allowed in non-sleepable context")
+__failure __msg("sleepable global function")
 int irq_sleepable_global_subprog_indirect(void *ctx)
 {
 	unsigned long flags;

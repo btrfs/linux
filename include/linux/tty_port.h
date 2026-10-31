@@ -6,10 +6,10 @@
 #include <linux/kref.h>
 #include <linux/mutex.h>
 #include <linux/tty_buffer.h>
+#include <linux/tty_driver.h>
 #include <linux/wait.h>
 
 struct attribute_group;
-struct tty_driver;
 struct tty_port;
 struct tty_struct;
 
@@ -138,6 +138,7 @@ struct tty_port {
 					   kernel */
 
 void tty_port_init(struct tty_port *port);
+void tty_port_link_wq(struct tty_port *port, struct workqueue_struct *flip_wq);
 void tty_port_link_device(struct tty_port *port, struct tty_driver *driver,
 		unsigned index);
 struct device *tty_port_register_device(struct tty_port *port,
@@ -163,6 +164,18 @@ static inline struct tty_port *tty_port_get(struct tty_port *port)
 	if (port && kref_get_unless_zero(&port->kref))
 		return port;
 	return NULL;
+}
+
+/*
+ * Never overwrite the workqueue set by tty_port_link_wq().
+ * No effect when %TTY_DRIVER_NO_WORKQUEUE is set, as driver->flip_wq is
+ * %NULL.
+ */
+static inline void tty_port_link_driver_wq(struct tty_port *port,
+					   struct tty_driver *driver)
+{
+	if (!port->buf.flip_wq)
+		tty_port_link_wq(port, driver->flip_wq);
 }
 
 /* If the cts flow control is enabled, return true. */
@@ -232,7 +245,8 @@ bool tty_port_carrier_raised(struct tty_port *port);
 void tty_port_raise_dtr_rts(struct tty_port *port);
 void tty_port_lower_dtr_rts(struct tty_port *port);
 void tty_port_hangup(struct tty_port *port);
-void __tty_port_tty_hangup(struct tty_port *port, bool check_clocal, bool async);
+void tty_port_tty_hangup(struct tty_port *port, bool check_clocal);
+void tty_port_tty_vhangup(struct tty_port *port);
 void tty_port_tty_wakeup(struct tty_port *port);
 int tty_port_block_til_ready(struct tty_port *port, struct tty_struct *tty,
 		struct file *filp);
@@ -249,25 +263,6 @@ int tty_port_open(struct tty_port *port, struct tty_struct *tty,
 static inline int tty_port_users(struct tty_port *port)
 {
 	return port->count + port->blocked_open;
-}
-
-/**
- * tty_port_tty_hangup - helper to hang up a tty asynchronously
- * @port: tty port
- * @check_clocal: hang only ttys with %CLOCAL unset?
- */
-static inline void tty_port_tty_hangup(struct tty_port *port, bool check_clocal)
-{
-	__tty_port_tty_hangup(port, check_clocal, true);
-}
-
-/**
- * tty_port_tty_vhangup - helper to hang up a tty synchronously
- * @port: tty port
- */
-static inline void tty_port_tty_vhangup(struct tty_port *port)
-{
-	__tty_port_tty_hangup(port, false, false);
 }
 
 #ifdef CONFIG_TTY
