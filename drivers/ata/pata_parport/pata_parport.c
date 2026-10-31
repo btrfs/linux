@@ -459,19 +459,11 @@ static void pata_parport_dev_release(struct device *dev)
 	kfree(pi);
 }
 
-static void pata_parport_bus_release(struct device *dev)
-{
-	/* nothing to do here but required to avoid warning on device removal */
-}
-
 static const struct bus_type pata_parport_bus_type = {
 	.name = DRV_NAME,
 };
 
-static struct device pata_parport_bus = {
-	.init_name = DRV_NAME,
-	.release = pata_parport_bus_release,
-};
+static struct device *pata_parport_bus;
 
 static const struct scsi_host_template pata_parport_sht = {
 	PATA_PARPORT_SHT("pata_parport")
@@ -511,14 +503,14 @@ static struct pi_adapter *pi_init_one(struct parport *parport,
 	if (id < 0)
 		return NULL;
 
-	pi = kzalloc(sizeof(struct pi_adapter), GFP_KERNEL);
+	pi = kzalloc_obj(struct pi_adapter);
 	if (!pi) {
 		ida_free(&pata_parport_bus_dev_ids, id);
 		return NULL;
 	}
 
 	/* set up pi->dev before pi_probe_unit() so it can use dev_printk() */
-	pi->dev.parent = &pata_parport_bus;
+	pi->dev.parent = pata_parport_bus;
 	pi->dev.bus = &pata_parport_bus_type;
 	pi->dev.driver = &pr->driver;
 	pi->dev.release = pata_parport_dev_release;
@@ -626,8 +618,9 @@ void pata_parport_unregister_driver(struct pi_protocol *pr)
 			break;
 	}
 	idr_remove(&protocols, id);
-	mutex_unlock(&pi_mutex);
 	driver_unregister(&pr->driver);
+	mutex_unlock(&pi_mutex);
+
 }
 EXPORT_SYMBOL_GPL(pata_parport_unregister_driver);
 
@@ -654,18 +647,18 @@ static ssize_t new_device_store(const struct bus_type *bus, const char *buf, siz
 		port_wanted = -1;
 	}
 
+	mutex_lock(&pi_mutex);
 	drv = driver_find(protocol, &pata_parport_bus_type);
 	if (!drv) {
 		if (strcmp(protocol, "auto")) {
 			pr_err("protocol %s not found\n", protocol);
+			mutex_unlock(&pi_mutex);
 			return -EINVAL;
 		}
 		pr_wanted = NULL;
 	} else {
 		pr_wanted = container_of(drv, struct pi_protocol, driver);
 	}
-
-	mutex_lock(&pi_mutex);
 	/* walk all parports */
 	idr_for_each_entry(&parport_list, parport, port_num) {
 		if (port_num == port_wanted || port_wanted == -1) {
@@ -730,7 +723,7 @@ static void pata_parport_attach(struct parport *port)
 	int pr_num, id;
 
 	mutex_lock(&pi_mutex);
-	id = idr_alloc(&parport_list, port, port->number, port->number,
+	id = idr_alloc(&parport_list, port, port->number, port->number + 1,
 		       GFP_KERNEL);
 	if (id < 0) {
 		mutex_unlock(&pi_mutex);
@@ -780,8 +773,9 @@ static __init int pata_parport_init(void)
 		return error;
 	}
 
-	error = device_register(&pata_parport_bus);
-	if (error) {
+	pata_parport_bus = root_device_register(DRV_NAME);
+	if (IS_ERR(pata_parport_bus)) {
+		error = PTR_ERR(pata_parport_bus);
 		pr_err("failed to register pata_parport bus, error: %d\n", error);
 		goto out_unregister_bus;
 	}
@@ -811,7 +805,7 @@ out_remove_del:
 out_remove_new:
 	bus_remove_file(&pata_parport_bus_type, &bus_attr_new_device);
 out_unregister_dev:
-	device_unregister(&pata_parport_bus);
+	root_device_unregister(pata_parport_bus);
 out_unregister_bus:
 	bus_unregister(&pata_parport_bus_type);
 	return error;
@@ -822,7 +816,7 @@ static __exit void pata_parport_exit(void)
 	parport_unregister_driver(&pata_parport_driver);
 	bus_remove_file(&pata_parport_bus_type, &bus_attr_new_device);
 	bus_remove_file(&pata_parport_bus_type, &bus_attr_delete_device);
-	device_unregister(&pata_parport_bus);
+	root_device_unregister(pata_parport_bus);
 	bus_unregister(&pata_parport_bus_type);
 }
 

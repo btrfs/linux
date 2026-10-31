@@ -14,7 +14,6 @@
 
 #include <linux/clk-provider.h>
 #include <linux/i2c.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/regmap.h>
@@ -64,10 +63,11 @@ struct rs9_driver_data {
 	struct i2c_client	*client;
 	struct regmap		*regmap;
 	const struct rs9_chip_info *chip_info;
-	struct clk_hw		*clk_dif[4];
 	u8			pll_amplitude;
 	u8			pll_ssc;
 	u8			clk_dif_sr;
+	/* must be last */
+	struct clk_hw_onecell_data onecell;
 };
 
 /*
@@ -271,32 +271,28 @@ static void rs9_update_config(struct rs9_driver_data *rs9)
 	}
 }
 
-static struct clk_hw *
-rs9_of_clk_get(struct of_phandle_args *clkspec, void *data)
-{
-	struct rs9_driver_data *rs9 = data;
-	unsigned int idx = clkspec->args[0];
-
-	return rs9->clk_dif[idx];
-}
-
 static int rs9_probe(struct i2c_client *client)
 {
+	const struct rs9_chip_info *chip_info;
 	unsigned char name[5] = "DIF0";
 	struct rs9_driver_data *rs9;
 	unsigned int vid, did;
 	struct clk_hw *hw;
 	int i, ret;
 
-	rs9 = devm_kzalloc(&client->dev, sizeof(*rs9), GFP_KERNEL);
+	chip_info = i2c_get_match_data(client);
+	if (!chip_info)
+		return -EINVAL;
+
+	rs9 = devm_kzalloc(&client->dev, struct_size(rs9, onecell.hws,
+			   chip_info->num_clks), GFP_KERNEL);
 	if (!rs9)
 		return -ENOMEM;
 
 	i2c_set_clientdata(client, rs9);
 	rs9->client = client;
-	rs9->chip_info = i2c_get_match_data(client);
-	if (!rs9->chip_info)
-		return -EINVAL;
+	rs9->chip_info = chip_info;
+	rs9->onecell.num = chip_info->num_clks;
 
 	/* Fetch common configuration from DT (if specified) */
 	ret = rs9_get_common_config(rs9);
@@ -304,7 +300,7 @@ static int rs9_probe(struct i2c_client *client)
 		return ret;
 
 	/* Fetch DIFx output configuration from DT (if specified) */
-	for (i = 0; i < rs9->chip_info->num_clks; i++) {
+	for (i = 0; i < rs9->onecell.num; i++) {
 		ret = rs9_get_output_config(rs9, i);
 		if (ret)
 			return ret;
@@ -330,31 +326,31 @@ static int rs9_probe(struct i2c_client *client)
 		return ret;
 
 	vid &= RS9_REG_VID_MASK;
-	if (vid != RS9_REG_VID_IDT || did != rs9->chip_info->did)
+	if (vid != RS9_REG_VID_IDT || did != chip_info->did)
 		return dev_err_probe(&client->dev, -ENODEV,
 				     "Incorrect VID/DID: %#02x, %#02x. Expected %#02x, %#02x\n",
-				     vid, did, RS9_REG_VID_IDT,
-				     rs9->chip_info->did);
+				     vid, did, RS9_REG_VID_IDT, chip_info->did);
 
 	/* Register clock */
-	for (i = 0; i < rs9->chip_info->num_clks; i++) {
+	for (i = 0; i < rs9->onecell.num; i++) {
 		snprintf(name, 5, "DIF%d", i);
 		hw = devm_clk_hw_register_fixed_factor_index(&client->dev, name,
 						    0, 0, 4, 1);
 		if (IS_ERR(hw))
 			return PTR_ERR(hw);
 
-		rs9->clk_dif[i] = hw;
+		rs9->onecell.hws[i] = hw;
 	}
 
-	ret = devm_of_clk_add_hw_provider(&client->dev, rs9_of_clk_get, rs9);
+	ret = devm_of_clk_add_hw_provider(&client->dev, of_clk_hw_onecell_get,
+					  &rs9->onecell);
 	if (!ret)
 		rs9_update_config(rs9);
 
 	return ret;
 }
 
-static int __maybe_unused rs9_suspend(struct device *dev)
+static int rs9_suspend(struct device *dev)
 {
 	struct rs9_driver_data *rs9 = dev_get_drvdata(dev);
 
@@ -364,15 +360,17 @@ static int __maybe_unused rs9_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused rs9_resume(struct device *dev)
+static int rs9_resume(struct device *dev)
 {
 	struct rs9_driver_data *rs9 = dev_get_drvdata(dev);
 	int ret;
 
 	regcache_cache_only(rs9->regmap, false);
 	ret = regcache_sync(rs9->regmap);
-	if (ret)
+	if (ret) {
+		regcache_cache_only(rs9->regmap, true);
 		dev_err(dev, "Failed to restore register map: %d\n", ret);
+	}
 	return ret;
 }
 
@@ -395,9 +393,9 @@ static const struct rs9_chip_info renesas_9fgv0841_info = {
 };
 
 static const struct i2c_device_id rs9_id[] = {
-	{ "9fgv0241", .driver_data = (kernel_ulong_t)&renesas_9fgv0241_info },
-	{ "9fgv0441", .driver_data = (kernel_ulong_t)&renesas_9fgv0441_info },
-	{ "9fgv0841", .driver_data = (kernel_ulong_t)&renesas_9fgv0841_info },
+	{ .name = "9fgv0241", .driver_data = (kernel_ulong_t)&renesas_9fgv0241_info },
+	{ .name = "9fgv0441", .driver_data = (kernel_ulong_t)&renesas_9fgv0441_info },
+	{ .name = "9fgv0841", .driver_data = (kernel_ulong_t)&renesas_9fgv0841_info },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rs9_id);
@@ -410,12 +408,12 @@ static const struct of_device_id clk_rs9_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, clk_rs9_of_match);
 
-static SIMPLE_DEV_PM_OPS(rs9_pm_ops, rs9_suspend, rs9_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(rs9_pm_ops, rs9_suspend, rs9_resume);
 
 static struct i2c_driver rs9_driver = {
 	.driver = {
 		.name = "clk-renesas-pcie-9series",
-		.pm	= &rs9_pm_ops,
+		.pm	= pm_sleep_ptr(&rs9_pm_ops),
 		.of_match_table = clk_rs9_of_match,
 	},
 	.probe		= rs9_probe,

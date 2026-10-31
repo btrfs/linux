@@ -677,9 +677,13 @@ int s6e63m0_probe(struct device *dev, void *trsp,
 	u32 max_brightness;
 	int ret;
 
-	ctx = devm_kzalloc(dev, sizeof(struct s6e63m0), GFP_KERNEL);
-	if (!ctx)
-		return -ENOMEM;
+	ctx = devm_drm_panel_alloc(dev, __typeof(*ctx), panel,
+				  &s6e63m0_drm_funcs,
+				  dsi_mode ? DRM_MODE_CONNECTOR_DSI :
+				  DRM_MODE_CONNECTOR_DPI);
+
+	if (IS_ERR(ctx))
+		return PTR_ERR(ctx);
 
 	ctx->transport_data = trsp;
 	ctx->dsi_mode = dsi_mode;
@@ -712,27 +716,13 @@ int s6e63m0_probe(struct device *dev, void *trsp,
 		return PTR_ERR(ctx->reset_gpio);
 	}
 
-	drm_panel_init(&ctx->panel, dev, &s6e63m0_drm_funcs,
-		       dsi_mode ? DRM_MODE_CONNECTOR_DSI :
-		       DRM_MODE_CONNECTOR_DPI);
-
 	ret = s6e63m0_backlight_register(ctx, max_brightness);
 	if (ret < 0)
 		return ret;
 
-	drm_panel_add(&ctx->panel);
-
-	return 0;
+	return devm_drm_panel_add(dev, &ctx->panel);
 }
 EXPORT_SYMBOL_GPL(s6e63m0_probe);
-
-void s6e63m0_remove(struct device *dev)
-{
-	struct s6e63m0 *ctx = dev_get_drvdata(dev);
-
-	drm_panel_remove(&ctx->panel);
-}
-EXPORT_SYMBOL_GPL(s6e63m0_remove);
 
 MODULE_AUTHOR("Paweł Chmiel <pawel.mikolaj.chmiel@gmail.com>");
 MODULE_DESCRIPTION("s6e63m0 LCD Driver");

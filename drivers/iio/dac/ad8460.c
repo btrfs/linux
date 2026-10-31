@@ -14,7 +14,6 @@
 #include <linux/gpio/consumer.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
 #include <linux/spi/spi.h>
@@ -305,7 +304,7 @@ static ssize_t ad8460_write_powerdown(struct iio_dev *indio_dev, uintptr_t priva
 	 * If powerdown is set, HVDAC is enabled and the HV driver is
 	 * enabled via HV_RESET in case it is in shutdown mode,
 	 * If powerdown is cleared, HVDAC is set to shutdown state
-	 * as well as the HV driver. Quiescent current decreases and ouput is
+	 * as well as the HV driver. Quiescent current decreases and output is
 	 * floating (high impedance).
 	 */
 
@@ -955,3 +954,4 @@ MODULE_AUTHOR("Mariel Tinaco <mariel.tinaco@analog.com");
 MODULE_DESCRIPTION("AD8460 DAC driver");
 MODULE_LICENSE("GPL");
 MODULE_IMPORT_NS("IIO_DMAENGINE_BUFFER");
+MODULE_IMPORT_NS("IIO_CONSUMER");

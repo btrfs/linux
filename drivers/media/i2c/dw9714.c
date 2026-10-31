@@ -149,7 +149,7 @@ static int dw9714_power_up(struct dw9714_device *dw9714_dev)
 
 	gpiod_set_value_cansleep(dw9714_dev->powerdown_gpio, 0);
 
-	usleep_range(1000, 2000);
+	usleep_range(12000, 14000);
 
 	return 0;
 }
@@ -307,7 +307,7 @@ static int __maybe_unused dw9714_vcm_resume(struct device *dev)
 }
 
 static const struct i2c_device_id dw9714_id_table[] = {
-	{ DW9714_NAME },
+	{ .name = DW9714_NAME },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, dw9714_id_table);

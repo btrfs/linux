@@ -13,10 +13,18 @@
 #include <linux/ptrace.h>
 #include <linux/audit_arch.h>
 #include <uapi/linux/audit.h>
-#include <uapi/linux/netfilter/nf_tables.h>
 #include <uapi/linux/fanotify.h>
 
-#define AUDIT_INO_UNSET ((unsigned long)-1)
+#define AUDIT_STATUS_ALL (AUDIT_STATUS_ENABLED | \
+			  AUDIT_STATUS_FAILURE | \
+			  AUDIT_STATUS_PID | \
+			  AUDIT_STATUS_RATE_LIMIT | \
+			  AUDIT_STATUS_BACKLOG_LIMIT | \
+			  AUDIT_STATUS_BACKLOG_WAIT_TIME | \
+			  AUDIT_STATUS_LOST | \
+			  AUDIT_STATUS_BACKLOG_WAIT_TIME_ACTUAL)
+
+#define AUDIT_INO_UNSET ((u64)-1)
 #define AUDIT_DEV_UNSET ((dev_t)-1)
 
 struct audit_sig_info {
@@ -125,15 +133,9 @@ enum audit_nfcfgop {
 	AUDIT_NFT_OP_INVALID,
 };
 
-extern int __init audit_register_class(int class, unsigned *list);
-extern int audit_classify_syscall(int abi, unsigned syscall);
+extern int __init audit_register_class(int class, unsigned int *list);
+extern int audit_classify_syscall(int abi, unsigned int syscall);
 extern int audit_classify_arch(int arch);
-/* only for compat system calls */
-extern unsigned compat_write_class[];
-extern unsigned compat_read_class[];
-extern unsigned compat_dir_class[];
-extern unsigned compat_chattr_class[];
-extern unsigned compat_signal_class[];
 
 /* audit_names->type values */
 #define	AUDIT_TYPE_UNKNOWN	0	/* we don't know yet */
@@ -195,6 +197,8 @@ extern int audit_log_subj_ctx(struct audit_buffer *ab, struct lsm_prop *prop);
 extern int audit_log_obj_ctx(struct audit_buffer *ab, struct lsm_prop *prop);
 extern int audit_log_task_context(struct audit_buffer *ab);
 extern void audit_log_task_info(struct audit_buffer *ab);
+extern int audit_log_nf_skb(struct audit_buffer *ab,
+			    const struct sk_buff *skb, u8 nfproto);
 
 extern int		    audit_update_lsm_rules(void);
 
@@ -272,6 +276,12 @@ static inline int audit_log_task_context(struct audit_buffer *ab)
 static inline void audit_log_task_info(struct audit_buffer *ab)
 { }
 
+static inline int audit_log_nf_skb(struct audit_buffer *ab,
+				   const struct sk_buff *skb, u8 nfproto)
+{
+	return 0;
+}
+
 static inline kuid_t audit_get_loginuid(struct task_struct *tsk)
 {
 	return INVALID_UID;
@@ -316,7 +326,6 @@ extern void __audit_uring_exit(int success, long code);
 extern void __audit_syscall_entry(int major, unsigned long a0, unsigned long a1,
 				  unsigned long a2, unsigned long a3);
 extern void __audit_syscall_exit(int ret_success, long ret_value);
-extern struct filename *__audit_reusename(const __user char *uptr);
 extern void __audit_getname(struct filename *name);
 extern void __audit_inode(struct filename *name, const struct dentry *dentry,
 				unsigned int flags);
@@ -380,12 +389,6 @@ static inline void audit_syscall_exit(void *pt_regs)
 		__audit_syscall_exit(success, return_code);
 	}
 }
-static inline struct filename *audit_reusename(const __user char *name)
-{
-	if (unlikely(!audit_dummy_context()))
-		return __audit_reusename(name);
-	return NULL;
-}
 static inline void audit_getname(struct filename *name)
 {
 	if (unlikely(!audit_dummy_context()))
@@ -446,6 +449,7 @@ extern void __audit_tk_injoffset(struct timespec64 offset);
 extern void __audit_ntp_log(const struct audit_ntp_data *ad);
 extern void __audit_log_nfcfg(const char *name, u8 af, unsigned int nentries,
 			      enum audit_nfcfgop op, gfp_t gfp);
+extern void __audit_log_fsopen(const char *fs_name);
 
 static inline void audit_ipc_obj(struct kern_ipc_perm *ipcp)
 {
@@ -544,7 +548,7 @@ static inline void audit_openat2_how(struct open_how *how)
 
 static inline void audit_log_kern_module(const char *name)
 {
-	if (!audit_dummy_context())
+	if (unlikely(!audit_dummy_context()))
 		__audit_log_kern_module(name);
 }
 
@@ -560,7 +564,7 @@ static inline void audit_tk_injoffset(struct timespec64 offset)
 	if (offset.tv_sec == 0 && offset.tv_nsec == 0)
 		return;
 
-	if (!audit_dummy_context())
+	if (unlikely(!audit_dummy_context()))
 		__audit_tk_injoffset(offset);
 }
 
@@ -583,7 +587,7 @@ static inline void audit_ntp_set_new(struct audit_ntp_data *ad,
 
 static inline void audit_ntp_log(const struct audit_ntp_data *ad)
 {
-	if (!audit_dummy_context())
+	if (unlikely(!audit_dummy_context()))
 		__audit_ntp_log(ad);
 }
 
@@ -593,6 +597,12 @@ static inline void audit_log_nfcfg(const char *name, u8 af,
 {
 	if (audit_enabled)
 		__audit_log_nfcfg(name, af, nentries, op, gfp);
+}
+
+static inline void audit_log_fsopen(const char *fs_name)
+{
+	if (!audit_dummy_context())
+		__audit_log_fsopen(fs_name);
 }
 
 extern int audit_n_rules;
@@ -621,10 +631,6 @@ static inline bool audit_dummy_context(void)
 static inline void audit_set_context(struct task_struct *task, struct audit_context *ctx)
 { }
 static inline struct audit_context *audit_context(void)
-{
-	return NULL;
-}
-static inline struct filename *audit_reusename(const __user char *name)
 {
 	return NULL;
 }
@@ -729,6 +735,9 @@ static inline void audit_ptrace(struct task_struct *t)
 static inline void audit_log_nfcfg(const char *name, u8 af,
 				   unsigned int nentries,
 				   enum audit_nfcfgop op, gfp_t gfp)
+{ }
+
+static inline void audit_log_fsopen(const char *fs_name)
 { }
 
 #define audit_n_rules 0

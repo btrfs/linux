@@ -9,7 +9,6 @@
 
 #include <linux/clk.h>
 #include <linux/delay.h>
-#include <linux/device.h>
 #include <linux/err.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
@@ -92,7 +91,6 @@ struct dra7xx_pcie {
 	struct phy		**phy;
 	struct irq_domain	*irq_domain;
 	struct clk              *clk;
-	enum dw_pcie_device_mode mode;
 };
 
 struct dra7xx_pcie_of_data {
@@ -215,7 +213,7 @@ static int dra7xx_pcie_handle_msi(struct dw_pcie_rp *pp, int index)
 
 	pos = find_first_bit(&val, MAX_MSI_IRQS_PER_CTRL);
 	while (pos != MAX_MSI_IRQS_PER_CTRL) {
-		generic_handle_domain_irq(pp->irq_domain,
+		generic_handle_domain_irq(pp->msi_irq_domain,
 					  (index * MAX_MSI_IRQS_PER_CTRL) + pos);
 		pos++;
 		pos = find_next_bit(&val, MAX_MSI_IRQS_PER_CTRL, pos);
@@ -328,7 +326,7 @@ static irqreturn_t dra7xx_pcie_irq_handler(int irq, void *arg)
 		dev_dbg(dev, "Link Request Reset\n");
 
 	if (reg & LINK_UP_EVT) {
-		if (dra7xx->mode == DW_PCIE_EP_TYPE)
+		if (dra7xx->pci->mode == DW_PCIE_EP_TYPE)
 			dw_pcie_ep_linkup(ep);
 		dev_dbg(dev, "Link-up state change\n");
 	}
@@ -374,16 +372,14 @@ static const struct dw_pcie_host_ops dra7xx_pcie_host_ops = {
 	.init = dra7xx_pcie_host_init,
 };
 
-static void dra7xx_pcie_ep_init(struct dw_pcie_ep *ep)
+static int dra7xx_pcie_ep_init(struct dw_pcie_ep *ep)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
 	struct dra7xx_pcie *dra7xx = to_dra7xx_pcie(pci);
-	enum pci_barno bar;
-
-	for (bar = 0; bar < PCI_STD_NUM_BARS; bar++)
-		dw_pcie_ep_reset_bar(pci, bar);
 
 	dra7xx_pcie_enable_wrapper_interrupts(dra7xx);
+
+	return 0;
 }
 
 static void dra7xx_pcie_raise_intx_irq(struct dra7xx_pcie *dra7xx)
@@ -424,6 +420,7 @@ static int dra7xx_pcie_raise_irq(struct dw_pcie_ep *ep, u8 func_no,
 }
 
 static const struct pci_epc_features dra7xx_pcie_epc_features = {
+	DWC_EPC_COMMON_FEATURES,
 	.linkup_notifier = true,
 	.msi_capable = true,
 };
@@ -682,7 +679,6 @@ static int dra7xx_pcie_probe(struct platform_device *pdev)
 	int i;
 	int phy_count;
 	struct phy **phy;
-	struct device_link **link;
 	void __iomem *base;
 	struct dw_pcie *pci;
 	struct dra7xx_pcie *dra7xx;
@@ -730,30 +726,16 @@ static int dra7xx_pcie_probe(struct platform_device *pdev)
 	if (!phy)
 		return -ENOMEM;
 
-	link = devm_kcalloc(dev, phy_count, sizeof(*link), GFP_KERNEL);
-	if (!link)
-		return -ENOMEM;
-
-	dra7xx->clk = devm_clk_get_optional(dev, NULL);
+	dra7xx->clk = devm_clk_get_optional_enabled(dev, NULL);
 	if (IS_ERR(dra7xx->clk))
 		return dev_err_probe(dev, PTR_ERR(dra7xx->clk),
 				     "clock request failed");
-
-	ret = clk_prepare_enable(dra7xx->clk);
-	if (ret)
-		return ret;
 
 	for (i = 0; i < phy_count; i++) {
 		snprintf(name, sizeof(name), "pcie-phy%d", i);
 		phy[i] = devm_phy_get(dev, name);
 		if (IS_ERR(phy[i]))
 			return PTR_ERR(phy[i]);
-
-		link[i] = device_link_add(dev, &phy[i]->dev, DL_FLAG_STATELESS);
-		if (!link[i]) {
-			ret = -EINVAL;
-			goto err_link;
-		}
 	}
 
 	dra7xx->base = base;
@@ -831,7 +813,7 @@ static int dra7xx_pcie_probe(struct platform_device *pdev)
 	default:
 		dev_err(dev, "INVALID device type %d\n", mode);
 	}
-	dra7xx->mode = mode;
+	dra7xx->pci->mode = mode;
 
 	ret = devm_request_threaded_irq(dev, irq, NULL, dra7xx_pcie_irq_handler,
 					IRQF_SHARED | IRQF_ONESHOT,
@@ -844,7 +826,7 @@ static int dra7xx_pcie_probe(struct platform_device *pdev)
 	return 0;
 
 err_deinit:
-	if (dra7xx->mode == DW_PCIE_RC_TYPE)
+	if (dra7xx->pci->mode == DW_PCIE_RC_TYPE)
 		dw_pcie_host_deinit(&dra7xx->pci->pp);
 	else
 		dw_pcie_ep_deinit(&dra7xx->pci->ep);
@@ -855,10 +837,6 @@ err_get_sync:
 	pm_runtime_disable(dev);
 	dra7xx_pcie_disable_phy(dra7xx);
 
-err_link:
-	while (--i >= 0)
-		device_link_del(link[i]);
-
 	return ret;
 }
 
@@ -868,7 +846,7 @@ static int dra7xx_pcie_suspend(struct device *dev)
 	struct dw_pcie *pci = dra7xx->pci;
 	u32 val;
 
-	if (dra7xx->mode != DW_PCIE_RC_TYPE)
+	if (pci->mode != DW_PCIE_RC_TYPE)
 		return 0;
 
 	/* clear MSE */
@@ -885,7 +863,7 @@ static int dra7xx_pcie_resume(struct device *dev)
 	struct dw_pcie *pci = dra7xx->pci;
 	u32 val;
 
-	if (dra7xx->mode != DW_PCIE_RC_TYPE)
+	if (pci->mode != DW_PCIE_RC_TYPE)
 		return 0;
 
 	/* set MSE */

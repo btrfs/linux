@@ -12,6 +12,7 @@
 
 #define WDTRSTCR_RESET		0xA55A0002
 #define WDTRSTCR		0x0054
+#define GEN4_WDTRSTCR_RESET	0xA55A8002
 #define GEN4_WDTRSTCR		0x0010
 
 #define CR7BAR			0x0070
@@ -30,7 +31,7 @@ static int rcar_rst_enable_wdt_reset(void __iomem *base)
 
 static int rcar_rst_v3u_enable_wdt_reset(void __iomem *base)
 {
-	iowrite32(WDTRSTCR_RESET, base + GEN4_WDTRSTCR);
+	iowrite32(GEN4_WDTRSTCR_RESET, base + GEN4_WDTRSTCR);
 	return 0;
 }
 
@@ -92,6 +93,7 @@ static const struct of_device_id rcar_rst_matches[] __initconst = {
 	{ .compatible = "renesas,r8a77470-rst", .data = &rcar_rst_gen2 },
 	/* RZ/G2 is handled like R-Car Gen3 */
 	{ .compatible = "renesas,r8a774a1-rst", .data = &rcar_rst_gen3 },
+	{ .compatible = "renesas,r8a774a3-rst", .data = &rcar_rst_gen3 },
 	{ .compatible = "renesas,r8a774b1-rst", .data = &rcar_rst_gen3 },
 	{ .compatible = "renesas,r8a774c0-rst", .data = &rcar_rst_gen3 },
 	{ .compatible = "renesas,r8a774e1-rst", .data = &rcar_rst_gen3 },

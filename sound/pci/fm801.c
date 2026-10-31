@@ -240,9 +240,18 @@ static inline u16 fm801_ioread16(struct fm801 *chip, unsigned short offset)
 }
 
 static const struct pci_device_id snd_fm801_ids[] = {
-	{ 0x1319, 0x0801, PCI_ANY_ID, PCI_ANY_ID, PCI_CLASS_MULTIMEDIA_AUDIO << 8, 0xffff00, 0, },   /* FM801 */
-	{ 0x5213, 0x0510, PCI_ANY_ID, PCI_ANY_ID, PCI_CLASS_MULTIMEDIA_AUDIO << 8, 0xffff00, 0, },   /* Gallant Odyssey Sound 4 */
-	{ 0, }
+	{
+		/* FM801 */
+		PCI_DEVICE(0x1319, 0x0801),
+		.class = PCI_CLASS_MULTIMEDIA_AUDIO << 8,
+		.class_mask = 0xffff00,
+	}, {
+		/* Gallant Odyssey Sound 4 */
+		PCI_DEVICE(0x5213, 0x0510),
+		.class = PCI_CLASS_MULTIMEDIA_AUDIO << 8,
+		.class_mask = 0xffff00,
+	},
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, snd_fm801_ids);
@@ -1255,11 +1264,11 @@ static int snd_fm801_create(struct snd_card *card,
 	return 0;
 }
 
-static int __snd_card_fm801_probe(struct pci_dev *pci,
-				  const struct pci_device_id *pci_id)
+static int snd_card_fm801_probe(struct pci_dev *pci,
+				const struct pci_device_id *pci_id)
 {
 	static int dev;
-	struct snd_card *card;
+	struct snd_card *card __free(snd_card_free) = NULL;
 	struct fm801 *chip;
 	struct snd_opl3 *opl3;
 	int err;
@@ -1316,14 +1325,9 @@ static int __snd_card_fm801_probe(struct pci_dev *pci,
 	if (err < 0)
 		return err;
 	pci_set_drvdata(pci, card);
+	card = NULL; /* probe succeeded, don't release as error */
 	dev++;
 	return 0;
-}
-
-static int snd_card_fm801_probe(struct pci_dev *pci,
-				const struct pci_device_id *pci_id)
-{
-	return snd_card_free_on_error(&pci->dev, __snd_card_fm801_probe(pci, pci_id));
 }
 
 static const unsigned char saved_regs[] = {

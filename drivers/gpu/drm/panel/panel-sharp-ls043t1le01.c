@@ -199,22 +199,13 @@ static int sharp_nt_panel_add(struct sharp_nt_panel *sharp_nt)
 		gpiod_set_value(sharp_nt->reset_gpio, 0);
 	}
 
-	drm_panel_init(&sharp_nt->base, &sharp_nt->dsi->dev,
-		       &sharp_nt_panel_funcs, DRM_MODE_CONNECTOR_DSI);
+	sharp_nt->base.prepare_prev_first = true;
 
 	ret = drm_panel_of_backlight(&sharp_nt->base);
 	if (ret)
 		return ret;
 
-	drm_panel_add(&sharp_nt->base);
-
-	return 0;
-}
-
-static void sharp_nt_panel_del(struct sharp_nt_panel *sharp_nt)
-{
-	if (sharp_nt->base.dev)
-		drm_panel_remove(&sharp_nt->base);
+	return devm_drm_panel_add(dev, &sharp_nt->base);
 }
 
 static int sharp_nt_panel_probe(struct mipi_dsi_device *dsi)
@@ -230,9 +221,12 @@ static int sharp_nt_panel_probe(struct mipi_dsi_device *dsi)
 			MIPI_DSI_CLOCK_NON_CONTINUOUS |
 			MIPI_DSI_MODE_NO_EOT_PACKET;
 
-	sharp_nt = devm_kzalloc(&dsi->dev, sizeof(*sharp_nt), GFP_KERNEL);
-	if (!sharp_nt)
-		return -ENOMEM;
+	sharp_nt = devm_drm_panel_alloc(&dsi->dev, __typeof(*sharp_nt), base,
+					&sharp_nt_panel_funcs,
+					DRM_MODE_CONNECTOR_DSI);
+
+	if (IS_ERR(sharp_nt))
+		return PTR_ERR(sharp_nt);
 
 	mipi_dsi_set_drvdata(dsi, sharp_nt);
 
@@ -242,25 +236,7 @@ static int sharp_nt_panel_probe(struct mipi_dsi_device *dsi)
 	if (ret < 0)
 		return ret;
 
-	ret = mipi_dsi_attach(dsi);
-	if (ret < 0) {
-		sharp_nt_panel_del(sharp_nt);
-		return ret;
-	}
-
-	return 0;
-}
-
-static void sharp_nt_panel_remove(struct mipi_dsi_device *dsi)
-{
-	struct sharp_nt_panel *sharp_nt = mipi_dsi_get_drvdata(dsi);
-	int ret;
-
-	ret = mipi_dsi_detach(dsi);
-	if (ret < 0)
-		dev_err(&dsi->dev, "failed to detach from DSI host: %d\n", ret);
-
-	sharp_nt_panel_del(sharp_nt);
+	return devm_mipi_dsi_attach(&dsi->dev, dsi);
 }
 
 static const struct of_device_id sharp_nt_of_match[] = {
@@ -275,7 +251,6 @@ static struct mipi_dsi_driver sharp_nt_panel_driver = {
 		.of_match_table = sharp_nt_of_match,
 	},
 	.probe = sharp_nt_panel_probe,
-	.remove = sharp_nt_panel_remove,
 };
 module_mipi_dsi_driver(sharp_nt_panel_driver);
 

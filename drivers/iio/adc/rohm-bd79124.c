@@ -19,7 +19,6 @@
 #include <linux/interrupt.h>
 #include <linux/irqreturn.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/regmap.h>
 #include <linux/types.h>
 
@@ -75,7 +74,7 @@
 
 /*
  * The high limit, low limit and last measurement result are each stored in
- * 2 consequtive registers. 4 bits are in the high bits of the first register
+ * 2 consecutive registers. 4 bits are in the high bits of the first register
  * and 8 bits in the next register.
  *
  * These macros return the address of the first reg for the given channel.
@@ -126,13 +125,8 @@ struct bd79124_data {
 };
 
 static const struct regmap_range bd79124_ro_ranges[] = {
-	{
-		.range_min = BD79124_REG_EVENT_FLAG,
-		.range_max = BD79124_REG_EVENT_FLAG,
-	}, {
-		.range_min = BD79124_REG_RECENT_CH0_LSB,
-		.range_max = BD79124_REG_RECENT_CH7_MSB,
-	},
+	regmap_reg_range(BD79124_REG_EVENT_FLAG, BD79124_REG_EVENT_FLAG),
+	regmap_reg_range(BD79124_REG_RECENT_CH0_LSB, BD79124_REG_RECENT_CH7_MSB),
 };
 
 static const struct regmap_access_table bd79124_ro_regs = {
@@ -141,22 +135,11 @@ static const struct regmap_access_table bd79124_ro_regs = {
 };
 
 static const struct regmap_range bd79124_volatile_ranges[] = {
-	{
-		.range_min = BD79124_REG_RECENT_CH0_LSB,
-		.range_max = BD79124_REG_RECENT_CH7_MSB,
-	}, {
-		.range_min = BD79124_REG_EVENT_FLAG,
-		.range_max = BD79124_REG_EVENT_FLAG,
-	}, {
-		.range_min = BD79124_REG_EVENT_FLAG_HI,
-		.range_max = BD79124_REG_EVENT_FLAG_HI,
-	}, {
-		.range_min = BD79124_REG_EVENT_FLAG_LO,
-		.range_max = BD79124_REG_EVENT_FLAG_LO,
-	}, {
-		.range_min = BD79124_REG_SYSTEM_STATUS,
-		.range_max = BD79124_REG_SYSTEM_STATUS,
-	},
+	regmap_reg_range(BD79124_REG_RECENT_CH0_LSB, BD79124_REG_RECENT_CH7_MSB),
+	regmap_reg_range(BD79124_REG_EVENT_FLAG, BD79124_REG_EVENT_FLAG),
+	regmap_reg_range(BD79124_REG_EVENT_FLAG_HI, BD79124_REG_EVENT_FLAG_HI),
+	regmap_reg_range(BD79124_REG_EVENT_FLAG_LO, BD79124_REG_EVENT_FLAG_LO),
+	regmap_reg_range(BD79124_REG_SYSTEM_STATUS, BD79124_REG_SYSTEM_STATUS),
 };
 
 static const struct regmap_access_table bd79124_volatile_regs = {
@@ -165,13 +148,8 @@ static const struct regmap_access_table bd79124_volatile_regs = {
 };
 
 static const struct regmap_range bd79124_precious_ranges[] = {
-	{
-		.range_min = BD79124_REG_EVENT_FLAG_HI,
-		.range_max = BD79124_REG_EVENT_FLAG_HI,
-	}, {
-		.range_min = BD79124_REG_EVENT_FLAG_LO,
-		.range_max = BD79124_REG_EVENT_FLAG_LO,
-	},
+	regmap_reg_range(BD79124_REG_EVENT_FLAG_HI, BD79124_REG_EVENT_FLAG_HI),
+	regmap_reg_range(BD79124_REG_EVENT_FLAG_LO, BD79124_REG_EVENT_FLAG_LO),
 };
 
 static const struct regmap_access_table bd79124_precious_regs = {
@@ -222,7 +200,7 @@ static int bd79124gpo_set_multiple(struct gpio_chip *gc, unsigned long *mask,
 	if (ret)
 		return ret;
 
-	if (all_gpos ^ *mask) {
+	if (*mask & ~all_gpos) {
 		dev_dbg(data->dev, "Invalid mux config. Can't set value.\n");
 
 		return -EINVAL;
@@ -403,6 +381,9 @@ static int bd79124_start_measurement(struct bd79124_data *data, int chan)
 
 	/* See if already started */
 	ret = regmap_read(data->map, BD79124_REG_AUTO_CHANNELS, &val);
+	if (ret)
+		return ret;
+
 	if (val & BIT(chan))
 		return 0;
 
@@ -442,11 +423,16 @@ static int bd79124_stop_measurement(struct bd79124_data *data, int chan)
 
 	/* See if already stopped */
 	ret = regmap_read(data->map, BD79124_REG_AUTO_CHANNELS, &enabled_chans);
+	if (ret)
+		return ret;
+
 	if (!(enabled_chans & BIT(chan)))
 		return 0;
 
 	ret = regmap_clear_bits(data->map, BD79124_REG_SEQ_CFG,
 				BD79124_MSK_SEQ_START);
+	if (ret)
+		return ret;
 
 	/* Clear the channel from the measured channels */
 	enabled_chans &= ~BIT(chan);
@@ -546,7 +532,7 @@ static int bd79124_enable_event(struct bd79124_data *data,
 		return ret;
 
 	if (dir == IIO_EV_DIR_RISING) {
-		limit = &data->alarm_f_limit[channel];
+		limit = &data->alarm_r_limit[channel];
 		reg = BD79124_GET_HIGH_LIMIT_REG(channel);
 	} else {
 		limit = &data->alarm_f_limit[channel];
@@ -941,13 +927,13 @@ static int bd79124_chan_init(struct bd79124_data *data, int channel)
 {
 	int ret;
 
-	ret = regmap_write(data->map, BD79124_GET_HIGH_LIMIT_REG(channel),
-			   BD79124_HIGH_LIMIT_MAX);
+	ret = bd79124_write_int_to_reg(data, BD79124_GET_HIGH_LIMIT_REG(channel),
+				       BD79124_HIGH_LIMIT_MAX);
 	if (ret)
 		return ret;
 
-	return regmap_write(data->map, BD79124_GET_LOW_LIMIT_REG(channel),
-			    BD79124_LOW_LIMIT_MIN);
+	return bd79124_write_int_to_reg(data, BD79124_GET_LOW_LIMIT_REG(channel),
+					BD79124_LOW_LIMIT_MIN);
 }
 
 static int bd79124_get_gpio_pins(const struct iio_chan_spec *cs, int num_channels)
@@ -983,7 +969,7 @@ static int bd79124_hw_init(struct bd79124_data *data)
 	if (ret)
 		return ret;
 
-	/* Enable writing the measured values to the regsters */
+	/* Enable writing the measured values to the registers */
 	ret = regmap_set_bits(data->map, BD79124_REG_GEN_CFG,
 			      BD79124_MSK_STATS_EN);
 	if (ret)
@@ -1125,7 +1111,7 @@ static const struct of_device_id bd79124_of_match[] = {
 MODULE_DEVICE_TABLE(of, bd79124_of_match);
 
 static const struct i2c_device_id bd79124_id[] = {
-	{ "bd79124" },
+	{ .name = "bd79124" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, bd79124_id);

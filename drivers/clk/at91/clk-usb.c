@@ -224,12 +224,12 @@ _at91sam9x5_clk_register_usb(struct regmap *regmap, const char *name,
 			     const char **parent_names, u8 num_parents,
 			     u32 usbs_mask)
 {
+	struct clk_init_data init = {};
 	struct at91sam9x5_clk_usb *usb;
 	struct clk_hw *hw;
-	struct clk_init_data init;
 	int ret;
 
-	usb = kzalloc(sizeof(*usb), GFP_KERNEL);
+	usb = kzalloc_obj(*usb);
 	if (!usb)
 		return ERR_PTR(-ENOMEM);
 
@@ -275,12 +275,12 @@ struct clk_hw * __init
 at91sam9n12_clk_register_usb(struct regmap *regmap, const char *name,
 			     const char *parent_name)
 {
+	struct clk_init_data init = {};
 	struct at91sam9x5_clk_usb *usb;
 	struct clk_hw *hw;
-	struct clk_init_data init;
 	int ret;
 
-	usb = kzalloc(sizeof(*usb), GFP_KERNEL);
+	usb = kzalloc_obj(*usb);
 	if (!usb)
 		return ERR_PTR(-ENOMEM);
 
@@ -394,12 +394,12 @@ struct clk_hw * __init
 at91rm9200_clk_register_usb(struct regmap *regmap, const char *name,
 			    const char *parent_name, const u32 *divisors)
 {
+	struct clk_init_data init = {};
 	struct at91rm9200_clk_usb *usb;
 	struct clk_hw *hw;
-	struct clk_init_data init;
 	int ret;
 
-	usb = kzalloc(sizeof(*usb), GFP_KERNEL);
+	usb = kzalloc_obj(*usb);
 	if (!usb)
 		return ERR_PTR(-ENOMEM);
 

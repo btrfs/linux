@@ -345,10 +345,10 @@ static u32 nau8825_intlog10_dec3(u32 value)
 /**
  * nau8825_xtalk_sidetone - computes cross talk suppression sidetone gain.
  *
- * @sig_org: orignal signal level
+ * @sig_org: original signal level
  * @sig_cros: cross talk signal level
  *
- * The orignal and cross talk signal vlues need to be characterized.
+ * The original and cross talk signal values need to be characterized.
  * Once these values have been characterized, this sidetone value
  * can be converted to decibel with the equation below.
  * sidetone = 20 * log (original signal level / crosstalk signal level)
@@ -671,11 +671,11 @@ static void nau8825_xtalk_imm_stop(struct nau8825 *nau8825)
  * Thus, the measurement function has four states to complete whole sequence.
  * 1. Prepare state : Prepare the resource for detection and transfer to HPR
  *     IMM stat to make JKR1(HPR) impedance measure.
- * 2. HPR IMM state : Read out orignal signal level of JKR1(HPR) and transfer
+ * 2. HPR IMM state : Read out original signal level of JKR1(HPR) and transfer
  *     to HPL IMM state to make JKTIP(HPL) impedance measure.
  * 3. HPL IMM state : Read out cross talk signal level of JKTIP(HPL) and
  *     transfer to IMM state to determine suppression sidetone gain.
- * 4. IMM state : Computes cross talk suppression sidetone gain with orignal
+ * 4. IMM state : Computes cross talk suppression sidetone gain with original
  *     and cross talk signal level. Apply this gain and then restore codec
  *     configuration. Then transfer to Done state for ending.
  */
@@ -712,8 +712,8 @@ static void nau8825_xtalk_measure(struct nau8825 *nau8825)
 		/* In left headphone IMM state, read out left headphone
 		 * impedance measure result, and delay some time to wait
 		 * detection sine wave output finish. Then, we can calculate
-		 * the cross talk suppresstion side tone according to the L/R
-		 * headphone imedance.
+		 * the cross talk suppression side tone according to the L/R
+		 * headphone impedance.
 		 */
 		regmap_read(nau8825->regmap, NAU8825_REG_IMM_RMS_L,
 			&nau8825->imp_rms[NAU8825_XTALK_HPL_R2L]);
@@ -724,8 +724,8 @@ static void nau8825_xtalk_measure(struct nau8825 *nau8825)
 		nau8825->xtalk_state = NAU8825_XTALK_IMM;
 		break;
 	case NAU8825_XTALK_IMM:
-		/* In impedance measure state, the orignal and cross talk
-		 * signal level vlues are ready. The side tone gain is deter-
+		/* In impedance measure state, the original and cross talk
+		 * signal level values are ready. The side tone gain is deter-
 		 * mined with these signal level. After all, restore codec
 		 * configuration.
 		 */
@@ -771,7 +771,7 @@ static void nau8825_xtalk_work(struct work_struct *work)
 
 static void nau8825_xtalk_cancel(struct nau8825 *nau8825)
 {
-	/* If the crosstalk is eanbled and the process is on going,
+	/* If the crosstalk is enabled and the process is on going,
 	 * the driver forces to cancel the crosstalk task and
 	 * restores the configuration to original status.
 	 */
@@ -1261,14 +1261,24 @@ static int nau8825_dai_startup(struct snd_pcm_substream *substream,
 	struct snd_soc_component *component = dai->component;
 	struct nau8825 *nau8825 = snd_soc_component_get_drvdata(component);
 	const struct nau8825_osr_attr *osr;
+	int ret;
 
 	osr = nau8825_get_osr(nau8825, substream->stream);
 	if (!osr || !osr->osr)
 		return -EINVAL;
 
-	return snd_pcm_hw_constraint_minmax(substream->runtime,
-					    SNDRV_PCM_HW_PARAM_RATE,
-					    0, CLK_DA_AD_MAX / osr->osr);
+	ret = snd_pcm_hw_constraint_minmax(substream->runtime,
+					   SNDRV_PCM_HW_PARAM_RATE,
+					   0, CLK_DA_AD_MAX / osr->osr);
+	if (ret < 0)
+		return ret;
+
+	/*
+	 * ASoC only marks the DAI as started when .startup() returns 0.
+	 * Since snd_pcm_hw_constraint_minmax() may return 1, explicitly
+	 * return 0 to ensure the DAI is correctly marked as started.
+	 */
+	return 0;
 }
 
 static int nau8825_hw_params(struct snd_pcm_substream *substream,
@@ -1303,7 +1313,7 @@ static int nau8825_hw_params(struct snd_pcm_substream *substream,
 			NAU8825_CLK_ADC_SRC_MASK,
 			osr->clk_src << NAU8825_CLK_ADC_SRC_SFT);
 
-	/* make BCLK and LRC divde configuration if the codec as master. */
+	/* make BCLK and LRC divide configuration if the codec as master. */
 	regmap_read(nau8825->regmap, NAU8825_REG_I2S_PCM_CTRL2, &ctrl_val);
 	if (ctrl_val & NAU8825_I2S_MS_MASTER) {
 		/* get the bclk and fs ratio */
@@ -1507,11 +1517,22 @@ static int nau8825_set_tdm_slot(struct snd_soc_dai *dai, unsigned int tx_mask,
 	return 0;
 }
 
+static const u64 nau8825_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF;
+
 static const struct snd_soc_dai_ops nau8825_dai_ops = {
 	.startup	= nau8825_dai_startup,
 	.hw_params	= nau8825_hw_params,
 	.set_fmt	= nau8825_set_dai_fmt,
 	.set_tdm_slot	= nau8825_set_tdm_slot,
+	.auto_selectable_formats	= &nau8825_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 #define NAU8825_RATES	SNDRV_PCM_RATE_8000_192000
@@ -2226,7 +2247,7 @@ static const struct regmap_config nau8825_regmap_config = {
 static int nau8825_component_probe(struct snd_soc_component *component)
 {
 	struct nau8825 *nau8825 = snd_soc_component_get_drvdata(component);
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 
 	nau8825->dapm = dapm;
 
@@ -2237,7 +2258,7 @@ static void nau8825_component_remove(struct snd_soc_component *component)
 {
 	struct nau8825 *nau8825 = snd_soc_component_get_drvdata(component);
 
-	/* Cancel and reset cross tak suppresstion detection funciton */
+	/* Cancel and reset cross talk suppression detection function */
 	nau8825_xtalk_cancel(nau8825);
 }
 
@@ -2630,7 +2651,7 @@ static int nau8825_set_bias_level(struct snd_soc_component *component,
 		break;
 
 	case SND_SOC_BIAS_STANDBY:
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_OFF) {
+		if (snd_soc_dapm_get_bias_level(nau8825->dapm) == SND_SOC_BIAS_OFF) {
 			if (nau8825->mclk_freq) {
 				ret = clk_prepare_enable(nau8825->mclk);
 				if (ret) {
@@ -2651,7 +2672,7 @@ static int nau8825_set_bias_level(struct snd_soc_component *component,
 		/* ground HPL/HPR, MICGRND1/2 */
 		regmap_update_bits(nau8825->regmap,
 			NAU8825_REG_HSD_CTRL, 0xf, 0xf);
-		/* Cancel and reset cross talk detection funciton */
+		/* Cancel and reset cross talk detection function */
 		nau8825_xtalk_cancel(nau8825);
 		/* Turn off all interruptions before system shutdown. Keep the
 		 * interruption quiet before resume setup completes.
@@ -2673,7 +2694,7 @@ static int __maybe_unused nau8825_suspend(struct snd_soc_component *component)
 	struct nau8825 *nau8825 = snd_soc_component_get_drvdata(component);
 
 	disable_irq(nau8825->irq);
-	snd_soc_component_force_bias_level(component, SND_SOC_BIAS_OFF);
+	snd_soc_dapm_force_bias_level(nau8825->dapm, SND_SOC_BIAS_OFF);
 	/* Power down codec power; don't suppoet button wakeup */
 	snd_soc_dapm_disable_pin(nau8825->dapm, "SAR");
 	snd_soc_dapm_disable_pin(nau8825->dapm, "MICBIAS");
@@ -2886,7 +2907,7 @@ static int nau8825_i2c_probe(struct i2c_client *i2c)
 	nau8825->dev = dev;
 	nau8825->irq = i2c->irq;
 	/* Initiate parameters, semaphore and work queue which are needed in
-	 * cross talk suppression measurment function.
+	 * cross talk suppression measurement function.
 	 */
 	nau8825->xtalk_state = NAU8825_XTALK_DONE;
 	nau8825->xtalk_protect = false;
@@ -2930,11 +2951,8 @@ static int nau8825_i2c_probe(struct i2c_client *i2c)
 		&nau8825_dai, 1);
 }
 
-static void nau8825_i2c_remove(struct i2c_client *client)
-{}
-
 static const struct i2c_device_id nau8825_i2c_ids[] = {
-	{ "nau8825" },
+	{ .name = "nau8825" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, nau8825_i2c_ids);
@@ -2962,7 +2980,6 @@ static struct i2c_driver nau8825_driver = {
 		.acpi_match_table = ACPI_PTR(nau8825_acpi_match),
 	},
 	.probe = nau8825_i2c_probe,
-	.remove = nau8825_i2c_remove,
 	.id_table = nau8825_i2c_ids,
 };
 module_i2c_driver(nau8825_driver);

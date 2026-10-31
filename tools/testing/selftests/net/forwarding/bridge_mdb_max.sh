@@ -28,6 +28,7 @@ ALL_TESTS="
 	test_8021d
 	test_8021q
 	test_8021qvs
+	test_mdb_count_warning
 "
 
 NUM_NETIFS=4
@@ -83,8 +84,6 @@ switch_create_8021q()
 {
 	local br_flags=$1; shift
 
-	log_info "802.1q $br_flags${br_flags:+ }tests"
-
 	ip link add name br0 type bridge vlan_filtering 1 vlan_default_pvid 0 \
 		mcast_snooping 1 $br_flags \
 		mcast_igmp_version 3 mcast_mld_version 2
@@ -106,6 +105,7 @@ switch_create_8021q()
 
 switch_create_8021qvs()
 {
+	log_info "802.1q mcast_vlan_snooping 1 tests"
 	switch_create_8021q "mcast_vlan_snooping 1"
 	bridge vlan global set dev br0 vid 10 mcast_igmp_version 3
 	bridge vlan global set dev br0 vid 10 mcast_mld_version 2
@@ -397,6 +397,24 @@ bridge_port_vlan_maxgroups_set()
 	local max=$1; shift
 
 	bridge vlan set $locus mcast_max_groups $max
+}
+
+bridge_mcast_snooping_get()
+{
+	ip -j -d link show dev br0 |
+	    jq '.[].linkinfo.info_data.mcast_snooping'
+}
+
+bridge_mcast_hash_max_get()
+{
+	ip -j -d link show dev br0 |
+	    jq '.[].linkinfo.info_data.mcast_hash_max'
+}
+
+bridge_mdb_entries_count()
+{
+	bridge -j mdb show dev br0 |
+	    jq '[.[].mdb[] | [.grp, .src, .vid]] | unique | length'
 }
 
 test_ngroups_reporting()
@@ -938,6 +956,114 @@ test_8021qvs_maxgroups_too_many_entries_ctl6()
 	test_maxgroups_too_many_entries ctl6 port_vlan "dev $swp1 vid 10"
 }
 
+test_maxgroups_hash_max()
+{
+	local CFG=$1; shift
+	local context=$1; shift
+	local locus=$1; shift
+
+	local hash_max n i
+
+	RET=0
+
+	hash_max=$(bridge_mcast_hash_max_get)
+
+	# Make sure the port has entries, so that max == n is not 0 (no limit).
+	${CFG}_entries_add "$locus" temp 2 120
+	check_err $? "$locus: Couldn't add MDB entries"
+	n=$(bridge_${context}_ngroups_get "$locus")
+
+	# Leave room for three more MDB entries.
+	ip link set dev br0 type bridge \
+		mcast_hash_max $(($(bridge_mdb_entries_count) + 3))
+	check_err $? "Couldn't set mcast_hash_max"
+
+	# Port at its maximum: (*, G) entries are rejected.
+	bridge_${context}_maxgroups_set "$locus" "$n"
+	check_err $? "$locus: Couldn't set maximum"
+	for i in $(seq 121 124); do
+		${CFG}_entries_add "$locus" temp 2 "$i" &> /dev/null
+	done
+
+	# One more slot: (*, G) is accepted, (S, G) is rejected.
+	bridge_${context}_maxgroups_set "$locus" $((n + 1))
+	check_err $? "$locus: Couldn't set maximum"
+	for i in $(seq 125 128); do
+		${CFG}_entries_add "$locus" temp 2 "$i" &> /dev/null
+	done
+
+	[[ $(bridge_mcast_snooping_get) == 1 ]]
+	check_err $? "Multicast snooping disabled by rejected MDB entries"
+
+	bridge mdb flush dev br0
+	ip link set dev br0 type bridge mcast_snooping 1
+	ip link set dev br0 type bridge mcast_hash_max "$hash_max"
+	bridge_${context}_maxgroups_set "$locus" 0
+	check_err $? "$locus: Couldn't set maximum to 0"
+
+	log_test "$CFG: $context maxgroups: rejected entries do not exhaust MDB"
+}
+
+test_8021d_maxgroups_hash_max_cfg4()
+{
+	test_maxgroups_hash_max cfg4 port "dev $swp1"
+}
+
+test_8021d_maxgroups_hash_max_ctl4()
+{
+	test_maxgroups_hash_max ctl4 port "dev $swp1"
+}
+
+test_8021d_maxgroups_hash_max_cfg6()
+{
+	test_maxgroups_hash_max cfg6 port "dev $swp1"
+}
+
+test_8021d_maxgroups_hash_max_ctl6()
+{
+	test_maxgroups_hash_max ctl6 port "dev $swp1"
+}
+
+test_8021q_maxgroups_hash_max_cfg4()
+{
+	test_maxgroups_hash_max cfg4 port "dev $swp1 vid 10"
+}
+
+test_8021q_maxgroups_hash_max_ctl4()
+{
+	test_maxgroups_hash_max ctl4 port "dev $swp1 vid 10"
+}
+
+test_8021q_maxgroups_hash_max_cfg6()
+{
+	test_maxgroups_hash_max cfg6 port "dev $swp1 vid 10"
+}
+
+test_8021q_maxgroups_hash_max_ctl6()
+{
+	test_maxgroups_hash_max ctl6 port "dev $swp1 vid 10"
+}
+
+test_8021qvs_maxgroups_hash_max_cfg4()
+{
+	test_maxgroups_hash_max cfg4 port_vlan "dev $swp1 vid 10"
+}
+
+test_8021qvs_maxgroups_hash_max_ctl4()
+{
+	test_maxgroups_hash_max ctl4 port_vlan "dev $swp1 vid 10"
+}
+
+test_8021qvs_maxgroups_hash_max_cfg6()
+{
+	test_maxgroups_hash_max cfg6 port_vlan "dev $swp1 vid 10"
+}
+
+test_8021qvs_maxgroups_hash_max_ctl6()
+{
+	test_maxgroups_hash_max ctl6 port_vlan "dev $swp1 vid 10"
+}
+
 test_maxgroups_too_many_cross_vlan()
 {
 	local CFG=$1; shift
@@ -1177,6 +1303,7 @@ test_8021d_maxgroups_cfg4()
 	test_8021d_maxgroups_zero_cfg4
 	test_8021d_maxgroups_too_low_cfg4
 	test_8021d_maxgroups_too_many_entries_cfg4
+	test_8021d_maxgroups_hash_max_cfg4
 }
 
 test_8021d_maxgroups_ctl4()
@@ -1184,6 +1311,7 @@ test_8021d_maxgroups_ctl4()
 	test_8021d_maxgroups_zero_ctl4
 	test_8021d_maxgroups_too_low_ctl4
 	test_8021d_maxgroups_too_many_entries_ctl4
+	test_8021d_maxgroups_hash_max_ctl4
 }
 
 test_8021d_maxgroups_cfg6()
@@ -1191,6 +1319,7 @@ test_8021d_maxgroups_cfg6()
 	test_8021d_maxgroups_zero_cfg6
 	test_8021d_maxgroups_too_low_cfg6
 	test_8021d_maxgroups_too_many_entries_cfg6
+	test_8021d_maxgroups_hash_max_cfg6
 }
 
 test_8021d_maxgroups_ctl6()
@@ -1198,6 +1327,7 @@ test_8021d_maxgroups_ctl6()
 	test_8021d_maxgroups_zero_ctl6
 	test_8021d_maxgroups_too_low_ctl6
 	test_8021d_maxgroups_too_many_entries_ctl6
+	test_8021d_maxgroups_hash_max_ctl6
 }
 
 test_8021q_maxgroups_cfg4()
@@ -1205,6 +1335,7 @@ test_8021q_maxgroups_cfg4()
 	test_8021q_maxgroups_zero_cfg4
 	test_8021q_maxgroups_too_low_cfg4
 	test_8021q_maxgroups_too_many_entries_cfg4
+	test_8021q_maxgroups_hash_max_cfg4
 }
 
 test_8021q_maxgroups_ctl4()
@@ -1212,6 +1343,7 @@ test_8021q_maxgroups_ctl4()
 	test_8021q_maxgroups_zero_ctl4
 	test_8021q_maxgroups_too_low_ctl4
 	test_8021q_maxgroups_too_many_entries_ctl4
+	test_8021q_maxgroups_hash_max_ctl4
 }
 
 test_8021q_maxgroups_cfg6()
@@ -1219,6 +1351,7 @@ test_8021q_maxgroups_cfg6()
 	test_8021q_maxgroups_zero_cfg6
 	test_8021q_maxgroups_too_low_cfg6
 	test_8021q_maxgroups_too_many_entries_cfg6
+	test_8021q_maxgroups_hash_max_cfg6
 }
 
 test_8021q_maxgroups_ctl6()
@@ -1226,6 +1359,7 @@ test_8021q_maxgroups_ctl6()
 	test_8021q_maxgroups_zero_ctl6
 	test_8021q_maxgroups_too_low_ctl6
 	test_8021q_maxgroups_too_many_entries_ctl6
+	test_8021q_maxgroups_hash_max_ctl6
 }
 
 test_8021qvs_maxgroups_cfg4()
@@ -1234,6 +1368,7 @@ test_8021qvs_maxgroups_cfg4()
 	test_8021qvs_maxgroups_zero_cross_vlan_cfg4
 	test_8021qvs_maxgroups_too_low_cfg4
 	test_8021qvs_maxgroups_too_many_entries_cfg4
+	test_8021qvs_maxgroups_hash_max_cfg4
 	test_8021qvs_maxgroups_too_many_cross_vlan_cfg4
 }
 
@@ -1243,6 +1378,7 @@ test_8021qvs_maxgroups_ctl4()
 	test_8021qvs_maxgroups_zero_cross_vlan_ctl4
 	test_8021qvs_maxgroups_too_low_ctl4
 	test_8021qvs_maxgroups_too_many_entries_ctl4
+	test_8021qvs_maxgroups_hash_max_ctl4
 	test_8021qvs_maxgroups_too_many_cross_vlan_ctl4
 }
 
@@ -1252,6 +1388,7 @@ test_8021qvs_maxgroups_cfg6()
 	test_8021qvs_maxgroups_zero_cross_vlan_cfg6
 	test_8021qvs_maxgroups_too_low_cfg6
 	test_8021qvs_maxgroups_too_many_entries_cfg6
+	test_8021qvs_maxgroups_hash_max_cfg6
 	test_8021qvs_maxgroups_too_many_cross_vlan_cfg6
 }
 
@@ -1261,6 +1398,7 @@ test_8021qvs_maxgroups_ctl6()
 	test_8021qvs_maxgroups_zero_cross_vlan_ctl6
 	test_8021qvs_maxgroups_too_low_ctl6
 	test_8021qvs_maxgroups_too_many_entries_ctl6
+	test_8021qvs_maxgroups_hash_max_ctl6
 	test_8021qvs_maxgroups_too_many_cross_vlan_ctl6
 }
 
@@ -1270,6 +1408,76 @@ test_8021qvs_toggle_vlan_snooping()
 {
 	test_toggle_vlan_snooping_temp
 	test_toggle_vlan_snooping_permanent
+}
+
+mdb_count_check_warn()
+{
+	local msg=$1; shift
+
+	dmesg | grep -q "WARNING:.*br_multicast_port_ngroups_dec.*"
+	check_fail $? "$msg"
+}
+
+test_mdb_count_mcast_vlan_snooping_flush()
+{
+	RET=0
+
+	# check if we already have a warning
+	mdb_count_check_warn "Check MDB entries count warning before test"
+
+	bridge mdb add dev br0 port "$swp1" grp 239.0.0.1 permanent vid 10
+	ip link set dev br0 down
+	ip link set dev br0 type bridge mcast_vlan_snooping 1
+	bridge mdb flush dev br0
+
+	mdb_count_check_warn "Check MDB entries count warning after test"
+
+	ip link set dev br0 type bridge mcast_vlan_snooping 0
+	ip link set dev br0 up
+
+	log_test "MDB count warning: mcast_vlan_snooping and MDB flush"
+}
+
+test_mdb_count_mcast_snooping_flush()
+{
+	RET=0
+
+	# check if we already have a warning
+	mdb_count_check_warn "Check MDB entries count warning before test"
+
+	bridge mdb add dev br0 port "$swp1" grp 239.0.0.1 permanent vid 10
+	ip link set dev br0 type bridge mcast_snooping 0
+	ip link set dev br0 type bridge mcast_vlan_snooping 1
+	bridge mdb flush dev br0
+
+	mdb_count_check_warn "Check MDB entries count warning after test"
+
+	ip link set dev br0 type bridge mcast_vlan_snooping 0
+	ip link set dev br0 type bridge mcast_snooping 1
+
+	log_test "MDB count warning: mcast_snooping and MDB flush"
+}
+
+test_mdb_count_vlan_state_flush()
+{
+	RET=0
+
+	# check if we already have a warning
+	mdb_count_check_warn "Check MDB entries count warning before test"
+
+	bridge mdb add dev br0 port "$swp1" grp 239.0.0.1 permanent vid 10
+	ip link set dev br0 down
+	bridge vlan set vid 10 dev "$swp1" state blocking
+	ip link set dev br0 type bridge mcast_vlan_snooping 1
+	ip link set dev br0 up
+	bridge mdb flush dev br0
+
+	mdb_count_check_warn "Check MDB entries count warning after test"
+
+	bridge vlan set vid 10 dev "$swp1" state forwarding
+	ip link set dev br0 type bridge mcast_vlan_snooping 0
+
+	log_test "MDB count warning: disabled vlan state and MDB flush"
 }
 
 # test groups
@@ -1297,6 +1505,7 @@ test_8021q()
 {
 	# Tests for vlan_filtering 1 mcast_vlan_snooping 0.
 
+	log_info "802.1q tests"
 	switch_create_8021q
 	setup_wait
 
@@ -1330,6 +1539,21 @@ test_8021qvs()
 	test_8021qvs_maxgroups_cfg6
 	test_8021qvs_maxgroups_ctl6
 	test_8021qvs_toggle_vlan_snooping
+
+	switch_destroy
+}
+
+test_mdb_count_warning()
+{
+	# Tests for mdb_n_entries warning
+
+	log_info "MDB count warning tests"
+	switch_create_8021q
+	setup_wait
+
+	test_mdb_count_mcast_vlan_snooping_flush
+	test_mdb_count_mcast_snooping_flush
+	test_mdb_count_vlan_state_flush
 
 	switch_destroy
 }

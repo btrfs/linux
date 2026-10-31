@@ -207,10 +207,7 @@ void bnx2x_vfop_qctor_prep(struct bnx2x *bp,
 	 */
 	__set_bit(BNX2X_Q_FLG_TX_SWITCH, &setup_p->flags);
 	__set_bit(BNX2X_Q_FLG_TX_SEC, &setup_p->flags);
-	if (vf->spoofchk)
-		__set_bit(BNX2X_Q_FLG_ANTI_SPOOF, &setup_p->flags);
-	else
-		__clear_bit(BNX2X_Q_FLG_ANTI_SPOOF, &setup_p->flags);
+	__assign_bit(BNX2X_Q_FLG_ANTI_SPOOF, &setup_p->flags, vf->spoofchk);
 
 	/* Setup-op rx parameters */
 	if (test_bit(BNX2X_Q_TYPE_HAS_RX, &q_type)) {
@@ -551,8 +548,7 @@ int bnx2x_vf_mcast(struct bnx2x *bp, struct bnx2x_virtf *vf,
 	else
 		set_bit(RAMROD_COMP_WAIT, &mcast.ramrod_flags);
 	if (mc_num) {
-		mc = kcalloc(mc_num, sizeof(struct bnx2x_mcast_list_elem),
-			     GFP_KERNEL);
+		mc = kzalloc_objs(struct bnx2x_mcast_list_elem, mc_num);
 		if (!mc) {
 			BNX2X_ERR("Cannot Configure multicasts due to lack of memory\n");
 			return -ENOMEM;
@@ -1218,7 +1214,7 @@ int bnx2x_iov_init_one(struct bnx2x *bp, int int_mode_param,
 	}
 
 	/* allocate the vfs database */
-	bp->vfdb = kzalloc(sizeof(*(bp->vfdb)), GFP_KERNEL);
+	bp->vfdb = kzalloc_obj(*(bp->vfdb));
 	if (!bp->vfdb) {
 		BNX2X_ERR("failed to allocate vf database\n");
 		err = -ENOMEM;
@@ -1247,9 +1243,7 @@ int bnx2x_iov_init_one(struct bnx2x *bp, int int_mode_param,
 	   num_vfs_param, iov->nr_virtfn);
 
 	/* allocate the vf array */
-	bp->vfdb->vfs = kcalloc(BNX2X_NR_VIRTFN(bp),
-				sizeof(struct bnx2x_virtf),
-				GFP_KERNEL);
+	bp->vfdb->vfs = kzalloc_objs(struct bnx2x_virtf, BNX2X_NR_VIRTFN(bp));
 	if (!bp->vfdb->vfs) {
 		BNX2X_ERR("failed to allocate vf array\n");
 		err = -ENOMEM;
@@ -1275,9 +1269,8 @@ int bnx2x_iov_init_one(struct bnx2x *bp, int int_mode_param,
 	}
 
 	/* allocate the queue arrays for all VFs */
-	bp->vfdb->vfqs = kcalloc(BNX2X_MAX_NUM_VF_QUEUES,
-				 sizeof(struct bnx2x_vf_queue),
-				 GFP_KERNEL);
+	bp->vfdb->vfqs = kzalloc_objs(struct bnx2x_vf_queue,
+				      BNX2X_MAX_NUM_VF_QUEUES);
 
 	if (!bp->vfdb->vfqs) {
 		BNX2X_ERR("failed to allocate vf queue array\n");
@@ -2374,12 +2367,8 @@ static int bnx2x_set_pf_tx_switching(struct bnx2x *bp, bool enable)
 	q_params.cmd = BNX2X_Q_CMD_UPDATE;
 	__set_bit(BNX2X_Q_UPDATE_TX_SWITCHING_CHNG,
 		  &q_params.params.update.update_flags);
-	if (enable)
-		__set_bit(BNX2X_Q_UPDATE_TX_SWITCHING,
-			  &q_params.params.update.update_flags);
-	else
-		__clear_bit(BNX2X_Q_UPDATE_TX_SWITCHING,
-			    &q_params.params.update.update_flags);
+	__assign_bit(BNX2X_Q_UPDATE_TX_SWITCHING,
+		     &q_params.params.update.update_flags, enable);
 
 	/* send the ramrod on all the queues of the PF */
 	for_each_eth_queue(bp, i) {
@@ -2768,10 +2757,7 @@ static void bnx2x_set_vf_vlan_acceptance(struct bnx2x *bp,
 
 	/* need to remove/add the VF's accept_any_vlan bit */
 	accept_flags = bnx2x_leading_vfq(vf, accept_flags);
-	if (accept)
-		set_bit(BNX2X_ACCEPT_ANY_VLAN, &accept_flags);
-	else
-		clear_bit(BNX2X_ACCEPT_ANY_VLAN, &accept_flags);
+	assign_bit(BNX2X_ACCEPT_ANY_VLAN, &accept_flags, accept);
 
 	bnx2x_vf_prep_rx_mode(bp, LEADING_IDX, &rx_ramrod, vf,
 			      accept_flags);

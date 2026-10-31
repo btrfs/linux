@@ -17,6 +17,7 @@
 #include <drm/drm_encoder.h>
 #include <drm/drm_gem.h>
 #include <drm/drm_gem_shmem_helper.h>
+#include <drm/drm_panic_helper.h>
 #include <drm/drm_plane.h>
 
 #include "mgag200_reg.h"
@@ -110,6 +111,12 @@
 
 #define DAC_INDEX 0x3c00
 #define DAC_DATA 0x3c0a
+
+#define RREG_DAC(reg)						\
+	({							\
+		WREG8(DAC_INDEX, reg);				\
+		RREG8(DAC_DATA);				\
+	})							\
 
 #define WREG_DAC(reg, v)					\
 	do {							\
@@ -247,14 +254,14 @@ struct mgag200_device_funcs {
 	 * success, the calculated parameters should be stored in the CRTC's
 	 * state in struct @mgag200_crtc_state.pixpllc.
 	 */
-	int (*pixpllc_atomic_check)(struct drm_crtc *crtc, struct drm_atomic_state *new_state);
+	int (*pixpllc_atomic_check)(struct drm_crtc *crtc, struct drm_atomic_commit *new_state);
 
 	/*
 	 * Program PIXPLLC from the CRTC state. The parameters should have been
 	 * stored in struct @mgag200_crtc_state.pixpllc by the corresponding
 	 * implementation of @pixpllc_atomic_check.
 	 */
-	void (*pixpllc_atomic_update)(struct drm_crtc *crtc, struct drm_atomic_state *old_state);
+	void (*pixpllc_atomic_update)(struct drm_crtc *crtc, struct drm_atomic_commit *old_state);
 };
 
 struct mga_device {
@@ -326,11 +333,11 @@ struct mga_device *mgag200_g200_device_create(struct pci_dev *pdev, const struct
 struct mga_device *mgag200_g200se_device_create(struct pci_dev *pdev, const struct drm_driver *drv,
 						enum mga_type type);
 void mgag200_g200wb_init_registers(struct mga_device *mdev);
-void mgag200_g200wb_pixpllc_atomic_update(struct drm_crtc *crtc, struct drm_atomic_state *old_state);
+void mgag200_g200wb_pixpllc_atomic_update(struct drm_crtc *crtc, struct drm_atomic_commit *old_state);
 struct mga_device *mgag200_g200wb_device_create(struct pci_dev *pdev, const struct drm_driver *drv);
 struct mga_device *mgag200_g200ev_device_create(struct pci_dev *pdev, const struct drm_driver *drv);
 void mgag200_g200eh_init_registers(struct mga_device *mdev);
-void mgag200_g200eh_pixpllc_atomic_update(struct drm_crtc *crtc, struct drm_atomic_state *old_state);
+void mgag200_g200eh_pixpllc_atomic_update(struct drm_crtc *crtc, struct drm_atomic_commit *old_state);
 struct mga_device *mgag200_g200eh_device_create(struct pci_dev *pdev,
 						const struct drm_driver *drv);
 struct mga_device *mgag200_g200eh3_device_create(struct pci_dev *pdev,
@@ -350,7 +357,7 @@ struct drm_crtc;
 struct drm_crtc_state;
 struct drm_display_mode;
 struct drm_plane;
-struct drm_atomic_state;
+struct drm_atomic_commit;
 struct drm_scanout_buffer;
 
 extern const uint32_t mgag200_primary_plane_formats[];
@@ -358,13 +365,13 @@ extern const size_t   mgag200_primary_plane_formats_size;
 extern const uint64_t mgag200_primary_plane_fmtmods[];
 
 int mgag200_primary_plane_helper_atomic_check(struct drm_plane *plane,
-					      struct drm_atomic_state *new_state);
+					      struct drm_atomic_commit *new_state);
 void mgag200_primary_plane_helper_atomic_update(struct drm_plane *plane,
-						struct drm_atomic_state *old_state);
+						struct drm_atomic_commit *old_state);
 void mgag200_primary_plane_helper_atomic_enable(struct drm_plane *plane,
-						struct drm_atomic_state *state);
+						struct drm_atomic_commit *state);
 void mgag200_primary_plane_helper_atomic_disable(struct drm_plane *plane,
-						 struct drm_atomic_state *old_state);
+						 struct drm_atomic_commit *old_state);
 int mgag200_primary_plane_helper_get_scanout_buffer(struct drm_plane *plane,
 						    struct drm_scanout_buffer *sb);
 
@@ -380,7 +387,8 @@ int mgag200_primary_plane_helper_get_scanout_buffer(struct drm_plane *plane,
 	.update_plane = drm_atomic_helper_update_plane, \
 	.disable_plane = drm_atomic_helper_disable_plane, \
 	.destroy = drm_plane_cleanup, \
-	DRM_GEM_SHADOW_PLANE_FUNCS
+	DRM_GEM_SHADOW_PLANE_FUNCS, \
+	DRM_PANIC_PLANE_FUNCS
 
 void mgag200_crtc_fill_gamma(struct mga_device *mdev, const struct drm_format_info *format);
 void mgag200_crtc_load_gamma(struct mga_device *mdev,
@@ -389,10 +397,10 @@ void mgag200_crtc_load_gamma(struct mga_device *mdev,
 
 enum drm_mode_status mgag200_crtc_helper_mode_valid(struct drm_crtc *crtc,
 						    const struct drm_display_mode *mode);
-int mgag200_crtc_helper_atomic_check(struct drm_crtc *crtc, struct drm_atomic_state *new_state);
-void mgag200_crtc_helper_atomic_flush(struct drm_crtc *crtc, struct drm_atomic_state *old_state);
-void mgag200_crtc_helper_atomic_enable(struct drm_crtc *crtc, struct drm_atomic_state *old_state);
-void mgag200_crtc_helper_atomic_disable(struct drm_crtc *crtc, struct drm_atomic_state *old_state);
+int mgag200_crtc_helper_atomic_check(struct drm_crtc *crtc, struct drm_atomic_commit *new_state);
+void mgag200_crtc_helper_atomic_flush(struct drm_crtc *crtc, struct drm_atomic_commit *old_state);
+void mgag200_crtc_helper_atomic_enable(struct drm_crtc *crtc, struct drm_atomic_commit *old_state);
+void mgag200_crtc_helper_atomic_disable(struct drm_crtc *crtc, struct drm_atomic_commit *old_state);
 
 #define MGAG200_CRTC_HELPER_FUNCS \
 	.mode_valid = mgag200_crtc_helper_mode_valid, \
@@ -401,15 +409,15 @@ void mgag200_crtc_helper_atomic_disable(struct drm_crtc *crtc, struct drm_atomic
 	.atomic_enable = mgag200_crtc_helper_atomic_enable, \
 	.atomic_disable = mgag200_crtc_helper_atomic_disable
 
-void mgag200_crtc_reset(struct drm_crtc *crtc);
+struct drm_crtc_state *mgag200_crtc_atomic_create_state(struct drm_crtc *crtc);
 struct drm_crtc_state *mgag200_crtc_atomic_duplicate_state(struct drm_crtc *crtc);
 void mgag200_crtc_atomic_destroy_state(struct drm_crtc *crtc, struct drm_crtc_state *crtc_state);
 
 #define MGAG200_CRTC_FUNCS \
-	.reset = mgag200_crtc_reset, \
 	.destroy = drm_crtc_cleanup, \
 	.set_config = drm_atomic_helper_set_config, \
 	.page_flip = drm_atomic_helper_page_flip, \
+	.atomic_create_state = mgag200_crtc_atomic_create_state, \
 	.atomic_duplicate_state = mgag200_crtc_atomic_duplicate_state, \
 	.atomic_destroy_state = mgag200_crtc_atomic_destroy_state
 

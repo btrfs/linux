@@ -1686,7 +1686,7 @@ int pm8001_handle_event(struct pm8001_hba_info *pm8001_ha, void *data,
 	struct pm8001_work *pw;
 	int ret = 0;
 
-	pw = kmalloc(sizeof(struct pm8001_work), GFP_ATOMIC);
+	pw = kmalloc_obj(struct pm8001_work, GFP_ATOMIC);
 	if (pw) {
 		pw->pm8001_ha = pm8001_ha;
 		pw->data = data;
@@ -3208,7 +3208,7 @@ hw_event_sata_phy_up(struct pm8001_hba_info *pm8001_ha, void *piomb)
 	phy->sas_phy.oob_mode = SATA_OOB_MODE;
 	sas_notify_phy_event(&phy->sas_phy, PHYE_OOB_DONE, GFP_ATOMIC);
 	spin_lock_irqsave(&phy->sas_phy.frame_rcvd_lock, flags);
-	memcpy(phy->frame_rcvd, ((u8 *)&pPayload->sata_fis - 4),
+	memcpy(phy->frame_rcvd, &pPayload->sata_fis,
 		sizeof(struct dev_to_host_fis));
 	phy->frame_rcvd_size = sizeof(struct dev_to_host_fis);
 	phy->identify.target_port_protocols = SAS_PROTOCOL_SATA;
@@ -4371,7 +4371,7 @@ int pm8001_chip_get_nvmd_req(struct pm8001_hba_info *pm8001_ha,
 	struct pm8001_ioctl_payload *ioctl_payload = payload;
 
 	nvmd_type = ioctl_payload->minor_function;
-	fw_control_context = kzalloc(sizeof(struct fw_control_ex), GFP_KERNEL);
+	fw_control_context = kzalloc_obj(struct fw_control_ex);
 	if (!fw_control_context)
 		return -ENOMEM;
 	fw_control_context->usrAddr = (u8 *)ioctl_payload->func_specific;
@@ -4464,7 +4464,7 @@ int pm8001_chip_set_nvmd_req(struct pm8001_hba_info *pm8001_ha,
 	struct pm8001_ioctl_payload *ioctl_payload = payload;
 
 	nvmd_type = ioctl_payload->minor_function;
-	fw_control_context = kzalloc(sizeof(struct fw_control_ex), GFP_KERNEL);
+	fw_control_context = kzalloc_obj(struct fw_control_ex);
 	if (!fw_control_context)
 		return -ENOMEM;
 
@@ -4579,7 +4579,7 @@ pm8001_chip_fw_flash_update_req(struct pm8001_hba_info *pm8001_ha,
 	dma_addr_t phys_addr = pm8001_ha->memoryMap.region[FW_FLASH].phys_addr;
 	struct pm8001_ioctl_payload *ioctl_payload = payload;
 
-	fw_control_context = kzalloc(sizeof(struct fw_control_ex), GFP_KERNEL);
+	fw_control_context = kzalloc_obj(struct fw_control_ex);
 	if (!fw_control_context)
 		return -ENOMEM;
 	fw_control = (struct fw_control_info *)&ioctl_payload->func_specific;

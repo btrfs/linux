@@ -499,7 +499,7 @@ static int s5p_make_sg_cpy(struct s5p_aes_dev *dev, struct scatterlist *src,
 	void *pages;
 	int len;
 
-	*dst = kmalloc(sizeof(**dst), GFP_ATOMIC);
+	*dst = kmalloc_obj(**dst, GFP_ATOMIC);
 	if (!*dst)
 		return -ENOMEM;
 
@@ -638,8 +638,7 @@ static int s5p_hash_rx(struct s5p_aes_dev *dev)
 
 static irqreturn_t s5p_aes_interrupt(int irq, void *dev_id)
 {
-	struct platform_device *pdev = dev_id;
-	struct s5p_aes_dev *dev = platform_get_drvdata(pdev);
+	struct s5p_aes_dev *dev = dev_id;
 	struct skcipher_request *req;
 	int err_dma_tx = 0;
 	int err_dma_rx = 0;
@@ -1056,7 +1055,7 @@ static int s5p_hash_copy_sg_lists(struct s5p_hash_reqctx *ctx,
 	if (ctx->bufcnt)
 		n++;
 
-	ctx->sg = kmalloc_array(n, sizeof(*sg), GFP_KERNEL);
+	ctx->sg = kmalloc_objs(*sg, n);
 	if (!ctx->sg) {
 		ctx->error = true;
 		return -ENOMEM;
@@ -1446,7 +1445,7 @@ static void s5p_hash_tasklet_cb(unsigned long data)
 	return;
 
 finish:
-	/* finish curent request */
+	/* finish current request */
 	s5p_hash_finish_req(dd->hash_req, 0);
 
 	/* If we are not busy, process next req */
@@ -2131,7 +2130,7 @@ static struct skcipher_alg algs[] = {
 static int s5p_aes_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	int i, j, err;
+	int i, err;
 	const struct samsung_aes_variant *variant;
 	struct s5p_aes_dev *pdata;
 	struct resource *res;
@@ -2221,7 +2220,7 @@ static int s5p_aes_probe(struct platform_device *pdev)
 	}
 	err = devm_request_threaded_irq(dev, pdata->irq_fc, NULL,
 					s5p_aes_interrupt, IRQF_ONESHOT,
-					pdev->name, pdev);
+					pdev->name, pdata);
 	if (err < 0) {
 		dev_warn(dev, "feed control interrupt is not available.\n");
 		goto err_irq;
@@ -2237,8 +2236,11 @@ static int s5p_aes_probe(struct platform_device *pdev)
 
 	for (i = 0; i < ARRAY_SIZE(algs); i++) {
 		err = crypto_register_skcipher(&algs[i]);
-		if (err)
+		if (err) {
+			dev_err(dev, "can't register '%s': %d\n",
+				algs[i].base.cra_name, err);
 			goto err_algs;
+		}
 	}
 
 	if (pdata->use_hash) {
@@ -2265,20 +2267,12 @@ static int s5p_aes_probe(struct platform_device *pdev)
 	return 0;
 
 err_hash:
-	for (j = hash_i - 1; j >= 0; j--)
-		crypto_unregister_ahash(&algs_sha1_md5_sha256[j]);
-
+	crypto_unregister_ahashes(algs_sha1_md5_sha256, hash_i);
 	tasklet_kill(&pdata->hash_tasklet);
 	res->end -= 0x300;
 
 err_algs:
-	if (i < ARRAY_SIZE(algs))
-		dev_err(dev, "can't register '%s': %d\n", algs[i].base.cra_name,
-			err);
-
-	for (j = 0; j < i; j++)
-		crypto_unregister_skcipher(&algs[j]);
-
+	crypto_unregister_skciphers(algs, i);
 	tasklet_kill(&pdata->tasklet);
 
 err_irq:
@@ -2294,15 +2288,13 @@ err_clk:
 static void s5p_aes_remove(struct platform_device *pdev)
 {
 	struct s5p_aes_dev *pdata = platform_get_drvdata(pdev);
-	int i;
 
-	for (i = 0; i < ARRAY_SIZE(algs); i++)
-		crypto_unregister_skcipher(&algs[i]);
+	crypto_unregister_skciphers(algs, ARRAY_SIZE(algs));
 
 	tasklet_kill(&pdata->tasklet);
 	if (pdata->use_hash) {
-		for (i = ARRAY_SIZE(algs_sha1_md5_sha256) - 1; i >= 0; i--)
-			crypto_unregister_ahash(&algs_sha1_md5_sha256[i]);
+		crypto_unregister_ahashes(algs_sha1_md5_sha256,
+					  ARRAY_SIZE(algs_sha1_md5_sha256));
 
 		pdata->res->end -= 0x300;
 		tasklet_kill(&pdata->hash_tasklet);

@@ -10,6 +10,7 @@
 #include "util.h" // lsdir(), mkdir_p(), rm_rf()
 #include <dirent.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -55,7 +56,6 @@ static int mark_dso_hit_callback(struct callchain_cursor_node *node, void *data 
 int build_id__mark_dso_hit(const struct perf_tool *tool __maybe_unused,
 			   union perf_event *event,
 			   struct perf_sample *sample,
-			   struct evsel *evsel,
 			   struct machine *machine)
 {
 	struct addr_location al;
@@ -63,8 +63,8 @@ int build_id__mark_dso_hit(const struct perf_tool *tool __maybe_unused,
 							sample->tid);
 
 	if (thread == NULL) {
-		pr_err("problem processing %d event, skipping it.\n",
-			event->header.type);
+		pr_err("problem processing %s event at offset %#" PRIx64 ", skipping it.\n",
+		       perf_event__name(event->header.type), sample->file_offset);
 		return -1;
 	}
 
@@ -74,7 +74,7 @@ int build_id__mark_dso_hit(const struct perf_tool *tool __maybe_unused,
 
 	addr_location__exit(&al);
 
-	sample__for_each_callchain_node(thread, evsel, sample, PERF_MAX_STACK_DEPTH,
+	sample__for_each_callchain_node(thread, sample, PERF_MAX_STACK_DEPTH,
 					/*symbols=*/false, mark_dso_hit_callback, /*data=*/NULL);
 
 
@@ -93,8 +93,11 @@ int build_id__snprintf(const struct build_id *build_id, char *bf, size_t bf_size
 		return 0;
 	}
 
-	for (size_t i = 0; i < build_id->size && offs < bf_size; ++i)
-		offs += snprintf(bf + offs, bf_size - offs, "%02x", build_id->data[i]);
+	if (bf_size > 0)
+		bf[0] = '\0';
+
+	for (size_t i = 0; i < build_id->size && offs + 1 < bf_size; ++i)
+		offs += scnprintf(bf + offs, bf_size - offs, "%02x", build_id->data[i]);
 
 	return offs;
 }
@@ -122,7 +125,7 @@ int filename__snprintf_build_id(const char *pathname, char *sbuild_id, size_t sb
 	struct build_id bid = { .size = 0, };
 	int ret;
 
-	ret = filename__read_build_id(pathname, &bid, /*block=*/true);
+	ret = filename__read_build_id(pathname, &bid);
 	if (ret < 0)
 		return ret;
 
@@ -848,7 +851,7 @@ static int filename__read_build_id_ns(const char *filename,
 	int ret;
 
 	nsinfo__mountns_enter(nsi, &nsc);
-	ret = filename__read_build_id(filename, bid, /*block=*/true);
+	ret = filename__read_build_id(filename, bid);
 	nsinfo__mountns_exit(&nsc);
 
 	return ret;

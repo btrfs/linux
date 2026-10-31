@@ -420,6 +420,7 @@ static int mei_ace_setup_dev_link(struct mei_ace *ace)
 		goto err_put;
 	}
 
+	put_device(csi_dev);
 	ace->csi_dev = csi_dev;
 
 	return 0;
@@ -522,7 +523,6 @@ static void mei_ace_remove(struct mei_cl_device *cldev)
 	cancel_work_sync(&ace->work);
 
 	device_link_del(ace->csi_link);
-	put_device(ace->csi_dev);
 
 	pm_runtime_disable(&cldev->dev);
 	pm_runtime_set_suspended(&cldev->dev);

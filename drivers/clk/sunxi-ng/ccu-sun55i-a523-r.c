@@ -43,27 +43,24 @@ static SUNXI_CCU_M_DATA_WITH_MUX(r_apb1_clk, "r-apb1",
 				 24, 3,	/* mux */
 				 0);
 
-static SUNXI_CCU_MP_DATA_WITH_MUX_GATE(r_cpu_timer0, "r-timer0",
-				       r_ahb_apb_parents, 0x100,
-				       0, 0,	/* no M */
-				       1, 3,	/* P */
-				       4, 3,	/* mux */
-				       BIT(0),
+static SUNXI_CCU_P_DATA_WITH_MUX_GATE(r_cpu_timer0, "r-timer0",
+				      r_ahb_apb_parents, 0x100,
+				      1, 3,	/* P */
+				      4, 3,	/* mux */
+				      BIT(0),
 				      0);
-static SUNXI_CCU_MP_DATA_WITH_MUX_GATE(r_cpu_timer1, "r-timer1",
-				       r_ahb_apb_parents, 0x104,
-				       0, 0,	/* no M */
-				       1, 3,	/* P */
-				       4, 3,	/* mux */
-				       BIT(0),
-				       0);
-static SUNXI_CCU_MP_DATA_WITH_MUX_GATE(r_cpu_timer2, "r-timer2",
-				       r_ahb_apb_parents, 0x108,
-				       0, 0,	/* no M */
-				       1, 3,	/* P */
-				       4, 3,	/* mux */
-				       BIT(0),
-				       0);
+static SUNXI_CCU_P_DATA_WITH_MUX_GATE(r_cpu_timer1, "r-timer1",
+				      r_ahb_apb_parents, 0x104,
+				      1, 3,	/* P */
+				      4, 3,	/* mux */
+				      BIT(0),
+				      0);
+static SUNXI_CCU_P_DATA_WITH_MUX_GATE(r_cpu_timer2, "r-timer2",
+				      r_ahb_apb_parents, 0x108,
+				      1, 3,	/* P */
+				      4, 3,	/* mux */
+				      BIT(0),
+				      0);
 
 static SUNXI_CCU_GATE_HW(bus_r_timer_clk, "bus-r-timer", &r_ahb_clk.common.hw,
 			 0x11c, BIT(0), 0);
@@ -83,9 +80,22 @@ static SUNXI_CCU_MUX_DATA_WITH_GATE(r_pwmctrl_clk, "r-pwmctrl",
 static SUNXI_CCU_GATE_HW(bus_r_pwmctrl_clk, "bus-r-pwmctrl",
 			 &r_apb0_clk.common.hw, 0x13c, BIT(0), 0);
 
-/* SPI clock is /M/N (same as new MMC?) */
+static const struct clk_parent_data r_spi_parents[] = {
+	{ .fw_name = "hosc" },
+	{ .fw_name = "pll-periph" },
+	{ .name = "pll-periph0-300M" },
+	{ .name = "pll-periph1-300M" },
+	{ .name = "pll-audio" },
+};
+static SUNXI_CCU_DUALDIV_MUX_GATE(r_spi_clk, "r-spi", r_spi_parents, 0x150,
+				  0, 5,		/* M */
+				  8, 5,		/* P */
+				  24, 3,	/* mux */
+				  BIT(31),	/* gate */
+				  0);
 static SUNXI_CCU_GATE_HW(bus_r_spi_clk, "bus-r-spi",
 			 &r_ahb_clk.common.hw, 0x15c, BIT(0), 0);
+
 static SUNXI_CCU_GATE_HW(bus_r_spinlock_clk, "bus-r-spinlock",
 			 &r_ahb_clk.common.hw, 0x16c, BIT(0), 0);
 static SUNXI_CCU_GATE_HW(bus_r_msgbox_clk, "bus-r-msgbox",
@@ -138,6 +148,7 @@ static struct ccu_common *sun55i_a523_r_ccu_clks[] = {
 	&bus_r_twd_clk.common,
 	&r_pwmctrl_clk.common,
 	&bus_r_pwmctrl_clk.common,
+	&r_spi_clk.common,
 	&bus_r_spi_clk.common,
 	&bus_r_spinlock_clk.common,
 	&bus_r_msgbox_clk.common,
@@ -169,6 +180,7 @@ static struct clk_hw_onecell_data sun55i_a523_r_hw_clks = {
 		[CLK_BUS_R_TWD]		= &bus_r_twd_clk.common.hw,
 		[CLK_R_PWMCTRL]		= &r_pwmctrl_clk.common.hw,
 		[CLK_BUS_R_PWMCTRL]	= &bus_r_pwmctrl_clk.common.hw,
+		[CLK_R_SPI]		= &r_spi_clk.common.hw,
 		[CLK_BUS_R_SPI]		= &bus_r_spi_clk.common.hw,
 		[CLK_BUS_R_SPINLOCK]	= &bus_r_spinlock_clk.common.hw,
 		[CLK_BUS_R_MSGBOX]	= &bus_r_msgbox_clk.common.hw,

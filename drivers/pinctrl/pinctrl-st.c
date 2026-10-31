@@ -987,6 +987,7 @@ static int st_pinconf_get(struct pinctrl_dev *pctldev,
 
 static void st_pinconf_dbg_show(struct pinctrl_dev *pctldev,
 				   struct seq_file *s, unsigned pin_id)
+	__must_hold(&pctldev->mutex)
 {
 	struct st_pio_control *pc;
 	unsigned long config;
@@ -1147,7 +1148,7 @@ static void st_parse_syscfgs(struct st_pinctrl *info, int bank,
 	pc->pu = st_pc_get_value(dev, regmap, bank/4, data->pu, lsb, msb);
 	pc->od = st_pc_get_value(dev, regmap, bank/4, data->od, lsb, msb);
 
-	/* retime avaiable for all pins by default */
+	/* retime available for all pins by default */
 	pc->rt_pin_mask = 0xff;
 	of_property_read_u32(np, "st,retime-pin-mask", &pc->rt_pin_mask);
 	st_pctl_dt_setup_retime(info, bank, pc);

@@ -5,7 +5,6 @@
 #include <linux/gpio/generic.h>
 #include <linux/irq.h>
 #include <linux/minmax.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -40,16 +39,18 @@
 #define REALTEK_GPIO_PORTS_PER_BANK	4
 
 /**
- * realtek_gpio_ctrl - Realtek Otto GPIO driver data
+ * struct realtek_gpio_ctrl - Realtek Otto GPIO driver data
  *
  * @chip: Associated gpio_generic_chip instance
  * @base: Base address of the register block for a GPIO bank
+ * @cpumask_base: Base address of the per-CPU interrupt mask registers
+ * @cpu_irq_maskable: CPUs that can receive GPIO interrupts
  * @lock: Lock for accessing the IRQ registers and values
  * @intr_mask: Mask for interrupts lines
  * @intr_type: Interrupt type selection
  * @bank_read: Read a bank setting as a single 32-bit value
  * @bank_write: Write a bank setting as a single 32-bit value
- * @imr_line_pos: Bit shift of an IRQ line's IMR value.
+ * @line_imr_pos: Bit shift of an IRQ line's IMR value.
  *
  * The DIR, DATA, and ISR registers consist of four 8-bit port values, packed
  * into a single 32-bit register. Use @bank_read (@bank_write) to get (assign)
@@ -175,10 +176,10 @@ static void realtek_gpio_update_line_imr(struct realtek_gpio_ctrl *ctrl, unsigne
 	u32 reg_val;
 
 	reg += 4 * (line_shift / 32);
-	reg_val = ioread32(reg);
+	reg_val = __raw_readl(reg);
 	reg_val &= ~(REALTEK_GPIO_IMR_LINE_MASK << shift);
 	reg_val |= (irq_type & irq_mask & REALTEK_GPIO_IMR_LINE_MASK) << shift;
-	iowrite32(reg_val, reg);
+	__raw_writel(reg_val, reg);
 }
 
 static void realtek_gpio_irq_ack(struct irq_data *data)
@@ -351,6 +352,10 @@ static const struct of_device_id realtek_gpio_of_match[] = {
 	{
 		.compatible = "realtek,rtl9310-gpio",
 	},
+	{
+		.compatible = "realtek,rtl9607-gpio",
+		.data = (void *)GPIO_PORTS_REVERSED,
+	},
 	{}
 };
 MODULE_DEVICE_TABLE(of, realtek_gpio_of_match);
@@ -359,8 +364,7 @@ static int realtek_gpio_probe(struct platform_device *pdev)
 {
 	struct gpio_generic_chip_config config;
 	struct device *dev = &pdev->dev;
-	unsigned long gen_gc_flags;
-	unsigned int dev_flags;
+	unsigned long gen_gc_flags, dev_flags;
 	struct gpio_irq_chip *girq;
 	struct realtek_gpio_ctrl *ctrl;
 	struct resource *res;
@@ -372,7 +376,7 @@ static int realtek_gpio_probe(struct platform_device *pdev)
 	if (!ctrl)
 		return -ENOMEM;
 
-	dev_flags = (unsigned int) device_get_match_data(dev);
+	dev_flags = (uintptr_t)device_get_match_data(dev);
 
 	ngpios = REALTEK_GPIO_MAX;
 	device_property_read_u32(dev, "ngpios", &ngpios);
@@ -389,16 +393,27 @@ static int realtek_gpio_probe(struct platform_device *pdev)
 
 	raw_spin_lock_init(&ctrl->lock);
 
+	gen_gc_flags = GPIO_GENERIC_PINCTRL_BACKEND;
+
 	if (dev_flags & GPIO_PORTS_REVERSED) {
-		gen_gc_flags = 0;
 		ctrl->bank_read = realtek_gpio_bank_read;
 		ctrl->bank_write = realtek_gpio_bank_write;
 		ctrl->line_imr_pos = realtek_gpio_line_imr_pos;
 	} else {
-		gen_gc_flags = GPIO_GENERIC_BIG_ENDIAN_BYTE_ORDER;
+		gen_gc_flags |= GPIO_GENERIC_BIG_ENDIAN_BYTE_ORDER;
 		ctrl->bank_read = realtek_gpio_bank_read_swapped;
 		ctrl->bank_write = realtek_gpio_bank_write_swapped;
 		ctrl->line_imr_pos = realtek_gpio_line_imr_pos_swapped;
+	}
+
+	if (device_property_read_bool(dev, "little-endian")) {
+		gen_gc_flags = 0;
+		ctrl->bank_read = realtek_gpio_bank_read;
+		ctrl->bank_write = realtek_gpio_bank_write;
+	} else if (device_is_big_endian(dev)) {
+		gen_gc_flags = GPIO_GENERIC_BIG_ENDIAN_BYTE_ORDER;
+		ctrl->bank_read = realtek_gpio_bank_read_swapped;
+		ctrl->bank_write = realtek_gpio_bank_write_swapped;
 	}
 
 	config = (struct gpio_generic_chip_config) {
@@ -419,6 +434,8 @@ static int realtek_gpio_probe(struct platform_device *pdev)
 	ctrl->chip.gc.owner = THIS_MODULE;
 
 	irq = platform_get_irq_optional(pdev, 0);
+	if (irq < 0 && irq != -ENXIO)
+		return irq;
 	if (!(dev_flags & GPIO_INTERRUPTS_DISABLED) && irq > 0) {
 		girq = &ctrl->chip.gc.irq;
 		gpio_irq_chip_set_chip(girq, &realtek_gpio_irq_chip);

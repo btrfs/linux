@@ -159,7 +159,7 @@ static struct snd_soc_jack_gpio headset_button_gpio[] = {
 static int aries_spk_cfg(struct snd_soc_dapm_widget *w,
 			struct snd_kcontrol *kcontrol, int event)
 {
-	struct snd_soc_card *card = w->dapm->card;
+	struct snd_soc_card *card = snd_soc_dapm_to_card(w->dapm);
 	struct snd_soc_pcm_runtime *rtd;
 	struct snd_soc_component *component;
 	int ret = 0;
@@ -194,7 +194,7 @@ static int aries_spk_cfg(struct snd_soc_dapm_widget *w,
 static int aries_main_bias(struct snd_soc_dapm_widget *w,
 			  struct snd_kcontrol *kcontrol, int event)
 {
-	struct snd_soc_card *card = w->dapm->card;
+	struct snd_soc_card *card = snd_soc_dapm_to_card(w->dapm);
 	struct aries_wm8994_data *priv = snd_soc_card_get_drvdata(card);
 	int ret = 0;
 
@@ -213,7 +213,7 @@ static int aries_main_bias(struct snd_soc_dapm_widget *w,
 static int aries_headset_bias(struct snd_soc_dapm_widget *w,
 			  struct snd_kcontrol *kcontrol, int event)
 {
-	struct snd_soc_card *card = w->dapm->card;
+	struct snd_soc_card *card = snd_soc_dapm_to_card(w->dapm);
 	struct aries_wm8994_data *priv = snd_soc_card_get_drvdata(card);
 	int ret = 0;
 
@@ -374,17 +374,15 @@ static int aries_late_probe(struct snd_soc_card *card)
 	irq = gpiod_to_irq(priv->gpio_headset_detect);
 	if (irq < 0) {
 		dev_err(card->dev, "Failed to map headset detect gpio to irq");
-		return -EINVAL;
+		return irq;
 	}
 
 	ret = devm_request_threaded_irq(card->dev, irq, NULL,
 			headset_det_irq_thread,
 			IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING |
 			IRQF_ONESHOT, "headset_detect", priv);
-	if (ret) {
-		dev_err(card->dev, "Failed to request headset detect irq");
+	if (ret)
 		return ret;
-	}
 
 	headset_button_gpio[0].data = priv;
 	headset_button_gpio[0].desc = priv->gpio_headset_key;
@@ -623,10 +621,8 @@ static int aries_audio_probe(struct platform_device *pdev)
 	if (ret < 0) {
 		/* Backwards compatible way */
 		ret = snd_soc_of_parse_audio_routing(card, "samsung,audio-routing");
-		if (ret < 0) {
-			dev_err(dev, "Audio routing invalid/unspecified\n");
+		if (ret < 0)
 			return ret;
-		}
 	}
 
 	aries_dai[1].dai_fmt = priv->variant->modem_dai_fmt;
@@ -658,6 +654,7 @@ static int aries_audio_probe(struct platform_device *pdev)
 		goto out;
 	}
 
+	of_node_get(aries_dai[0].cpus->of_node);
 	aries_dai[0].platforms->of_node = aries_dai[0].cpus->of_node;
 
 	/* Set CPU of_node for BT DAI */
@@ -670,10 +667,8 @@ static int aries_audio_probe(struct platform_device *pdev)
 
 	ret = devm_snd_soc_register_component(dev, &aries_component,
 				aries_ext_dai, ARRAY_SIZE(aries_ext_dai));
-	if (ret < 0) {
-		dev_err(dev, "Failed to register component: %d\n", ret);
+	if (ret < 0)
 		goto out;
-	}
 
 	ret = devm_snd_soc_register_card(dev, card);
 	if (ret)
@@ -700,3 +695,4 @@ module_platform_driver(aries_audio_driver);
 MODULE_DESCRIPTION("ALSA SoC ARIES WM8994");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:aries-audio-wm8994");
+MODULE_IMPORT_NS("IIO_CONSUMER");

@@ -1106,6 +1106,17 @@ static int sun4i_i2s_dai_startup(struct snd_pcm_substream *sub, struct snd_soc_d
 					    i2s->variant->pcm_formats);
 }
 
+static const u64 sun4i_i2s_selectable_format =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF;
+
 static const struct snd_soc_dai_ops sun4i_i2s_dai_ops = {
 	.probe		= sun4i_i2s_dai_probe,
 	.startup	= sun4i_i2s_dai_startup,
@@ -1114,6 +1125,8 @@ static const struct snd_soc_dai_ops sun4i_i2s_dai_ops = {
 	.set_sysclk	= sun4i_i2s_set_sysclk,
 	.set_tdm_slot	= sun4i_i2s_set_tdm_slot,
 	.trigger	= sun4i_i2s_trigger,
+	.auto_selectable_formats	= &sun4i_i2s_selectable_format,
+	.num_auto_selectable_formats	= 1,
 };
 
 #define SUN4I_FORMATS_ALL (SNDRV_PCM_FMTBIT_S16_LE | \
@@ -1550,30 +1563,26 @@ static int sun4i_i2s_probe(struct platform_device *pdev)
 	}
 
 	i2s->bus_clk = devm_clk_get(&pdev->dev, "apb");
-	if (IS_ERR(i2s->bus_clk)) {
-		dev_err(&pdev->dev, "Can't get our bus clock\n");
-		return PTR_ERR(i2s->bus_clk);
-	}
+	if (IS_ERR(i2s->bus_clk))
+		return dev_err_probe(&pdev->dev, PTR_ERR(i2s->bus_clk),
+				     "Can't get our bus clock\n");
 
 	i2s->regmap = devm_regmap_init_mmio(&pdev->dev, regs,
 					    i2s->variant->sun4i_i2s_regmap);
-	if (IS_ERR(i2s->regmap)) {
-		dev_err(&pdev->dev, "Regmap initialisation failed\n");
-		return PTR_ERR(i2s->regmap);
-	}
+	if (IS_ERR(i2s->regmap))
+		return dev_err_probe(&pdev->dev, PTR_ERR(i2s->regmap),
+				     "Regmap initialisation failed\n");
 
 	i2s->mod_clk = devm_clk_get(&pdev->dev, "mod");
-	if (IS_ERR(i2s->mod_clk)) {
-		dev_err(&pdev->dev, "Can't get our mod clock\n");
-		return PTR_ERR(i2s->mod_clk);
-	}
+	if (IS_ERR(i2s->mod_clk))
+		return dev_err_probe(&pdev->dev, PTR_ERR(i2s->mod_clk),
+				     "Can't get our mod clock\n");
 
 	if (i2s->variant->has_reset) {
 		i2s->rst = devm_reset_control_get_exclusive(&pdev->dev, NULL);
-		if (IS_ERR(i2s->rst)) {
-			dev_err(&pdev->dev, "Failed to get reset control\n");
-			return PTR_ERR(i2s->rst);
-		}
+		if (IS_ERR(i2s->rst))
+			return dev_err_probe(&pdev->dev, PTR_ERR(i2s->rst),
+					     "Failed to get reset control\n");
 	}
 
 	if (!IS_ERR(i2s->rst)) {

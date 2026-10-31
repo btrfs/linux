@@ -26,9 +26,8 @@ struct kernfs_iattrs {
 	struct timespec64	ia_mtime;
 	struct timespec64	ia_ctime;
 
-	struct simple_xattrs	xattrs;
-	atomic_t		nr_user_xattrs;
-	atomic_t		user_xattr_size;
+	struct list_head	xattrs;
+	struct simple_xattr_limits xattr_limits;
 };
 
 struct kernfs_root {
@@ -55,6 +54,8 @@ struct kernfs_root {
 	rwlock_t		kernfs_rename_lock;
 
 	struct rcu_head		rcu;
+
+	struct simple_xattr_cache xa_cache;
 };
 
 /* +1 to avoid triggering overflow warning when negating it */
@@ -97,7 +98,7 @@ struct kernfs_super_info {
 	 * instance.  If multiple tags become necessary, make the following
 	 * an array and compare kernfs_node tag against every entry.
 	 */
-	const void		*ns;
+	const struct ns_common	*ns;
 
 	/* anchored at kernfs_root->supers, protected by kernfs_rwsem */
 	struct list_head	node;
@@ -116,7 +117,14 @@ static inline bool kernfs_rename_is_locked(const struct kernfs_node *kn)
 
 static inline const char *kernfs_rcu_name(const struct kernfs_node *kn)
 {
-	return rcu_dereference_check(kn->name, kernfs_root_is_locked(kn));
+	/*
+	 * Like kernfs_node::__parent below, the name is only replaced under
+	 * both kernfs_root::kernfs_rwsem and kernfs_root::kernfs_rename_lock,
+	 * so either one keeps it, and the string it points at, stable.
+	 */
+	return rcu_dereference_check(kn->name,
+				     kernfs_root_is_locked(kn) ||
+				     kernfs_rename_is_locked(kn));
 }
 
 static inline struct kernfs_node *kernfs_parent(const struct kernfs_node *kn)
@@ -146,20 +154,19 @@ static inline struct kernfs_node *kernfs_dentry_node(struct dentry *dentry)
 static inline void kernfs_set_rev(struct kernfs_node *parent,
 				  struct dentry *dentry)
 {
-	dentry->d_time = parent->dir.rev;
+	WRITE_ONCE(dentry->d_time, READ_ONCE(parent->dir.rev));
 }
 
 static inline void kernfs_inc_rev(struct kernfs_node *parent)
 {
-	parent->dir.rev++;
+	lockdep_assert_held_write(&parent->dir.root->kernfs_rwsem);
+	WRITE_ONCE(parent->dir.rev, parent->dir.rev + 1);
 }
 
 static inline bool kernfs_dir_changed(struct kernfs_node *parent,
 				      struct dentry *dentry)
 {
-	if (parent->dir.rev != dentry->d_time)
-		return true;
-	return false;
+	return READ_ONCE(parent->dir.rev) != READ_ONCE(dentry->d_time);
 }
 
 extern const struct super_operations kernfs_sops;
@@ -170,11 +177,11 @@ extern struct kmem_cache *kernfs_node_cache, *kernfs_iattrs_cache;
  */
 extern const struct xattr_handler * const kernfs_xattr_handlers[];
 void kernfs_evict_inode(struct inode *inode);
-int kernfs_iop_permission(struct mnt_idmap *idmap,
+int kernfs_iop_permission(const struct mnt_idmap *idmap,
 			  struct inode *inode, int mask);
-int kernfs_iop_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+int kernfs_iop_setattr(const struct mnt_idmap *idmap, struct dentry *dentry,
 		       struct iattr *iattr);
-int kernfs_iop_getattr(struct mnt_idmap *idmap,
+int kernfs_iop_getattr(const struct mnt_idmap *idmap,
 		       const struct path *path, struct kstat *stat,
 		       u32 request_mask, unsigned int query_flags);
 ssize_t kernfs_iop_listxattr(struct dentry *dentry, char *buf, size_t size);
@@ -212,4 +219,24 @@ extern const struct inode_operations kernfs_symlink_iops;
  * kernfs locks
  */
 extern struct kernfs_global_locks *kernfs_locks;
+
+/* Hashed mutex helpers - protect per-node data structures */
+static inline struct mutex *kernfs_node_lock_ptr(struct kernfs_node *kn)
+{
+	int idx = hash_ptr(kn, NR_KERNFS_LOCK_BITS);
+
+	return &kernfs_locks->node_mutex[idx];
+}
+
+static inline struct mutex *kernfs_node_lock(struct kernfs_node *kn)
+{
+	struct mutex *lock = kernfs_node_lock_ptr(kn);
+
+	mutex_lock(lock);
+	return lock;
+}
+
+DEFINE_CLASS(kernfs_node_lock, struct mutex *,
+	     mutex_unlock(_T), kernfs_node_lock(kn), struct kernfs_node *kn)
+
 #endif	/* __KERNFS_INTERNAL_H */

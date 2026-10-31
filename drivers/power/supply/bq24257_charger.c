@@ -18,6 +18,7 @@
 #include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
+#include <linux/devm-helpers.h>
 
 #include <linux/acpi.h>
 #include <linux/of.h>
@@ -294,6 +295,40 @@ static int bq24257_set_input_current_limit(struct bq24257_device *bq,
 						    BQ24257_IILIMIT_MAP_SIZE));
 }
 
+static int bq24257_get_sys_switch(struct bq24257_device *bq,
+				  union power_supply_propval *val)
+{
+	int ret;
+
+	ret = bq24257_field_read(bq, F_SYSOFF);
+	if (ret < 0)
+		return ret;
+
+	val->intval = ret ? POWER_SUPPLY_LOAD_SWITCH_OFF :
+			    POWER_SUPPLY_LOAD_SWITCH_ON;
+
+	return 0;
+}
+
+static int bq24257_set_sys_switch(struct bq24257_device *bq,
+				  const union power_supply_propval *val)
+{
+	u8 regval;
+
+	switch (val->intval) {
+	case POWER_SUPPLY_LOAD_SWITCH_ON:
+		regval = 0;
+		break;
+	case POWER_SUPPLY_LOAD_SWITCH_OFF:
+		regval = 1;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return bq24257_field_write(bq, F_SYSOFF, regval);
+}
+
 static int bq24257_power_supply_get_property(struct power_supply *psy,
 					     enum power_supply_property psp,
 					     union power_supply_propval *val)
@@ -380,7 +415,8 @@ static int bq24257_power_supply_get_property(struct power_supply *psy,
 
 	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
 		return bq24257_get_input_current_limit(bq, val);
-
+	case POWER_SUPPLY_PROP_LOAD_SWITCH:
+		return bq24257_get_sys_switch(bq, val);
 	default:
 		return -EINVAL;
 	}
@@ -397,6 +433,8 @@ static int bq24257_power_supply_set_property(struct power_supply *psy,
 	switch (prop) {
 	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
 		return bq24257_set_input_current_limit(bq, val);
+	case POWER_SUPPLY_PROP_LOAD_SWITCH:
+		return bq24257_set_sys_switch(bq, val);
 	default:
 		return -EINVAL;
 	}
@@ -407,6 +445,7 @@ static int bq24257_power_supply_property_is_writeable(struct power_supply *psy,
 {
 	switch (psp) {
 	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
+	case POWER_SUPPLY_PROP_LOAD_SWITCH:
 		return true;
 	default:
 		return false;
@@ -739,6 +778,7 @@ static enum power_supply_property bq24257_power_supply_props[] = {
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX,
 	POWER_SUPPLY_PROP_CHARGE_TERM_CURRENT,
 	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
+	POWER_SUPPLY_PROP_LOAD_SWITCH,
 };
 
 static char *bq24257_charger_supplied_to[] = {
@@ -748,6 +788,8 @@ static char *bq24257_charger_supplied_to[] = {
 static const struct power_supply_desc bq24257_power_supply_desc = {
 	.name = "bq24257-charger",
 	.type = POWER_SUPPLY_TYPE_USB,
+	.load_switches = BIT(POWER_SUPPLY_LOAD_SWITCH_ON) |
+			 BIT(POWER_SUPPLY_LOAD_SWITCH_OFF),
 	.properties = bq24257_power_supply_props,
 	.num_properties = ARRAY_SIZE(bq24257_power_supply_props),
 	.get_property = bq24257_power_supply_get_property,
@@ -1003,10 +1045,6 @@ static int bq24257_probe(struct i2c_client *client)
 	if (bq->info->chip == BQ24250)
 		bq->iilimit_autoset_enable = false;
 
-	if (bq->iilimit_autoset_enable)
-		INIT_DELAYED_WORK(&bq->iilimit_setup_work,
-				  bq24257_iilimit_setup_work);
-
 	/*
 	 * The BQ24250 doesn't have a dedicated Power Good (PG) pin so let's
 	 * not probe for it and instead use a SW-based approach to determine
@@ -1047,15 +1085,21 @@ static int bq24257_probe(struct i2c_client *client)
 		return ret;
 	}
 
+	if (bq->iilimit_autoset_enable) {
+		ret = devm_delayed_work_autocancel(dev,
+						   &bq->iilimit_setup_work,
+						   bq24257_iilimit_setup_work);
+		if (ret)
+			return ret;
+	}
+
 	ret = devm_request_threaded_irq(dev, client->irq, NULL,
 					bq24257_irq_handler_thread,
 					IRQF_TRIGGER_FALLING |
 					IRQF_TRIGGER_RISING | IRQF_ONESHOT,
 					bq->info->name, bq);
-	if (ret) {
-		dev_err(dev, "Failed to request IRQ #%d\n", client->irq);
+	if (ret)
 		return ret;
-	}
 
 	return 0;
 }
@@ -1063,9 +1107,6 @@ static int bq24257_probe(struct i2c_client *client)
 static void bq24257_remove(struct i2c_client *client)
 {
 	struct bq24257_device *bq = i2c_get_clientdata(client);
-
-	if (bq->iilimit_autoset_enable)
-		cancel_delayed_work_sync(&bq->iilimit_setup_work);
 
 	bq24257_field_write(bq, F_RESET, 1); /* reset to defaults */
 }
@@ -1133,10 +1174,10 @@ static const struct bq2425x_chip_info bq24257_info = {
 };
 
 static const struct i2c_device_id bq24257_i2c_ids[] = {
-	{ "bq24250", (kernel_ulong_t)&bq24250_info },
-	{ "bq24251", (kernel_ulong_t)&bq24251_info },
-	{ "bq24257", (kernel_ulong_t)&bq24257_info },
-	{}
+	{ .name = "bq24250", .driver_data = (kernel_ulong_t)&bq24250_info },
+	{ .name = "bq24251", .driver_data = (kernel_ulong_t)&bq24251_info },
+	{ .name = "bq24257", .driver_data = (kernel_ulong_t)&bq24257_info },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, bq24257_i2c_ids);
 

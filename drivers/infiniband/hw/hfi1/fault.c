@@ -209,14 +209,13 @@ int hfi1_fault_init_debugfs(struct hfi1_ibdev *ibd)
 	struct dentry *parent = ibd->hfi1_ibdev_dbg;
 	struct dentry *fault_dir;
 
-	ibd->fault = kzalloc(sizeof(*ibd->fault), GFP_KERNEL);
+	ibd->fault = kzalloc_obj(*ibd->fault);
 	if (!ibd->fault)
 		return -ENOMEM;
 
 	ibd->fault->attr.interval = 1;
 	ibd->fault->attr.require_end = ULONG_MAX;
 	ibd->fault->attr.stacktrace_depth = 32;
-	ibd->fault->attr.dname = NULL;
 	ibd->fault->attr.verbose = 0;
 	ibd->fault->enable = false;
 	ibd->fault->opcode = false;

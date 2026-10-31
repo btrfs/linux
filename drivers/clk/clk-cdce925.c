@@ -620,12 +620,17 @@ static int cdce925_probe(struct i2c_client *client)
 	struct device_node *node = client->dev.of_node;
 	const char *parent_name;
 	const char *pll_clk_name[MAX_NUMBER_OF_PLLS] = {NULL,};
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	u32 value;
 	int i;
 	int err;
 	struct device_node *np_output;
-	char child_name[6];
+	/*
+	 * The PLL number isn't a compile time constant so GCC can't infer
+	 * the number. Make the stack buffer large enough to hold any int
+	 * so Wformat-truncation does not complain.
+	 */
+	char child_name[15];
 	struct regmap_config config = {
 		.name = "configuration0",
 		.reg_bits = 8,
@@ -697,7 +702,7 @@ static int cdce925_probe(struct i2c_client *client)
 			dev_err(&client->dev, "Failed register PLL %d\n", i);
 			goto error;
 		}
-		sprintf(child_name, "PLL%d", i+1);
+		snprintf(child_name, sizeof(child_name), "PLL%d", i + 1);
 		np_output = of_get_child_by_name(node, child_name);
 		if (!np_output)
 			continue;
@@ -826,10 +831,10 @@ static const struct clk_cdce925_chip_info clk_cdce949_info = {
 };
 
 static const struct i2c_device_id cdce925_id[] = {
-	{ "cdce913", (kernel_ulong_t)&clk_cdce913_info },
-	{ "cdce925", (kernel_ulong_t)&clk_cdce925_info },
-	{ "cdce937", (kernel_ulong_t)&clk_cdce937_info },
-	{ "cdce949", (kernel_ulong_t)&clk_cdce949_info },
+	{ .name = "cdce913", .driver_data = (kernel_ulong_t)&clk_cdce913_info },
+	{ .name = "cdce925", .driver_data = (kernel_ulong_t)&clk_cdce925_info },
+	{ .name = "cdce937", .driver_data = (kernel_ulong_t)&clk_cdce937_info },
+	{ .name = "cdce949", .driver_data = (kernel_ulong_t)&clk_cdce949_info },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, cdce925_id);

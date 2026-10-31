@@ -156,8 +156,8 @@ static unsigned long get_voltage(struct devfreq *df, unsigned long freq)
 		opp = dev_pm_opp_find_freq_exact(dev, freq, false);
 
 	if (IS_ERR(opp)) {
-		dev_err_ratelimited(dev, "Failed to find OPP for frequency %lu: %ld\n",
-				    freq, PTR_ERR(opp));
+		dev_err_ratelimited(dev, "Failed to find OPP for frequency %lu: %pe\n",
+				    freq, opp);
 		return 0;
 	}
 
@@ -402,7 +402,7 @@ of_devfreq_cooling_register_power(struct device_node *np, struct devfreq *df,
 	int err, num_opps;
 
 
-	dfc = kzalloc(sizeof(*dfc), GFP_KERNEL);
+	dfc = kzalloc_obj(*dfc);
 	if (!dfc)
 		return ERR_PTR(-ENOMEM);
 
@@ -454,7 +454,7 @@ of_devfreq_cooling_register_power(struct device_node *np, struct devfreq *df,
 	if (!name)
 		goto remove_qos_req;
 
-	cdev = thermal_of_cooling_device_register(np, name, dfc, ops);
+	cdev = thermal_of_cooling_device_register(np, 0, name, dfc, ops);
 	kfree(name);
 
 	if (IS_ERR(cdev)) {
@@ -472,7 +472,8 @@ of_devfreq_cooling_register_power(struct device_node *np, struct devfreq *df,
 remove_qos_req:
 	dev_pm_qos_remove_request(&dfc->req_max_freq);
 free_table:
-	kfree(dfc->freq_table);
+	if (!dfc->em_pd)
+		kfree(dfc->freq_table);
 free_dfc:
 	kfree(dfc);
 

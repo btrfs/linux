@@ -23,6 +23,7 @@ properties:
       - microchip,ksz8864  # 4-port version of KSZ8895 family switch
       - microchip,ksz8873
       - microchip,ksz8895  # 5-port version of KSZ8895 family switch
+      - microchip,ksz8995xa
       - microchip,ksz9477
       - microchip,ksz9897
       - microchip,ksz9896
@@ -40,6 +41,7 @@ properties:
       - const: reset
         description:
           Used during reset for strap configuration.
+    minItems: 1
 
   reset-gpios:
     description:
@@ -153,6 +155,8 @@ allOf:
             const: microchip,ksz8463
     then:
       properties:
+        pinctrl-names:
+          minItems: 2
         straps-rxd-gpios:
           description:
             RXD0 and RXD1 pins, used to select SPI as bus interface.

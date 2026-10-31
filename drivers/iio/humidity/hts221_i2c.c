@@ -9,7 +9,6 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/i2c.h>
 #include <linux/slab.h>
 #include <linux/regmap.h>
@@ -27,17 +26,14 @@ static const struct regmap_config hts221_i2c_regmap_config = {
 
 static int hts221_i2c_probe(struct i2c_client *client)
 {
+	struct device *dev = &client->dev;
 	struct regmap *regmap;
 
 	regmap = devm_regmap_init_i2c(client, &hts221_i2c_regmap_config);
-	if (IS_ERR(regmap)) {
-		dev_err(&client->dev, "Failed to register i2c regmap %ld\n",
-			PTR_ERR(regmap));
-		return PTR_ERR(regmap);
-	}
+	if (IS_ERR(regmap))
+		return dev_err_probe(dev, PTR_ERR(regmap), "Failed to register i2c regmap\n");
 
-	return hts221_probe(&client->dev, client->irq,
-			    client->name, regmap);
+	return hts221_probe(dev, client->irq, client->name, regmap);
 }
 
 static const struct acpi_device_id hts221_acpi_match[] = {
@@ -53,7 +49,7 @@ static const struct of_device_id hts221_i2c_of_match[] = {
 MODULE_DEVICE_TABLE(of, hts221_i2c_of_match);
 
 static const struct i2c_device_id hts221_i2c_id_table[] = {
-	{ HTS221_DEV_NAME },
+	{ .name = HTS221_DEV_NAME },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, hts221_i2c_id_table);

@@ -14,8 +14,6 @@
  *
  * The only non-static object here is ext2_dir_inode_operations.
  *
- * TODO: get rid of kmap() use, add readahead.
- *
  * Copyright (C) 1992, 1993, 1994, 1995
  * Remy Card (card@masi.ibp.fr)
  * Laboratoire MASI - Institut Blaise Pascal
@@ -99,9 +97,9 @@ struct dentry *ext2_get_parent(struct dentry *child)
  * If the create succeeds, we fill in the inode information
  * with d_instantiate(). 
  */
-static int ext2_create (struct mnt_idmap * idmap,
+static int ext2_create (const struct mnt_idmap * idmap,
 			struct inode * dir, struct dentry * dentry,
-			umode_t mode, bool excl)
+			umode_t mode)
 {
 	struct inode *inode;
 	int err;
@@ -119,7 +117,7 @@ static int ext2_create (struct mnt_idmap * idmap,
 	return ext2_add_nondir(dentry, inode);
 }
 
-static int ext2_tmpfile(struct mnt_idmap *idmap, struct inode *dir,
+static int ext2_tmpfile(const struct mnt_idmap *idmap, struct inode *dir,
 			struct file *file, umode_t mode)
 {
 	struct inode *inode = ext2_new_inode(dir, mode, NULL);
@@ -133,7 +131,7 @@ static int ext2_tmpfile(struct mnt_idmap *idmap, struct inode *dir,
 	return finish_open_simple(file, 0);
 }
 
-static int ext2_mknod (struct mnt_idmap * idmap, struct inode * dir,
+static int ext2_mknod (const struct mnt_idmap * idmap, struct inode * dir,
 	struct dentry *dentry, umode_t mode, dev_t rdev)
 {
 	struct inode * inode;
@@ -154,7 +152,7 @@ static int ext2_mknod (struct mnt_idmap * idmap, struct inode * dir,
 	return err;
 }
 
-static int ext2_symlink (struct mnt_idmap * idmap, struct inode * dir,
+static int ext2_symlink (const struct mnt_idmap * idmap, struct inode * dir,
 	struct dentry * dentry, const char * symname)
 {
 	struct super_block * sb = dir->i_sb;
@@ -225,7 +223,7 @@ static int ext2_link (struct dentry * old_dentry, struct inode * dir,
 	return err;
 }
 
-static struct dentry *ext2_mkdir(struct mnt_idmap * idmap,
+static struct dentry *ext2_mkdir(const struct mnt_idmap * idmap,
 				 struct inode * dir, struct dentry * dentry,
 				 umode_t mode)
 {
@@ -238,7 +236,7 @@ static struct dentry *ext2_mkdir(struct mnt_idmap * idmap,
 
 	inode_inc_link_count(dir);
 
-	inode = ext2_new_inode(dir, S_IFDIR | mode, &dentry->d_name);
+	inode = ext2_new_inode(dir, mode, &dentry->d_name);
 	err = PTR_ERR(inode);
 	if (IS_ERR(inode))
 		goto out_dir;
@@ -293,7 +291,10 @@ static int ext2_unlink(struct inode *dir, struct dentry *dentry)
 		goto out;
 
 	inode_set_ctime_to_ts(inode, inode_get_ctime(dir));
-	inode_dec_link_count(inode);
+
+	if (inode->i_nlink)
+		inode_dec_link_count(inode);
+
 	err = 0;
 out:
 	return err;
@@ -315,7 +316,7 @@ static int ext2_rmdir (struct inode * dir, struct dentry *dentry)
 	return err;
 }
 
-static int ext2_rename (struct mnt_idmap * idmap,
+static int ext2_rename (const struct mnt_idmap * idmap,
 			struct inode * old_dir, struct dentry * old_dentry,
 			struct inode * new_dir, struct dentry * new_dentry,
 			unsigned int flags)

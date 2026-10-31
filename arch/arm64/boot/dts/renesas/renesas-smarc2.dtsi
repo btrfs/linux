@@ -13,6 +13,13 @@
  *     0 - SMARC SDIO signal is connected to uSD1
  *     1 - SMARC SDIO signal is connected to M.2 Key E connector
  *
+ * Please set the switch position SW_OPT_MUX.4 on the carrier board and the
+ * corresponding macro SW_SER0_PMOD on the board DTS:
+ *
+ * SW_SER0_PMOD:
+ *     0 - SER0 signals connect to M.2 Key-E, SER2 signals are unconnected
+ *     1 - SER0 signals connect to PMOD, SER2 signals connect to M.2 Key-E
+ *
  * Please set the switch position SW_GPIO_CAN_PMOD on the carrier board and the
  * corresponding macro SW_GPIO8_CAN0_STB/SW_GPIO8_CAN0_STB on the board DTS:
  *
@@ -37,22 +44,9 @@
 		stdout-path = "serial3:115200n8";
 	};
 
-	aliases {
-		i2c0 = &i2c0;
-		serial3 = &scif0;
-		mmc1 = &sdhi1;
-	};
-
-	can_transceiver0: can-phy0 {
-		compatible = "ti,tcan1042";
-		#phy-cells = <0>;
-		max-bitrate = <8000000>;
-		status = "disabled";
-	};
-
-	can_transceiver1: can-phy1 {
-		compatible = "ti,tcan1042";
-		#phy-cells = <0>;
+	can_transceiver: can-phy {
+		compatible = "ti,tcan1046", "nxp,tja1048";
+		#phy-cells = <1>;
 		max-bitrate = <8000000>;
 		status = "disabled";
 	};
@@ -90,9 +84,38 @@
 	status = "okay";
 };
 
+&ehci0 {
+	dr_mode = "otg";
+	status = "okay";
+};
+
+&ehci1 {
+	dr_mode = "host";
+	status = "okay";
+};
+
+&hsusb0 {
+	dr_mode = "otg";
+	status = "okay";
+};
+
 &i2c0 {
 	status = "okay";
 	clock-frequency = <400000>;
+};
+
+&ohci0 {
+	dr_mode = "otg";
+	status = "okay";
+};
+
+&ohci1 {
+	dr_mode = "host";
+	status = "okay";
+};
+
+&pcie {
+	status = "okay";
 };
 
 &scif0 {

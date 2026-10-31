@@ -152,6 +152,7 @@
 struct ak4619_priv {
 	struct regmap *regmap;
 	struct snd_pcm_hw_constraint_list constraint;
+	struct gpio_desc *pdn_gpio;
 	int deemph_en;
 	unsigned int playback_rate;
 	unsigned int sysclk;
@@ -257,7 +258,7 @@ static void ak4619_set_deemph(struct snd_soc_component *component)
 static int ak4619_put_deemph(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct ak4619_priv *ak4619 = snd_soc_component_get_drvdata(component);
 	int deemph_en = ucontrol->value.integer.value[0];
 	int ret = 0;
@@ -282,7 +283,7 @@ static int ak4619_put_deemph(struct snd_kcontrol *kcontrol,
 static int ak4619_get_deemph(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct ak4619_priv *ak4619 = snd_soc_component_get_drvdata(component);
 
 	ucontrol->value.integer.value[0] = ak4619->deemph_en;
@@ -778,17 +779,13 @@ static int ak4619_dai_startup(struct snd_pcm_substream *substream,
 }
 
 static u64 ak4619_dai_formats[] = {
-	/*
-	 * Select below from Sound Card, not here
-	 *	SND_SOC_DAIFMT_CBC_CFC
-	 *	SND_SOC_DAIFMT_CBP_CFP
-	 */
-
 	/* First Priority */
 	SND_SOC_POSSIBLE_DAIFMT_I2S	|
 	SND_SOC_POSSIBLE_DAIFMT_LEFT_J,
 
 	/* Second Priority */
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
 	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
 	SND_SOC_POSSIBLE_DAIFMT_DSP_B,
 };
@@ -803,7 +800,26 @@ static const struct snd_soc_dai_ops ak4619_dai_ops = {
 	.num_auto_selectable_formats	= ARRAY_SIZE(ak4619_dai_formats),
 };
 
+static int ak4619_suspend(struct snd_soc_component *component)
+{
+	struct regmap *regmap = dev_get_regmap(component->dev, NULL);
+
+	regcache_cache_only(regmap, true);
+	regcache_mark_dirty(regmap);
+	return 0;
+}
+
+static int ak4619_resume(struct snd_soc_component *component)
+{
+	struct regmap *regmap = dev_get_regmap(component->dev, NULL);
+
+	regcache_cache_only(regmap, false);
+	return regcache_sync(regmap);
+}
+
 static const struct snd_soc_component_driver soc_component_dev_ak4619 = {
+	.suspend		= ak4619_suspend,
+	.resume			= ak4619_resume,
 	.set_bias_level		= ak4619_set_bias_level,
 	.controls		= ak4619_snd_controls,
 	.num_controls		= ARRAY_SIZE(ak4619_snd_controls),
@@ -831,7 +847,7 @@ static const struct of_device_id ak4619_of_match[] = {
 MODULE_DEVICE_TABLE(of, ak4619_of_match);
 
 static const struct i2c_device_id ak4619_i2c_id[] = {
-	{ "ak4619", (kernel_ulong_t)&ak4619_regmap_cfg },
+	{ .name = "ak4619", .driver_data = (kernel_ulong_t)&ak4619_regmap_cfg },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ak4619_i2c_id);
@@ -879,10 +895,20 @@ static int ak4619_i2c_probe(struct i2c_client *i2c)
 
 	i2c_set_clientdata(i2c, ak4619);
 
+	ak4619->pdn_gpio = devm_gpiod_get_optional(dev, "powerdown",
+		GPIOD_OUT_LOW);
+	if (IS_ERR(ak4619->pdn_gpio))
+		return dev_err_probe(dev, PTR_ERR(ak4619->pdn_gpio),
+			"powerdown GPIO request failed\n");
+	if (ak4619->pdn_gpio)
+		msleep(10);
+
 	ak4619->regmap = devm_regmap_init_i2c(i2c, &ak4619_regmap_cfg);
 	if (IS_ERR(ak4619->regmap)) {
 		ret = PTR_ERR(ak4619->regmap);
 		dev_err(dev, "regmap_init() failed: %d\n", ret);
+		if (ak4619->pdn_gpio)
+			gpiod_set_value_cansleep(ak4619->pdn_gpio, 1);
 		return ret;
 	}
 
@@ -891,6 +917,8 @@ static int ak4619_i2c_probe(struct i2c_client *i2c)
 	if (ret < 0) {
 		dev_err(dev, "Failed to register ak4619 component: %d\n",
 			ret);
+		if (ak4619->pdn_gpio)
+			gpiod_set_value_cansleep(ak4619->pdn_gpio, 1);
 		return ret;
 	}
 

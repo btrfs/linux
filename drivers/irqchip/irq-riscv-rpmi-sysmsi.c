@@ -250,6 +250,7 @@ static int rpmi_sysmsi_probe(struct platform_device *pdev)
 		rc = riscv_acpi_get_gsi_info(fwnode, &priv->gsi_base, &id,
 					     &nr_irqs, NULL);
 		if (rc) {
+			mbox_free_channel(priv->chan);
 			dev_err(dev, "failed to find GSI mapping\n");
 			return rc;
 		}
@@ -312,8 +313,8 @@ static const struct of_device_id rpmi_sysmsi_match[] = {
 };
 
 static const struct acpi_device_id acpi_rpmi_sysmsi_match[] = {
-	{ "RSCV0006" },
-	{}
+	{ .id = "RSCV0006" },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, acpi_rpmi_sysmsi_match);
 

@@ -142,7 +142,7 @@ int smc_ism_get_vlan(struct smcd_dev *smcd, unsigned short vlanid)
 		return -EOPNOTSUPP;
 
 	/* create new vlan entry, in case we need it */
-	new_vlan = kzalloc(sizeof(*new_vlan), GFP_KERNEL);
+	new_vlan = kzalloc_obj(*new_vlan);
 	if (!new_vlan)
 		return -ENOMEM;
 	new_vlan->vlanid = vlanid;
@@ -467,18 +467,14 @@ static struct smcd_dev *smcd_alloc_dev(const char *name, int max_dmbs)
 {
 	struct smcd_dev *smcd;
 
-	smcd = kzalloc(sizeof(*smcd), GFP_KERNEL);
+	smcd = kzalloc_flex(*smcd, conn, max_dmbs);
 	if (!smcd)
 		return NULL;
-	smcd->conn = kcalloc(max_dmbs, sizeof(struct smc_connection *),
-			     GFP_KERNEL);
-	if (!smcd->conn)
-		goto free_smcd;
 
 	smcd->event_wq = alloc_ordered_workqueue("ism_evt_wq-%s)",
 						 WQ_MEM_RECLAIM, name);
 	if (!smcd->event_wq)
-		goto free_conn;
+		goto free_smcd;
 
 	spin_lock_init(&smcd->lock);
 	spin_lock_init(&smcd->lgr_lock);
@@ -487,8 +483,6 @@ static struct smcd_dev *smcd_alloc_dev(const char *name, int max_dmbs)
 	init_waitqueue_head(&smcd->lgrs_deleted);
 	return smcd;
 
-free_conn:
-	kfree(smcd->conn);
 free_smcd:
 	kfree(smcd);
 	return NULL;
@@ -558,7 +552,6 @@ static void smcd_unregister_dev(struct dibs_dev *dibs)
 	list_del_init(&smcd->list);
 	mutex_unlock(&smcd_dev_list.mutex);
 	destroy_workqueue(smcd->event_wq);
-	kfree(smcd->conn);
 	kfree(smcd);
 }
 
@@ -582,7 +575,7 @@ static void smcd_handle_event(struct dibs_dev *dibs,
 	if (smcd->going_away)
 		return;
 	/* copy event to event work queue, and let it be handled there */
-	wrk = kmalloc(sizeof(*wrk), GFP_ATOMIC);
+	wrk = kmalloc_obj(*wrk, GFP_ATOMIC);
 	if (!wrk)
 		return;
 	INIT_WORK(&wrk->work, smc_ism_event_work);

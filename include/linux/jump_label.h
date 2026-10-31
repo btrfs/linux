@@ -71,7 +71,7 @@
  * Additional babbling in: Documentation/staging/static-keys.rst
  */
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <linux/types.h>
 #include <linux/compiler.h>
@@ -87,13 +87,6 @@ struct static_key {
 	atomic_t enabled;
 #ifdef CONFIG_JUMP_LABEL
 /*
- * Note:
- *   To make anonymous unions work with old compilers, the static
- *   initialization of them requires brackets. This creates a dependency
- *   on the order of the struct with the initializers. If any fields
- *   are added, STATIC_KEY_INIT_TRUE and STATIC_KEY_INIT_FALSE may need
- *   to be modified.
- *
  * bit 0 => 1 if key is initially true
  *	    0 if initially false
  * bit 1 => 1 if points to struct static_key_mod
@@ -107,12 +100,12 @@ struct static_key {
 #endif	/* CONFIG_JUMP_LABEL */
 };
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 #ifdef CONFIG_JUMP_LABEL
 #include <asm/jump_label.h>
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 #ifdef CONFIG_HAVE_ARCH_JUMP_LABEL_RELATIVE
 
 struct jump_entry {
@@ -187,7 +180,7 @@ static inline int jump_entry_size(struct jump_entry *entry)
 #endif
 #endif
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 enum jump_label_type {
 	JUMP_LABEL_NOP = 0,
@@ -238,19 +231,12 @@ extern void static_key_enable_cpuslocked(struct static_key *key);
 extern void static_key_disable_cpuslocked(struct static_key *key);
 extern enum jump_label_type jump_label_init_type(struct jump_entry *entry);
 
-/*
- * We should be using ATOMIC_INIT() for initializing .enabled, but
- * the inclusion of atomic.h is problematic for inclusion of jump_label.h
- * in 'low-level' headers. Thus, we are initializing .enabled with a
- * raw value, but have added a BUILD_BUG_ON() to catch any issues in
- * jump_label_init() see: kernel/jump_label.c.
- */
 #define STATIC_KEY_INIT_TRUE					\
-	{ .enabled = { 1 },					\
-	  { .type = JUMP_TYPE_TRUE } }
+	{ .enabled = ATOMIC_INIT(1),				\
+	  .type = JUMP_TYPE_TRUE }
 #define STATIC_KEY_INIT_FALSE					\
-	{ .enabled = { 0 },					\
-	  { .type = JUMP_TYPE_FALSE } }
+	{ .enabled = ATOMIC_INIT(0),				\
+	  .type = JUMP_TYPE_FALSE }
 
 #else  /* !CONFIG_JUMP_LABEL */
 
@@ -538,6 +524,6 @@ extern bool ____wrong_branch_error(void);
 #define static_branch_enable_cpuslocked(x)	static_key_enable_cpuslocked(&(x)->key)
 #define static_branch_disable_cpuslocked(x)	static_key_disable_cpuslocked(&(x)->key)
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 #endif	/* _LINUX_JUMP_LABEL_H */

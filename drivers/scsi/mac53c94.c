@@ -66,7 +66,7 @@ static irqreturn_t do_mac53c94_interrupt(int, void *);
 static void cmd_done(struct fsc_state *, int result);
 static void set_dma_cmds(struct fsc_state *, struct scsi_cmnd *);
 
-static int mac53c94_queue_lck(struct scsi_cmnd *cmd)
+static enum scsi_qc_status mac53c94_queue_lck(struct scsi_cmnd *cmd)
 {
 	struct fsc_state *state;
 
@@ -107,7 +107,7 @@ static int mac53c94_host_reset(struct scsi_cmnd *cmd)
 	struct dbdma_regs __iomem *dma = state->dma;
 	unsigned long flags;
 
-	spin_lock_irqsave(cmd->device->host->host_lock, flags);
+	spin_lock_irqsave(&cmd->device->host->host_lock, flags);
 
 	writel((RUN|PAUSE|FLUSH|WAKE) << 16, &dma->control);
 	writeb(CMD_SCSI_RESET, &regs->command);	/* assert RST */
@@ -117,7 +117,7 @@ static int mac53c94_host_reset(struct scsi_cmnd *cmd)
 	mac53c94_init(state);
 	writeb(CMD_NOP, &regs->command);
 
-	spin_unlock_irqrestore(cmd->device->host->host_lock, flags);
+	spin_unlock_irqrestore(&cmd->device->host->host_lock, flags);
 	return SUCCESS;
 }
 
@@ -182,9 +182,9 @@ static irqreturn_t do_mac53c94_interrupt(int irq, void *dev_id)
 	unsigned long flags;
 	struct Scsi_Host *dev = ((struct fsc_state *) dev_id)->current_req->device->host;
 	
-	spin_lock_irqsave(dev->host_lock, flags);
+	spin_lock_irqsave(&dev->host_lock, flags);
 	mac53c94_interrupt(irq, dev_id);
-	spin_unlock_irqrestore(dev->host_lock, flags);
+	spin_unlock_irqrestore(&dev->host_lock, flags);
 	return IRQ_HANDLED;
 }
 
@@ -462,9 +462,8 @@ static int mac53c94_probe(struct macio_dev *mdev, const struct of_device_id *mat
        	 * +1 to allow for aligning.
 	 * XXX FIXME: Use DMA consistent routines
 	 */
-       	dma_cmd_space = kmalloc_array(host->sg_tablesize + 2,
-					     sizeof(struct dbdma_cmd),
-					     GFP_KERNEL);
+       	dma_cmd_space = kmalloc_objs(struct dbdma_cmd,
+					    host->sg_tablesize + 2);
 	if (!dma_cmd_space) {
 		printk(KERN_ERR "mac53c94: couldn't allocate dma "
 		       "command space for %pOF\n", node);

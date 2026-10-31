@@ -36,6 +36,9 @@ static umode_t __first_visible(const struct attribute_group *grp, struct kobject
 	if (grp->attrs && grp->attrs[0] && grp->is_visible)
 		return grp->is_visible(kobj, grp->attrs[0], 0);
 
+	if (grp->attrs && grp->attrs[0] && grp->is_visible_const)
+		return grp->is_visible_const(kobj, grp->attrs[0], 0);
+
 	if (grp->bin_attrs && grp->bin_attrs[0] && grp->is_bin_visible)
 		return grp->is_bin_visible(kobj, grp->bin_attrs[0], 0);
 
@@ -61,8 +64,11 @@ static int create_files(struct kernfs_node *parent, struct kobject *kobj,
 			 */
 			if (update)
 				kernfs_remove_by_name(parent, (*attr)->name);
-			if (grp->is_visible) {
-				mode = grp->is_visible(kobj, *attr, i);
+			if (grp->is_visible || grp->is_visible_const) {
+				if (grp->is_visible)
+					mode = grp->is_visible(kobj, *attr, i);
+				else
+					mode = grp->is_visible_const(kobj, *attr, i);
 				mode &= ~SYSFS_GROUP_INVISIBLE;
 				if (!mode)
 					continue;
@@ -182,7 +188,7 @@ static int internal_create_group(struct kobject *kobj, int update,
 	kernfs_get(kn);
 	error = create_files(kn, kobj, uid, gid, grp, update);
 	if (error) {
-		if (grp->name)
+		if (grp->name && !update)
 			kernfs_remove(kn);
 	}
 	kernfs_put(kn);
@@ -211,7 +217,7 @@ int sysfs_create_group(struct kobject *kobj,
 EXPORT_SYMBOL_GPL(sysfs_create_group);
 
 static int internal_create_groups(struct kobject *kobj, int update,
-				  const struct attribute_group **groups)
+				  const struct attribute_group *const *groups)
 {
 	int error = 0;
 	int i;
@@ -244,7 +250,7 @@ static int internal_create_groups(struct kobject *kobj, int update,
  * Returns 0 on success or error code from sysfs_create_group on failure.
  */
 int sysfs_create_groups(struct kobject *kobj,
-			const struct attribute_group **groups)
+			const struct attribute_group *const *groups)
 {
 	return internal_create_groups(kobj, 0, groups);
 }
@@ -262,7 +268,7 @@ EXPORT_SYMBOL_GPL(sysfs_create_groups);
  * Returns 0 on success or error code from sysfs_update_group on failure.
  */
 int sysfs_update_groups(struct kobject *kobj,
-			const struct attribute_group **groups)
+			const struct attribute_group *const *groups)
 {
 	return internal_create_groups(kobj, 1, groups);
 }
@@ -336,7 +342,7 @@ EXPORT_SYMBOL_GPL(sysfs_remove_group);
  * If groups is not NULL, remove the specified groups from the kobject.
  */
 void sysfs_remove_groups(struct kobject *kobj,
-			 const struct attribute_group **groups)
+			 const struct attribute_group *const *groups)
 {
 	int i;
 
@@ -511,8 +517,11 @@ static int sysfs_group_attrs_change_owner(struct kobject *kobj,
 		struct attribute *const *attr;
 
 		for (i = 0, attr = grp->attrs; *attr; i++, attr++) {
-			if (grp->is_visible) {
-				mode = grp->is_visible(kobj, *attr, i);
+			if (grp->is_visible || grp->is_visible_const) {
+				if (grp->is_visible)
+					mode = grp->is_visible(kobj, *attr, i);
+				else
+					mode = grp->is_visible_const(kobj, *attr, i);
 				if (mode & SYSFS_GROUP_INVISIBLE)
 					break;
 				if (!mode)
@@ -607,7 +616,7 @@ EXPORT_SYMBOL_GPL(sysfs_group_change_owner);
  * Returns 0 on success or error code on failure.
  */
 int sysfs_groups_change_owner(struct kobject *kobj,
-			      const struct attribute_group **groups,
+			      const struct attribute_group *const *groups,
 			      kuid_t kuid, kgid_t kgid)
 {
 	int error = 0, i;

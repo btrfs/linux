@@ -27,13 +27,14 @@
 #include <linux/vmalloc.h>
 
 #include "../slab.h"
+#include "../vmalloc.h"
 #include "kmsan.h"
 
 bool kmsan_enabled __read_mostly;
 
 /*
  * Per-CPU KMSAN context to be used in interrupts, where current->kmsan is
- * unavaliable.
+ * unavailable.
  */
 DEFINE_PER_CPU(struct kmsan_ctx, kmsan_percpu_ctx);
 
@@ -240,11 +241,8 @@ struct page *kmsan_vmalloc_to_page_or_null(void *vaddr)
 {
 	struct page *page;
 
-	if (!kmsan_internal_is_vmalloc_addr(vaddr) &&
-	    !kmsan_internal_is_module_addr(vaddr))
-		return NULL;
-	page = vmalloc_to_page(vaddr);
-	if (pfn_valid(page_to_pfn(page)))
+	page = __vmalloc_to_page(vaddr);
+	if (page && pfn_valid(page_to_pfn(page)))
 		return page;
 	else
 		return NULL;

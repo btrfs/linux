@@ -306,7 +306,7 @@ static irqreturn_t aha1542_interrupt(int irq, void *dev_id)
 #endif
 	number_serviced = 0;
 
-	spin_lock_irqsave(sh->host_lock, flags);
+	spin_lock_irqsave(&sh->host_lock, flags);
 	while (1) {
 		flag = inb(INTRFLAGS(sh->io_port));
 
@@ -339,7 +339,7 @@ static irqreturn_t aha1542_interrupt(int irq, void *dev_id)
 		} while (mbi != aha1542->aha1542_last_mbi_used);
 
 		if (mb[mbi].status == 0) {
-			spin_unlock_irqrestore(sh->host_lock, flags);
+			spin_unlock_irqrestore(&sh->host_lock, flags);
 			/* Hmm, no mail.  Must have read it the last time around */
 			if (!number_serviced)
 				shost_printk(KERN_WARNING, sh, "interrupt received, but no mail.\n");
@@ -367,7 +367,7 @@ static irqreturn_t aha1542_interrupt(int irq, void *dev_id)
 		tmp_cmd = aha1542->int_cmds[mbo];
 
 		if (!tmp_cmd) {
-			spin_unlock_irqrestore(sh->host_lock, flags);
+			spin_unlock_irqrestore(&sh->host_lock, flags);
 			shost_printk(KERN_WARNING, sh, "Unexpected interrupt\n");
 			shost_printk(KERN_WARNING, sh, "tarstat=%x, hastat=%x idlun=%x ccb#=%d\n", ccb[mbo].tarstat,
 			       ccb[mbo].hastat, ccb[mbo].idlun, mbo);
@@ -411,7 +411,8 @@ static irqreturn_t aha1542_interrupt(int irq, void *dev_id)
 	}
 }
 
-static int aha1542_queuecommand(struct Scsi_Host *sh, struct scsi_cmnd *cmd)
+static enum scsi_qc_status aha1542_queuecommand(struct Scsi_Host *sh,
+						struct scsi_cmnd *cmd)
 {
 	struct aha1542_cmd *acmd = scsi_cmd_priv(cmd);
 	struct aha1542_hostdata *aha1542 = shost_priv(sh);
@@ -460,7 +461,7 @@ static int aha1542_queuecommand(struct Scsi_Host *sh, struct scsi_cmnd *cmd)
 	 * is how the host adapter will scan for them
 	 */
 
-	spin_lock_irqsave(sh->host_lock, flags);
+	spin_lock_irqsave(&sh->host_lock, flags);
 	mbo = aha1542->aha1542_last_mbo_used + 1;
 	if (mbo >= AHA1542_MAILBOXES)
 		mbo = 0;
@@ -517,7 +518,7 @@ static int aha1542_queuecommand(struct Scsi_Host *sh, struct scsi_cmnd *cmd)
 #endif
 	mb[mbo].status = 1;
 	aha1542_outb(cmd->device->host->io_port, CMD_START_SCSI);
-	spin_unlock_irqrestore(sh->host_lock, flags);
+	spin_unlock_irqrestore(&sh->host_lock, flags);
 
 	return 0;
 }
@@ -872,7 +873,7 @@ static int aha1542_dev_reset(struct scsi_cmnd *cmd)
 	int mbo;
 	struct ccb *ccb = aha1542->ccb;
 
-	spin_lock_irqsave(sh->host_lock, flags);
+	spin_lock_irqsave(&sh->host_lock, flags);
 	mbo = aha1542->aha1542_last_mbo_used + 1;
 	if (mbo >= AHA1542_MAILBOXES)
 		mbo = 0;
@@ -912,7 +913,7 @@ static int aha1542_dev_reset(struct scsi_cmnd *cmd)
 	 * target
 	 */
 	aha1542_outb(sh->io_port, CMD_START_SCSI);
-	spin_unlock_irqrestore(sh->host_lock, flags);
+	spin_unlock_irqrestore(&sh->host_lock, flags);
 
 	scmd_printk(KERN_WARNING, cmd,
 		"Trying device reset for target\n");
@@ -927,7 +928,7 @@ static int aha1542_reset(struct scsi_cmnd *cmd, u8 reset_cmd)
 	unsigned long flags;
 	int i;
 
-	spin_lock_irqsave(sh->host_lock, flags);
+	spin_lock_irqsave(&sh->host_lock, flags);
 	/*
 	 * This does a scsi reset for all devices on the bus.
 	 * In principle, we could also reset the 1542 - should
@@ -938,7 +939,7 @@ static int aha1542_reset(struct scsi_cmnd *cmd, u8 reset_cmd)
 
 	if (!wait_mask(STATUS(cmd->device->host->io_port),
 	     STATMASK, IDLE, STST | DIAGF | INVDCMD | DF | CDF, 0)) {
-		spin_unlock_irqrestore(sh->host_lock, flags);
+		spin_unlock_irqrestore(&sh->host_lock, flags);
 		return FAILED;
 	}
 
@@ -977,7 +978,7 @@ static int aha1542_reset(struct scsi_cmnd *cmd, u8 reset_cmd)
 		}
 	}
 
-	spin_unlock_irqrestore(sh->host_lock, flags);
+	spin_unlock_irqrestore(&sh->host_lock, flags);
 	return SUCCESS;
 }
 
@@ -1082,7 +1083,7 @@ static int isa_registered;
 #ifdef CONFIG_PNP
 static const struct pnp_device_id aha1542_pnp_ids[] = {
 	{ .id = "ADP1542" },
-	{ .id = "" }
+	{ }
 };
 MODULE_DEVICE_TABLE(pnp, aha1542_pnp_ids);
 

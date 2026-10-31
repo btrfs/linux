@@ -53,8 +53,8 @@ static void test_insert_opened(struct test_sockmap_listen *skel __always_unused,
 			       int family, int sotype, int mapfd)
 {
 	u32 key = 0;
-	u64 value;
 	int err, s;
+	u64 value;
 
 	s = xsocket(family, sotype, 0);
 	if (s == -1)
@@ -63,11 +63,8 @@ static void test_insert_opened(struct test_sockmap_listen *skel __always_unused,
 	errno = 0;
 	value = s;
 	err = bpf_map_update_elem(mapfd, &key, &value, BPF_NOEXIST);
-	if (sotype == SOCK_STREAM) {
-		if (!err || errno != EOPNOTSUPP)
-			FAIL_ERRNO("map_update: expected EOPNOTSUPP");
-	} else if (err)
-		FAIL_ERRNO("map_update: expected success");
+	ASSERT_ERR(err, "map_update");
+	ASSERT_EQ(errno, EOPNOTSUPP, "errno");
 	xclose(s);
 }
 
@@ -77,8 +74,8 @@ static void test_insert_bound(struct test_sockmap_listen *skel __always_unused,
 	struct sockaddr_storage addr;
 	socklen_t len = 0;
 	u32 key = 0;
-	u64 value;
 	int err, s;
+	u64 value;
 
 	init_addr_loopback(family, &addr, &len);
 
@@ -93,8 +90,12 @@ static void test_insert_bound(struct test_sockmap_listen *skel __always_unused,
 	errno = 0;
 	value = s;
 	err = bpf_map_update_elem(mapfd, &key, &value, BPF_NOEXIST);
-	if (!err || errno != EOPNOTSUPP)
-		FAIL_ERRNO("map_update: expected EOPNOTSUPP");
+	if (sotype == SOCK_STREAM) {
+		ASSERT_ERR(err, "map_update");
+		ASSERT_EQ(errno, EOPNOTSUPP, "errno");
+	} else {
+		ASSERT_OK(err, "map_update");
+	}
 close:
 	xclose(s);
 }
@@ -899,7 +900,7 @@ static void test_msg_redir_to_listening_with_link(struct test_sockmap_listen *sk
 
 	redir_to_listening(family, sotype, sock_map, verdict_map, REDIR_EGRESS);
 
-	bpf_link__detach(link);
+	bpf_link__destroy(link);
 }
 
 static void redir_partial(int family, int sotype, int sock_map, int parser_map)
@@ -1231,22 +1232,6 @@ static void test_ops_cleanup(const struct bpf_map *map)
 	}
 }
 
-static const char *family_str(sa_family_t family)
-{
-	switch (family) {
-	case AF_INET:
-		return "IPv4";
-	case AF_INET6:
-		return "IPv6";
-	case AF_UNIX:
-		return "Unix";
-	case AF_VSOCK:
-		return "VSOCK";
-	default:
-		return "unknown";
-	}
-}
-
 static const char *map_type_str(const struct bpf_map *map)
 {
 	int type;
@@ -1289,7 +1274,7 @@ static void test_ops(struct test_sockmap_listen *skel, struct bpf_map *map,
 		/* insert */
 		TEST(test_insert_invalid),
 		TEST(test_insert_opened),
-		TEST(test_insert_bound, SOCK_STREAM),
+		TEST(test_insert_bound),
 		TEST(test_insert),
 		/* delete */
 		TEST(test_delete_after_insert),
@@ -1314,7 +1299,7 @@ static void test_ops(struct test_sockmap_listen *skel, struct bpf_map *map,
 	char s[MAX_TEST_NAME];
 	int map_fd;
 
-	family_name = family_str(family);
+	family_name = inet_family_str(family);
 	map_name = map_type_str(map);
 	sotype_name = sotype_str(sotype);
 	map_fd = bpf_map__fd(map);
@@ -1354,7 +1339,7 @@ static void test_redir(struct test_sockmap_listen *skel, struct bpf_map *map,
 	const struct redir_test *t;
 	char s[MAX_TEST_NAME];
 
-	family_name = family_str(family);
+	family_name = inet_family_str(family);
 	map_name = map_type_str(map);
 
 	for (t = tests; t < tests + ARRAY_SIZE(tests); t++) {
@@ -1386,7 +1371,7 @@ static void test_reuseport(struct test_sockmap_listen *skel,
 	const struct reuseport_test *t;
 	char s[MAX_TEST_NAME];
 
-	family_name = family_str(family);
+	family_name = inet_family_str(family);
 	map_name = map_type_str(map);
 	sotype_name = sotype_str(sotype);
 

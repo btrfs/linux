@@ -272,7 +272,7 @@ static int tas5086_set_deemph(struct snd_soc_component *component)
 static int tas5086_get_deemph(struct snd_kcontrol *kcontrol,
 			      struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct tas5086_private *priv = snd_soc_component_get_drvdata(component);
 
 	ucontrol->value.integer.value[0] = priv->deemph;
@@ -283,7 +283,7 @@ static int tas5086_get_deemph(struct snd_kcontrol *kcontrol,
 static int tas5086_put_deemph(struct snd_kcontrol *kcontrol,
 			      struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct tas5086_private *priv = snd_soc_component_get_drvdata(component);
 
 	priv->deemph = ucontrol->value.integer.value[0];
@@ -743,11 +743,18 @@ static const struct snd_soc_dapm_route tas5086_dapm_routes[] = {
 
 };
 
+static const u64 tas5086_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J;
+
 static const struct snd_soc_dai_ops tas5086_dai_ops = {
 	.hw_params	= tas5086_hw_params,
 	.set_sysclk	= tas5086_set_dai_sysclk,
 	.set_fmt	= tas5086_set_dai_fmt,
 	.mute_stream	= tas5086_mute_stream,
+	.auto_selectable_formats	= &tas5086_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 static struct snd_soc_dai_driver tas5086_dai = {
@@ -891,7 +898,7 @@ static const struct snd_soc_component_driver soc_component_dev_tas5086 = {
 };
 
 static const struct i2c_device_id tas5086_i2c_id[] = {
-	{ "tas5086" },
+	{ .name = "tas5086" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tas5086_i2c_id);
@@ -975,17 +982,13 @@ static int tas5086_i2c_probe(struct i2c_client *i2c)
 	return ret;
 }
 
-static void tas5086_i2c_remove(struct i2c_client *i2c)
-{}
-
 static struct i2c_driver tas5086_i2c_driver = {
 	.driver = {
-		.name	= "tas5086",
+		.name = "tas5086",
 		.of_match_table = of_match_ptr(tas5086_dt_ids),
 	},
-	.id_table	= tas5086_i2c_id,
-	.probe		= tas5086_i2c_probe,
-	.remove		= tas5086_i2c_remove,
+	.id_table = tas5086_i2c_id,
+	.probe = tas5086_i2c_probe,
 };
 
 module_i2c_driver(tas5086_i2c_driver);

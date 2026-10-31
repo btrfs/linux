@@ -206,18 +206,16 @@ static void __print_timestamp(const char *name, struct timespec *cur,
 	fprintf(stderr, "\n");
 }
 
-static void print_timestamp_usr(void)
+static void record_timestamp_usr(void)
 {
 	if (clock_gettime(CLOCK_REALTIME, &ts_usr))
 		error(1, errno, "clock_gettime");
-
-	__print_timestamp("  USR", &ts_usr, 0, 0);
 }
 
 static void print_timestamp(struct scm_timestamping *tss, int tstype,
 			    int tskey, int payload_len)
 {
-	const char *tsname;
+	const char *tsname = NULL;
 
 	validate_key(tskey, tstype);
 
@@ -420,19 +418,25 @@ static uint16_t get_ip_csum(const uint16_t *start, int num_words,
 	return ~sum;
 }
 
-static uint16_t get_udp_csum(const struct udphdr *udph, int alen)
+static uint16_t get_udp_csum(const struct udphdr *udph, bool is_ipv4)
 {
-	unsigned long pseudo_sum, csum_len;
-	const void *csum_start = udph;
+	const void *addr = is_ipv4 ? (void *)&daddr.sin_addr : &daddr6.sin6_addr;
+	int alen = is_ipv4 ? sizeof(struct in_addr) : sizeof(struct in6_addr);
+	uint16_t addr16[sizeof(struct in6_addr) / sizeof(uint16_t)];
+	unsigned long pseudo_sum;
+	int i;
 
 	pseudo_sum = htons(IPPROTO_UDP);
 	pseudo_sum += udph->len;
 
-	/* checksum ip(v6) addresses + udp header + payload */
-	csum_start -= alen * 2;
-	csum_len = ntohs(udph->len) + alen * 2;
+	/* pseudo-header source and destination: both are daddr */
+	memcpy(addr16, addr, alen);
+	for (i = 0; i < alen / 2; i++)
+		pseudo_sum += 2 * addr16[i];
 
-	return get_ip_csum(csum_start, csum_len >> 1, pseudo_sum);
+	/* checksum udp header + payload */
+	return get_ip_csum((const uint16_t *)udph, ntohs(udph->len) >> 1,
+			   pseudo_sum);
 }
 
 static int fill_header_ipv4(void *p)
@@ -481,8 +485,7 @@ static void fill_header_udp(void *p, bool is_ipv4)
 	udph->len    = ntohs(sizeof(*udph) + cfg_payload_len);
 	udph->check  = 0;
 
-	udph->check  = get_udp_csum(udph, is_ipv4 ? sizeof(struct in_addr) :
-						    sizeof(struct in6_addr));
+	udph->check  = get_udp_csum(udph, is_ipv4);
 }
 
 static void do_test(int family, unsigned int report_opt)
@@ -599,8 +602,6 @@ static void do_test(int family, unsigned int report_opt)
 			fill_header_udp(buf + off, family == PF_INET);
 		}
 
-		print_timestamp_usr();
-
 		iov.iov_base = buf;
 		iov.iov_len = total_len;
 
@@ -655,9 +656,13 @@ static void do_test(int family, unsigned int report_opt)
 
 		}
 
+		record_timestamp_usr();
+
 		val = sendmsg(fd, &msg, 0);
 		if (val != total_len)
 			error(1, errno, "send");
+
+		__print_timestamp("  USR", &ts_usr, 0, 0);
 
 		/* wait for all errors to be queued, else ACKs arrive OOO */
 		if (cfg_sleep_usec)

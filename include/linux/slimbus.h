@@ -8,7 +8,7 @@
 #include <linux/device.h>
 #include <linux/module.h>
 #include <linux/completion.h>
-#include <linux/mod_devicetable.h>
+#include <linux/device-id/slim.h>
 
 extern const struct bus_type slimbus_bus;
 
@@ -98,7 +98,7 @@ struct slim_driver {
  * @start_offset: Specifies starting offset in information/value element map
  * @rbuf: buffer to read the values
  * @wbuf: buffer to write
- * @num_bytes: upto 16. This ensures that the message will fit the slicesize
+ * @num_bytes: up to 16. This ensures that the message will fit the slicesize
  *		per SLIMbus spec
  * @comp: completion for asynchronous operations, valid only if TID is
  *	  required for transaction, like REQUEST operations.

@@ -63,9 +63,9 @@ static void dmub_dcn35_get_fb_base_offset(struct dmub_srv *dmub,
 	uint32_t tmp;
 
 	/*
-	if (dmub->fb_base || dmub->fb_offset) {
-		*fb_base = dmub->fb_base;
-		*fb_offset = dmub->fb_offset;
+	if (dmub->soc_fb_info.fb_base || dmub->soc_fb_info.fb_offset) {
+		*fb_base = dmub->soc_fb_info.fb_base;
+		*fb_offset = dmub->soc_fb_info.fb_offset;
 		return;
 	}
 	*/
@@ -222,6 +222,7 @@ void dmub_dcn35_setup_windows(struct dmub_srv *dmub,
 			      const struct dmub_window *cw6,
 			      const struct dmub_window *region6)
 {
+	(void)cw2;
 	union dmub_addr offset;
 
 	offset = cw3->offset;
@@ -402,7 +403,7 @@ void dmub_dcn35_enable_dmub_boot_options(struct dmub_srv *dmub, const struct dmu
 	union dmub_fw_boot_options boot_options = {0};
 
 	if (!dmub->dpia_supported) {
-		dmub->dpia_supported = dmub_dcn35_get_fw_boot_option(dmub).bits.enable_dpia;
+		dmub->dpia_supported = dmub_dcn35_get_fw_boot_option(dmub).bits.enable_dpia != 0;
 	}
 
 	boot_options.bits.z10_disable = params->disable_z10;
@@ -418,6 +419,10 @@ void dmub_dcn35_enable_dmub_boot_options(struct dmub_srv *dmub, const struct dmu
 	boot_options.bits.disable_sldo_opt = params->disable_sldo_opt;
 	boot_options.bits.enable_non_transparent_setconfig = params->enable_non_transparent_setconfig;
 	boot_options.bits.lower_hbr3_phy_ssc = params->lower_hbr3_phy_ssc;
+	boot_options.bits.disable_dpia_bw_allocation = params->disable_dpia_bw_allocation;
+	boot_options.bits.bootcrc_en_at_preos = dmub_dcn35_get_fw_boot_option(dmub).bits.bootcrc_en_at_preos;
+	boot_options.bits.bootcrc_en_at_S0i3 = dmub_dcn35_get_fw_boot_option(dmub).bits.bootcrc_en_at_S0i3;
+	boot_options.bits.bootcrc_boot_mode = dmub_dcn35_get_fw_boot_option(dmub).bits.bootcrc_boot_mode;
 
 	REG_WRITE(DMCUB_SCRATCH14, boot_options.all);
 }
@@ -453,73 +458,113 @@ uint32_t dmub_dcn35_get_current_time(struct dmub_srv *dmub)
 	return REG_READ(DMCUB_TIMER_CURRENT);
 }
 
-void dmub_dcn35_get_diagnostic_data(struct dmub_srv *dmub)
+void dmub_dcn35_get_diagnostic_data(struct dmub_srv *dmub, struct dmub_hw_diagnostic_data *hw_data)
 {
 	uint32_t is_dmub_enabled, is_soft_reset, is_pwait;
 	uint32_t is_traceport_enabled, is_cw6_enabled;
-	struct dmub_timeout_info timeout = {0};
 
-	if (!dmub)
+	if (!dmub || !hw_data)
 		return;
 
-	/* timeout data filled externally, cache before resetting memory */
-	timeout = dmub->debug.timeout_info;
-	memset(&dmub->debug, 0, sizeof(dmub->debug));
-	dmub->debug.timeout_info = timeout;
+	memset(hw_data, 0, sizeof(*hw_data));
 
-	dmub->debug.dmcub_version = dmub->fw_version;
+	hw_data->dmcub_version = dmub->fw_version;
 
-	dmub->debug.scratch[0] = REG_READ(DMCUB_SCRATCH0);
-	dmub->debug.scratch[1] = REG_READ(DMCUB_SCRATCH1);
-	dmub->debug.scratch[2] = REG_READ(DMCUB_SCRATCH2);
-	dmub->debug.scratch[3] = REG_READ(DMCUB_SCRATCH3);
-	dmub->debug.scratch[4] = REG_READ(DMCUB_SCRATCH4);
-	dmub->debug.scratch[5] = REG_READ(DMCUB_SCRATCH5);
-	dmub->debug.scratch[6] = REG_READ(DMCUB_SCRATCH6);
-	dmub->debug.scratch[7] = REG_READ(DMCUB_SCRATCH7);
-	dmub->debug.scratch[8] = REG_READ(DMCUB_SCRATCH8);
-	dmub->debug.scratch[9] = REG_READ(DMCUB_SCRATCH9);
-	dmub->debug.scratch[10] = REG_READ(DMCUB_SCRATCH10);
-	dmub->debug.scratch[11] = REG_READ(DMCUB_SCRATCH11);
-	dmub->debug.scratch[12] = REG_READ(DMCUB_SCRATCH12);
-	dmub->debug.scratch[13] = REG_READ(DMCUB_SCRATCH13);
-	dmub->debug.scratch[14] = REG_READ(DMCUB_SCRATCH14);
-	dmub->debug.scratch[15] = REG_READ(DMCUB_SCRATCH15);
-	dmub->debug.scratch[16] = REG_READ(DMCUB_SCRATCH16);
+	hw_data->scratch[0] = REG_READ(DMCUB_SCRATCH0);
+	hw_data->scratch[1] = REG_READ(DMCUB_SCRATCH1);
+	hw_data->scratch[2] = REG_READ(DMCUB_SCRATCH2);
+	hw_data->scratch[3] = REG_READ(DMCUB_SCRATCH3);
+	hw_data->scratch[4] = REG_READ(DMCUB_SCRATCH4);
+	hw_data->scratch[5] = REG_READ(DMCUB_SCRATCH5);
+	hw_data->scratch[6] = REG_READ(DMCUB_SCRATCH6);
+	hw_data->scratch[7] = REG_READ(DMCUB_SCRATCH7);
+	hw_data->scratch[8] = REG_READ(DMCUB_SCRATCH8);
+	hw_data->scratch[9] = REG_READ(DMCUB_SCRATCH9);
+	hw_data->scratch[10] = REG_READ(DMCUB_SCRATCH10);
+	hw_data->scratch[11] = REG_READ(DMCUB_SCRATCH11);
+	hw_data->scratch[12] = REG_READ(DMCUB_SCRATCH12);
+	hw_data->scratch[13] = REG_READ(DMCUB_SCRATCH13);
+	hw_data->scratch[14] = REG_READ(DMCUB_SCRATCH14);
+	hw_data->scratch[15] = REG_READ(DMCUB_SCRATCH15);
+	hw_data->scratch[16] = REG_READ(DMCUB_SCRATCH16);
 
-	dmub->debug.undefined_address_fault_addr = REG_READ(DMCUB_UNDEFINED_ADDRESS_FAULT_ADDR);
-	dmub->debug.inst_fetch_fault_addr = REG_READ(DMCUB_INST_FETCH_FAULT_ADDR);
-	dmub->debug.data_write_fault_addr = REG_READ(DMCUB_DATA_WRITE_FAULT_ADDR);
+	hw_data->undefined_address_fault_addr = REG_READ(DMCUB_UNDEFINED_ADDRESS_FAULT_ADDR);
+	hw_data->inst_fetch_fault_addr = REG_READ(DMCUB_INST_FETCH_FAULT_ADDR);
+	hw_data->data_write_fault_addr = REG_READ(DMCUB_DATA_WRITE_FAULT_ADDR);
 
-	dmub->debug.inbox1_rptr = REG_READ(DMCUB_INBOX1_RPTR);
-	dmub->debug.inbox1_wptr = REG_READ(DMCUB_INBOX1_WPTR);
-	dmub->debug.inbox1_size = REG_READ(DMCUB_INBOX1_SIZE);
+	hw_data->inbox1_rptr = REG_READ(DMCUB_INBOX1_RPTR);
+	hw_data->inbox1_wptr = REG_READ(DMCUB_INBOX1_WPTR);
+	hw_data->inbox1_size = REG_READ(DMCUB_INBOX1_SIZE);
 
-	dmub->debug.inbox0_rptr = REG_READ(DMCUB_INBOX0_RPTR);
-	dmub->debug.inbox0_wptr = REG_READ(DMCUB_INBOX0_WPTR);
-	dmub->debug.inbox0_size = REG_READ(DMCUB_INBOX0_SIZE);
+	hw_data->inbox0_rptr = REG_READ(DMCUB_INBOX0_RPTR);
+	hw_data->inbox0_wptr = REG_READ(DMCUB_INBOX0_WPTR);
+	hw_data->inbox0_size = REG_READ(DMCUB_INBOX0_SIZE);
 
-	dmub->debug.outbox1_rptr = REG_READ(DMCUB_OUTBOX1_RPTR);
-	dmub->debug.outbox1_wptr = REG_READ(DMCUB_OUTBOX1_WPTR);
-	dmub->debug.outbox1_size = REG_READ(DMCUB_OUTBOX1_SIZE);
+	hw_data->outbox1_rptr = REG_READ(DMCUB_OUTBOX1_RPTR);
+	hw_data->outbox1_wptr = REG_READ(DMCUB_OUTBOX1_WPTR);
+	hw_data->outbox1_size = REG_READ(DMCUB_OUTBOX1_SIZE);
 
 	REG_GET(DMCUB_CNTL, DMCUB_ENABLE, &is_dmub_enabled);
-	dmub->debug.is_dmcub_enabled = is_dmub_enabled;
+	ASSERT(is_dmub_enabled <= 0xFF);
+	hw_data->is_dmcub_enabled = (uint8_t)is_dmub_enabled;
 
 	REG_GET(DMCUB_CNTL, DMCUB_PWAIT_MODE_STATUS, &is_pwait);
-	dmub->debug.is_pwait = is_pwait;
+	ASSERT(is_pwait <= 0xFF);
+	hw_data->is_pwait = (uint8_t)is_pwait;
 
 	REG_GET(DMCUB_CNTL2, DMCUB_SOFT_RESET, &is_soft_reset);
-	dmub->debug.is_dmcub_soft_reset = is_soft_reset;
+	ASSERT(is_soft_reset <= 0xFF);
+	hw_data->is_dmcub_soft_reset = (uint8_t)is_soft_reset;
 
 	REG_GET(DMCUB_CNTL, DMCUB_TRACEPORT_EN, &is_traceport_enabled);
-	dmub->debug.is_traceport_en  = is_traceport_enabled;
+	ASSERT(is_traceport_enabled <= 0xFF);
+	hw_data->is_traceport_en  = (uint8_t)is_traceport_enabled;
 
 	REG_GET(DMCUB_REGION3_CW6_TOP_ADDRESS, DMCUB_REGION3_CW6_ENABLE, &is_cw6_enabled);
-	dmub->debug.is_cw6_enabled = is_cw6_enabled;
+	ASSERT(is_cw6_enabled <= 0xFF);
+	hw_data->is_cw6_enabled = (uint8_t)is_cw6_enabled;
 
-	dmub->debug.gpint_datain0 = REG_READ(DMCUB_GPINT_DATAIN0);
+	hw_data->gpint_datain0 = REG_READ(DMCUB_GPINT_DATAIN0);
 }
+
+bool dmub_dcn35_get_preos_fw_info(struct dmub_srv *dmub)
+{
+	uint64_t region3_cw5_offset;
+	uint32_t top_addr, top_addr_enable, offset_low;
+	uint32_t offset_high, base_addr, fw_version;
+	bool is_vbios_fw = false;
+
+	memset(&dmub->preos_info, 0, sizeof(dmub->preos_info));
+
+	fw_version = REG_READ(DMCUB_SCRATCH1);
+	is_vbios_fw = ((fw_version >> 6) & 0x01) ? true : false;
+	if (!is_vbios_fw)
+		return false;
+
+	dmub->preos_info.boot_status = REG_READ(DMCUB_SCRATCH0);
+	dmub->preos_info.fw_version = REG_READ(DMCUB_SCRATCH1);
+	dmub->preos_info.boot_options = REG_READ(DMCUB_SCRATCH14);
+	REG_GET(DMCUB_REGION3_CW5_TOP_ADDRESS,
+		DMCUB_REGION3_CW5_ENABLE, &top_addr_enable);
+	if (top_addr_enable) {
+		dmub_dcn35_get_fb_base_offset(dmub,
+			&dmub->preos_info.fb_base, &dmub->preos_info.fb_offset);
+		offset_low = REG_READ(DMCUB_REGION3_CW5_OFFSET);
+		offset_high = REG_READ(DMCUB_REGION3_CW5_OFFSET_HIGH);
+		region3_cw5_offset = ((uint64_t)offset_high << 32) | offset_low;
+		dmub->preos_info.trace_buffer_phy_addr = region3_cw5_offset
+			- dmub->preos_info.fb_base + dmub->preos_info.fb_offset;
+
+		REG_GET(DMCUB_REGION3_CW5_TOP_ADDRESS,
+			DMCUB_REGION3_CW5_TOP_ADDRESS, &top_addr);
+		base_addr = REG_READ(DMCUB_REGION3_CW5_BASE_ADDRESS) & 0x1FFFFFFF;
+		dmub->preos_info.trace_buffer_size =
+			(top_addr > base_addr) ? (top_addr - base_addr + 1) : 0;
+	}
+
+	return true;
+}
+
 void dmub_dcn35_configure_dmub_in_system_memory(struct dmub_srv *dmub)
 {
 	/* DMCUB_REGION3_TMR_AXI_SPACE values:

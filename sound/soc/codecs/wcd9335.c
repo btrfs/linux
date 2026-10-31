@@ -1260,8 +1260,9 @@ static const struct snd_kcontrol_new sb_tx8_mux =
 static int slim_rx_mux_get(struct snd_kcontrol *kc,
 			   struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_dapm_widget *w = snd_soc_dapm_kcontrol_widget(kc);
-	struct wcd9335_codec *wcd = dev_get_drvdata(w->dapm->dev);
+	struct snd_soc_dapm_widget *w = snd_soc_dapm_kcontrol_to_widget(kc);
+	struct device *dev = snd_soc_dapm_to_dev(w->dapm);
+	struct wcd9335_codec *wcd = dev_get_drvdata(dev);
 	u32 port_id = w->shift;
 
 	ucontrol->value.enumerated.item[0] = wcd->rx_port_value[port_id];
@@ -1272,8 +1273,9 @@ static int slim_rx_mux_get(struct snd_kcontrol *kc,
 static int slim_rx_mux_put(struct snd_kcontrol *kc,
 			   struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_dapm_widget *w = snd_soc_dapm_kcontrol_widget(kc);
-	struct wcd9335_codec *wcd = dev_get_drvdata(w->dapm->dev);
+	struct snd_soc_dapm_widget *w = snd_soc_dapm_kcontrol_to_widget(kc);
+	struct device *dev = snd_soc_dapm_to_dev(w->dapm);
+	struct wcd9335_codec *wcd = dev_get_drvdata(dev);
 	struct soc_enum *e = (struct soc_enum *)kc->private_value;
 	struct snd_soc_dapm_update *update = NULL;
 	u32 port_id = w->shift;
@@ -1323,9 +1325,10 @@ static int slim_tx_mixer_get(struct snd_kcontrol *kc,
 			     struct snd_ctl_elem_value *ucontrol)
 {
 
-	struct snd_soc_dapm_context *dapm = snd_soc_dapm_kcontrol_dapm(kc);
-	struct wcd9335_codec *wcd = dev_get_drvdata(dapm->dev);
-	struct snd_soc_dapm_widget *widget = snd_soc_dapm_kcontrol_widget(kc);
+	struct snd_soc_dapm_context *dapm = snd_soc_dapm_kcontrol_to_dapm(kc);
+	struct device *dev = snd_soc_dapm_to_dev(dapm);
+	struct wcd9335_codec *wcd = dev_get_drvdata(dev);
+	struct snd_soc_dapm_widget *widget = snd_soc_dapm_kcontrol_to_widget(kc);
 	struct soc_mixer_control *mixer =
 			(struct soc_mixer_control *)kc->private_value;
 	int dai_id = widget->shift;
@@ -1340,8 +1343,9 @@ static int slim_tx_mixer_put(struct snd_kcontrol *kc,
 			     struct snd_ctl_elem_value *ucontrol)
 {
 
-	struct snd_soc_dapm_widget *widget = snd_soc_dapm_kcontrol_widget(kc);
-	struct wcd9335_codec *wcd = dev_get_drvdata(widget->dapm->dev);
+	struct snd_soc_dapm_widget *widget = snd_soc_dapm_kcontrol_to_widget(kc);
+	struct device *dev = snd_soc_dapm_to_dev(widget->dapm);
+	struct wcd9335_codec *wcd = dev_get_drvdata(dev);
 	struct snd_soc_dapm_update *update = NULL;
 	struct soc_mixer_control *mixer =
 			(struct soc_mixer_control *)kc->private_value;
@@ -1474,7 +1478,7 @@ static const struct snd_kcontrol_new aif3_cap_mixer[] = {
 static int wcd9335_put_dec_enum(struct snd_kcontrol *kc,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_dapm_kcontrol_dapm(kc);
+	struct snd_soc_dapm_context *dapm = snd_soc_dapm_kcontrol_to_dapm(kc);
 	struct snd_soc_component *component = snd_soc_dapm_to_component(dapm);
 	struct soc_enum *e = (struct soc_enum *)kc->private_value;
 	unsigned int val, reg, sel;
@@ -1529,7 +1533,7 @@ static int wcd9335_int_dem_inp_mux_put(struct snd_kcontrol *kc,
 	struct snd_soc_component *component;
 	int reg, val;
 
-	component = snd_soc_dapm_kcontrol_component(kc);
+	component = snd_soc_dapm_kcontrol_to_component(kc);
 	val = ucontrol->value.enumerated.item[0];
 
 	if (e->reg == WCD9335_CDC_RX0_RX_PATH_SEC0)
@@ -2177,7 +2181,7 @@ static int wcd9335_get_compander(struct snd_kcontrol *kc,
 			       struct snd_ctl_elem_value *ucontrol)
 {
 
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kc);
+	struct snd_soc_component *component = snd_kcontrol_chip(kc);
 	int comp = ((struct soc_mixer_control *)kc->private_value)->shift;
 	struct wcd9335_codec *wcd = dev_get_drvdata(component->dev);
 
@@ -2188,7 +2192,7 @@ static int wcd9335_get_compander(struct snd_kcontrol *kc,
 static int wcd9335_set_compander(struct snd_kcontrol *kc,
 				 struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kc);
+	struct snd_soc_component *component = snd_kcontrol_chip(kc);
 	struct wcd9335_codec *wcd = dev_get_drvdata(component->dev);
 	int comp = ((struct soc_mixer_control *) kc->private_value)->shift;
 	int value = ucontrol->value.integer.value[0];
@@ -2227,7 +2231,7 @@ static int wcd9335_set_compander(struct snd_kcontrol *kc,
 static int wcd9335_rx_hph_mode_get(struct snd_kcontrol *kc,
 				 struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kc);
+	struct snd_soc_component *component = snd_kcontrol_chip(kc);
 	struct wcd9335_codec *wcd = dev_get_drvdata(component->dev);
 
 	ucontrol->value.enumerated.item[0] = wcd->hph_mode;
@@ -2238,7 +2242,7 @@ static int wcd9335_rx_hph_mode_get(struct snd_kcontrol *kc,
 static int wcd9335_rx_hph_mode_put(struct snd_kcontrol *kc,
 				 struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kc);
+	struct snd_soc_component *component = snd_kcontrol_chip(kc);
 	struct wcd9335_codec *wcd = dev_get_drvdata(component->dev);
 	u32 mode_val;
 
@@ -3903,7 +3907,7 @@ static irqreturn_t wcd9335_slimbus_irq(int irq, void *data)
 {
 	struct wcd9335_codec *wcd = data;
 	unsigned long status = 0;
-	int i, j, port_id;
+	unsigned int i, j, port_id;
 	unsigned int val, int_val = 0;
 	irqreturn_t ret = IRQ_NONE;
 	bool tx;
@@ -5006,9 +5010,9 @@ static int wcd9335_power_on_reset(struct wcd9335_codec *wcd)
 	 */
 	usleep_range(600, 650);
 
-	gpiod_set_value(wcd->reset_gpio, 1);
+	gpiod_set_value_cansleep(wcd->reset_gpio, 1);
 	msleep(20);
-	gpiod_set_value(wcd->reset_gpio, 0);
+	gpiod_set_value_cansleep(wcd->reset_gpio, 0);
 	msleep(20);
 
 	return 0;
@@ -5092,6 +5096,13 @@ static int wcd9335_slim_probe(struct slim_device *slim)
 	return 0;
 }
 
+static void wcd9335_put_device_action(void *data)
+{
+	struct device *dev = data;
+
+	put_device(dev);
+}
+
 static int wcd9335_slim_status(struct slim_device *sdev,
 			       enum slim_device_status status)
 {
@@ -5116,28 +5127,40 @@ static int wcd9335_slim_status(struct slim_device *sdev,
 		return -EINVAL;
 	}
 
+	ret = devm_add_action_or_reset(dev, wcd9335_put_device_action,
+			&wcd->slim_ifc_dev->dev);
+	if (ret)
+		return ret;
+
 	slim_get_logical_addr(wcd->slim_ifc_dev);
 
 	wcd->regmap = regmap_init_slimbus(sdev, &wcd9335_regmap_config);
-	if (IS_ERR(wcd->regmap))
+	if (IS_ERR(wcd->regmap)) {
+		put_device(&wcd->slim_ifc_dev->dev);
 		return dev_err_probe(dev, PTR_ERR(wcd->regmap),
 				     "Failed to allocate slim register map\n");
+	}
 
 	wcd->if_regmap = regmap_init_slimbus(wcd->slim_ifc_dev,
 						  &wcd9335_ifc_regmap_config);
-	if (IS_ERR(wcd->if_regmap))
+	if (IS_ERR(wcd->if_regmap)) {
+		put_device(&wcd->slim_ifc_dev->dev);
 		return dev_err_probe(dev, PTR_ERR(wcd->if_regmap),
 				     "Failed to allocate ifc register map\n");
+	}
 
 	ret = wcd9335_bring_up(wcd);
 	if (ret) {
 		dev_err(dev, "Failed to bringup WCD9335\n");
+		put_device(&wcd->slim_ifc_dev->dev);
 		return ret;
 	}
 
 	ret = wcd9335_irq_init(wcd);
-	if (ret)
+	if (ret) {
+		put_device(&wcd->slim_ifc_dev->dev);
 		return ret;
+	}
 
 	wcd9335_probe(wcd);
 

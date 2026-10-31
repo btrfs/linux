@@ -8,6 +8,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/sysfs.h>
 #include <linux/thermal.h>
 #include <asm/msr.h>
 #include "int340x_thermal_zone.h"
@@ -23,7 +24,7 @@ static ssize_t power_limit_##index##_##suffix##_show(struct device *dev, \
 { \
 	struct proc_thermal_device *proc_dev = dev_get_drvdata(dev); \
 	\
-	return sprintf(buf, "%lu\n",\
+	return sysfs_emit(buf, "%lu\n",\
 	(unsigned long)proc_dev->power_limits[index].suffix * 1000); \
 }
 
@@ -143,7 +144,7 @@ static ssize_t tcc_offset_degree_celsius_show(struct device *dev,
 	if (offset < 0)
 		return offset;
 
-	return sprintf(buf, "%d\n", offset);
+	return sysfs_emit(buf, "%d\n", offset);
 }
 
 static ssize_t tcc_offset_degree_celsius_store(struct device *dev,
@@ -178,16 +179,20 @@ static int proc_thermal_get_zone_temp(struct thermal_zone_device *zone,
 {
 	int cpu;
 	int curr_temp, ret;
-
-	*temp = 0;
+	bool temp_valid = false;
 
 	for_each_online_cpu(cpu) {
 		ret = intel_tcc_get_temp(cpu, &curr_temp, false);
 		if (ret < 0)
 			return ret;
-		if (!*temp || curr_temp > *temp)
+		if (!temp_valid || curr_temp > *temp) {
 			*temp = curr_temp;
+			temp_valid = true;
+		}
 	}
+
+	if (!temp_valid)
+		return -ENODATA;
 
 	*temp *= 1000;
 
@@ -290,10 +295,8 @@ int proc_thermal_add(struct device *dev, struct proc_thermal_device *proc_priv)
 	}
 
 	proc_priv->int340x_zone = int340x_thermal_zone_add(adev, get_temp);
-	if (IS_ERR(proc_priv->int340x_zone)) {
+	if (IS_ERR(proc_priv->int340x_zone))
 		return PTR_ERR(proc_priv->int340x_zone);
-	} else
-		ret = 0;
 
 	ret = acpi_install_notify_handler(adev->handle, ACPI_DEVICE_NOTIFY,
 					  proc_thermal_notify,

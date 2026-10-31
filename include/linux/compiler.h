@@ -149,10 +149,7 @@ void ftrace_likely_update(struct ftrace_likely_data *f, int val,
 #endif
 
 #ifndef RELOC_HIDE
-# define RELOC_HIDE(ptr, off)					\
-  ({ unsigned long __ptr;					\
-     __ptr = (unsigned long) (ptr);				\
-    (typeof(ptr)) (__ptr + (off)); })
+# define RELOC_HIDE(ptr, off) ((typeof(ptr))((unsigned long)(ptr) + (off)))
 #endif
 
 #define absolute_pointer(val)	RELOC_HIDE((void *)(val), 0)
@@ -163,7 +160,11 @@ void ftrace_likely_update(struct ftrace_likely_data *f, int val,
 	__asm__ ("" : "=r" (var) : "0" (var))
 #endif
 
-#define __UNIQUE_ID(prefix) __PASTE(__PASTE(__UNIQUE_ID_, prefix), __COUNTER__)
+/* Format: __UNIQUE_ID_<name>_<__COUNTER__> */
+#define __UNIQUE_ID(name)					\
+	__PASTE(__UNIQUE_ID_,					\
+	__PASTE(name,						\
+	__PASTE(_, __COUNTER__)))
 
 /**
  * data_race - mark an expression as containing intentional data races
@@ -186,7 +187,9 @@ void ftrace_likely_update(struct ftrace_likely_data *f, int val,
 #define data_race(expr)							\
 ({									\
 	__kcsan_disable_current();					\
-	__auto_type __v = (expr);					\
+	disable_context_analysis();					\
+	auto __v = (expr);						\
+	enable_context_analysis();					\
 	__kcsan_enable_current();					\
 	__v;								\
 })
@@ -227,16 +230,6 @@ void ftrace_likely_update(struct ftrace_likely_data *f, int val,
 				"must be non-C-string (not NUL-terminated)")
 
 /*
- * Use __typeof_unqual__() when available.
- *
- * XXX: Remove test for __CHECKER__ once
- * sparse learns about __typeof_unqual__().
- */
-#if CC_HAS_TYPEOF_UNQUAL && !defined(__CHECKER__)
-# define USE_TYPEOF_UNQUAL 1
-#endif
-
-/*
  * Define TYPEOF_UNQUAL() to use __typeof_unqual__() as typeof
  * operator when available, to return an unqualified type of the exp.
  */
@@ -244,6 +237,23 @@ void ftrace_likely_update(struct ftrace_likely_data *f, int val,
 # define TYPEOF_UNQUAL(exp) __typeof_unqual__(exp)
 #else
 # define TYPEOF_UNQUAL(exp) __typeof__(exp)
+#endif
+
+/*
+ * TYPEOF_NO_ADDRESS_SPACE() - typeof() without the address space qualifiers
+ *
+ * No operator strips only the address space qualifiers: typeof() keeps every
+ * qualifier and TYPEOF_UNQUAL() drops every qualifier, const and volatile
+ * included.
+ *
+ * Approximate one by dropping the qualifiers for sparse only, as it is the
+ * only one that knows about address spaces. The compiler keeps seeing the fully
+ * qualified type, so a missing const or volatile will still throw a warning.
+ */
+#ifdef __CHECKER__
+# define TYPEOF_NO_ADDRESS_SPACE(exp) TYPEOF_UNQUAL(exp)
+#else
+# define TYPEOF_NO_ADDRESS_SPACE(exp) __typeof__(exp)
 #endif
 
 #endif /* __KERNEL__ */
@@ -269,12 +279,6 @@ static inline void *offset_to_ptr(const int *off)
 
 #endif /* __ASSEMBLY__ */
 
-#ifdef CONFIG_64BIT
-#define ARCH_SEL(a,b) a
-#else
-#define ARCH_SEL(a,b) b
-#endif
-
 /*
  * Force the compiler to emit 'sym' as a symbol, so that we can reference
  * it from inline assembler. Necessary in case 'sym' could be inlined
@@ -283,10 +287,15 @@ static inline void *offset_to_ptr(const int *off)
  */
 #define ___ADDRESSABLE(sym, __attrs)						\
 	static void * __used __attrs						\
-	__UNIQUE_ID(__PASTE(__addressable_,sym)) = (void *)(uintptr_t)&sym;
+	__UNIQUE_ID(__PASTE(addressable_, sym)) = (void *)(uintptr_t)&sym;
 
 #define __ADDRESSABLE(sym) \
 	___ADDRESSABLE(sym, __section(".discard.addressable"))
+
+/* Enforce static storage duration. */
+#define ASSERT_STATIC_STORAGE(name) \
+	static typeof(name) * const __always_unused \
+		name##_storage_check = &(name)
 
 /*
  * This returns a constant expression while determining if an argument is

@@ -38,9 +38,9 @@ static unsigned int num_devices;
  * nitrox_pci_tbl - PCI Device ID Table
  */
 static const struct pci_device_id nitrox_pci_tbl[] = {
-	{PCI_VDEVICE(CAVIUM, CNN55XX_DEV_ID), 0},
+	{ PCI_VDEVICE(CAVIUM, CNN55XX_DEV_ID) },
 	/* required last entry */
-	{0, }
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, nitrox_pci_tbl);
 
@@ -441,7 +441,7 @@ static int nitrox_probe(struct pci_dev *pdev,
 		goto flr_fail;
 	pci_set_master(pdev);
 
-	ndev = kzalloc(sizeof(*ndev), GFP_KERNEL);
+	ndev = kzalloc_obj(*ndev);
 	if (!ndev) {
 		err = -ENOMEM;
 		goto ndev_fail;
@@ -468,7 +468,7 @@ static int nitrox_probe(struct pci_dev *pdev,
 		err = -EIO;
 		goto ioremap_err;
 	}
-	/* allocate command queus based on cpus, max queues are 64 */
+	/* allocate command queues based on cpus, max queues are 64 */
 	ndev->nr_queues = min_t(u32, MAX_PF_QUEUES, num_online_cpus());
 	ndev->qlen = qlen;
 

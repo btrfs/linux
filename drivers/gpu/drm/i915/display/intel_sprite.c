@@ -39,10 +39,10 @@
 #include <drm/drm_print.h>
 #include <drm/drm_rect.h>
 
-#include "i915_utils.h"
 #include "i9xx_plane.h"
 #include "intel_de.h"
 #include "intel_display_types.h"
+#include "intel_display_utils.h"
 #include "intel_fb.h"
 #include "intel_frontbuffer.h"
 #include "intel_plane.h"
@@ -241,13 +241,13 @@ int vlv_plane_min_cdclk(const struct intel_crtc_state *crtc_state,
 	unsigned int num, den;
 
 	/*
-	 * Note that crtc_state->pixel_rate accounts for both
+	 * Note that crtc_state->pixel_rate_cdclk accounts for both
 	 * horizontal and vertical panel fitter downscaling factors.
 	 * Pre-HSW bspec tells us to only consider the horizontal
 	 * downscaling factor here. We ignore that and just consider
 	 * both for simplicity.
 	 */
-	pixel_rate = crtc_state->pixel_rate;
+	pixel_rate = crtc_state->pixel_rate_cdclk;
 
 	vlv_plane_ratio(crtc_state, plane_state, &num, &den);
 
@@ -462,7 +462,7 @@ vlv_sprite_get_hw_state(struct intel_plane *plane,
 	struct intel_display *display = to_intel_display(plane);
 	enum intel_display_power_domain power_domain;
 	enum plane_id plane_id = plane->id;
-	intel_wakeref_t wakeref;
+	struct ref_tracker *wakeref;
 	bool ret;
 
 	power_domain = POWER_DOMAIN_PIPE(plane->pipe);
@@ -550,13 +550,13 @@ int ivb_plane_min_cdclk(const struct intel_crtc_state *crtc_state,
 	unsigned int num, den;
 
 	/*
-	 * Note that crtc_state->pixel_rate accounts for both
+	 * Note that crtc_state->pixel_rate_cdclk accounts for both
 	 * horizontal and vertical panel fitter downscaling factors.
 	 * Pre-HSW bspec tells us to only consider the horizontal
 	 * downscaling factor here. We ignore that and just consider
 	 * both for simplicity.
 	 */
-	pixel_rate = crtc_state->pixel_rate;
+	pixel_rate = crtc_state->pixel_rate_cdclk;
 
 	ivb_plane_ratio(crtc_state, plane_state, &num, &den);
 
@@ -570,13 +570,13 @@ static int ivb_sprite_min_cdclk(const struct intel_crtc_state *crtc_state,
 	unsigned int num, den;
 
 	/*
-	 * Note that crtc_state->pixel_rate accounts for both
+	 * Note that crtc_state->pixel_rate_cdclk accounts for both
 	 * horizontal and vertical panel fitter downscaling factors.
 	 * Pre-HSW bspec tells us to only consider the horizontal
 	 * downscaling factor here. We ignore that and just consider
 	 * both for simplicity.
 	 */
-	pixel_rate = crtc_state->pixel_rate;
+	pixel_rate = crtc_state->pixel_rate_cdclk;
 
 	src_w = drm_rect_width(&plane_state->uapi.src) >> 16;
 	dst_w = drm_rect_width(&plane_state->uapi.dst);
@@ -629,7 +629,7 @@ static void hsw_plane_ratio(const struct intel_crtc_state *crtc_state,
 int hsw_plane_min_cdclk(const struct intel_crtc_state *crtc_state,
 			const struct intel_plane_state *plane_state)
 {
-	unsigned int pixel_rate = crtc_state->pixel_rate;
+	unsigned int pixel_rate = crtc_state->pixel_rate_cdclk;
 	unsigned int num, den;
 
 	hsw_plane_ratio(crtc_state, plane_state, &num, &den);
@@ -893,7 +893,7 @@ ivb_sprite_get_hw_state(struct intel_plane *plane,
 {
 	struct intel_display *display = to_intel_display(plane);
 	enum intel_display_power_domain power_domain;
-	intel_wakeref_t wakeref;
+	struct ref_tracker *wakeref;
 	bool ret;
 
 	power_domain = POWER_DOMAIN_PIPE(plane->pipe);
@@ -918,13 +918,13 @@ static int g4x_sprite_min_cdclk(const struct intel_crtc_state *crtc_state,
 	unsigned int limit, decimate;
 
 	/*
-	 * Note that crtc_state->pixel_rate accounts for both
+	 * Note that crtc_state->pixel_rate_cdclk accounts for both
 	 * horizontal and vertical panel fitter downscaling factors.
 	 * Pre-HSW bspec tells us to only consider the horizontal
 	 * downscaling factor here. We ignore that and just consider
 	 * both for simplicity.
 	 */
-	pixel_rate = crtc_state->pixel_rate;
+	pixel_rate = crtc_state->pixel_rate_cdclk;
 
 	/* Horizontal downscaling limits the maximum pixel rate */
 	hscale = drm_rect_calc_hscale(&plane_state->uapi.src,
@@ -958,10 +958,9 @@ static int g4x_sprite_min_cdclk(const struct intel_crtc_state *crtc_state,
 
 static unsigned int
 g4x_sprite_max_stride(struct intel_plane *plane,
-		      u32 pixel_format, u64 modifier,
-		      unsigned int rotation)
+		      const struct drm_format_info *info,
+		      u64 modifier, unsigned int rotation)
 {
-	const struct drm_format_info *info = drm_format_info(pixel_format);
 	int cpp = info->cpp[0];
 
 	/* Limit to 4k pixels to guarantee TILEOFF.x doesn't get too big. */
@@ -973,10 +972,9 @@ g4x_sprite_max_stride(struct intel_plane *plane,
 
 static unsigned int
 hsw_sprite_max_stride(struct intel_plane *plane,
-		      u32 pixel_format, u64 modifier,
-		      unsigned int rotation)
+		      const struct drm_format_info *info,
+		      u64 modifier, unsigned int rotation)
 {
-	const struct drm_format_info *info = drm_format_info(pixel_format);
 	int cpp = info->cpp[0];
 
 	/* Limit to 8k pixels to guarantee OFFSET.x doesn't get too big. */
@@ -1235,7 +1233,7 @@ g4x_sprite_get_hw_state(struct intel_plane *plane,
 {
 	struct intel_display *display = to_intel_display(plane);
 	enum intel_display_power_domain power_domain;
-	intel_wakeref_t wakeref;
+	struct ref_tracker *wakeref;
 	bool ret;
 
 	power_domain = POWER_DOMAIN_PIPE(plane->pipe);
@@ -1569,6 +1567,7 @@ static const struct drm_plane_funcs g4x_sprite_funcs = {
 	.atomic_duplicate_state = intel_plane_duplicate_state,
 	.atomic_destroy_state = intel_plane_destroy_state,
 	.format_mod_supported = g4x_sprite_format_mod_supported,
+	.format_mod_supported_async = intel_plane_format_mod_supported_async,
 };
 
 static const struct drm_plane_funcs snb_sprite_funcs = {
@@ -1578,6 +1577,7 @@ static const struct drm_plane_funcs snb_sprite_funcs = {
 	.atomic_duplicate_state = intel_plane_duplicate_state,
 	.atomic_destroy_state = intel_plane_destroy_state,
 	.format_mod_supported = snb_sprite_format_mod_supported,
+	.format_mod_supported_async = intel_plane_format_mod_supported_async,
 };
 
 static const struct drm_plane_funcs vlv_sprite_funcs = {
@@ -1587,6 +1587,7 @@ static const struct drm_plane_funcs vlv_sprite_funcs = {
 	.atomic_duplicate_state = intel_plane_duplicate_state,
 	.atomic_destroy_state = intel_plane_destroy_state,
 	.format_mod_supported = vlv_sprite_format_mod_supported,
+	.format_mod_supported_async = intel_plane_format_mod_supported_async,
 };
 
 struct intel_plane *
@@ -1720,6 +1721,10 @@ intel_sprite_plane_create(struct intel_display *display,
 					  BIT(DRM_COLOR_YCBCR_FULL_RANGE),
 					  DRM_COLOR_YCBCR_BT709,
 					  DRM_COLOR_YCBCR_LIMITED_RANGE);
+
+	if (display->platform.valleyview || display->platform.cherryview)
+		drm_plane_create_blend_mode_property(&plane->base,
+						     BIT(DRM_MODE_BLEND_PREMULTI));
 
 	zpos = sprite + 1;
 	drm_plane_create_zpos_immutable_property(&plane->base, zpos);

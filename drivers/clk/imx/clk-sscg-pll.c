@@ -504,12 +504,12 @@ struct clk_hw *imx_clk_hw_sscg_pll(const char *name,
 				void __iomem *base,
 				unsigned long flags)
 {
+	struct clk_init_data init = {};
 	struct clk_sscg_pll *pll;
-	struct clk_init_data init;
 	struct clk_hw *hw;
 	int ret;
 
-	pll = kzalloc(sizeof(*pll), GFP_KERNEL);
+	pll = kzalloc_obj(*pll);
 	if (!pll)
 		return ERR_PTR(-ENOMEM);
 

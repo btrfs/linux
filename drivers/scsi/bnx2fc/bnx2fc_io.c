@@ -142,7 +142,7 @@ static void bnx2fc_cmd_timeout(struct work_struct *work)
 			set_bit(BNX2FC_FLAG_ELS_TIMEOUT, &io_req->req_flags);
 
 			if ((io_req->cb_func) && (io_req->cb_arg)) {
-				io_req->cb_func(io_req->cb_arg);
+				io_req->cb_func(tgt, io_req->cb_arg);
 				io_req->cb_arg = NULL;
 			}
 		}
@@ -241,15 +241,13 @@ struct bnx2fc_cmd_mgr *bnx2fc_cmd_mgr_alloc(struct bnx2fc_hba *hba)
 	}
 
 	cmgr->hba = hba;
-	cmgr->free_list = kcalloc(arr_sz, sizeof(*cmgr->free_list),
-				  GFP_KERNEL);
+	cmgr->free_list = kzalloc_objs(*cmgr->free_list, arr_sz);
 	if (!cmgr->free_list) {
 		printk(KERN_ERR PFX "failed to alloc free_list\n");
 		goto mem_err;
 	}
 
-	cmgr->free_list_lock = kcalloc(arr_sz, sizeof(*cmgr->free_list_lock),
-				       GFP_KERNEL);
+	cmgr->free_list_lock = kzalloc_objs(*cmgr->free_list_lock, arr_sz);
 	if (!cmgr->free_list_lock) {
 		printk(KERN_ERR PFX "failed to alloc free_list_lock\n");
 		kfree(cmgr->free_list);
@@ -272,7 +270,7 @@ struct bnx2fc_cmd_mgr *bnx2fc_cmd_mgr_alloc(struct bnx2fc_hba *hba)
 	xid = BNX2FC_MIN_XID;
 	num_pri_ios = num_ios - hba->elstm_xids;
 	for (i = 0; i < num_ios; i++) {
-		io_req = kzalloc(sizeof(*io_req), GFP_KERNEL);
+		io_req = kzalloc_obj(*io_req);
 
 		if (!io_req) {
 			printk(KERN_ERR PFX "failed to alloc io_req\n");
@@ -942,7 +940,7 @@ int bnx2fc_initiate_seq_cleanup(struct bnx2fc_cmd *orig_io_req, u32 offset,
 	port = orig_io_req->port;
 	interface = port->priv;
 
-	cb_arg = kzalloc(sizeof(struct bnx2fc_els_cb_arg), GFP_ATOMIC);
+	cb_arg = kzalloc_obj(struct bnx2fc_els_cb_arg, GFP_ATOMIC);
 	if (!cb_arg) {
 		printk(KERN_ERR PFX "Unable to alloc cb_arg for seq clnup\n");
 		rc = -ENOMEM;
@@ -1081,10 +1079,10 @@ int bnx2fc_eh_device_reset(struct scsi_cmnd *sc_cmd)
 				   FCP_TMF_LUN_RESET);
 }
 
-static int bnx2fc_abts_cleanup(struct bnx2fc_cmd *io_req)
+static int bnx2fc_abts_cleanup(struct bnx2fc_rport *tgt,
+			       struct bnx2fc_cmd *io_req)
 	__must_hold(&tgt->tgt_lock)
 {
-	struct bnx2fc_rport *tgt = io_req->tgt;
 	unsigned int time_left;
 
 	init_completion(&io_req->cleanup_done);
@@ -1214,7 +1212,7 @@ int bnx2fc_eh_abort(struct scsi_cmnd *sc_cmd)
 		 * cleanup the command and return that I/O was successfully
 		 * aborted.
 		 */
-		bnx2fc_abts_cleanup(io_req);
+		bnx2fc_abts_cleanup(tgt, io_req);
 		/* This only occurs when an task abort was requested while ABTS
 		   is in progress.  Setting the IO_CLEANUP flag will skip the
 		   RRQ process in the case when the fw generated SCSI_CMD cmpl
@@ -1264,7 +1262,7 @@ int bnx2fc_eh_abort(struct scsi_cmnd *sc_cmd)
 		 * Cleanup firmware residuals before returning control back
 		 * to SCSI ML.
 		 */
-		rc = bnx2fc_abts_cleanup(io_req);
+		rc = bnx2fc_abts_cleanup(tgt, io_req);
 		goto done;
 	} else {
 		/*
@@ -1284,16 +1282,17 @@ done:
 	return rc;
 }
 
-void bnx2fc_process_seq_cleanup_compl(struct bnx2fc_cmd *seq_clnp_req,
+void bnx2fc_process_seq_cleanup_compl(struct bnx2fc_rport *tgt,
+				      struct bnx2fc_cmd *seq_clnp_req,
 				      struct fcoe_task_ctx_entry *task,
 				      u8 rx_state)
+	__must_hold(&tgt->tgt_lock)
 {
 	struct bnx2fc_els_cb_arg *cb_arg = seq_clnp_req->cb_arg;
 	struct bnx2fc_cmd *orig_io_req = cb_arg->aborted_io_req;
 	u32 offset = cb_arg->offset;
 	enum fc_rctl r_ctl = cb_arg->r_ctl;
 	int rc = 0;
-	struct bnx2fc_rport *tgt = orig_io_req->tgt;
 
 	BNX2FC_IO_DBG(orig_io_req, "Entered process_cleanup_compl xid = 0x%x"
 			      "cmd_type = %d\n",
@@ -1836,8 +1835,8 @@ static void bnx2fc_parse_fcp_rsp(struct bnx2fc_cmd *io_req,
  *
  * This is the IO strategy routine, called by SCSI-ML
  **/
-int bnx2fc_queuecommand(struct Scsi_Host *host,
-			struct scsi_cmnd *sc_cmd)
+enum scsi_qc_status bnx2fc_queuecommand(struct Scsi_Host *host,
+					struct scsi_cmnd *sc_cmd)
 {
 	struct fc_lport *lport = shost_priv(host);
 	struct fc_rport *rport = starget_to_rport(scsi_target(sc_cmd->device));

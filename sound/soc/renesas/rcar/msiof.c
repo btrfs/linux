@@ -363,11 +363,6 @@ static int msiof_dai_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	return 0;
 }
 
-/*
- * Select below from Sound Card, not auto
- *	SND_SOC_DAIFMT_CBC_CFC
- *	SND_SOC_DAIFMT_CBP_CFP
- */
 static const u64 msiof_dai_formats = SND_SOC_POSSIBLE_DAIFMT_I2S	|
 				     SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
 				     SND_SOC_POSSIBLE_DAIFMT_NB_NF;
@@ -424,18 +419,14 @@ static int msiof_open(struct snd_soc_component *component,
 		return PTR_ERR(chan);
 
 	ret = snd_dmaengine_pcm_open(substream, chan);
-	if (ret < 0)
-		goto open_err_dma;
+	if (ret < 0) {
+		dma_release_channel(chan);
+		return ret;
+	}
 
 	snd_soc_set_runtime_hwparams(substream, &msiof_pcm_hardware);
 
-	ret = snd_pcm_hw_constraint_integer(substream->runtime, SNDRV_PCM_HW_PARAM_PERIODS);
-
-open_err_dma:
-	if (ret < 0)
-		dma_release_channel(chan);
-
-	return ret;
+	return 0;
 }
 
 static int msiof_close(struct snd_soc_component *component,
@@ -514,7 +505,7 @@ static const struct snd_soc_component_driver msiof_component_driver = {
 	.open		= msiof_open,
 	.close		= msiof_close,
 	.pointer	= msiof_pointer,
-	.pcm_construct	= msiof_new,
+	.pcm_new	= msiof_new,
 	.trigger	= msiof_trigger,
 	.hw_params	= msiof_hw_params,
 };

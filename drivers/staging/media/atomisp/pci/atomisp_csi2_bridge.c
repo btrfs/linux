@@ -113,7 +113,7 @@ static char *gmin_cfg_get_dsm(struct acpi_device *adev, const char *key)
 	if (!obj)
 		return NULL;
 
-	for (i = 0; i < obj->package.count - 1; i += 2) {
+	for (i = 0; i + 1 < obj->package.count; i += 2) {
 		key_el = &obj->package.elements[i + 0];
 		val_el = &obj->package.elements[i + 1];
 
@@ -305,8 +305,8 @@ static int atomisp_csi2_add_gpio_mappings(struct acpi_device *adev)
 	int ret;
 
 	/* Max num GPIOs we've seen plus a terminator */
-	int3472 = kzalloc(struct_size(int3472, gpios.table, INT3472_MAX_SENSOR_GPIOS + 1),
-			  GFP_KERNEL);
+	int3472 = kzalloc_flex(*int3472, gpios.table,
+			       INT3472_MAX_SENSOR_GPIOS + 1);
 	if (!int3472)
 		return -ENOMEM;
 

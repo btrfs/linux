@@ -97,8 +97,8 @@ struct netfront_cb {
 static DECLARE_WAIT_QUEUE_HEAD(module_wq);
 
 struct netfront_stats {
-	u64			packets;
-	u64			bytes;
+	u64_stats_t		packets;
+	u64_stats_t		bytes;
 	struct u64_stats_sync	syncp;
 };
 
@@ -634,8 +634,8 @@ static int xennet_xdp_xmit_one(struct net_device *dev,
 		notify_remote_via_irq(queue->tx_irq);
 
 	u64_stats_update_begin(&tx_stats->syncp);
-	tx_stats->bytes += xdpf->len;
-	tx_stats->packets++;
+	u64_stats_add(&tx_stats->bytes, xdpf->len);
+	u64_stats_inc(&tx_stats->packets);
 	u64_stats_update_end(&tx_stats->syncp);
 
 	return 0;
@@ -843,8 +843,8 @@ static netdev_tx_t xennet_start_xmit(struct sk_buff *skb, struct net_device *dev
 		notify_remote_via_irq(queue->tx_irq);
 
 	u64_stats_update_begin(&tx_stats->syncp);
-	tx_stats->bytes += skb->len;
-	tx_stats->packets++;
+	u64_stats_add(&tx_stats->bytes, skb->len);
+	u64_stats_inc(&tx_stats->packets);
 	u64_stats_update_end(&tx_stats->syncp);
 
 	if (!netfront_tx_slot_available(queue))
@@ -1234,8 +1234,16 @@ static int handle_incoming_queue(struct netfront_queue *queue,
 	while ((skb = __skb_dequeue(rxq)) != NULL) {
 		int pull_to = NETFRONT_SKB_CB(skb)->pull_to;
 
-		if (pull_to > skb_headlen(skb))
-			__pskb_pull_tail(skb, pull_to - skb_headlen(skb));
+		/* pull_to comes from the first slot's length, which the
+		 * backend controls.  Make sure the head holds at least an
+		 * Ethernet header for eth_type_trans().
+		 */
+		if (!pskb_may_pull(skb, max(pull_to, ETH_HLEN))) {
+			kfree_skb(skb);
+			packets_dropped++;
+			queue->info->netdev->stats.rx_errors++;
+			continue;
+		}
 
 		/* Ethernet work: Delayed to here as it peeks the header. */
 		skb->protocol = eth_type_trans(skb, queue->info->netdev);
@@ -1249,8 +1257,8 @@ static int handle_incoming_queue(struct netfront_queue *queue,
 		}
 
 		u64_stats_update_begin(&rx_stats->syncp);
-		rx_stats->packets++;
-		rx_stats->bytes += skb->len;
+		u64_stats_inc(&rx_stats->packets);
+		u64_stats_add(&rx_stats->bytes, skb->len);
 		u64_stats_update_end(&rx_stats->syncp);
 
 		/* Pass it up. */
@@ -1338,8 +1346,10 @@ err:
 		skb->data_len = rx->status;
 		skb->len += rx->status;
 
-		if (unlikely(xennet_fill_frags(queue, skb, &tmpq)))
+		if (unlikely(xennet_fill_frags(queue, skb, &tmpq))) {
+			__skb_queue_head(&tmpq, skb);
 			goto err;
+		}
 
 		if (rx->flags & XEN_NETRXF_csum_blank)
 			skb->ip_summed = CHECKSUM_PARTIAL;
@@ -1400,14 +1410,14 @@ static void xennet_get_stats64(struct net_device *dev,
 
 		do {
 			start = u64_stats_fetch_begin(&tx_stats->syncp);
-			tx_packets = tx_stats->packets;
-			tx_bytes = tx_stats->bytes;
+			tx_packets = u64_stats_read(&tx_stats->packets);
+			tx_bytes = u64_stats_read(&tx_stats->bytes);
 		} while (u64_stats_fetch_retry(&tx_stats->syncp, start));
 
 		do {
 			start = u64_stats_fetch_begin(&rx_stats->syncp);
-			rx_packets = rx_stats->packets;
-			rx_bytes = rx_stats->bytes;
+			rx_packets = u64_stats_read(&rx_stats->packets);
+			rx_bytes = u64_stats_read(&rx_stats->bytes);
 		} while (u64_stats_fetch_retry(&rx_stats->syncp, start));
 
 		tot->rx_packets += rx_packets;
@@ -1646,7 +1656,7 @@ static int xennet_xdp_set(struct net_device *dev, struct bpf_prog *prog,
 
 	/* avoid the race with XDP headroom adjustment */
 	wait_event(module_wq,
-		   xenbus_read_driver_state(np->xbdev->otherend) ==
+		   xenbus_read_driver_state(np->xbdev, np->xbdev->otherend) ==
 		   XenbusStateReconfigured);
 	np->netfront_xdp_enabled = true;
 
@@ -1764,9 +1774,9 @@ static struct net_device *xennet_create_dev(struct xenbus_device *dev)
 	do {
 		xenbus_switch_state(dev, XenbusStateInitialising);
 		err = wait_event_timeout(module_wq,
-				 xenbus_read_driver_state(dev->otherend) !=
+				 xenbus_read_driver_state(dev, dev->otherend) !=
 				 XenbusStateClosed &&
-				 xenbus_read_driver_state(dev->otherend) !=
+				 xenbus_read_driver_state(dev, dev->otherend) !=
 				 XenbusStateUnknown, XENNET_TIMEOUT);
 	} while (!err);
 
@@ -2212,8 +2222,7 @@ static int xennet_create_queues(struct netfront_info *info,
 	unsigned int i;
 	int ret;
 
-	info->queues = kcalloc(*num_queues, sizeof(struct netfront_queue),
-			       GFP_KERNEL);
+	info->queues = kzalloc_objs(struct netfront_queue, *num_queues);
 	if (!info->queues)
 		return -ENOMEM;
 
@@ -2627,31 +2636,31 @@ static void xennet_bus_close(struct xenbus_device *dev)
 {
 	int ret;
 
-	if (xenbus_read_driver_state(dev->otherend) == XenbusStateClosed)
+	if (xenbus_read_driver_state(dev, dev->otherend) == XenbusStateClosed)
 		return;
 	do {
 		xenbus_switch_state(dev, XenbusStateClosing);
 		ret = wait_event_timeout(module_wq,
-				   xenbus_read_driver_state(dev->otherend) ==
-				   XenbusStateClosing ||
-				   xenbus_read_driver_state(dev->otherend) ==
-				   XenbusStateClosed ||
-				   xenbus_read_driver_state(dev->otherend) ==
-				   XenbusStateUnknown,
-				   XENNET_TIMEOUT);
+				xenbus_read_driver_state(dev, dev->otherend) ==
+				XenbusStateClosing ||
+				xenbus_read_driver_state(dev, dev->otherend) ==
+				XenbusStateClosed ||
+				xenbus_read_driver_state(dev, dev->otherend) ==
+				XenbusStateUnknown,
+				XENNET_TIMEOUT);
 	} while (!ret);
 
-	if (xenbus_read_driver_state(dev->otherend) == XenbusStateClosed)
+	if (xenbus_read_driver_state(dev, dev->otherend) == XenbusStateClosed)
 		return;
 
 	do {
 		xenbus_switch_state(dev, XenbusStateClosed);
 		ret = wait_event_timeout(module_wq,
-				   xenbus_read_driver_state(dev->otherend) ==
-				   XenbusStateClosed ||
-				   xenbus_read_driver_state(dev->otherend) ==
-				   XenbusStateUnknown,
-				   XENNET_TIMEOUT);
+				xenbus_read_driver_state(dev, dev->otherend) ==
+				XenbusStateClosed ||
+				xenbus_read_driver_state(dev, dev->otherend) ==
+				XenbusStateUnknown,
+				XENNET_TIMEOUT);
 	} while (!ret);
 }
 
@@ -2696,8 +2705,9 @@ static int __init netif_init(void)
 
 	pr_info("Initialising Xen virtual ethernet driver\n");
 
-	/* Allow as many queues as there are CPUs inut max. 8 if user has not
-	 * specified a value.
+	/* Allow the number of queues to match the number of CPUs, but not exceed
+	 * the maximum limit. If the user has not specified a value, the default
+	 * maximum limit is 8.
 	 */
 	if (xennet_max_queues == 0)
 		xennet_max_queues = min_t(unsigned int, MAX_QUEUES_DEFAULT,

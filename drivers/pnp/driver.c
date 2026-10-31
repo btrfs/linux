@@ -96,13 +96,13 @@ static int pnp_device_probe(struct device *dev)
 		if (!(pnp_drv->flags & PNP_DRIVER_RES_DO_NOT_CHANGE)) {
 			error = pnp_activate_dev(pnp_dev);
 			if (error < 0)
-				return error;
+				goto fail;
 		}
 	} else if ((pnp_drv->flags & PNP_DRIVER_RES_DISABLE)
 		   == PNP_DRIVER_RES_DISABLE) {
 		error = pnp_disable_dev(pnp_dev);
 		if (error < 0)
-			return error;
+			goto fail;
 	}
 	error = 0;
 	if (pnp_drv->probe) {
@@ -148,6 +148,24 @@ static void pnp_device_shutdown(struct device *dev)
 
 	if (drv && drv->shutdown)
 		drv->shutdown(pnp_dev);
+}
+
+static int pnp_uevent(const struct device *dev, struct kobj_uevent_env *env)
+{
+	struct pnp_id *pos;
+	const struct pnp_dev *pnp_dev = to_pnp_dev(dev);
+
+	if (!dev)
+		return -ENODEV;
+
+	pos = pnp_dev->id;
+	while (pos) {
+		if (add_uevent_var(env, "MODALIAS=pnp:d%s", pos->id))
+			return -ENOMEM;
+		pos = pos->next;
+	}
+
+	return 0;
 }
 
 static int pnp_bus_match(struct device *dev, const struct device_driver *drv)
@@ -259,6 +277,7 @@ static const struct dev_pm_ops pnp_bus_dev_pm_ops = {
 const struct bus_type pnp_bus_type = {
 	.name    = "pnp",
 	.match   = pnp_bus_match,
+	.uevent  = pnp_uevent,
 	.probe   = pnp_device_probe,
 	.remove  = pnp_device_remove,
 	.shutdown = pnp_device_shutdown,
@@ -296,7 +315,7 @@ struct pnp_id *pnp_add_id(struct pnp_dev *dev, const char *id)
 {
 	struct pnp_id *dev_id, *ptr;
 
-	dev_id = kzalloc(sizeof(struct pnp_id), GFP_KERNEL);
+	dev_id = kzalloc_obj(struct pnp_id);
 	if (!dev_id)
 		return NULL;
 

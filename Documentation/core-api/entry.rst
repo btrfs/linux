@@ -58,32 +58,59 @@ state transitions must run with interrupts disabled.
 Syscalls
 --------
 
-Syscall-entry code starts in assembly code and calls out into low-level C code
-after establishing low-level architecture-specific state and stack frames. This
-low-level C code must not be instrumented. A typical syscall handling function
-invoked from low-level assembly code looks like this:
+Syscall-entry code starts in assembly code and calls out into low-level C
+code after establishing low-level architecture-specific state and stack
+frames. This low-level C code must not be instrumented. The recommended
+syscall handling function invoked from low-level assembly code looks like
+this:
 
 .. code-block:: c
 
-  noinstr void syscall(struct pt_regs *regs, int nr)
+  noinstr void syscall(struct pt_regs *regs, long nr)
   {
 	arch_syscall_enter(regs);
-	nr = syscall_enter_from_user_mode(regs, nr);
-
-	instrumentation_begin();
-	if (!invoke_syscall(regs, nr) && nr != -1)
-	 	result_reg(regs) = __sys_ni_syscall(regs);
-	instrumentation_end();
-
+	result_reg(regs) = -ENOSYS;
+	if (syscall_enter_from_user_mode_randomize_stack(regs, &nr)) {
+		instrumentation_begin();
+		if (valid(nr)
+			result_reg(regs) = invoke_syscall(regs, nr);
+		instrumentation_end();
+	}
 	syscall_exit_to_user_mode(regs);
   }
 
-syscall_enter_from_user_mode() first invokes enter_from_user_mode() which
-establishes state in the following order:
+This is the most resilent variant as it has always a guaranteed valid
+return code. The alternative variant is:
+
+.. code-block:: c
+
+  noinstr void syscall(struct pt_regs *regs, long nr)
+  {
+	arch_syscall_enter(regs);
+	if (syscall_enter_from_user_mode_randomize_stack(regs, &nr)) {
+		instrumentation_begin();
+		if (valid(nr)
+			result_reg(regs) = invoke_syscall(regs, nr);
+		else
+			result_reg(regs) = -ENOSYS;
+		instrumentation_end();
+	}
+	syscall_exit_to_user_mode(regs);
+  }
+
+That works for most situations except when a probe/BPF attached to the
+syscall tracepoint sets an invalid syscall number e.g. -1 and also modifies
+the result register. So this variant will obviously overwrite the modified
+result with -ENOSYS.
+
+syscall_enter_from_user_mode_randomize_stack() first invokes
+enter_from_user_mode_randomize_stack() which establishes state in the
+following order:
 
   * Lockdep
   * RCU / Context tracking
   * Tracing
+  * Apply stack randomization
 
 and then invokes the various entry work functions like ptrace, seccomp, audit,
 syscall tracing, etc. After all that is done, the instrumentable invoke_syscall
@@ -99,10 +126,11 @@ transition in the reverse order:
   * RCU / Context tracking
   * Lockdep
 
-syscall_enter_from_user_mode() and syscall_exit_to_user_mode() are also
-available as fine grained subfunctions in cases where the architecture code
-has to do extra work between the various steps. In such cases it has to
-ensure that enter_from_user_mode() is called first on entry and
+syscall_enter_from_user_mode_randomize_stack() and
+syscall_exit_to_user_mode() are also available as fine grained subfunctions
+in cases where the architecture code has to do extra work between the
+various steps. In such cases it has to ensure that
+enter_from_user_mode_randomize_stack() is called first on entry and
 exit_to_user_mode() is called last on exit.
 
 Do not nest syscalls. Nested syscalls will cause RCU and/or context tracking
@@ -169,8 +197,9 @@ return true, handles NOHZ tick state and interrupt time accounting. This
 means that up to the point where irq_enter_rcu() is invoked in_hardirq()
 returns false.
 
-irq_exit_rcu() handles interrupt time accounting, undoes the preemption
-count update and eventually handles soft interrupts and NOHZ tick state.
+irq_exit_rcu() handles interrupt time accounting, handles soft interrupts if
+possible, handles the NOHZ tick state and finally undoes the preemption count
+update.
 
 In theory, the preemption count could be updated in irqentry_enter(). In
 practice, deferring this update to irq_enter_rcu() allows the preemption-count
@@ -179,10 +208,13 @@ irqentry_exit(), which are described in the next paragraph. The only downside
 is that the early entry code up to irq_enter_rcu() must be aware that the
 preemption count has not yet been updated with the HARDIRQ_OFFSET state.
 
-Note that irq_exit_rcu() must remove HARDIRQ_OFFSET from the preemption count
-before it handles soft interrupts, whose handlers must run in BH context rather
-than irq-disabled context. In addition, irqentry_exit() might schedule, which
-also requires that HARDIRQ_OFFSET has been removed from the preemption count.
+Note that soft interrupt handlers must run in BH context rather than in hard
+interrupt context. irq_exit_rcu() therefore replaces HARDIRQ_OFFSET with
+SOFTIRQ_OFFSET in the preemption count while it handles soft interrupts and
+puts HARDIRQ_OFFSET back afterwards, so that the remaining interrupt exit work
+is still attributed to the interrupt. HARDIRQ_OFFSET is removed before
+irq_exit_rcu() returns because irqentry_exit() might schedule, which requires
+that HARDIRQ_OFFSET has been removed from the preemption count.
 
 Even though interrupt handlers are expected to run with local interrupts
 disabled, interrupt nesting is common from an entry/exit perspective. For

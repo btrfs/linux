@@ -18,6 +18,7 @@
 #include "hda_auto_parser.h"
 #include "hda_jack.h"
 #include "../generic.h"
+#include "../side-codecs/hda_component.h"
 
 /* CS8409 Specific Definitions */
 
@@ -246,6 +247,7 @@ enum cs8409_coefficient_index_registers {
 #define CS8409_CS42L42_AMIC_PIN_NID		CS8409_PIN_ASP1_RECEIVER_A
 #define CS8409_CS42L42_DMIC_PIN_NID		CS8409_PIN_DMIC1_IN
 #define CS8409_CS42L42_DMIC_ADC_PIN_NID		CS8409_PIN_DMIC1
+#define CS8409_JACK_DETECT_DELAY_MS		100
 
 /* Dolphin */
 
@@ -265,12 +267,15 @@ enum {
 	CS8409_BULLSEYE,
 	CS8409_WARLOCK,
 	CS8409_WARLOCK_MLK,
+	CS8409_WARLOCK_MLK_DELAYED_JD,
 	CS8409_WARLOCK_MLK_DUAL_MIC,
 	CS8409_CYBORG,
 	CS8409_FIXUPS,
 	CS8409_DOLPHIN,
 	CS8409_DOLPHIN_FIXUPS,
 	CS8409_ODIN,
+	CS8409_CDB35L56_FOUR_HD,
+	CS8409_CDB35L56_FOUR_HD_FIXUP,
 };
 
 enum {
@@ -336,17 +341,24 @@ struct cs8409_spec {
 	unsigned int i2c_clck_enabled;
 	unsigned int dev_addr;
 	struct delayed_work i2c_clk_work;
+	struct delayed_work jack_detect_work;
 
 	unsigned int playback_started:1;
 	unsigned int capture_started:1;
 	unsigned int init_done:1;
 	unsigned int build_ctrl_done:1;
+	unsigned int speaker_muted:1;
+	unsigned int delay_jack_detect:1;
 
 	/* verb exec op override */
 	int (*exec_verb)(struct hdac_device *dev, unsigned int cmd, unsigned int flags,
 			 unsigned int *res);
 	/* unsol_event op override */
 	void (*unsol_event)(struct hda_codec *codec, unsigned int res);
+
+	/* component binding */
+	struct component_match *match;
+	struct hda_component_parent comps;
 };
 
 extern const struct snd_kcontrol_new cs42l42_dac_volume_mixer;
@@ -373,5 +385,10 @@ extern struct sub_codec dolphin_cs42l42_1;
 
 void cs8409_cs42l42_fixups(struct hda_codec *codec, const struct hda_fixup *fix, int action);
 void dolphin_fixups(struct hda_codec *codec, const struct hda_fixup *fix, int action);
+
+extern const struct cs8409_cir_param cs8409_cdb35l56_four_hw_cfg[];
+extern const struct hda_verb cs8409_cdb35l56_four_init_verbs[];
+void cs8409_cdb35l56_four_autodet_fixup(struct hda_codec *codec, const struct hda_fixup *fix,
+					int action);
 
 #endif

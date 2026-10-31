@@ -49,7 +49,6 @@
 #define UNSIGNALED_EVENT_SLOT ((uint64_t)-1)
 
 struct kfd_event_waiter;
-struct signal_page;
 
 struct kfd_event {
 	u32 event_id;
@@ -62,9 +61,6 @@ struct kfd_event {
 
 	spinlock_t lock;
 	wait_queue_head_t wq; /* List of event waiters. */
-
-	/* Only for signal events. */
-	uint64_t __user *user_signal_address;
 
 	/* type specific data */
 	union {
@@ -85,6 +81,7 @@ struct kfd_event {
 #define KFD_EVENT_TYPE_MEMORY 8
 
 extern void kfd_signal_event_interrupt(u32 pasid, uint32_t partial_id,
-				       uint32_t valid_id_bits);
+				       uint32_t valid_id_bits,
+				       bool signal_mailbox_updated);
 
 #endif

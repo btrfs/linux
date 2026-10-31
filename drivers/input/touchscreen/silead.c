@@ -776,27 +776,27 @@ static int silead_ts_resume(struct device *dev)
 static DEFINE_SIMPLE_DEV_PM_OPS(silead_ts_pm, silead_ts_suspend, silead_ts_resume);
 
 static const struct i2c_device_id silead_ts_id[] = {
-	{ "gsl1680" },
-	{ "gsl1688" },
-	{ "gsl3670" },
-	{ "gsl3675" },
-	{ "gsl3692" },
-	{ "mssl1680" },
+	{ .name = "gsl1680" },
+	{ .name = "gsl1688" },
+	{ .name = "gsl3670" },
+	{ .name = "gsl3675" },
+	{ .name = "gsl3692" },
+	{ .name = "mssl1680" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, silead_ts_id);
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id silead_ts_acpi_match[] = {
-	{ "GSL1680", 0 },
-	{ "GSL1688", 0 },
-	{ "GSL3670", 0 },
-	{ "GSL3675", 0 },
-	{ "GSL3692", 0 },
-	{ "MSSL1680", 0 },
-	{ "MSSL0001", 0 },
-	{ "MSSL0002", 0 },
-	{ "MSSL0017", 0 },
+	{ .id = "GSL1680" },
+	{ .id = "GSL1688" },
+	{ .id = "GSL3670" },
+	{ .id = "GSL3675" },
+	{ .id = "GSL3692" },
+	{ .id = "MSSL1680" },
+	{ .id = "MSSL0001" },
+	{ .id = "MSSL0002" },
+	{ .id = "MSSL0017" },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, silead_ts_acpi_match);

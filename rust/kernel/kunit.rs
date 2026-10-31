@@ -9,20 +9,21 @@
 use crate::fmt;
 use crate::prelude::*;
 
-#[cfg(CONFIG_PRINTK)]
-use crate::c_str;
-
 /// Prints a KUnit error-level message.
 ///
 /// Public but hidden since it should only be used from KUnit generated code.
 #[doc(hidden)]
 pub fn err(args: fmt::Arguments<'_>) {
+    // `args` is unused if `CONFIG_PRINTK` is not set - this avoids a build-time warning.
+    #[cfg(not(CONFIG_PRINTK))]
+    let _ = args;
+
     // SAFETY: The format string is null-terminated and the `%pA` specifier matches the argument we
     // are passing.
     #[cfg(CONFIG_PRINTK)]
     unsafe {
         bindings::_printk(
-            c_str!("\x013%pA").as_char_ptr(),
+            c"\x013%pA".as_char_ptr(),
             core::ptr::from_ref(&args).cast::<c_void>(),
         );
     }
@@ -33,12 +34,16 @@ pub fn err(args: fmt::Arguments<'_>) {
 /// Public but hidden since it should only be used from KUnit generated code.
 #[doc(hidden)]
 pub fn info(args: fmt::Arguments<'_>) {
+    // `args` is unused if `CONFIG_PRINTK` is not set - this avoids a build-time warning.
+    #[cfg(not(CONFIG_PRINTK))]
+    let _ = args;
+
     // SAFETY: The format string is null-terminated and the `%pA` specifier matches the argument we
     // are passing.
     #[cfg(CONFIG_PRINTK)]
     unsafe {
         bindings::_printk(
-            c_str!("\x016%pA").as_char_ptr(),
+            c"\x016%pA".as_char_ptr(),
             core::ptr::from_ref(&args).cast::<c_void>(),
         );
     }
@@ -53,15 +58,17 @@ pub fn info(args: fmt::Arguments<'_>) {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! kunit_assert {
-    ($name:literal, $file:literal, $diff:expr, $condition:expr $(,)?) => {
+    ($name:literal, $condition:expr $(,)?) => {
         'out: {
             // Do nothing if the condition is `true`.
             if $condition {
                 break 'out;
             }
 
-            static FILE: &'static $crate::str::CStr = $crate::c_str!($file);
-            static LINE: i32 = ::core::line!() as i32 - $diff;
+            // Use `file!()` instead of `::core::file!()` here so it can be overridden.
+            static FILE: &'static $crate::str::CStr = $crate::c_str!(file!());
+            // Use `line!()` instead of `::core::line!()` here so it can be overridden.
+            static LINE: i32 = line!() as i32;
             static CONDITION: &'static $crate::str::CStr = $crate::c_str!(stringify!($condition));
 
             // SAFETY: FFI call without safety requirements.
@@ -159,10 +166,10 @@ macro_rules! kunit_assert {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! kunit_assert_eq {
-    ($name:literal, $file:literal, $diff:expr, $left:expr, $right:expr $(,)?) => {{
+    ($name:literal, $left:expr, $right:expr $(,)?) => {{
         // For the moment, we just forward to the expression assert because, for binary asserts,
         // KUnit supports only a few types (e.g. integers).
-        $crate::kunit_assert!($name, $file, $diff, $left == $right);
+        $crate::kunit_assert!($name, $left == $right);
     }};
 }
 
@@ -192,9 +199,6 @@ pub fn is_test_result_ok(t: impl TestResult) -> bool {
 }
 
 /// Represents an individual test case.
-///
-/// The [`kunit_unsafe_test_suite!`] macro expects a NULL-terminated list of valid test cases.
-/// Use [`kunit_case_null`] to generate such a delimiter.
 #[doc(hidden)]
 pub const fn kunit_case(
     name: &'static kernel::str::CStr,
@@ -215,32 +219,11 @@ pub const fn kunit_case(
     }
 }
 
-/// Represents the NULL test case delimiter.
-///
-/// The [`kunit_unsafe_test_suite!`] macro expects a NULL-terminated list of test cases. This
-/// function returns such a delimiter.
-#[doc(hidden)]
-pub const fn kunit_case_null() -> kernel::bindings::kunit_case {
-    kernel::bindings::kunit_case {
-        run_case: None,
-        name: core::ptr::null_mut(),
-        generate_params: None,
-        attr: kernel::bindings::kunit_attributes {
-            speed: kernel::bindings::kunit_speed_KUNIT_SPEED_NORMAL,
-        },
-        status: kernel::bindings::kunit_status_KUNIT_SUCCESS,
-        module_name: core::ptr::null_mut(),
-        log: core::ptr::null_mut(),
-        param_init: None,
-        param_exit: None,
-    }
-}
-
 /// Registers a KUnit test suite.
 ///
 /// # Safety
 ///
-/// `test_cases` must be a NULL terminated array of valid test cases,
+/// `test_cases` must be a `NULL` terminated array of valid test cases,
 /// whose lifetime is at least that of the test suite (i.e., static).
 ///
 /// # Examples
@@ -253,8 +236,8 @@ pub const fn kunit_case_null() -> kernel::bindings::kunit_case {
 /// }
 ///
 /// static mut KUNIT_TEST_CASES: [kernel::bindings::kunit_case; 2] = [
-///     kernel::kunit::kunit_case(kernel::c_str!("name"), test_fn),
-///     kernel::kunit::kunit_case_null(),
+///     kernel::kunit::kunit_case(c"name", test_fn),
+///     pin_init::zeroed(),
 /// ];
 /// kernel::kunit_unsafe_test_suite!(suite_name, KUNIT_TEST_CASES);
 /// ```
@@ -307,6 +290,7 @@ macro_rules! kunit_unsafe_test_suite {
                     log: ::core::ptr::null_mut(),
                     suite_init_err: 0,
                     is_init: false,
+                    status: kernel::bindings::kunit_status_KUNIT_SUCCESS,
                 };
 
             #[used(compiler)]
@@ -348,6 +332,7 @@ pub fn in_kunit_test() -> bool {
     !unsafe { bindings::kunit_get_current_test() }.is_null()
 }
 
+#[cfg(CONFIG_RUST_KUNIT_SELFTEST)]
 #[kunit_tests(rust_kernel_kunit)]
 mod tests {
     use super::*;

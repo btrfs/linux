@@ -14,6 +14,7 @@
 #include <drm/drm_fourcc.h>
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_gem_dma_helper.h>
+#include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_writeback.h>
 
@@ -63,19 +64,18 @@ static const struct drm_connector_helper_funcs malidp_mw_connector_helper_funcs 
 	.mode_valid = malidp_mw_connector_mode_valid,
 };
 
-static void malidp_mw_connector_reset(struct drm_connector *connector)
+static struct drm_connector_state *
+malidp_mw_connector_create_state(struct drm_connector *connector)
 {
-	struct malidp_mw_connector_state *mw_state =
-		kzalloc(sizeof(*mw_state), GFP_KERNEL);
+	struct malidp_mw_connector_state *mw_state;
 
-	if (connector->state)
-		__drm_atomic_helper_connector_destroy_state(connector->state);
+	mw_state = kzalloc_obj(*mw_state);
+	if (!mw_state)
+		return ERR_PTR(-ENOMEM);
 
-	kfree(connector->state);
-	connector->state = NULL;
+	__drm_atomic_helper_connector_state_init(&mw_state->base, connector);
 
-	if (mw_state)
-		__drm_atomic_helper_connector_reset(connector, &mw_state->base);
+	return &mw_state->base;
 }
 
 static enum drm_connector_status
@@ -97,7 +97,7 @@ malidp_mw_connector_duplicate_state(struct drm_connector *connector)
 	if (WARN_ON(!connector->state))
 		return NULL;
 
-	mw_state = kzalloc(sizeof(*mw_state), GFP_KERNEL);
+	mw_state = kzalloc_obj(*mw_state);
 	if (!mw_state)
 		return NULL;
 
@@ -111,7 +111,7 @@ malidp_mw_connector_duplicate_state(struct drm_connector *connector)
 }
 
 static const struct drm_connector_funcs malidp_mw_connector_funcs = {
-	.reset = malidp_mw_connector_reset,
+	.atomic_create_state = malidp_mw_connector_create_state,
 	.detect = malidp_mw_connector_detect,
 	.fill_modes = drm_helper_probe_single_connector_modes,
 	.destroy = malidp_mw_connector_destroy,
@@ -237,7 +237,7 @@ int malidp_mw_connector_init(struct drm_device *drm)
 }
 
 void malidp_mw_atomic_commit(struct drm_device *drm,
-			     struct drm_atomic_state *old_state)
+			     struct drm_atomic_commit *old_state)
 {
 	struct malidp_drm *malidp = drm_to_malidp(drm);
 	struct drm_writeback_connector *mw_conn = &malidp->mw_connector;

@@ -9,7 +9,6 @@
 #include <linux/err.h>
 #include <linux/gpio/consumer.h>
 #include <linux/io.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -43,7 +42,8 @@ static int ad7606_par_bus_setup_iio_backend(struct device *dev,
 					    struct iio_dev *indio_dev)
 {
 	struct ad7606_state *st = iio_priv(indio_dev);
-	unsigned int ret, c;
+	unsigned int c;
+	int ret;
 	struct iio_backend_data_fmt data = {
 		.sign_extend = true,
 		.enable = true,

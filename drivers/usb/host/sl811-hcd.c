@@ -814,7 +814,7 @@ static int sl811h_urb_enqueue(
 
 	/* avoid all allocations within spinlocks */
 	if (!hep->hcpriv) {
-		ep = kzalloc(sizeof *ep, mem_flags);
+		ep = kzalloc_obj(*ep, mem_flags);
 		if (ep == NULL)
 			return -ENOMEM;
 	}
@@ -1591,6 +1591,7 @@ sl811h_remove(struct platform_device *dev)
 
 	remove_debug_file(sl811);
 	usb_remove_hcd(hcd);
+	device_wakeup_disable(hcd->self.controller);
 
 	/* some platforms may use IORESOURCE_IO */
 	res = platform_get_resource(dev, IORESOURCE_MEM, 1);
@@ -1748,6 +1749,7 @@ sl811h_suspend(struct platform_device *dev, pm_message_t state)
 		break;
 	case PM_EVENT_SUSPEND:
 	case PM_EVENT_HIBERNATE:
+	case PM_EVENT_POWEROFF:
 	case PM_EVENT_PRETHAW:		/* explicitly discard hw state */
 		port_power(sl811, 0);
 		break;

@@ -574,7 +574,7 @@ static void ioat_enumerate_channels(struct ioatdma_device *ioat_dma)
 	dev_dbg(dev, "%s: xfercap = %d\n", __func__, 1 << xfercap_log);
 
 	for (i = 0; i < chancnt; i++) {
-		ioat_chan = kzalloc(sizeof(*ioat_chan), GFP_KERNEL);
+		ioat_chan = kzalloc_obj(*ioat_chan);
 		if (!ioat_chan)
 			break;
 
@@ -1170,15 +1170,6 @@ static int ioat3_dma_probe(struct ioatdma_device *ioat_dma, int dca)
 		       ioat_chan->reg_base + IOAT_DCACTRL_OFFSET);
 	}
 
-	err = dma_async_device_register(&ioat_dma->dma_dev);
-	if (err)
-		goto err_disable_interrupts;
-
-	ioat_kobject_add(ioat_dma, &ioat_ktype);
-
-	if (dca)
-		ioat_dma->dca = ioat_dca_init(pdev, ioat_dma->reg_base);
-
 	/* disable relaxed ordering */
 	err = pcie_capability_read_word(pdev, PCI_EXP_DEVCTL, &val16);
 	if (err) {
@@ -1193,6 +1184,15 @@ static int ioat3_dma_probe(struct ioatdma_device *ioat_dma, int dca)
 		err = pcibios_err_to_errno(err);
 		goto err_disable_interrupts;
 	}
+
+	err = dma_async_device_register(&ioat_dma->dma_dev);
+	if (err)
+		goto err_disable_interrupts;
+
+	ioat_kobject_add(ioat_dma, &ioat_ktype);
+
+	if (dca)
+		ioat_dma->dca = ioat_dca_init(pdev, ioat_dma->reg_base);
 
 	if (ioat_dma->cap & IOAT_CAP_DPS)
 		writeb(ioat_pending_level + 1,
@@ -1286,7 +1286,6 @@ static pci_ers_result_t ioat_pcie_error_slot_reset(struct pci_dev *pdev)
 	} else {
 		pci_set_master(pdev);
 		pci_restore_state(pdev);
-		pci_save_state(pdev);
 		pci_wake_from_d3(pdev, false);
 	}
 
@@ -1333,7 +1332,7 @@ static void release_ioatdma(struct dma_device *device)
 static struct ioatdma_device *
 alloc_ioatdma(struct pci_dev *pdev, void __iomem *iobase)
 {
-	struct ioatdma_device *d = kzalloc(sizeof(*d), GFP_KERNEL);
+	struct ioatdma_device *d = kzalloc_obj(*d);
 
 	if (!d)
 		return NULL;

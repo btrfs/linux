@@ -117,6 +117,8 @@ static int max11205_probe(struct spi_device *spi)
 	ad_sd_init(&st->sd, indio_dev, spi, &max11205_sigma_delta_info);
 
 	st->chip_info = spi_get_device_match_data(spi);
+	if (!st->chip_info)
+		return -ENODATA;
 
 	indio_dev->name = st->chip_info->name;
 	indio_dev->modes = INDIO_DIRECT_MODE;
@@ -145,8 +147,8 @@ static int max11205_probe(struct spi_device *spi)
 }
 
 static const struct spi_device_id max11205_spi_ids[] = {
-	{ "max11205a", (kernel_ulong_t)&max11205_chip_info[TYPE_MAX11205A] },
-	{ "max11205b", (kernel_ulong_t)&max11205_chip_info[TYPE_MAX11205B] },
+	{ .name = "max11205a", .driver_data = (kernel_ulong_t)&max11205_chip_info[TYPE_MAX11205A] },
+	{ .name = "max11205b", .driver_data = (kernel_ulong_t)&max11205_chip_info[TYPE_MAX11205B] },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, max11205_spi_ids);

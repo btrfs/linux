@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
 #include <errno.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -18,6 +19,10 @@
 struct options {
 	bool count_packets;
 	bool gso_enabled;
+	bool failopen;
+	bool out_of_order;
+	bool bogus_verdict;
+	bool hold;
 	int verbose;
 	unsigned int queue_num;
 	unsigned int timeout;
@@ -30,7 +35,8 @@ static struct options opts;
 
 static void help(const char *p)
 {
-	printf("Usage: %s [-c|-v [-vv] ] [-t timeout] [-q queue_num] [-Qdst_queue ] [ -d ms_delay ] [-G]\n", p);
+	printf("Usage: %s [-c|-v [-vv] ] [-o] [-O] [-b] [-t timeout] [-q queue_num] [-Qdst_queue ] [ -d ms_delay ] [-G]\n", p);
+	printf("          [-H] (hold verdicts until SIGUSR1 is received)\n");
 }
 
 static int parse_attr_cb(const struct nlattr *attr, void *data)
@@ -236,6 +242,8 @@ struct mnl_socket *open_queue(void)
 
 	flags = opts.gso_enabled ? NFQA_CFG_F_GSO : 0;
 	flags |= NFQA_CFG_F_UID_GID;
+	if (opts.failopen)
+		flags |= NFQA_CFG_F_FAIL_OPEN;
 	mnl_attr_put_u32(nlh, NFQA_CFG_FLAGS, htonl(flags));
 	mnl_attr_put_u32(nlh, NFQA_CFG_MASK, htonl(flags));
 
@@ -272,7 +280,10 @@ static int mainloop(void)
 	unsigned int buflen = 64 * 1024 + MNL_SOCKET_BUFFER_SIZE;
 	struct mnl_socket *nl;
 	struct nlmsghdr *nlh;
+	uint32_t ooo_ids[16];
 	unsigned int portid;
+	int ooo_count = 0;
+	sigset_t hold_set;
 	char *buf;
 	int ret;
 
@@ -281,6 +292,12 @@ static int mainloop(void)
 		perror("malloc");
 		exit(EXIT_FAILURE);
 	}
+
+	/* -H: keep SIGUSR1 pending until the first packet is read */
+	sigemptyset(&hold_set);
+	sigaddset(&hold_set, SIGUSR1);
+	if (opts.hold)
+		sigprocmask(SIG_BLOCK, &hold_set, NULL);
 
 	nl = open_queue();
 	portid = mnl_socket_get_portid(nl);
@@ -305,18 +322,53 @@ static int mainloop(void)
 
 		ret = mnl_cb_run(buf, ret, 0, portid, queue_cb, NULL);
 		if (ret < 0) {
+			/* bogus verdict mode will generate ENOENT error messages */
+			if (opts.bogus_verdict && errno == ENOENT)
+				continue;
 			perror("mnl_cb_run");
 			exit(EXIT_FAILURE);
 		}
 
 		id = ret - MNL_CB_OK;
+		if (opts.hold) {
+			int sig;
+
+			sigwait(&hold_set, &sig);
+			opts.hold = false;
+		}
+
 		if (opts.delay_ms)
 			sleep_ms(opts.delay_ms);
 
-		nlh = nfq_build_verdict(buf, id, opts.queue_num, opts.verdict);
-		if (mnl_socket_sendto(nl, nlh, nlh->nlmsg_len) < 0) {
-			perror("mnl_socket_sendto");
-			exit(EXIT_FAILURE);
+		if (opts.bogus_verdict) {
+			for (int i = 0; i < 50; i++) {
+				nlh = nfq_build_verdict(buf, id + 0x7FFFFFFF + i,
+							opts.queue_num, opts.verdict);
+				mnl_socket_sendto(nl, nlh, nlh->nlmsg_len);
+			}
+		}
+
+		if (opts.out_of_order) {
+			ooo_ids[ooo_count] = id;
+			if (ooo_count >= 15) {
+				for (ooo_count; ooo_count >= 0; ooo_count--) {
+					nlh = nfq_build_verdict(buf, ooo_ids[ooo_count],
+								opts.queue_num, opts.verdict);
+					if (mnl_socket_sendto(nl, nlh, nlh->nlmsg_len) < 0) {
+						perror("mnl_socket_sendto");
+						exit(EXIT_FAILURE);
+					}
+				}
+				ooo_count = 0;
+			} else {
+				ooo_count++;
+			}
+		} else {
+			nlh = nfq_build_verdict(buf, id, opts.queue_num, opts.verdict);
+			if (mnl_socket_sendto(nl, nlh, nlh->nlmsg_len) < 0) {
+				perror("mnl_socket_sendto");
+				exit(EXIT_FAILURE);
+			}
 		}
 	}
 
@@ -329,7 +381,7 @@ static void parse_opts(int argc, char **argv)
 {
 	int c;
 
-	while ((c = getopt(argc, argv, "chvt:q:Q:d:G")) != -1) {
+	while ((c = getopt(argc, argv, "chvoObt:q:Q:d:GH")) != -1) {
 		switch (c) {
 		case 'c':
 			opts.count_packets = true;
@@ -337,6 +389,9 @@ static void parse_opts(int argc, char **argv)
 		case 'h':
 			help(argv[0]);
 			exit(0);
+			break;
+		case 'H':
+			opts.hold = true;
 			break;
 		case 'q':
 			opts.queue_num = atoi(optarg);
@@ -366,8 +421,17 @@ static void parse_opts(int argc, char **argv)
 		case 'G':
 			opts.gso_enabled = false;
 			break;
+		case 'o':
+			opts.failopen = true;
+			break;
 		case 'v':
 			opts.verbose++;
+			break;
+		case 'O':
+			opts.out_of_order = true;
+			break;
+		case 'b':
+			opts.bogus_verdict = true;
 			break;
 		}
 	}

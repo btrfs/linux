@@ -1,5 +1,6 @@
+/* SPDX-License-Identifier: MIT */
 /*
- * Copyright 2019 Advanced Micro Devices, Inc.
+ * Copyright 2019-2026 Advanced Micro Devices, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -68,15 +69,20 @@
 #include "dc/dc_types.h"
 
 #define DMUB_PC_SNAPSHOT_COUNT 10
+#define DMUB_TRACE_SNAPSHOT_COUNT 8
 
 /* Default tracebuffer size if meta is absent. */
 #define DMUB_TRACE_BUFFER_SIZE (64 * 1024)
+
+#define PSP_HEADER_BYTES_256 0x100 // 256 bytes
+#define PSP_FOOTER_BYTES_256 0x100 // 256 bytes
 
 /* Forward declarations */
 struct dmub_srv;
 struct dmub_srv_common_regs;
 struct dmub_srv_dcn31_regs;
 
+struct dmcub_trace_buf;
 struct dmcub_trace_buf_entry;
 
 /* enum dmub_window_memory_type - memory location type specification for windows */
@@ -116,6 +122,10 @@ enum dmub_asic {
 	DMUB_ASIC_DCN351,
 	DMUB_ASIC_DCN36,
 	DMUB_ASIC_DCN401,
+	DMUB_ASIC_DCN42,
+	DMUB_ASIC_DCN42B,
+	DMUB_ASIC_DCN60,
+
 	DMUB_ASIC_MAX,
 };
 
@@ -132,6 +142,7 @@ enum dmub_window_id {
 	DMUB_WINDOW_IB_MEM,
 	DMUB_WINDOW_SHARED_STATE,
 	DMUB_WINDOW_LSDMA_BUFFER,
+	DMUB_WINDOW_CURSOR_OFFLOAD,
 	DMUB_WINDOW_TOTAL,
 };
 
@@ -226,6 +237,23 @@ struct dmub_srv_region_params {
 	const uint8_t *fw_inst_const;
 	const uint8_t *fw_bss_data;
 	const enum dmub_window_memory_type *window_memory_type;
+	const struct dmub_fw_meta_info *fw_info;
+};
+
+/**
+ * struct dmub_srv_fw_meta_info_params - params used for fetching fw meta info from fw_image
+ * @inst_const_size: size of the fw inst const section
+ * @bss_data_size: size of the fw bss data section
+ * @fw_inst_const: raw firmware inst const section
+ * @fw_bss_data: raw firmware bss data section
+ * @custom_psp_footer_size: custom psp footer size to use when indexing for fw meta info
+ */
+struct dmub_srv_fw_meta_info_params {
+	uint32_t inst_const_size;
+	uint32_t bss_data_size;
+	const uint8_t *fw_inst_const;
+	const uint8_t *fw_bss_data;
+	uint32_t custom_psp_footer_size;
 };
 
 /**
@@ -248,6 +276,7 @@ struct dmub_srv_region_info {
 	uint32_t gart_size;
 	uint8_t num_regions;
 	struct dmub_region regions[DMUB_WINDOW_TOTAL];
+	uint32_t verified_psp_footer_size;
 };
 
 /**
@@ -285,6 +314,18 @@ struct dmub_srv_fb_info {
 	struct dmub_fb fb[DMUB_WINDOW_TOTAL];
 };
 
+/**
+ * struct dmub_soc_fb_info - relevant addresses from the frame buffer
+ * @fb_base: base of the framebuffer aperture
+ * @fb_offset: offset of the framebuffer aperture
+ */
+struct dmub_soc_fb_info {
+	uint64_t fb_base;
+	uint64_t fb_offset;
+	uint32_t alt_channel_region_size[2];
+	uint64_t alt_channel_region_base[2]; /* mc address */
+};
+
 /*
  * struct dmub_srv_hw_params - params for dmub hardware initialization
  * @fb: framebuffer info for each region
@@ -294,9 +335,8 @@ struct dmub_srv_fb_info {
  * @load_inst_const: true if DMUB should load inst const fw
  */
 struct dmub_srv_hw_params {
-	struct dmub_fb *fb[DMUB_WINDOW_TOTAL];
-	uint64_t fb_base;
-	uint64_t fb_offset;
+	struct dmub_srv_fb_info *fb_info;
+	struct dmub_soc_fb_info soc_fb_info;
 	uint32_t psp_version;
 	bool load_inst_const;
 	bool skip_panel_power_sequence;
@@ -317,6 +357,27 @@ struct dmub_srv_hw_params {
 	bool enable_non_transparent_setconfig;
 	bool lower_hbr3_phy_ssc;
 	bool override_hbr3_pll_vco;
+	bool disable_dpia_bw_allocation;
+};
+
+#define DMUB_TIMEOUT_TRACE_COUNT 8
+
+/**
+ * struct dmub_trace_buf_header - Header for the DMUB trace buffer
+ * @entry_count: Number of valid entries in the trace buffer
+ * @reserved: Reserved for future use
+ */
+struct dmub_trace_buf_header {
+	uint32_t entry_count;
+	uint32_t reserved[3];
+};
+
+/**
+ * struct dmub_trace_snapshot - Snapshot of the DMUB trace buffer
+ * @traces: Array of trace buffer entries
+ */
+struct dmub_trace_snapshot {
+	struct dmcub_trace_buf_entry traces[DMUB_TRACE_SNAPSHOT_COUNT];
 };
 
 /**
@@ -328,13 +389,13 @@ struct dmub_timeout_info {
 	bool timeout_occured;
 	union dmub_rb_cmd timeout_cmd;
 	unsigned long long timestamp;
+	struct dmub_trace_snapshot trace_snapshot;
 };
 
 /**
- * struct dmub_diagnostic_data - Diagnostic data retrieved from DMCUB for
- * debugging purposes, including logging, crash analysis, etc.
+ * struct dmub_hw_diagnostic_data - Hardware diagnostic data for the DMUB
  */
-struct dmub_diagnostic_data {
+struct dmub_hw_diagnostic_data {
 	uint32_t dmcub_version;
 	uint32_t scratch[17];
 	uint32_t pc[DMUB_PC_SNAPSHOT_COUNT];
@@ -351,7 +412,6 @@ struct dmub_diagnostic_data {
 	uint32_t outbox1_wptr;
 	uint32_t outbox1_size;
 	uint32_t gpint_datain0;
-	struct dmub_timeout_info timeout_info;
 	uint8_t is_dmcub_enabled : 1;
 	uint8_t is_dmcub_soft_reset : 1;
 	uint8_t is_dmcub_secure_reset : 1;
@@ -359,6 +419,30 @@ struct dmub_diagnostic_data {
 	uint8_t is_cw0_enabled : 1;
 	uint8_t is_cw6_enabled : 1;
 	uint8_t is_pwait : 1;
+};
+
+/**
+ * struct dmub_diagnostic_data - Diagnostic data retrieved from DMCUB for
+ * debugging purposes, including logging, crash analysis, etc.
+ */
+struct dmub_diagnostic_data {
+	struct dmub_hw_diagnostic_data hw;
+	struct dmub_timeout_info first_timeout_info;
+	struct dmub_timeout_info latest_timeout_info;
+	struct dmub_trace_snapshot trace_snapshot;
+};
+
+/**
+ * struct dmub_preos_info - preos fw info before loading post os fw.
+ */
+struct dmub_preos_info {
+	uint64_t fb_base;
+	uint64_t fb_offset;
+	uint64_t trace_buffer_phy_addr;
+	uint32_t trace_buffer_size;
+	uint32_t fw_version;
+	uint32_t boot_status;
+	uint32_t boot_options;
 };
 
 struct dmub_srv_inbox {
@@ -485,7 +569,8 @@ struct dmub_srv_hw_funcs {
 	void (*send_inbox0_cmd)(struct dmub_srv *dmub, union dmub_inbox0_data_register data);
 	uint32_t (*get_current_time)(struct dmub_srv *dmub);
 
-	void (*get_diagnostic_data)(struct dmub_srv *dmub);
+	void (*get_diagnostic_data)(struct dmub_srv *dmub, struct dmub_hw_diagnostic_data *hw_data);
+	bool (*get_preos_fw_info)(struct dmub_srv *dmub);
 
 	bool (*should_detect)(struct dmub_srv *dmub);
 	void (*init_reg_offsets)(struct dmub_srv *dmub, struct dc_context *ctx);
@@ -535,16 +620,21 @@ struct dmub_srv_create_params {
  * @fw_version: the current firmware version, if any
  * @is_virtual: false if hardware support only
  * @shared_state: dmub shared state between firmware and driver
- * @fw_state: dmub firmware state pointer
+ * @cursor_offload_v1: Cursor offload state
+ * @fw_state: dmub firmware state pointer (debug purpose only)
  */
 struct dmub_srv {
 	enum dmub_asic asic;
 	void *user_ctx;
 	uint32_t fw_version;
 	bool is_virtual;
+	bool no_ext_reg_access;
 	struct dmub_fb scratch_mem_fb;
 	struct dmub_fb ib_mem_gart;
+	struct dmub_fb cursor_offload_fb;
+	const struct dmub_srv_fb_info *fb_info;
 	volatile struct dmub_shared_state_feature_block *shared_state;
+	volatile struct dmub_cursor_offload_v1 *cursor_offload_v1;
 	volatile const struct dmub_fw_state *fw_state;
 
 	/* private: internal use only */
@@ -553,6 +643,8 @@ struct dmub_srv {
 	struct dmub_srv_dcn32_regs *regs_dcn32;
 	struct dmub_srv_dcn35_regs *regs_dcn35;
 	const struct dmub_srv_dcn401_regs *regs_dcn401;
+	struct dmub_srv_dcn42_regs *regs_dcn42;
+    const struct dmub_srv_dcn60_regs *regs_dcn60;
 	struct dmub_srv_base_funcs funcs;
 	struct dmub_srv_hw_funcs hw_funcs;
 	struct dmub_srv_inbox inbox1;
@@ -570,8 +662,7 @@ struct dmub_srv {
 	bool hw_init;
 	bool dpia_supported;
 
-	uint64_t fb_base;
-	uint64_t fb_offset;
+	struct dmub_soc_fb_info soc_fb_info;
 	uint32_t psp_version;
 
 	/* Feature capabilities reported by fw */
@@ -583,6 +674,7 @@ struct dmub_srv {
 	enum dmub_srv_power_state_type power_state;
 	struct dmub_diagnostic_data debug;
 	struct dmub_fb lsdma_rb_fb;
+	struct dmub_preos_info preos_info;
 };
 
 /**
@@ -901,14 +993,15 @@ enum dmub_status dmub_srv_get_gpint_dataout(struct dmub_srv *dmub,
 					     uint32_t *dataout);
 
 /**
- * dmub_flush_buffer_mem() - Read back entire frame buffer region.
+ * dmub_srv_flush_buffer_mem() - Read back entire frame buffer region.
  * This ensures that the write from x86 has been flushed and will not
  * hang the DMCUB.
+ * @dmub: the dmub service
  * @fb: frame buffer to flush
  *
  * Can be called after software initialization.
  */
-void dmub_flush_buffer_mem(const struct dmub_fb *fb);
+void dmub_srv_flush_buffer_mem(struct dmub_srv *dmub, const struct dmub_fb *fb);
 
 /**
  * dmub_srv_get_fw_boot_status() - Returns the DMUB boot status bits.
@@ -931,6 +1024,14 @@ enum dmub_status dmub_srv_set_skip_panel_power_sequence(struct dmub_srv *dmub,
 
 bool dmub_srv_get_outbox0_msg(struct dmub_srv *dmub, struct dmcub_trace_buf_entry *entry);
 
+/**
+ * dmub_srv_get_diagnostic_data() - Get diagnostic data from the DMUB.
+ * @dmub: the dmub service
+ *
+ * Returns:
+ *   true - if the diagnostic data was successfully retrieved
+ *   false - otherwise
+ */
 bool dmub_srv_get_diagnostic_data(struct dmub_srv *dmub);
 
 bool dmub_srv_should_detect(struct dmub_srv *dmub);
@@ -1012,7 +1113,7 @@ void dmub_srv_set_power_state(struct dmub_srv *dmub, enum dmub_srv_power_state_t
  *   DMUB_STATUS_OK - success
  *   DMUB_STATUS_INVALID - unspecified error
  */
-enum dmub_status dmub_srv_reg_cmd_execute(struct dmub_srv *dmub, union dmub_rb_cmd *cmd);
+enum dmub_status dmub_srv_reg_cmd_execute(struct dmub_srv *dmub, const union dmub_rb_cmd *cmd);
 
 
 /**
@@ -1067,5 +1168,35 @@ enum dmub_status dmub_srv_wait_for_inbox_free(struct dmub_srv *dmub,
  *   DMUB_STATUS_INVALID - unspecified error
  */
 enum dmub_status dmub_srv_update_inbox_status(struct dmub_srv *dmub);
+
+/**
+ * dmub_srv_get_preos_info() - retrieves preos fw info
+ * @dmub: the dmub service
+ *
+ * Return:
+ *   true - preos fw info retrieved successfully
+ *   false - preos fw info not retrieved successfully
+ */
+bool dmub_srv_get_preos_info(struct dmub_srv *dmub);
+
+/**
+ * dmub_srv_get_fw_meta_info_from_raw_fw() - Fetch firmware metadata info from raw firmware image
+ * @params: parameters for fetching firmware metadata info
+ * @fw_info_out: output buffer for firmware metadata info
+ *
+ * Return:
+ *   DMUB_STATUS_OK - success
+ *   DMUB_STATUS_INVALID - no FW meta info found
+ */
+enum dmub_status dmub_srv_get_fw_meta_info_from_raw_fw(struct dmub_srv_fw_meta_info_params *params,
+						       struct dmub_fw_meta_info *fw_info_out);
+
+/**
+ * dmub_srv_get_trace_snapshot() - Fetch the latest trace entries from the DMCUB trace buffer
+ * @dmub: the dmub service
+ * @trace_snapshot: output buffer for trace entries
+ *
+ */
+void dmub_srv_get_trace_snapshot(struct dmub_srv *dmub, struct dmub_trace_snapshot *trace_snapshot);
 
 #endif /* _DMUB_SRV_H_ */

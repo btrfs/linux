@@ -944,7 +944,6 @@ static const struct net_device_ops ifi_canfd_netdev_ops = {
 	.ndo_open	= ifi_canfd_open,
 	.ndo_stop	= ifi_canfd_close,
 	.ndo_start_xmit	= ifi_canfd_start_xmit,
-	.ndo_change_mtu	= can_change_mtu,
 };
 
 static const struct ethtool_ops ifi_canfd_ethtool_ops = {
@@ -1045,7 +1044,7 @@ static void ifi_canfd_plat_remove(struct platform_device *pdev)
 
 static const struct of_device_id ifi_canfd_of_table[] = {
 	{ .compatible = "ifi,canfd-1.0", .data = NULL },
-	{ /* sentinel */ },
+	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, ifi_canfd_of_table);
 

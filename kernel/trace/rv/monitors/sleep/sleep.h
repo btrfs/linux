@@ -15,18 +15,15 @@ enum ltl_atom {
 	LTL_ABORT_SLEEP,
 	LTL_BLOCK_ON_RT_MUTEX,
 	LTL_CLOCK_NANOSLEEP,
+	LTL_EPOLL_WAIT,
 	LTL_FUTEX_LOCK_PI,
 	LTL_FUTEX_WAIT,
-	LTL_KERNEL_THREAD,
-	LTL_KTHREAD_SHOULD_STOP,
-	LTL_NANOSLEEP_CLOCK_MONOTONIC,
-	LTL_NANOSLEEP_CLOCK_TAI,
+	LTL_NANOSLEEP_CLOCK_REALTIME,
 	LTL_NANOSLEEP_TIMER_ABSTIME,
 	LTL_RT,
+	LTL_SCHEDULE_IN,
 	LTL_SLEEP,
-	LTL_TASK_IS_MIGRATION,
-	LTL_TASK_IS_RCU,
-	LTL_WAKE,
+	LTL_USER_THREAD,
 	LTL_WOKEN_BY_EQUAL_OR_HIGHER_PRIO,
 	LTL_WOKEN_BY_HARDIRQ,
 	LTL_WOKEN_BY_NMI,
@@ -40,18 +37,15 @@ static const char *ltl_atom_str(enum ltl_atom atom)
 		"ab_sl",
 		"bl_on_rt_mu",
 		"cl_na",
+		"ep_wa",
 		"fu_lo_pi",
 		"fu_wa",
-		"ker_th",
-		"kth_sh_st",
-		"na_cl_mo",
-		"na_cl_ta",
+		"na_cl_re",
 		"na_ti_ab",
 		"rt",
-		"sl",
-		"ta_mi",
-		"ta_rc",
-		"wak",
+		"sch_in",
+		"sle",
+		"us_th",
 		"wo_eq_hi_pr",
 		"wo_ha",
 		"wo_nm",
@@ -75,182 +69,174 @@ static_assert(RV_NUM_BA_STATES <= RV_MAX_BA_STATES);
 
 static void ltl_start(struct task_struct *task, struct ltl_monitor *mon)
 {
-	bool task_is_migration = test_bit(LTL_TASK_IS_MIGRATION, mon->atoms);
-	bool task_is_rcu = test_bit(LTL_TASK_IS_RCU, mon->atoms);
-	bool val40 = task_is_rcu || task_is_migration;
-	bool futex_lock_pi = test_bit(LTL_FUTEX_LOCK_PI, mon->atoms);
-	bool val41 = futex_lock_pi || val40;
-	bool block_on_rt_mutex = test_bit(LTL_BLOCK_ON_RT_MUTEX, mon->atoms);
-	bool val5 = block_on_rt_mutex || val41;
-	bool kthread_should_stop = test_bit(LTL_KTHREAD_SHOULD_STOP, mon->atoms);
-	bool abort_sleep = test_bit(LTL_ABORT_SLEEP, mon->atoms);
-	bool val32 = abort_sleep || kthread_should_stop;
 	bool woken_by_nmi = test_bit(LTL_WOKEN_BY_NMI, mon->atoms);
-	bool val33 = woken_by_nmi || val32;
 	bool woken_by_hardirq = test_bit(LTL_WOKEN_BY_HARDIRQ, mon->atoms);
-	bool val34 = woken_by_hardirq || val33;
 	bool woken_by_equal_or_higher_prio = test_bit(LTL_WOKEN_BY_EQUAL_OR_HIGHER_PRIO,
 	     mon->atoms);
-	bool val14 = woken_by_equal_or_higher_prio || val34;
-	bool wake = test_bit(LTL_WAKE, mon->atoms);
-	bool val13 = !wake;
-	bool kernel_thread = test_bit(LTL_KERNEL_THREAD, mon->atoms);
-	bool nanosleep_clock_tai = test_bit(LTL_NANOSLEEP_CLOCK_TAI, mon->atoms);
-	bool nanosleep_clock_monotonic = test_bit(LTL_NANOSLEEP_CLOCK_MONOTONIC, mon->atoms);
-	bool val24 = nanosleep_clock_monotonic || nanosleep_clock_tai;
-	bool nanosleep_timer_abstime = test_bit(LTL_NANOSLEEP_TIMER_ABSTIME, mon->atoms);
-	bool val25 = nanosleep_timer_abstime && val24;
-	bool clock_nanosleep = test_bit(LTL_CLOCK_NANOSLEEP, mon->atoms);
-	bool val18 = clock_nanosleep && val25;
-	bool futex_wait = test_bit(LTL_FUTEX_WAIT, mon->atoms);
-	bool val9 = futex_wait || val18;
-	bool val11 = val9 || kernel_thread;
+	bool user_thread = test_bit(LTL_USER_THREAD, mon->atoms);
 	bool sleep = test_bit(LTL_SLEEP, mon->atoms);
-	bool val2 = !sleep;
+	bool schedule_in = test_bit(LTL_SCHEDULE_IN, mon->atoms);
 	bool rt = test_bit(LTL_RT, mon->atoms);
+	bool nanosleep_timer_abstime = test_bit(LTL_NANOSLEEP_TIMER_ABSTIME, mon->atoms);
+	bool nanosleep_clock_realtime = test_bit(LTL_NANOSLEEP_CLOCK_REALTIME, mon->atoms);
+	bool futex_wait = test_bit(LTL_FUTEX_WAIT, mon->atoms);
+	bool futex_lock_pi = test_bit(LTL_FUTEX_LOCK_PI, mon->atoms);
+	bool epoll_wait = test_bit(LTL_EPOLL_WAIT, mon->atoms);
+	bool clock_nanosleep = test_bit(LTL_CLOCK_NANOSLEEP, mon->atoms);
+	bool block_on_rt_mutex = test_bit(LTL_BLOCK_ON_RT_MUTEX, mon->atoms);
+	bool abort_sleep = test_bit(LTL_ABORT_SLEEP, mon->atoms);
+	bool val7 = block_on_rt_mutex || futex_lock_pi;
+	bool val32 = woken_by_nmi || abort_sleep;
+	bool val33 = woken_by_hardirq || val32;
+	bool val14 = woken_by_equal_or_higher_prio || val33;
+	bool val13 = !schedule_in;
+	bool val25 = !nanosleep_clock_realtime;
+	bool val26 = nanosleep_timer_abstime && val25;
+	bool val18 = clock_nanosleep && val26;
+	bool val20 = val18 || epoll_wait;
+	bool val11 = futex_wait || val20;
+	bool val3 = !user_thread;
+	bool val2 = !sleep;
+	bool val4 = val2 || val3;
 	bool val1 = !rt;
-	bool val3 = val1 || val2;
+	bool val5 = val1 || val4;
 
-	if (val3)
+	if (val5)
 		__set_bit(S0, mon->states);
 	if (val11 && val13)
 		__set_bit(S1, mon->states);
 	if (val11 && val14)
 		__set_bit(S4, mon->states);
-	if (val5)
+	if (val7)
 		__set_bit(S5, mon->states);
 }
 
 static void
 ltl_possible_next_states(struct ltl_monitor *mon, unsigned int state, unsigned long *next)
 {
-	bool task_is_migration = test_bit(LTL_TASK_IS_MIGRATION, mon->atoms);
-	bool task_is_rcu = test_bit(LTL_TASK_IS_RCU, mon->atoms);
-	bool val40 = task_is_rcu || task_is_migration;
-	bool futex_lock_pi = test_bit(LTL_FUTEX_LOCK_PI, mon->atoms);
-	bool val41 = futex_lock_pi || val40;
-	bool block_on_rt_mutex = test_bit(LTL_BLOCK_ON_RT_MUTEX, mon->atoms);
-	bool val5 = block_on_rt_mutex || val41;
-	bool kthread_should_stop = test_bit(LTL_KTHREAD_SHOULD_STOP, mon->atoms);
-	bool abort_sleep = test_bit(LTL_ABORT_SLEEP, mon->atoms);
-	bool val32 = abort_sleep || kthread_should_stop;
 	bool woken_by_nmi = test_bit(LTL_WOKEN_BY_NMI, mon->atoms);
-	bool val33 = woken_by_nmi || val32;
 	bool woken_by_hardirq = test_bit(LTL_WOKEN_BY_HARDIRQ, mon->atoms);
-	bool val34 = woken_by_hardirq || val33;
 	bool woken_by_equal_or_higher_prio = test_bit(LTL_WOKEN_BY_EQUAL_OR_HIGHER_PRIO,
 	     mon->atoms);
-	bool val14 = woken_by_equal_or_higher_prio || val34;
-	bool wake = test_bit(LTL_WAKE, mon->atoms);
-	bool val13 = !wake;
-	bool kernel_thread = test_bit(LTL_KERNEL_THREAD, mon->atoms);
-	bool nanosleep_clock_tai = test_bit(LTL_NANOSLEEP_CLOCK_TAI, mon->atoms);
-	bool nanosleep_clock_monotonic = test_bit(LTL_NANOSLEEP_CLOCK_MONOTONIC, mon->atoms);
-	bool val24 = nanosleep_clock_monotonic || nanosleep_clock_tai;
-	bool nanosleep_timer_abstime = test_bit(LTL_NANOSLEEP_TIMER_ABSTIME, mon->atoms);
-	bool val25 = nanosleep_timer_abstime && val24;
-	bool clock_nanosleep = test_bit(LTL_CLOCK_NANOSLEEP, mon->atoms);
-	bool val18 = clock_nanosleep && val25;
-	bool futex_wait = test_bit(LTL_FUTEX_WAIT, mon->atoms);
-	bool val9 = futex_wait || val18;
-	bool val11 = val9 || kernel_thread;
+	bool user_thread = test_bit(LTL_USER_THREAD, mon->atoms);
 	bool sleep = test_bit(LTL_SLEEP, mon->atoms);
-	bool val2 = !sleep;
+	bool schedule_in = test_bit(LTL_SCHEDULE_IN, mon->atoms);
 	bool rt = test_bit(LTL_RT, mon->atoms);
+	bool nanosleep_timer_abstime = test_bit(LTL_NANOSLEEP_TIMER_ABSTIME, mon->atoms);
+	bool nanosleep_clock_realtime = test_bit(LTL_NANOSLEEP_CLOCK_REALTIME, mon->atoms);
+	bool futex_wait = test_bit(LTL_FUTEX_WAIT, mon->atoms);
+	bool futex_lock_pi = test_bit(LTL_FUTEX_LOCK_PI, mon->atoms);
+	bool epoll_wait = test_bit(LTL_EPOLL_WAIT, mon->atoms);
+	bool clock_nanosleep = test_bit(LTL_CLOCK_NANOSLEEP, mon->atoms);
+	bool block_on_rt_mutex = test_bit(LTL_BLOCK_ON_RT_MUTEX, mon->atoms);
+	bool abort_sleep = test_bit(LTL_ABORT_SLEEP, mon->atoms);
+	bool val7 = block_on_rt_mutex || futex_lock_pi;
+	bool val32 = woken_by_nmi || abort_sleep;
+	bool val33 = woken_by_hardirq || val32;
+	bool val14 = woken_by_equal_or_higher_prio || val33;
+	bool val13 = !schedule_in;
+	bool val25 = !nanosleep_clock_realtime;
+	bool val26 = nanosleep_timer_abstime && val25;
+	bool val18 = clock_nanosleep && val26;
+	bool val20 = val18 || epoll_wait;
+	bool val11 = futex_wait || val20;
+	bool val3 = !user_thread;
+	bool val2 = !sleep;
+	bool val4 = val2 || val3;
 	bool val1 = !rt;
-	bool val3 = val1 || val2;
+	bool val5 = val1 || val4;
 
 	switch (state) {
 	case S0:
-		if (val3)
+		if (val5)
 			__set_bit(S0, next);
 		if (val11 && val13)
 			__set_bit(S1, next);
 		if (val11 && val14)
 			__set_bit(S4, next);
-		if (val5)
+		if (val7)
 			__set_bit(S5, next);
 		break;
 	case S1:
 		if (val11 && val13)
 			__set_bit(S1, next);
-		if (val13 && val3)
+		if (val13 && val5)
 			__set_bit(S2, next);
-		if (val14 && val3)
+		if (val14 && val5)
 			__set_bit(S3, next);
 		if (val11 && val14)
 			__set_bit(S4, next);
-		if (val13 && val5)
+		if (val13 && val7)
 			__set_bit(S6, next);
-		if (val14 && val5)
+		if (val14 && val7)
 			__set_bit(S7, next);
 		break;
 	case S2:
 		if (val11 && val13)
 			__set_bit(S1, next);
-		if (val13 && val3)
+		if (val13 && val5)
 			__set_bit(S2, next);
-		if (val14 && val3)
+		if (val14 && val5)
 			__set_bit(S3, next);
 		if (val11 && val14)
 			__set_bit(S4, next);
-		if (val13 && val5)
+		if (val13 && val7)
 			__set_bit(S6, next);
-		if (val14 && val5)
+		if (val14 && val7)
 			__set_bit(S7, next);
 		break;
 	case S3:
-		if (val3)
+		if (val5)
 			__set_bit(S0, next);
 		if (val11 && val13)
 			__set_bit(S1, next);
 		if (val11 && val14)
 			__set_bit(S4, next);
-		if (val5)
+		if (val7)
 			__set_bit(S5, next);
 		break;
 	case S4:
-		if (val3)
+		if (val5)
 			__set_bit(S0, next);
 		if (val11 && val13)
 			__set_bit(S1, next);
 		if (val11 && val14)
 			__set_bit(S4, next);
-		if (val5)
+		if (val7)
 			__set_bit(S5, next);
 		break;
 	case S5:
-		if (val3)
+		if (val5)
 			__set_bit(S0, next);
 		if (val11 && val13)
 			__set_bit(S1, next);
 		if (val11 && val14)
 			__set_bit(S4, next);
-		if (val5)
+		if (val7)
 			__set_bit(S5, next);
 		break;
 	case S6:
 		if (val11 && val13)
 			__set_bit(S1, next);
-		if (val13 && val3)
+		if (val13 && val5)
 			__set_bit(S2, next);
-		if (val14 && val3)
+		if (val14 && val5)
 			__set_bit(S3, next);
 		if (val11 && val14)
 			__set_bit(S4, next);
-		if (val13 && val5)
+		if (val13 && val7)
 			__set_bit(S6, next);
-		if (val14 && val5)
+		if (val14 && val7)
 			__set_bit(S7, next);
 		break;
 	case S7:
-		if (val3)
+		if (val5)
 			__set_bit(S0, next);
 		if (val11 && val13)
 			__set_bit(S1, next);
 		if (val11 && val14)
 			__set_bit(S4, next);
-		if (val5)
+		if (val7)
 			__set_bit(S5, next);
 		break;
 	}

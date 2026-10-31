@@ -8,8 +8,7 @@
  *		 Martin Schwidefsky (schwidefsky@de.ibm.com)
  */
 
-#define KMSG_COMPONENT "cio"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "cio: " fmt
 
 #include <linux/export.h>
 #include <linux/init.h>
@@ -687,13 +686,13 @@ static struct ccw_device * io_subchannel_allocate_dev(struct subchannel *sch)
 	struct gen_pool *dma_pool;
 	int ret;
 
-	cdev  = kzalloc(sizeof(*cdev), GFP_KERNEL);
+	cdev = kzalloc_obj(*cdev);
 	if (!cdev) {
 		ret = -ENOMEM;
 		goto err_cdev;
 	}
-	cdev->private = kzalloc(sizeof(struct ccw_device_private),
-				GFP_KERNEL | GFP_DMA);
+	cdev->private = kzalloc_obj(struct ccw_device_private,
+				    GFP_KERNEL | GFP_DMA);
 	if (!cdev->private) {
 		ret = -ENOMEM;
 		goto err_priv;
@@ -923,7 +922,7 @@ static int ccw_device_move_to_sch(struct ccw_device *cdev,
 
 	if (!sch_is_pseudo_sch(old_sch)) {
 		spin_lock_irq(&old_sch->lock);
-		old_enabled = old_sch->schib.pmcw.ena;
+		old_enabled = old_sch->schib.pmcw.dnv && old_sch->schib.pmcw.ena;
 		rc = 0;
 		if (old_enabled)
 			rc = cio_disable_subchannel(old_sch);
@@ -942,7 +941,7 @@ static int ccw_device_move_to_sch(struct ccw_device *cdev,
 		CIO_MSG_EVENT(0, "device_move(0.%x.%04x,0.%x.%04x)=%d\n",
 			      cdev->private->dev_id.ssid,
 			      cdev->private->dev_id.devno, sch->schid.ssid,
-			      sch->schib.pmcw.dev, rc);
+			      sch->schid.sch_no, rc);
 		if (old_enabled) {
 			/* Try to re-enable the old subchannel. */
 			spin_lock_irq(&old_sch->lock);
@@ -1061,7 +1060,7 @@ static int io_subchannel_probe(struct subchannel *sch)
 	if (rc)
 		goto out_schedule;
 	/* Allocate I/O subchannel private data. */
-	io_priv = kzalloc(sizeof(*io_priv), GFP_KERNEL | GFP_DMA);
+	io_priv = kzalloc_obj(*io_priv, GFP_KERNEL | GFP_DMA);
 	if (!io_priv)
 		goto out_schedule;
 
@@ -1208,7 +1207,7 @@ static void io_subchannel_quiesce(struct subchannel *sch)
 	cdev = sch_get_cdev(sch);
 	if (cio_is_console(sch->schid))
 		goto out_unlock;
-	if (!sch->schib.pmcw.ena)
+	if (!sch->schib.pmcw.dnv || !sch->schib.pmcw.ena)
 		goto out_unlock;
 	ret = cio_disable_subchannel(sch);
 	if (ret != -EBUSY)
@@ -1255,7 +1254,8 @@ static int recovery_check(struct device *dev, void *data)
 	switch (cdev->private->state) {
 	case DEV_STATE_ONLINE:
 		sch = to_subchannel(cdev->dev.parent);
-		if ((sch->schib.pmcw.pam & sch->opm) == sch->vpm)
+		if (sch->schib.pmcw.dnv &&
+		    (sch->schib.pmcw.pam & sch->opm) == sch->vpm)
 			break;
 		fallthrough;
 	case DEV_STATE_DISCONNECTED:
@@ -1329,7 +1329,7 @@ static int purge_fn(struct subchannel *sch, void *data)
 
 	cdev = sch_get_cdev(sch);
 	if (cdev) {
-		if (cdev->private->state != DEV_STATE_OFFLINE)
+		if (cdev->online)
 			goto unlock;
 
 		if (atomic_cmpxchg(&cdev->private->onoff, 0, 1) != 0)
@@ -1645,7 +1645,7 @@ struct ccw_device * __init ccw_device_create_console(struct ccw_driver *drv)
 	if (IS_ERR(sch))
 		return ERR_CAST(sch);
 
-	io_priv = kzalloc(sizeof(*io_priv), GFP_KERNEL | GFP_DMA);
+	io_priv = kzalloc_obj(*io_priv, GFP_KERNEL | GFP_DMA);
 	if (!io_priv)
 		goto err_priv;
 	io_priv->dma_area = dma_alloc_coherent(&sch->dev,

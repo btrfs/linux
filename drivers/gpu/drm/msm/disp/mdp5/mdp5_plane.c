@@ -80,19 +80,15 @@ mdp5_plane_atomic_print_state(struct drm_printer *p,
 	drm_printf(p, "\tstage=%s\n", stage2name(pstate->stage));
 }
 
-static void mdp5_plane_reset(struct drm_plane *plane)
+static struct drm_plane_state *mdp5_plane_create_state(struct drm_plane *plane)
 {
 	struct mdp5_plane_state *mdp5_state;
-
-	if (plane->state)
-		__drm_atomic_helper_plane_destroy_state(plane->state);
-
-	kfree(to_mdp5_plane_state(plane->state));
-	plane->state = NULL;
-	mdp5_state = kzalloc(sizeof(*mdp5_state), GFP_KERNEL);
+	mdp5_state = kzalloc_obj(*mdp5_state);
 	if (!mdp5_state)
-		return;
-	__drm_atomic_helper_plane_reset(plane, &mdp5_state->base);
+		return ERR_PTR(-ENOMEM);
+	__drm_atomic_helper_plane_state_init(&mdp5_state->base, plane);
+
+	return &mdp5_state->base;
 }
 
 static struct drm_plane_state *
@@ -126,7 +122,7 @@ static void mdp5_plane_destroy_state(struct drm_plane *plane,
 static const struct drm_plane_funcs mdp5_plane_funcs = {
 		.update_plane = drm_atomic_helper_update_plane,
 		.disable_plane = drm_atomic_helper_disable_plane,
-		.reset = mdp5_plane_reset,
+		.atomic_create_state = mdp5_plane_create_state,
 		.atomic_duplicate_state = mdp5_plane_duplicate_state,
 		.atomic_destroy_state = mdp5_plane_destroy_state,
 		.atomic_print_state = mdp5_plane_atomic_print_state,
@@ -323,7 +319,7 @@ static int mdp5_plane_atomic_check_with_state(struct drm_crtc_state *crtc_state,
 }
 
 static int mdp5_plane_atomic_check(struct drm_plane *plane,
-				   struct drm_atomic_state *state)
+				   struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *old_plane_state = drm_atomic_get_old_plane_state(state,
 										 plane);
@@ -336,8 +332,7 @@ static int mdp5_plane_atomic_check(struct drm_plane *plane,
 	if (!crtc)
 		return 0;
 
-	crtc_state = drm_atomic_get_existing_crtc_state(state,
-							crtc);
+	crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
 	if (WARN_ON(!crtc_state))
 		return -EINVAL;
 
@@ -345,7 +340,7 @@ static int mdp5_plane_atomic_check(struct drm_plane *plane,
 }
 
 static void mdp5_plane_atomic_update(struct drm_plane *plane,
-				     struct drm_atomic_state *state)
+				     struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *new_state = drm_atomic_get_new_plane_state(state,
 									   plane);
@@ -364,7 +359,7 @@ static void mdp5_plane_atomic_update(struct drm_plane *plane,
 }
 
 static int mdp5_plane_atomic_async_check(struct drm_plane *plane,
-					 struct drm_atomic_state *state, bool flip)
+					 struct drm_atomic_commit *state, bool flip)
 {
 	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state,
 										 plane);
@@ -373,8 +368,8 @@ static int mdp5_plane_atomic_async_check(struct drm_plane *plane,
 	int min_scale, max_scale;
 	int ret;
 
-	crtc_state = drm_atomic_get_existing_crtc_state(state,
-							new_plane_state->crtc);
+	crtc_state = drm_atomic_get_new_crtc_state(state,
+						   new_plane_state->crtc);
 	if (WARN_ON(!crtc_state))
 		return -EINVAL;
 
@@ -418,7 +413,7 @@ static int mdp5_plane_atomic_async_check(struct drm_plane *plane,
 }
 
 static void mdp5_plane_atomic_async_update(struct drm_plane *plane,
-					   struct drm_atomic_state *state)
+					   struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *new_state = drm_atomic_get_new_plane_state(state,
 									   plane);

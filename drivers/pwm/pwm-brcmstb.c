@@ -101,7 +101,7 @@ static int brcmstb_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 	u32 value;
 
 	/*
-	 * If asking for a duty_ns equal to period_ns, we need to substract
+	 * If asking for a duty_ns equal to period_ns, we need to subtract
 	 * the period value by 1 to make it shorter than the "on" time and
 	 * produce a flat 100% duty cycle signal, and max out the "on" time
 	 */
@@ -222,7 +222,7 @@ static const struct pwm_ops brcmstb_pwm_ops = {
 };
 
 static const struct of_device_id brcmstb_pwm_of_match[] = {
-	{ .compatible = "brcm,bcm7038-pwm", },
+	{ .compatible = "brcm,bcm7038-pwm" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, brcmstb_pwm_of_match);

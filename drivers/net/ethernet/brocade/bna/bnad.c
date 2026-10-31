@@ -1345,8 +1345,7 @@ bnad_mem_alloc(struct bnad *bnad,
 		return 0;
 	}
 
-	mem_info->mdl = kcalloc(mem_info->num, sizeof(struct bna_mem_descr),
-				GFP_KERNEL);
+	mem_info->mdl = kzalloc_objs(struct bna_mem_descr, mem_info->num);
 	if (mem_info->mdl == NULL)
 		return -ENOMEM;
 
@@ -1458,9 +1457,8 @@ bnad_txrx_irq_alloc(struct bnad *bnad, enum bnad_intr_source src,
 
 	if (cfg_flags & BNAD_CF_MSIX) {
 		intr_info->intr_type = BNA_INTR_T_MSIX;
-		intr_info->idl = kcalloc(intr_info->num,
-					sizeof(struct bna_intr_descr),
-					GFP_KERNEL);
+		intr_info->idl = kzalloc_objs(struct bna_intr_descr,
+					      intr_info->num);
 		if (!intr_info->idl)
 			return -ENOMEM;
 
@@ -1484,9 +1482,8 @@ bnad_txrx_irq_alloc(struct bnad *bnad, enum bnad_intr_source src,
 	} else {
 		intr_info->intr_type = BNA_INTR_T_INTX;
 		intr_info->num = 1;
-		intr_info->idl = kcalloc(intr_info->num,
-					sizeof(struct bna_intr_descr),
-					GFP_KERNEL);
+		intr_info->idl = kzalloc_objs(struct bna_intr_descr,
+					      intr_info->num);
 		if (!intr_info->idl)
 			return -ENOMEM;
 
@@ -2574,6 +2571,22 @@ bnad_ioceth_disable(struct bnad *bnad)
 	return err;
 }
 
+/*
+ * The IOC timers rearm one another, so deleting one cannot stop a
+ * sibling callback from arming it again.  Shut them down so a later
+ * mod_timer() is ignored.
+ */
+static void
+bnad_ioc_timers_shutdown(struct bnad *bnad)
+{
+	struct bfa_ioc *ioc = &bnad->bna.ioceth.ioc;
+
+	timer_shutdown_sync(&ioc->ioc_timer);
+	timer_shutdown_sync(&ioc->sem_timer);
+	timer_shutdown_sync(&ioc->hb_timer);
+	timer_shutdown_sync(&ioc->iocpf_timer);
+}
+
 static int
 bnad_ioceth_enable(struct bnad *bnad)
 {
@@ -2642,7 +2655,7 @@ bnad_enable_msix(struct bnad *bnad)
 		return;
 
 	bnad->msix_table =
-		kcalloc(bnad->msix_num, sizeof(struct msix_entry), GFP_KERNEL);
+		kzalloc_objs(struct msix_entry, bnad->msix_num);
 
 	if (!bnad->msix_table)
 		goto intx_mode;
@@ -3009,7 +3022,6 @@ bnad_start_xmit(struct sk_buff *skb, struct net_device *netdev)
 	txqent->hdr.wi.reserved = 0;
 	txqent->hdr.wi.num_vectors = vectors;
 
-	head_unmap->skb = skb;
 	head_unmap->nvecs = 0;
 
 	/* Program the vectors */
@@ -3021,6 +3033,7 @@ bnad_start_xmit(struct sk_buff *skb, struct net_device *netdev)
 		BNAD_UPDATE_CTR(bnad, tx_skb_map_failed);
 		return NETDEV_TX_OK;
 	}
+	head_unmap->skb = skb;
 	BNA_SET_DMA_ADDR(dma_addr, &txqent->vector[0].host_addr);
 	txqent->vector[0].length = htons(len);
 	dma_unmap_addr_set(&unmap->vectors[0], dma_addr, dma_addr);
@@ -3730,9 +3743,7 @@ probe_uninit:
 	bnad_res_free(bnad, &bnad->mod_res_info[0], BNA_MOD_RES_T_MAX);
 disable_ioceth:
 	bnad_ioceth_disable(bnad);
-	timer_delete_sync(&bnad->bna.ioceth.ioc.ioc_timer);
-	timer_delete_sync(&bnad->bna.ioceth.ioc.sem_timer);
-	timer_delete_sync(&bnad->bna.ioceth.ioc.hb_timer);
+	bnad_ioc_timers_shutdown(bnad);
 	spin_lock_irqsave(&bnad->bna_lock, flags);
 	bna_uninit(bna);
 	spin_unlock_irqrestore(&bnad->bna_lock, flags);
@@ -3773,9 +3784,7 @@ bnad_pci_remove(struct pci_dev *pdev)
 
 	mutex_lock(&bnad->conf_mutex);
 	bnad_ioceth_disable(bnad);
-	timer_delete_sync(&bnad->bna.ioceth.ioc.ioc_timer);
-	timer_delete_sync(&bnad->bna.ioceth.ioc.sem_timer);
-	timer_delete_sync(&bnad->bna.ioceth.ioc.hb_timer);
+	bnad_ioc_timers_shutdown(bnad);
 	spin_lock_irqsave(&bnad->bna_lock, flags);
 	bna_uninit(bna);
 	spin_unlock_irqrestore(&bnad->bna_lock, flags);

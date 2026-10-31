@@ -18,31 +18,29 @@
 
 #include <linux/gpio/consumer.h>
 #include <linux/gpio/driver.h>
+#include <linux/gpio/property.h>
 
 #include "gpiolib.h"
 #include "gpiolib-swnode.h"
 
-#define GPIOLIB_SWNODE_UNDEFINED_NAME "swnode-gpio-undefined"
-
 static struct gpio_device *swnode_get_gpio_device(struct fwnode_handle *fwnode)
 {
 	const struct software_node *gdev_node;
-	struct gpio_device *gdev;
 
 	gdev_node = to_software_node(fwnode);
-	if (!gdev_node || !gdev_node->name)
-		return ERR_PTR(-EINVAL);
+	if (!gdev_node)
+		goto fwnode_lookup;
 
 	/*
 	 * Check for a special node that identifies undefined GPIOs, this is
 	 * primarily used as a key for internal chip selects in SPI bindings.
 	 */
 	if (IS_ENABLED(CONFIG_GPIO_SWNODE_UNDEFINED) &&
-	    !strcmp(gdev_node->name, GPIOLIB_SWNODE_UNDEFINED_NAME))
+	    gdev_node == &swnode_gpio_undefined)
 		return ERR_PTR(-ENOENT);
 
-	gdev = gpio_device_find_by_fwnode(fwnode);
-	return gdev ?: ERR_PTR(-EPROBE_DEFER);
+fwnode_lookup:
+	return gpio_device_find_by_fwnode(fwnode) ?: ERR_PTR(-EPROBE_DEFER);
 }
 
 static int swnode_gpio_get_reference(const struct fwnode_handle *fwnode,
@@ -74,6 +72,14 @@ struct gpio_desc *swnode_find_gpio(struct fwnode_handle *fwnode,
 		ret = swnode_gpio_get_reference(fwnode, propname, idx, &args);
 		if (ret == 0)
 			break;
+		if (ret == -ENOTCONN)
+			/*
+			 * -ENOTCONN for a software node reference lookup means
+			 *  that a remote struct software_node exists but has
+			 *  not yet been registered as a firmware node. Defer
+			 *  until this happens.
+			 */
+			return ERR_PTR(-EPROBE_DEFER);
 	}
 	if (ret) {
 		pr_debug("%s: can't parse '%s' property of node '%pfwP[%d]'\n",
@@ -87,10 +93,6 @@ struct gpio_desc *swnode_find_gpio(struct fwnode_handle *fwnode,
 	if (IS_ERR(gdev))
 		return ERR_CAST(gdev);
 
-	/*
-	 * FIXME: The GPIO device reference is put at return but the descriptor
-	 * is passed on. Find a proper solution.
-	 */
 	desc = gpio_device_get_desc(gdev, args.args[0]);
 	*flags = args.args[1]; /* We expect native GPIO flags */
 
@@ -139,7 +141,7 @@ int swnode_gpio_count(const struct fwnode_handle *fwnode, const char *con_id)
  * a key for internal chip selects in SPI bindings.
  */
 const struct software_node swnode_gpio_undefined = {
-	.name = GPIOLIB_SWNODE_UNDEFINED_NAME,
+	.name = "swnode-gpio-undefined",
 };
 EXPORT_SYMBOL_NS_GPL(swnode_gpio_undefined, "GPIO_SWNODE");
 

@@ -3,7 +3,7 @@
 # scripts contains sources for various helper programs used throughout
 # the kernel for the build process.
 
-hostprogs-always-$(CONFIG_KALLSYMS)			+= kallsyms
+hostprogs-always-y				+= kallsyms
 hostprogs-always-$(BUILD_C_RECORDMCOUNT)		+= recordmcount
 hostprogs-always-$(CONFIG_BUILDTIME_TABLE_SORT)		+= sorttable
 hostprogs-always-$(CONFIG_ASN1)				+= asn1_compiler
@@ -11,6 +11,11 @@ hostprogs-always-$(CONFIG_MODULE_SIG_FORMAT)		+= sign-file
 hostprogs-always-$(CONFIG_SYSTEM_EXTRA_CERTIFICATE)	+= insert-sys-cert
 hostprogs-always-$(CONFIG_RUST_KERNEL_DOCTESTS)		+= rustdoc_test_builder
 hostprogs-always-$(CONFIG_RUST_KERNEL_DOCTESTS)		+= rustdoc_test_gen
+hostprogs-always-$(CONFIG_TRACEPOINTS)			+= tracepoint-update
+
+kallsyms-objs := kallsyms.o kallsyms-sysmap.o elf-parse.o
+sorttable-objs := sorttable.o elf-parse.o
+tracepoint-update-objs := tracepoint-update.o elf-parse.o
 
 ifneq ($(or $(CONFIG_X86_64),$(CONFIG_X86_32)),)
 always-$(CONFIG_RUST)					+= target.json
@@ -25,10 +30,15 @@ generate_rust_target-rust := y
 rustdoc_test_builder-rust := y
 rustdoc_test_gen-rust := y
 
+HOSTCFLAGS_tracepoint-update.o = -I$(srctree)/tools/include
+HOSTCFLAGS_kallsyms.o = -I$(srctree)/tools/include
+HOSTCFLAGS_kallsyms-sysmap.o = -I$(srctree)/tools/include
+HOSTCFLAGS_elf-parse.o = -I$(srctree)/tools/include
 HOSTCFLAGS_sorttable.o = -I$(srctree)/tools/include
 HOSTLDLIBS_sorttable = -lpthread
 HOSTCFLAGS_asn1_compiler.o = -I$(srctree)/include
 HOSTCFLAGS_sign-file.o = $(shell $(HOSTPKG_CONFIG) --cflags libcrypto 2> /dev/null)
+HOSTCFLAGS_sign-file.o += -I$(srctree)/tools/include/uapi/
 HOSTLDLIBS_sign-file = $(shell $(HOSTPKG_CONFIG) --libs libcrypto 2> /dev/null || echo -lcrypto)
 
 ifdef CONFIG_UNWINDER_ORC
@@ -45,6 +55,9 @@ endif
 ifdef CONFIG_BUILDTIME_MCOUNT_SORT
 HOSTCFLAGS_sorttable.o += -DMCOUNT_SORT_ENABLED
 endif
+
+hostprogs += gen_init_cpio
+always-$(CONFIG_BLK_DEV_INITRD) += gen_init_cpio
 
 # The following programs are only built on demand
 hostprogs += unifdef gen_packed_field_checks

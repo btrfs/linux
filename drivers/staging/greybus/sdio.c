@@ -206,7 +206,7 @@ static int gb_sdio_request_handler(struct gb_operation *op)
 	struct gb_message *request;
 	struct gb_sdio_event_request *payload;
 	u8 type = op->type;
-	int ret =  0;
+	int ret = 0;
 	u8 event;
 
 	if (type != GB_SDIO_TYPE_EVENT) {
@@ -372,7 +372,7 @@ static int gb_sdio_transfer(struct gb_sdio_host *host, struct mmc_data *data)
 	left = data->blksz * data->blocks;
 
 	while (left) {
-		/* check is a stop transmission is pending */
+		/* check if a stop transmission is pending */
 		spin_lock(&host->xfer);
 		if (host->xfer_stop) {
 			host->xfer_stop = false;
@@ -767,17 +767,15 @@ static int gb_sdio_probe(struct gbphy_device *gbphy_dev,
 	struct gb_sdio_host *host;
 	int ret = 0;
 
-	mmc = mmc_alloc_host(sizeof(*host), &gbphy_dev->dev);
+	mmc = devm_mmc_alloc_host(&gbphy_dev->dev, sizeof(*host));
 	if (!mmc)
 		return -ENOMEM;
 
 	connection = gb_connection_create(gbphy_dev->bundle,
 					  le16_to_cpu(gbphy_dev->cport_desc->id),
 					  gb_sdio_request_handler);
-	if (IS_ERR(connection)) {
-		ret = PTR_ERR(connection);
-		goto exit_mmc_free;
-	}
+	if (IS_ERR(connection))
+		return PTR_ERR(connection);
 
 	host = mmc_priv(mmc);
 	host->mmc = mmc;
@@ -806,7 +804,7 @@ static int gb_sdio_probe(struct gbphy_device *gbphy_dev,
 
 	mutex_init(&host->lock);
 	spin_lock_init(&host->xfer);
-	host->mrq_workqueue = alloc_workqueue("mmc-%s", 0, 1,
+	host->mrq_workqueue = alloc_workqueue("mmc-%s", WQ_PERCPU, 1,
 					      dev_name(&gbphy_dev->dev));
 	if (!host->mrq_workqueue) {
 		ret = -ENOMEM;
@@ -835,8 +833,6 @@ exit_connection_disable:
 	gb_connection_disable(connection);
 exit_connection_destroy:
 	gb_connection_destroy(connection);
-exit_mmc_free:
-	mmc_free_host(mmc);
 
 	return ret;
 }
@@ -863,7 +859,6 @@ static void gb_sdio_remove(struct gbphy_device *gbphy_dev)
 	mmc_remove_host(mmc);
 	gb_connection_disable(connection);
 	gb_connection_destroy(connection);
-	mmc_free_host(mmc);
 }
 
 static const struct gbphy_device_id gb_sdio_id_table[] = {

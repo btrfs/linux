@@ -236,7 +236,7 @@ int intel_th_msu_buffer_register(const struct msu_buffer *mbuf,
 	struct msu_buffer_entry *mbe;
 	int ret = 0;
 
-	mbe = kzalloc(sizeof(*mbe), GFP_KERNEL);
+	mbe = kzalloc_obj(*mbe);
 	if (!mbe)
 		return -ENOMEM;
 
@@ -450,7 +450,7 @@ static struct msc_iter *msc_iter_install(struct msc *msc)
 {
 	struct msc_iter *iter;
 
-	iter = kzalloc(sizeof(*iter), GFP_KERNEL);
+	iter = kzalloc_obj(*iter);
 	if (!iter)
 		return ERR_PTR(-ENOMEM);
 
@@ -1105,7 +1105,7 @@ static int msc_buffer_win_alloc(struct msc *msc, unsigned int nr_blocks)
 	if (!nr_blocks)
 		return 0;
 
-	win = kzalloc(sizeof(*win), GFP_KERNEL);
+	win = kzalloc_obj(*win);
 	if (!win)
 		return -ENOMEM;
 
@@ -1490,8 +1490,10 @@ static int intel_th_msc_release(struct inode *inode, struct file *file)
 {
 	struct msc_iter *iter = file->private_data;
 	struct msc *msc = iter->msc;
+	struct intel_th_device *thdev = msc->thdev;
 
 	msc_iter_remove(iter, msc);
+	put_device(&thdev->dev);
 
 	return 0;
 }

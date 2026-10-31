@@ -26,9 +26,8 @@
 
 /* add your revision and whatnot here */
 static const struct pci_device_id cobalt_pci_tbl[] = {
-	{PCI_VENDOR_ID_CISCO, PCI_DEVICE_ID_COBALT,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0,}
+	{ PCI_VDEVICE(CISCO, PCI_DEVICE_ID_COBALT) },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, cobalt_pci_tbl);
@@ -525,8 +524,8 @@ static int cobalt_subdevs_init(struct cobalt *cobalt)
 				&cobalt_edid);
 		if (err)
 			return err;
-		err = v4l2_subdev_call(s[i].sd, pad, set_fmt, NULL,
-				&sd_fmt);
+		err = v4l2_subdev_call(s[i].sd, pad, set_fmt, NULL, NULL,
+				       &sd_fmt);
 		if (err)
 			return err;
 		/* Reset channel video module */
@@ -609,8 +608,8 @@ static int cobalt_subdevs_hsma_init(struct cobalt *cobalt)
 
 		if (err)
 			return err;
-		err = v4l2_subdev_call(s->sd, pad, set_fmt, NULL,
-				&sd_fmt);
+		err = v4l2_subdev_call(s->sd, pad, set_fmt, NULL, NULL,
+				       &sd_fmt);
 		if (err)
 			return err;
 		cobalt->have_hsma_rx = true;
@@ -663,7 +662,7 @@ static int cobalt_probe(struct pci_dev *pci_dev,
 	/* FIXME - module parameter arrays constrain max instances */
 	i = atomic_inc_return(&cobalt_instance) - 1;
 
-	cobalt = kzalloc(sizeof(struct cobalt), GFP_KERNEL);
+	cobalt = kzalloc_obj(struct cobalt);
 	if (cobalt == NULL)
 		return -ENOMEM;
 	cobalt->pci_dev = pci_dev;

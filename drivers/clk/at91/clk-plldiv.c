@@ -86,12 +86,12 @@ struct clk_hw * __init
 at91_clk_register_plldiv(struct regmap *regmap, const char *name,
 			 const char *parent_name)
 {
+	struct clk_init_data init = {};
 	struct clk_plldiv *plldiv;
 	struct clk_hw *hw;
-	struct clk_init_data init;
 	int ret;
 
-	plldiv = kzalloc(sizeof(*plldiv), GFP_KERNEL);
+	plldiv = kzalloc_obj(*plldiv);
 	if (!plldiv)
 		return ERR_PTR(-ENOMEM);
 

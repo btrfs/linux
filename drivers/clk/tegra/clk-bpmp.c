@@ -32,7 +32,7 @@ struct tegra_bpmp_clk {
 	unsigned int id;
 
 	unsigned int num_parents;
-	unsigned int *parents;
+	unsigned int parents[] __counted_by(num_parents);
 };
 
 static inline struct tegra_bpmp_clk *to_tegra_bpmp_clk(struct clk_hw *hw)
@@ -367,7 +367,15 @@ static int tegra_bpmp_clk_get_info(struct tegra_bpmp *bpmp, unsigned int id,
 	if (err < 0)
 		return err;
 
-	strscpy(info->name, response.name, MRQ_CLK_NAME_MAXLEN);
+	if (dev_to_node(bpmp->dev) == NUMA_NO_NODE) {
+		strscpy(info->name, response.name, sizeof(info->name));
+	} else {
+		err = snprintf(info->name, sizeof(info->name), "%d-%s",
+			       dev_to_node(bpmp->dev), response.name);
+		if (WARN_ON(err >= sizeof(info->name)))
+			return -E2BIG;
+	}
+
 	info->num_parents = response.num_parents;
 
 	for (i = 0; i < info->num_parents; i++)
@@ -434,7 +442,7 @@ static int tegra_bpmp_probe_clocks(struct tegra_bpmp *bpmp,
 
 	dev_dbg(bpmp->dev, "maximum clock ID: %u\n", max_id);
 
-	clocks = kcalloc(max_id + 1, sizeof(*clocks), GFP_KERNEL);
+	clocks = kzalloc_objs(*clocks, max_id + 1);
 	if (!clocks)
 		return -ENOMEM;
 
@@ -510,19 +518,13 @@ tegra_bpmp_clk_register(struct tegra_bpmp *bpmp,
 	unsigned int i;
 	int err;
 
-	clk = devm_kzalloc(bpmp->dev, sizeof(*clk), GFP_KERNEL);
+	clk = devm_kzalloc(bpmp->dev, struct_size(clk, parents, info->num_parents), GFP_KERNEL);
 	if (!clk)
 		return ERR_PTR(-ENOMEM);
 
+	clk->num_parents = info->num_parents;
 	clk->id = info->id;
 	clk->bpmp = bpmp;
-
-	clk->parents = devm_kcalloc(bpmp->dev, info->num_parents,
-				    sizeof(*clk->parents), GFP_KERNEL);
-	if (!clk->parents)
-		return ERR_PTR(-ENOMEM);
-
-	clk->num_parents = info->num_parents;
 
 	/* hardware clock initialization */
 	memset(&init, 0, sizeof(init));

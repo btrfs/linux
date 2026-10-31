@@ -3,7 +3,7 @@
  * Copyright (C) 2017-2023 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -144,6 +144,7 @@ xchk_dir_lock_child(
 STATIC int
 xchk_dir_parent_pointer(
 	struct xchk_dir		*sd,
+	xfs_dablk_t		offset,
 	const struct xfs_name	*name,
 	struct xfs_inode	*ip)
 {
@@ -154,7 +155,10 @@ xchk_dir_parent_pointer(
 	error = xfs_parent_lookup(sc->tp, ip, name, &sd->pptr_rec,
 			&sd->pptr_args);
 	if (error == -ENOATTR)
-		xchk_fblock_xref_set_corrupt(sc, XFS_DATA_FORK, 0);
+		xchk_fblock_xref_set_corrupt(sc, XFS_DATA_FORK, offset);
+	else
+		xchk_fblock_xref_process_error(sc, XFS_DATA_FORK, offset,
+				&error);
 
 	return 0;
 }
@@ -163,7 +167,7 @@ xchk_dir_parent_pointer(
 STATIC int
 xchk_dir_check_pptr_fast(
 	struct xchk_dir		*sd,
-	xfs_dir2_dataptr_t	dapos,
+	xfs_dablk_t		offset,
 	const struct xfs_name	*name,
 	struct xfs_inode	*ip)
 {
@@ -178,7 +182,7 @@ xchk_dir_check_pptr_fast(
 
 	/* No self-referential non-dot or dotdot dirents. */
 	if (ip == sc->ip) {
-		xchk_fblock_set_corrupt(sc, XFS_DATA_FORK, 0);
+		xchk_fblock_set_corrupt(sc, XFS_DATA_FORK, offset);
 		return -ECANCELED;
 	}
 
@@ -187,27 +191,27 @@ xchk_dir_check_pptr_fast(
 	if (!lockmode) {
 		struct xchk_dirent	save_de = {
 			.namelen	= name->len,
-			.ino		= ip->i_ino,
+			.ino		= I_INO(ip),
 		};
 
 		/* Couldn't lock the inode, so save the dirent for later. */
-		trace_xchk_dir_defer(sc->ip, name, ip->i_ino);
+		trace_xchk_dir_defer(sc->ip, name, I_INO(ip));
 
 		error = xfblob_storename(sd->dir_names, &save_de.name_cookie,
 				name);
-		if (!xchk_fblock_xref_process_error(sc, XFS_DATA_FORK, 0,
+		if (!xchk_fblock_xref_process_error(sc, XFS_DATA_FORK, offset,
 					&error))
 			return error;
 
 		error = xfarray_append(sd->dir_entries, &save_de);
-		if (!xchk_fblock_xref_process_error(sc, XFS_DATA_FORK, 0,
+		if (!xchk_fblock_xref_process_error(sc, XFS_DATA_FORK, offset,
 					&error))
 			return error;
 
 		return 0;
 	}
 
-	error = xchk_dir_parent_pointer(sd, name, ip);
+	error = xchk_dir_parent_pointer(sd, offset, name, ip);
 	xfs_iunlock(ip, lockmode);
 	return error;
 }
@@ -254,14 +258,14 @@ xchk_dir_actor(
 
 	if (xfs_dir2_samename(name, &xfs_name_dot)) {
 		/* If this is "." then check that the inum matches the dir. */
-		if (ino != dp->i_ino)
+		if (ino != I_INO(dp))
 			xchk_fblock_set_corrupt(sc, XFS_DATA_FORK, offset);
 	} else if (xfs_dir2_samename(name, &xfs_name_dotdot)) {
 		/*
 		 * If this is ".." in the root inode, check that the inum
 		 * matches this dir.
 		 */
-		if (xchk_inode_is_dirtree_root(dp) && ino != dp->i_ino)
+		if (xchk_inode_is_dirtree_root(dp) && ino != I_INO(dp))
 			xchk_fblock_set_corrupt(sc, XFS_DATA_FORK, offset);
 	}
 
@@ -298,7 +302,7 @@ xchk_dir_actor(
 	xchk_dir_check_ftype(sc, offset, ip, name->type);
 
 	if (xfs_has_parent(mp)) {
-		error = xchk_dir_check_pptr_fast(sd, dapos, name, ip);
+		error = xchk_dir_check_pptr_fast(sd, offset, name, ip);
 		if (error)
 			goto out_rele;
 	}
@@ -309,6 +313,74 @@ out:
 	if (sc->sm->sm_flags & XFS_SCRUB_OFLAG_CORRUPT)
 		return -ECANCELED;
 	return error;
+}
+
+/*
+ * Deal with an unused directory entry.  Returns a positive number of bytes to
+ * advance in the directory block, zero to stop processing, or -1 if corruption
+ * was found.
+ */
+static int
+xchk_dir_check_unused(
+	struct xchk_da_btree		*ds,
+	struct xfs_buf			*bp,
+	unsigned int			iter_off,
+	unsigned int			end,
+	xfs_dablk_t			rec_bno)
+{
+	struct xfs_dir2_data_unused	*dup = bp->b_addr + iter_off;
+	unsigned int			advance;
+
+	if (iter_off + sizeof(*dup) > end) {
+		xchk_fblock_set_corrupt(ds->sc, XFS_DATA_FORK, rec_bno);
+		return -1;
+	}
+
+	advance = xfs_dir2_data_unusedsize(be16_to_cpu(dup->length));
+	if (!advance || iter_off + advance > end) {
+		xchk_fblock_set_corrupt(ds->sc, XFS_DATA_FORK, rec_bno);
+		return -1;
+	}
+
+	return advance;
+}
+
+/*
+ * Check a directory entry.  Returns a positive number of bytes to advance
+ * in the directory block, zero to stop processing, or -1 if corruption was
+ * found.
+ */
+static int
+xchk_dir_check_entry(
+	struct xchk_da_btree		*ds,
+	struct xfs_buf			*bp,
+	unsigned int			iter_off,
+	unsigned int			end,
+	struct xfs_dir2_data_entry	*dent,
+	xfs_dablk_t			rec_bno)
+{
+	struct xfs_dir2_data_entry	*dep = bp->b_addr + iter_off;
+	struct xfs_mount		*mp = ds->state->mp;
+	unsigned int			advance;
+
+	/* must have namelen */
+	advance = offsetof(typeof(*dep), name);
+	if (iter_off + advance >= end) {
+		xchk_fblock_set_corrupt(ds->sc, XFS_DATA_FORK, rec_bno);
+		return -1;
+	}
+
+	/* Don't walk off the end of the block. */
+	advance = xfs_dir2_data_entsize(mp, dep->namelen);
+	if (!advance || iter_off + advance > end) {
+		xchk_fblock_set_corrupt(ds->sc, XFS_DATA_FORK, rec_bno);
+		return -1;
+	}
+
+	if (dep == dent)
+		return 0;
+
+	return advance;
 }
 
 /* Scrub a directory btree record. */
@@ -336,6 +408,7 @@ xchk_dir_rec(
 	xfs_dahash_t			hash;
 	struct xfs_dir3_icleaf_hdr	hdr;
 	unsigned int			tag;
+	bool				foundit = false;
 	int				error;
 
 	ASSERT(blk->magic == XFS_DIR2_LEAF1_MAGIC ||
@@ -380,28 +453,42 @@ xchk_dir_rec(
 	dent = bp->b_addr + off;
 
 	/* Make sure we got a real directory entry. */
-	iter_off = geo->data_entry_offset;
 	end = xfs_dir3_data_end_offset(geo, bp->b_addr);
 	if (!end) {
 		xchk_fblock_set_corrupt(ds->sc, XFS_DATA_FORK, rec_bno);
 		goto out_relse;
 	}
-	for (;;) {
-		struct xfs_dir2_data_entry	*dep = bp->b_addr + iter_off;
+	iter_off = geo->data_entry_offset;
+	while (iter_off < end) {
 		struct xfs_dir2_data_unused	*dup = bp->b_addr + iter_off;
+		int				advance;
 
-		if (iter_off >= end) {
+		/* must have freetag */
+		advance = offsetof(typeof(*dup), length);
+		if (iter_off + advance >= end) {
 			xchk_fblock_set_corrupt(ds->sc, XFS_DATA_FORK, rec_bno);
 			goto out_relse;
 		}
 
-		if (be16_to_cpu(dup->freetag) == XFS_DIR2_DATA_FREE_TAG) {
-			iter_off += be16_to_cpu(dup->length);
-			continue;
-		}
-		if (dep == dent)
+		if (dup->freetag == cpu_to_be16(XFS_DIR2_DATA_FREE_TAG))
+			advance = xchk_dir_check_unused(ds, bp, iter_off, end,
+					rec_bno);
+		else
+			advance = xchk_dir_check_entry(ds, bp, iter_off, end,
+					dent, rec_bno);
+		if (advance < 0)
+			goto out_relse;
+		if (!advance) {
+			foundit = true;
 			break;
-		iter_off += xfs_dir2_data_entsize(mp, dep->namelen);
+		}
+		iter_off += advance;
+	}
+
+	/* Hash tree must point to the exact dirent */
+	if (!foundit) {
+		xchk_fblock_set_corrupt(ds->sc, XFS_DATA_FORK, rec_bno);
+		goto out_relse;
 	}
 
 	/* Retrieve the entry, sanity check it, and compare hashes. */
@@ -411,6 +498,13 @@ xchk_dir_rec(
 	if (!xfs_verify_dir_ino(mp, ino) || tag != off)
 		xchk_fblock_set_corrupt(ds->sc, XFS_DATA_FORK, rec_bno);
 	if (dent->namelen == 0) {
+		xchk_fblock_set_corrupt(ds->sc, XFS_DATA_FORK, rec_bno);
+		goto out_relse;
+	}
+
+	/* Name must not overflow end of block */
+	if ((char *)dent->name + dent->namelen >
+	    (char *)bp->b_addr + BBTOB(bp->b_length)) {
 		xchk_fblock_set_corrupt(ds->sc, XFS_DATA_FORK, rec_bno);
 		goto out_relse;
 	}
@@ -482,17 +576,22 @@ xchk_directory_data_bestfree(
 		/* dir block format */
 		if (lblk != XFS_B_TO_FSBT(mp, XFS_DIR2_DATA_OFFSET))
 			xchk_fblock_set_corrupt(sc, XFS_DATA_FORK, lblk);
-		error = xfs_dir3_block_read(sc->tp, sc->ip, sc->ip->i_ino, &bp);
+		error = xfs_dir3_block_read(sc->tp, sc->ip, I_INO(sc->ip), &bp);
 	} else {
 		/* dir data format */
-		error = xfs_dir3_data_read(sc->tp, sc->ip, sc->ip->i_ino, lblk,
+		error = xfs_dir3_data_read(sc->tp, sc->ip, I_INO(sc->ip), lblk,
 				0, &bp);
 	}
 	if (!xchk_fblock_process_error(sc, XFS_DATA_FORK, lblk, &error))
 		goto out;
 	xchk_buffer_recheck(sc, bp);
 
-	/* XXX: Check xfs_dir3_data_hdr.pad is zero once we start setting it. */
+	if (!is_block && xfs_has_crc(sc->mp)) {
+		struct xfs_dir3_data_hdr    *hdr3 = bp->b_addr;
+
+		if (hdr3->pad)
+			xchk_fblock_set_preen(sc, XFS_DATA_FORK, lblk);
+	}
 
 	if (sc->sm->sm_flags & XFS_SCRUB_OFLAG_CORRUPT)
 		goto out_buf;
@@ -638,7 +737,7 @@ xchk_directory_leaf1_bestfree(
 	int				error;
 
 	/* Read the free space block. */
-	error = xfs_dir3_leaf_read(sc->tp, sc->ip, sc->ip->i_ino, lblk, &bp);
+	error = xfs_dir3_leaf_read(sc->tp, sc->ip, I_INO(sc->ip), lblk, &bp);
 	if (!xchk_fblock_process_error(sc, XFS_DATA_FORK, lblk, &error))
 		return error;
 	xchk_buffer_recheck(sc, bp);
@@ -744,7 +843,7 @@ xchk_directory_free_bestfree(
 	int				error;
 
 	/* Read the free space block */
-	error = xfs_dir2_free_read(sc->tp, sc->ip, sc->ip->i_ino, lblk, &bp);
+	error = xfs_dir2_free_read(sc->tp, sc->ip, I_INO(sc->ip), lblk, &bp);
 	if (!xchk_fblock_process_error(sc, XFS_DATA_FORK, lblk, &error))
 		return error;
 	xchk_buffer_recheck(sc, bp);
@@ -792,7 +891,7 @@ xchk_directory_blocks(
 		.whichfork	= XFS_DATA_FORK,
 		.geo		= sc->mp->m_dir_geo,
 		.trans		= sc->tp,
-		.owner		= sc->ip->i_ino,
+		.owner		= I_INO(sc->ip),
 	};
 	struct xfs_ifork	*ifp = xfs_ifork_ptr(sc->ip, XFS_DATA_FORK);
 	struct xfs_mount	*mp = sc->mp;
@@ -991,7 +1090,7 @@ xchk_dir_slow_dirent(
 	 */
 	lockmode = xchk_dir_lock_child(sc, ip);
 	if (lockmode) {
-		trace_xchk_dir_slowpath(sc->ip, xname, ip->i_ino);
+		trace_xchk_dir_slowpath(sc->ip, xname, I_INO(ip));
 		goto check_pptr;
 	}
 
@@ -1002,7 +1101,7 @@ xchk_dir_slow_dirent(
 	xchk_iunlock(sc, sc->ilock_flags);
 	sd->need_revalidate = true;
 
-	trace_xchk_dir_ultraslowpath(sc->ip, xname, ip->i_ino);
+	trace_xchk_dir_ultraslowpath(sc->ip, xname, I_INO(ip));
 
 	error = xchk_dir_trylock_for_pptrs(sc, ip, &lockmode);
 	if (error)
@@ -1018,7 +1117,7 @@ xchk_dir_slow_dirent(
 		goto out_unlock;
 
 check_pptr:
-	error = xchk_dir_parent_pointer(sd, xname, ip);
+	error = xchk_dir_parent_pointer(sd, 0, xname, ip);
 out_unlock:
 	xfs_iunlock(ip, lockmode);
 out_rele:
@@ -1075,7 +1174,7 @@ xchk_directory(
 
 	/* Plausible size? */
 	if (sc->ip->i_disk_size < xfs_dir2_sf_hdr_size(0)) {
-		xchk_ino_set_corrupt(sc, sc->ip->i_ino);
+		xchk_ip_set_corrupt(sc, sc->ip);
 		return 0;
 	}
 
@@ -1095,29 +1194,24 @@ xchk_directory(
 	if (sc->sm->sm_flags & XFS_SCRUB_OFLAG_CORRUPT)
 		return 0;
 
-	sd = kvzalloc(sizeof(struct xchk_dir), XCHK_GFP_FLAGS);
+	sd = kvzalloc_obj(struct xchk_dir, XCHK_GFP_FLAGS);
 	if (!sd)
 		return -ENOMEM;
 	sd->sc = sc;
 	sd->xname.name = sd->namebuf;
 
 	if (xfs_has_parent(sc->mp)) {
-		char		*descr;
-
 		/*
 		 * Set up some staging memory for dirents that we can't check
 		 * due to locking contention.
 		 */
-		descr = xchk_xfile_ino_descr(sc, "slow directory entries");
-		error = xfarray_create(descr, 0, sizeof(struct xchk_dirent),
-				&sd->dir_entries);
-		kfree(descr);
+		error = xfarray_create("slow directory entries", 0,
+				sizeof(struct xchk_dirent), &sd->dir_entries);
 		if (error)
 			goto out_sd;
 
-		descr = xchk_xfile_ino_descr(sc, "slow directory entry names");
-		error = xfblob_create(descr, &sd->dir_names);
-		kfree(descr);
+		error = xfblob_create("slow directory entry names",
+				&sd->dir_names);
 		if (error)
 			goto out_entries;
 	}

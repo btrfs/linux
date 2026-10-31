@@ -36,9 +36,13 @@ extern const struct seq_operations cpuinfo_op;
 /* Per-cpu ISA extensions. */
 extern struct riscv_isainfo hart_isa[NR_CPUS];
 
+extern DECLARE_BITMAP(riscv_isa, RISCV_ISA_EXT_MAX);
+
 extern u32 thead_vlenb_of;
 
 void __init riscv_user_isa_enable(void);
+
+void riscv_clear_hypervisor_csr(void);
 
 #define _RISCV_ISA_EXT_DATA(_name, _id, _subset_exts, _subset_exts_size, _validate) {	\
 	.name = #_name,									\
@@ -134,8 +138,7 @@ static __always_inline bool riscv_cpu_has_extension_likely(int cpu, const unsign
 {
 	compiletime_assert(ext < RISCV_ISA_EXT_MAX, "ext must be < RISCV_ISA_EXT_MAX");
 
-	if (IS_ENABLED(CONFIG_RISCV_ALTERNATIVE) &&
-	    __riscv_has_extension_likely(STANDARD_EXT, ext))
+	if (__riscv_has_extension_likely(STANDARD_EXT, ext))
 		return true;
 
 	return __riscv_isa_extension_available(hart_isa[cpu].isa, ext);
@@ -145,11 +148,22 @@ static __always_inline bool riscv_cpu_has_extension_unlikely(int cpu, const unsi
 {
 	compiletime_assert(ext < RISCV_ISA_EXT_MAX, "ext must be < RISCV_ISA_EXT_MAX");
 
-	if (IS_ENABLED(CONFIG_RISCV_ALTERNATIVE) &&
-	    __riscv_has_extension_unlikely(STANDARD_EXT, ext))
+	if (__riscv_has_extension_unlikely(STANDARD_EXT, ext))
 		return true;
 
 	return __riscv_isa_extension_available(hart_isa[cpu].isa, ext);
+}
+
+static inline bool cpu_supports_shadow_stack(void)
+{
+	return (IS_ENABLED(CONFIG_RISCV_USER_CFI) &&
+		riscv_has_extension_unlikely(RISCV_ISA_EXT_ZICFISS));
+}
+
+static inline bool cpu_supports_indirect_br_lp_instr(void)
+{
+	return (IS_ENABLED(CONFIG_RISCV_USER_CFI) &&
+		riscv_has_extension_unlikely(RISCV_ISA_EXT_ZICFILP));
 }
 
 #endif

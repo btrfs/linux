@@ -6,14 +6,12 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <sched.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 #include <sys/mount.h>
 
-#include "../kselftest_harness.h"
+#include "kselftest_harness.h"
 
 #define ASSERT_ERRNO(expected, _t, seen)				\
 	__EXPECT(expected, #expected,					\

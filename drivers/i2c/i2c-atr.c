@@ -49,8 +49,8 @@ struct i2c_atr_alias_pair {
  * @shared:   Indicates if this alias pool is shared by multiple channels
  *
  * @lock:     Lock protecting @aliases and @use_mask
- * @aliases:  Array of aliases, must hold exactly @size elements
  * @use_mask: Mask of used aliases
+ * @aliases:  Array of aliases, must hold exactly @size elements
  */
 struct i2c_atr_alias_pool {
 	size_t size;
@@ -58,8 +58,8 @@ struct i2c_atr_alias_pool {
 
 	/* Protects aliases and use_mask */
 	spinlock_t lock;
-	u16 *aliases;
 	unsigned long *use_mask;
+	u16 aliases[] __counted_by(size);
 };
 
 /**
@@ -137,22 +137,16 @@ static struct i2c_atr_alias_pool *i2c_atr_alloc_alias_pool(size_t num_aliases, b
 	struct i2c_atr_alias_pool *alias_pool;
 	int ret;
 
-	alias_pool = kzalloc(sizeof(*alias_pool), GFP_KERNEL);
+	alias_pool = kzalloc_flex(*alias_pool, aliases, num_aliases);
 	if (!alias_pool)
 		return ERR_PTR(-ENOMEM);
 
 	alias_pool->size = num_aliases;
 
-	alias_pool->aliases = kcalloc(num_aliases, sizeof(*alias_pool->aliases), GFP_KERNEL);
-	if (!alias_pool->aliases) {
-		ret = -ENOMEM;
-		goto err_free_alias_pool;
-	}
-
 	alias_pool->use_mask = bitmap_zalloc(num_aliases, GFP_KERNEL);
 	if (!alias_pool->use_mask) {
 		ret = -ENOMEM;
-		goto err_free_aliases;
+		goto err_free_alias_pool;
 	}
 
 	alias_pool->shared = shared;
@@ -161,8 +155,6 @@ static struct i2c_atr_alias_pool *i2c_atr_alloc_alias_pool(size_t num_aliases, b
 
 	return alias_pool;
 
-err_free_aliases:
-	kfree(alias_pool->aliases);
 err_free_alias_pool:
 	kfree(alias_pool);
 	return ERR_PTR(ret);
@@ -171,7 +163,6 @@ err_free_alias_pool:
 static void i2c_atr_free_alias_pool(struct i2c_atr_alias_pool *alias_pool)
 {
 	bitmap_free(alias_pool->use_mask);
-	kfree(alias_pool->aliases);
 	kfree(alias_pool);
 }
 
@@ -183,7 +174,7 @@ static struct i2c_atr_alias_pair *i2c_atr_create_c2a(struct i2c_atr_chan *chan,
 
 	lockdep_assert_held(&chan->alias_pairs_lock);
 
-	c2a = kzalloc(sizeof(*c2a), GFP_KERNEL);
+	c2a = kzalloc_obj(*c2a);
 	if (!c2a)
 		return NULL;
 
@@ -549,6 +540,12 @@ static int i2c_atr_attach_addr(struct i2c_adapter *adapter,
 	struct i2c_atr_alias_pair *c2a;
 	int ret = 0;
 
+	/*
+	 * attach_addr() may reconfigure the remote side of the bus, keep
+	 * transfers on other channels out until it is done.
+	 */
+	mutex_lock(&atr->lock);
+
 	mutex_lock(&chan->alias_pairs_lock);
 
 	c2a = i2c_atr_create_mapping_by_addr(chan, addr);
@@ -566,6 +563,8 @@ static int i2c_atr_attach_addr(struct i2c_adapter *adapter,
 
 out_unlock:
 	mutex_unlock(&chan->alias_pairs_lock);
+	mutex_unlock(&atr->lock);
+
 	return ret;
 }
 
@@ -576,6 +575,8 @@ static void i2c_atr_detach_addr(struct i2c_adapter *adapter,
 	struct i2c_atr *atr = chan->atr;
 	struct i2c_atr_alias_pair *c2a;
 
+	mutex_lock(&atr->lock);
+
 	atr->ops->detach_addr(atr, chan->chan_id, addr);
 
 	mutex_lock(&chan->alias_pairs_lock);
@@ -583,6 +584,7 @@ static void i2c_atr_detach_addr(struct i2c_adapter *adapter,
 	c2a = i2c_atr_find_mapping_by_addr(chan, addr);
 	if (!c2a) {
 		mutex_unlock(&chan->alias_pairs_lock);
+		mutex_unlock(&atr->lock);
 		return;
 	}
 
@@ -595,6 +597,7 @@ static void i2c_atr_detach_addr(struct i2c_adapter *adapter,
 	i2c_atr_destroy_c2a(&c2a);
 
 	mutex_unlock(&chan->alias_pairs_lock);
+	mutex_unlock(&atr->lock);
 }
 
 static int i2c_atr_bus_notifier_call(struct notifier_block *nb,
@@ -724,7 +727,7 @@ struct i2c_atr *i2c_atr_new(struct i2c_adapter *parent, struct device *dev,
 	if (!ops || !ops->attach_addr || !ops->detach_addr)
 		return ERR_PTR(-EINVAL);
 
-	atr = kzalloc(struct_size(atr, adapter, max_adapters), GFP_KERNEL);
+	atr = kzalloc_flex(*atr, adapter, max_adapters);
 	if (!atr)
 		return ERR_PTR(-ENOMEM);
 
@@ -800,7 +803,7 @@ int i2c_atr_add_adapter(struct i2c_atr *atr, struct i2c_atr_adap_desc *desc)
 		return -EEXIST;
 	}
 
-	chan = kzalloc(sizeof(*chan), GFP_KERNEL);
+	chan = kzalloc_obj(*chan);
 	if (!chan)
 		return -ENOMEM;
 
@@ -864,6 +867,7 @@ int i2c_atr_add_adapter(struct i2c_atr *atr, struct i2c_atr_adap_desc *desc)
 
 	ret = i2c_add_adapter(&chan->adap);
 	if (ret) {
+		atr->adapter[chan_id] = NULL;
 		dev_err(dev, "failed to add atr-adapter %u (error=%d)\n",
 			chan_id, ret);
 		goto err_free_alias_pool;

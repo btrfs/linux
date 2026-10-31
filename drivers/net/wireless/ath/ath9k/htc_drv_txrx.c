@@ -664,8 +664,8 @@ void ath9k_htc_txstatus(struct ath9k_htc_priv *priv, void *wmi_event)
 			 * Store this event, so that the TX cleanup
 			 * routine can check later for the needed packet.
 			 */
-			tx_pend = kzalloc(sizeof(struct ath9k_htc_tx_event),
-					  GFP_ATOMIC);
+			tx_pend = kzalloc_obj(struct ath9k_htc_tx_event,
+					      GFP_ATOMIC);
 			if (!tx_pend)
 				continue;
 
@@ -1141,8 +1141,8 @@ void ath9k_htc_rxep(void *drv_priv, struct sk_buff *skb,
 	struct ath9k_htc_rxbuf *rxbuf = NULL, *tmp_buf = NULL;
 	unsigned long flags;
 
-	/* Check if ath9k_rx_init() completed. */
-	if (!data_race(priv->rx.initialized))
+	/* Check if ath9k_init_device() completed. */
+	if (!smp_load_acquire(&priv->initialized))
 		goto err;
 
 	spin_lock_irqsave(&priv->rx.rxbuflock, flags);
@@ -1193,16 +1193,12 @@ int ath9k_rx_init(struct ath9k_htc_priv *priv)
 
 	for (i = 0; i < ATH9K_HTC_RXBUF; i++) {
 		struct ath9k_htc_rxbuf *rxbuf =
-			kzalloc(sizeof(struct ath9k_htc_rxbuf), GFP_KERNEL);
+			kzalloc_obj(struct ath9k_htc_rxbuf);
 		if (rxbuf == NULL)
 			goto err;
 
 		list_add_tail(&rxbuf->list, &priv->rx.rxbuf);
 	}
-
-	/* Allow ath9k_htc_rxep() to operate. */
-	smp_wmb();
-	priv->rx.initialized = true;
 
 	return 0;
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2012-15 Advanced Micro Devices, Inc.
+ * Copyright 2012-2026 Advanced Micro Devices, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -54,6 +54,7 @@
 #include "dc_hw_types.h"
 #include "hw_shared.h"
 #include "transform.h"
+#include "dc_types.h"
 
 #define MAX_MPCC 6
 #define MAX_OPP 6
@@ -65,7 +66,6 @@ enum mpc_output_csc_mode {
 	MPC_OUTPUT_CSC_COEF_A,
 	MPC_OUTPUT_CSC_COEF_B
 };
-
 
 enum mpcc_blend_mode {
 	MPCC_BLEND_MODE_BYPASS,
@@ -102,13 +102,6 @@ enum mpcc_movable_cm_location {
 	MPCC_MOVABLE_CM_LOCATION_AFTER,
 };
 
-enum MCM_LUT_XABLE {
-	MCM_LUT_DISABLE,
-	MCM_LUT_DISABLED = MCM_LUT_DISABLE,
-	MCM_LUT_ENABLE,
-	MCM_LUT_ENABLED = MCM_LUT_ENABLE,
-};
-
 enum MCM_LUT_ID {
 	MCM_LUT_3DLUT,
 	MCM_LUT_1DLUT,
@@ -117,7 +110,7 @@ enum MCM_LUT_ID {
 
 struct mpc_fl_3dlut_config {
 	bool enabled;
-	uint16_t width;
+	enum dc_cm_lut_size size;
 	bool select_lut_bank_a;
 	uint16_t bit_depth;
 	int hubp_index;
@@ -198,42 +191,6 @@ struct mpc_grph_gamut_adjustment {
 	struct fixed31_32 temperature_matrix[CSC_TEMPERATURE_MATRIX_SIZE];
 	enum graphics_gamut_adjust_type gamut_adjust_type;
 	enum mpcc_gamut_remap_id mpcc_gamut_remap_block_id;
-};
-
-struct mpc_rmcm_regs {
-	uint32_t rmcm_3dlut_mem_pwr_state;
-	uint32_t rmcm_3dlut_mem_pwr_force;
-	uint32_t rmcm_3dlut_mem_pwr_dis;
-	uint32_t rmcm_3dlut_mem_pwr_mode;
-	uint32_t rmcm_3dlut_size;
-	uint32_t rmcm_3dlut_mode;
-	uint32_t rmcm_3dlut_mode_cur;
-	uint32_t rmcm_3dlut_read_sel;
-	uint32_t rmcm_3dlut_30bit_en;
-	uint32_t rmcm_3dlut_wr_en_mask;
-	uint32_t rmcm_3dlut_ram_sel;
-	uint32_t rmcm_3dlut_out_norm_factor;
-	uint32_t rmcm_3dlut_fl_sel;
-	uint32_t rmcm_3dlut_out_offset_r;
-	uint32_t rmcm_3dlut_out_scale_r;
-	uint32_t rmcm_3dlut_fl_done;
-	uint32_t rmcm_3dlut_fl_soft_underflow;
-	uint32_t rmcm_3dlut_fl_hard_underflow;
-	uint32_t rmcm_cntl;
-	uint32_t rmcm_shaper_mem_pwr_state;
-	uint32_t rmcm_shaper_mem_pwr_force;
-	uint32_t rmcm_shaper_mem_pwr_dis;
-	uint32_t rmcm_shaper_mem_pwr_mode;
-	uint32_t rmcm_shaper_lut_mode;
-	uint32_t rmcm_shaper_mode_cur;
-	uint32_t rmcm_shaper_lut_write_en_mask;
-	uint32_t rmcm_shaper_lut_write_sel;
-	uint32_t rmcm_shaper_offset_b;
-	uint32_t rmcm_shaper_scale_b;
-	uint32_t rmcm_shaper_rama_exp_region_start_b;
-	uint32_t rmcm_shaper_rama_exp_region_start_seg_b;
-	uint32_t rmcm_shaper_rama_exp_region_end_b;
-	uint32_t rmcm_shaper_rama_exp_region_end_base_b;
 };
 
 struct mpcc_sm_cfg {
@@ -324,6 +281,7 @@ struct mpc_tree {
 struct mpc {
 	const struct mpc_funcs *funcs;
 	struct dc_context *ctx;
+	int inst;
 
 	struct mpcc mpcc_array[MAX_MPCC];
 	struct pwl_params blender_params;
@@ -347,7 +305,15 @@ struct mpcc_state {
 	uint32_t rgam_mode;
 	uint32_t rgam_lut;
 	struct mpc_grph_gamut_adjustment gamut_remap;
-	struct mpc_rmcm_regs rmcm_regs;
+};
+
+struct dcn_mpc_reg_state {
+	uint32_t mpcc_bot_sel;
+	uint32_t mpcc_control;
+	uint32_t mpcc_status;
+	uint32_t mpcc_top_sel;
+	uint32_t mpcc_opp_id;
+	uint32_t mpcc_ogam_control;
 };
 
 /**
@@ -373,6 +339,24 @@ struct mpc_funcs {
 			struct mpc *mpc,
 			int mpcc_inst,
 			struct mpcc_state *s);
+	/**
+    * @mpc_read_reg_state:
+    *
+    * Read MPC register state for debugging underflow purposes.
+    *
+    * Parameters:
+    *
+    * - [in] mpc - MPC context
+    * - [out] reg_state - MPC register state structure
+    *
+    * Return:
+    *
+    * void
+    */
+	void (*mpc_read_reg_state)(
+			struct mpc *mpc,
+			int mpcc_inst,
+			struct dcn_mpc_reg_state *mpc_reg_state);
 
 	/**
 	* @insert_plane:
@@ -1016,6 +1000,24 @@ struct mpc_funcs {
 	void (*update_3dlut_fast_load_select)(struct mpc *mpc, int mpcc_id, int hubp_idx);
 
 	/**
+	* @get_3dlut_fast_load_status:
+	*
+	* Get 3D LUT fast load status and reference them with done, soft_underflow and hard_underflow pointers.
+	*
+	* Parameters:
+	* - [in/out] mpc - MPC context.
+	* - [in] mpcc_id
+	* - [in/out] done
+	* - [in/out] soft_underflow
+	* - [in/out] hard_underflow
+	*
+	* Return:
+	*
+	* void
+	*/
+	void (*get_3dlut_fast_load_status)(struct mpc *mpc, int mpcc_id, uint32_t *done, uint32_t *soft_underflow, uint32_t *hard_underflow);
+
+	/**
 	* @populate_lut:
 	*
 	* Populate LUT with given tetrahedral parameters.
@@ -1031,8 +1033,11 @@ struct mpc_funcs {
 	*
 	* void
 	*/
-	void (*populate_lut)(struct mpc *mpc, const enum MCM_LUT_ID id, const union mcm_lut_params params,
-			bool lut_bank_a, int mpcc_id);
+	void (*populate_lut)(struct mpc *mpc,
+			const enum MCM_LUT_ID id,
+			const union mcm_lut_params *params,
+			const bool lut_bank_a,
+			const int mpcc_id);
 
 	/**
 	* @program_lut_read_write_control:
@@ -1043,13 +1048,18 @@ struct mpc_funcs {
 	* - [in/out] mpc - MPC context.
 	* - [in] id
 	* - [in] lut_bank_a
+	* - [in] bit_depth
 	* - [in] mpcc_id
 	*
 	* Return:
 	*
 	* void
 	*/
-	void (*program_lut_read_write_control)(struct mpc *mpc, const enum MCM_LUT_ID id, bool lut_bank_a, int mpcc_id);
+	void (*program_lut_read_write_control)(struct mpc *mpc,
+		const enum MCM_LUT_ID id,
+		const bool lut_bank_a,
+		const unsigned int bit_depth,
+		const int mpcc_id);
 
 	/**
 	* @program_lut_mode:
@@ -1059,56 +1069,44 @@ struct mpc_funcs {
 	* Parameters:
 	* - [in/out] mpc - MPC context.
 	* - [in] id
-	* - [in] xable
+	* - [in] enable
 	* - [in] lut_bank_a
+	* - [in] size
 	* - [in] mpcc_id
 	*
 	* Return:
 	*
 	* void
 	*/
-	void (*program_lut_mode)(struct mpc *mpc, const enum MCM_LUT_ID id, const enum MCM_LUT_XABLE xable,
-			bool lut_bank_a, int mpcc_id);
+	void (*program_lut_mode)(struct mpc *mpc,
+			const enum MCM_LUT_ID id,
+			const bool enable,
+			const bool lut_bank_a,
+			const enum dc_cm_lut_size size,
+			const int mpcc_id);
+
 
 	/**
-	 * @mcm:
-	 *
-	 * MPC MCM new HW sequential programming functions
-	 */
-	struct {
-		void (*program_3dlut_size)(struct mpc *mpc, uint32_t width, int mpcc_id);
-		void (*program_bias_scale)(struct mpc *mpc, uint16_t bias, uint16_t scale, int mpcc_id);
-		void (*program_bit_depth)(struct mpc *mpc, uint16_t bit_depth, int mpcc_id);
-		bool (*is_config_supported)(uint32_t width);
-		void (*program_lut_read_write_control)(struct mpc *mpc, const enum MCM_LUT_ID id,
-			bool lut_bank_a, bool enabled, int mpcc_id);
-
-		void (*populate_lut)(struct mpc *mpc, const union mcm_lut_params params,
-			bool lut_bank_a, int mpcc_id);
-	} mcm;
-
-	/**
-	 * @rmcm:
-	 *
-	 * MPC RMCM new HW sequential programming functions
-	 */
-	struct {
-		void (*fl_3dlut_configure)(struct mpc *mpc, struct mpc_fl_3dlut_config *cfg, int mpcc_id);
-		void (*enable_3dlut_fl)(struct mpc *mpc, bool enable, int mpcc_id);
-		void (*update_3dlut_fast_load_select)(struct mpc *mpc, int mpcc_id, int hubp_idx);
-		void (*program_lut_read_write_control)(struct mpc *mpc, const enum MCM_LUT_ID id,
-			bool lut_bank_a, bool enabled, int mpcc_id);
-		void (*program_lut_mode)(struct mpc *mpc, const enum MCM_LUT_XABLE xable,
-			bool lut_bank_a, int mpcc_id);
-		void (*program_3dlut_size)(struct mpc *mpc, uint32_t width, int mpcc_id);
-		void (*program_bias_scale)(struct mpc *mpc, uint16_t bias, uint16_t scale, int mpcc_id);
-		void (*program_bit_depth)(struct mpc *mpc, uint16_t bit_depth, int mpcc_id);
-		bool (*is_config_supported)(uint32_t width);
-
-		void (*power_on_shaper_3dlut)(struct mpc *mpc, uint32_t mpcc_id, bool power_on);
-		void (*populate_lut)(struct mpc *mpc, const union mcm_lut_params params,
-			bool lut_bank_a, int mpcc_id);
-	} rmcm;
+	* @get_lut_mode:
+	*
+	* Obtains enablement and ram bank status.
+	*
+	* Parameters:
+	* - [in/out] mpc - MPC context.
+	* - [in] id
+	* - [in] mpcc_id
+	* - [out] enable
+	* - [out] lut_bank_a
+	*
+	* Return:
+	*
+	* void
+	*/
+	void (*get_lut_mode)(struct mpc *mpc,
+			const enum MCM_LUT_ID id,
+			const int mpcc_id,
+			bool *enable,
+			bool *lut_bank_a);
 };
 
 #endif

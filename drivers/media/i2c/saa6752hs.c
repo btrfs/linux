@@ -563,6 +563,7 @@ static int saa6752hs_get_fmt(struct v4l2_subdev *sd,
 }
 
 static int saa6752hs_set_fmt(struct v4l2_subdev *sd,
+		const struct v4l2_subdev_client_info *ci,
 		struct v4l2_subdev_state *sd_state,
 		struct v4l2_subdev_format *format)
 {
@@ -770,7 +771,7 @@ static void saa6752hs_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id saa6752hs_id[] = {
-	{ "saa6752hs" },
+	{ .name = "saa6752hs" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, saa6752hs_id);

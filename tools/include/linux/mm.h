@@ -4,6 +4,7 @@
 
 #include <linux/align.h>
 #include <linux/mmzone.h>
+#include <linux/sizes.h>
 
 #define PAGE_SHIFT		12
 #define PAGE_SIZE		(_AC(1, UL) << PAGE_SHIFT)
@@ -16,6 +17,7 @@
 
 #define __va(x) ((void *)((unsigned long)(x)))
 #define __pa(x) ((unsigned long)(x))
+#define __pa_symbol(x) ((unsigned long)(x))
 
 #define pfn_to_page(pfn) ((void *)((pfn) * PAGE_SIZE))
 
@@ -28,13 +30,7 @@ static inline void *phys_to_virt(unsigned long address)
 #define virt_to_phys virt_to_phys
 static inline phys_addr_t virt_to_phys(volatile void *address)
 {
-	return (phys_addr_t)address;
-}
-
-void reserve_bootmem_region(phys_addr_t start, phys_addr_t end, int nid);
-
-static inline void totalram_pages_inc(void)
-{
+	return __pa(address);
 }
 
 static inline void totalram_pages_add(long count)

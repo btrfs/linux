@@ -20,6 +20,7 @@ properties:
   compatible:
     oneOf:
       - enum:
+          - fsl,imx25-iomuxc
           - fsl,imx35-iomuxc
           - fsl,imx51-iomuxc
           - fsl,imx53-iomuxc
@@ -178,7 +179,7 @@ examples:
 
         pinctrl_uart4: uart4grp {
             fsl,pins =
-                <0x288 0x658 0x000 0x3 0x0	0x140>,
-                <0x28c 0x65c 0x938 0x3 0x3	0x140>;
+                <0x288 0x658 0x000 0x3 0x0 0x140>,
+                <0x28c 0x65c 0x938 0x3 0x3 0x140>;
         };
     };

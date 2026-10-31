@@ -42,7 +42,7 @@ definitions:
       - skip-hw
       - skip-sw
       - in-hw
-      - not-in-nw
+      - not-in-hw
       - verbose
   -
     name: flower-key-ctrl-flags
@@ -2207,6 +2207,9 @@ attribute-sets:
       -
         name: blue-timer-us
         type: s32
+      -
+        name: active-queues
+        type: u32
   -
     name: cake-tin-stats-attrs
     name-prefix: tca-cake-tin-stats-

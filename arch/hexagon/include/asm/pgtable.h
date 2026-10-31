@@ -14,9 +14,6 @@
 #include <asm/page.h>
 #include <asm-generic/pgtable-nopmd.h>
 
-/* A handy thing to have if one has the RAM. Declared in head.S */
-extern unsigned long empty_zero_page;
-
 /*
  * The PTE model described here is that of the Hexagon Virtual Machine,
  * which autonomously walks 2-level page tables.  At a lower level, we
@@ -97,9 +94,6 @@ extern unsigned long empty_zero_page;
 #endif
 
 /*  Any bigger and the PTE disappears.  */
-#define pgd_ERROR(e) \
-	printk(KERN_ERR "%s:%d: bad pgd %08lx.\n", __FILE__, __LINE__,\
-		pgd_val(e))
 
 /*
  * Page Protection Constants. Includes (in this variant) cache attributes.
@@ -347,9 +341,6 @@ static inline unsigned long pmd_page_vaddr(pmd_t pmd)
 {
 	return (unsigned long)__va(pmd_val(pmd) & PAGE_MASK);
 }
-
-/* ZERO_PAGE - returns the globally shared zero page */
-#define ZERO_PAGE(vaddr) (virt_to_page(&empty_zero_page))
 
 /*
  * Encode/decode swap entries and swap PTEs. Swap PTEs are all PTEs that

@@ -4,7 +4,6 @@
 //
 // Based on WM8523 ALSA SoC Audio driver written by Mark Brown
 
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/init.h>
@@ -42,7 +41,7 @@ static const struct snd_soc_dapm_route uda1334_dapm_routes[] = {
 static int uda1334_put_deemph(struct snd_kcontrol *kcontrol,
 			      struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct uda1334_priv *uda1334 = snd_soc_component_get_drvdata(component);
 	int deemph = ucontrol->value.integer.value[0];
 
@@ -57,7 +56,7 @@ static int uda1334_put_deemph(struct snd_kcontrol *kcontrol,
 static int uda1334_get_deemph(struct snd_kcontrol *kcontrol,
 			      struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct uda1334_priv *uda1334 = snd_soc_component_get_drvdata(component);
 	int ret;
 
@@ -194,12 +193,18 @@ static int uda1334_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
 
 #define UDA1334_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE)
 
+static const u64 uda1334_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF;
+
 static const struct snd_soc_dai_ops uda1334_dai_ops = {
 	.startup	= uda1334_startup,
 	.shutdown	= uda1334_shutdown,
 	.set_sysclk	= uda1334_set_dai_sysclk,
 	.set_fmt	= uda1334_set_fmt,
 	.mute_stream	= uda1334_mute_stream,
+	.auto_selectable_formats	= &uda1334_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 static struct snd_soc_dai_driver uda1334_dai = {

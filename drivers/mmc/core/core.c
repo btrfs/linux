@@ -97,7 +97,8 @@ static void mmc_should_fail_request(struct mmc_host *host,
 		return;
 
 	data->error = data_errors[get_random_u32_below(ARRAY_SIZE(data_errors))];
-	data->bytes_xfered = get_random_u32_below(data->bytes_xfered >> 9) << 9;
+	data->bytes_xfered = get_random_u32_below(data->bytes_xfered >> SECTOR_SHIFT)
+						  << SECTOR_SHIFT;
 }
 
 #else /* CONFIG_FAIL_MMC_REQUEST */
@@ -588,8 +589,8 @@ EXPORT_SYMBOL(mmc_cqe_recovery);
  *	mmc_is_req_done() is used with requests that have
  *	mrq->cap_cmd_during_tfr = true. mmc_is_req_done() must be called after
  *	starting a request and before waiting for it to complete. That is,
- *	either in between calls to mmc_start_req(), or after mmc_wait_for_req()
- *	and before mmc_wait_for_req_done(). If it is called at other times the
+ *	after mmc_start_request() or mmc_wait_for_req() and before
+ *	mmc_wait_for_req_done(). If it is called at other times the
  *	result is not meaningful.
  */
 bool mmc_is_req_done(struct mmc_host *host, struct mmc_request *mrq)
@@ -1387,7 +1388,7 @@ void mmc_power_off(struct mmc_host *host)
 	 * XO-1.5, require a short delay after poweroff before the card
 	 * can be successfully turned on again.
 	 */
-	mmc_delay(1);
+	mmc_delay_us(host->ios.power_off_delay_us);
 }
 
 void mmc_power_cycle(struct mmc_host *host, u32 ocr)
@@ -2003,7 +2004,7 @@ unsigned int mmc_calc_max_discard(struct mmc_card *card)
 
 	/*
 	 * Without erase_group_def set, MMC erase timeout depends on clock
-	 * frequence which can change.  In that case, the best choice is
+	 * frequency which can change.  In that case, the best choice is
 	 * just the preferred erase size.
 	 */
 	if (mmc_card_mmc(card) && !(card->ext_csd.erase_group_def & 1))

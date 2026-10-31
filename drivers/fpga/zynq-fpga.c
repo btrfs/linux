@@ -598,7 +598,6 @@ static int zynq_fpga_probe(struct platform_device *pdev)
 	err = devm_request_irq(dev, priv->irq, zynq_fpga_isr, 0, dev_name(dev),
 			       priv);
 	if (err) {
-		dev_err(dev, "unable to request IRQ\n");
 		clk_disable_unprepare(priv->clk);
 		return err;
 	}
@@ -652,6 +651,6 @@ static struct platform_driver zynq_fpga_driver = {
 module_platform_driver(zynq_fpga_driver);
 
 MODULE_AUTHOR("Moritz Fischer <moritz.fischer@ettus.com>");
-MODULE_AUTHOR("Michal Simek <michal.simek@xilinx.com>");
+MODULE_AUTHOR("Michal Simek <michal.simek@amd.com>");
 MODULE_DESCRIPTION("Xilinx Zynq FPGA Manager");
 MODULE_LICENSE("GPL v2");

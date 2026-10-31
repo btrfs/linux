@@ -27,6 +27,18 @@
 #include <linux/types.h>
 #include <linux/device.h>
 
+enum hdmi_version {
+	HDMI_VERSION_UNKNOWN,
+	HDMI_VERSION_1_0,
+	HDMI_VERSION_1_1,
+	HDMI_VERSION_1_2,
+	HDMI_VERSION_1_3,
+	HDMI_VERSION_1_4,
+	HDMI_VERSION_2_0,
+	HDMI_VERSION_2_1,
+	HDMI_VERSION_2_2,
+};
+
 enum hdmi_packet_type {
 	HDMI_PACKET_TYPE_NULL = 0x00,
 	HDMI_PACKET_TYPE_AUDIO_CLOCK_REGEN = 0x01,
@@ -49,6 +61,12 @@ enum hdmi_infoframe_type {
 	HDMI_INFOFRAME_TYPE_AUDIO = 0x84,
 	HDMI_INFOFRAME_TYPE_DRM = 0x87,
 };
+
+/* HDMI spec maximum TMDS character rates, in Hz */
+#define HDMI_TMDS_CHAR_RATE_MIN_HZ         25000000
+#define HDMI_1_0_TMDS_CHAR_RATE_MAX_HZ    165000000
+#define HDMI_1_3_TMDS_CHAR_RATE_MAX_HZ    340000000
+#define HDMI_2_0_TMDS_CHAR_RATE_MAX_HZ    600000000
 
 #define HDMI_IEEE_OUI 0x000c03
 #define HDMI_FORUM_IEEE_OUI 0xc45dd8

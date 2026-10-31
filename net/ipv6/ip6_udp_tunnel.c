@@ -40,7 +40,7 @@ int udp_sock_create6(struct net *net, struct udp_port_cfg *cfg,
 	memcpy(&udp6_addr.sin6_addr, &cfg->local_ip6,
 	       sizeof(udp6_addr.sin6_addr));
 	udp6_addr.sin6_port = cfg->local_udp_port;
-	err = kernel_bind(sock, (struct sockaddr *)&udp6_addr,
+	err = kernel_bind(sock, (struct sockaddr_unsized *)&udp6_addr,
 			  sizeof(udp6_addr));
 	if (err < 0)
 		goto error;
@@ -52,7 +52,7 @@ int udp_sock_create6(struct net *net, struct udp_port_cfg *cfg,
 		       sizeof(udp6_addr.sin6_addr));
 		udp6_addr.sin6_port = cfg->peer_udp_port;
 		err = kernel_connect(sock,
-				     (struct sockaddr *)&udp6_addr,
+				     (struct sockaddr_unsized *)&udp6_addr,
 				     sizeof(udp6_addr), 0);
 	}
 	if (err < 0)
@@ -93,7 +93,7 @@ void udp_tunnel6_xmit_skb(struct dst_entry *dst, struct sock *sk,
 	uh->dest = dst_port;
 	uh->source = src_port;
 
-	uh->len = htons(skb->len);
+	udp_set_len(uh, skb->len);
 
 	skb_dst_set(skb, dst);
 
@@ -118,7 +118,7 @@ EXPORT_SYMBOL_GPL(udp_tunnel6_xmit_skb);
  *      @skb: Packet for which lookup is done
  *      @dev: Tunnel device
  *      @net: Network namespace of tunnel device
- *      @sock: Socket which provides route info
+ *      @sk: Socket which provides route info
  *      @oif: Index of the output interface
  *      @saddr: Memory to store the src ip address
  *      @key: Tunnel information
@@ -135,7 +135,7 @@ EXPORT_SYMBOL_GPL(udp_tunnel6_xmit_skb);
 struct dst_entry *udp_tunnel6_dst_lookup(struct sk_buff *skb,
 					 struct net_device *dev,
 					 struct net *net,
-					 struct socket *sock,
+					 struct sock *sk,
 					 int oif,
 					 struct in6_addr *saddr,
 					 const struct ip_tunnel_key *key,
@@ -162,8 +162,7 @@ struct dst_entry *udp_tunnel6_dst_lookup(struct sk_buff *skb,
 	fl6.fl6_dport = dport;
 	fl6.flowlabel = ip6_make_flowinfo(dsfield, key->label);
 
-	dst = ipv6_stub->ipv6_dst_lookup_flow(net, sock->sk, &fl6,
-					      NULL);
+	dst = ip6_dst_lookup_flow(net, sk, &fl6, NULL);
 	if (IS_ERR(dst)) {
 		netdev_dbg(dev, "no route to %pI6\n", &fl6.daddr);
 		return ERR_PTR(-ENETUNREACH);

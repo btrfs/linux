@@ -51,8 +51,6 @@
 
 #define USER_PTRS_PER_PGD	(TASK_SIZE / PGDIR_SIZE)
 
-#define pgd_ERROR(e) \
-	pr_err("%s:%d: bad pgd %08llx.\n", __FILE__, __LINE__, (unsigned long long)pgd_val(e))
 
 /*
  * This is the bottom of the PKMAP area with HIGHMEM or an arbitrary
@@ -120,10 +118,8 @@
 
 #if defined(CONFIG_44x)
 #include <asm/nohash/32/pte-44x.h>
-#elif defined(CONFIG_PPC_85xx) && defined(CONFIG_PTE_64BIT)
-#include <asm/nohash/pte-e500.h>
 #elif defined(CONFIG_PPC_85xx)
-#include <asm/nohash/32/pte-85xx.h>
+#include <asm/nohash/pte-e500.h>
 #elif defined(CONFIG_PPC_8xx)
 #include <asm/nohash/32/pte-8xx.h>
 #endif

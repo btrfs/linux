@@ -14,8 +14,8 @@
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_bridge.h>
 #include <drm/drm_bridge_connector.h>
+#include <drm/drm_encoder.h>
 #include <drm/drm_mipi_dsi.h>
-#include <drm/drm_simple_kms_helper.h>
 #include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 
@@ -220,14 +220,14 @@ int kmb_dsi_host_bridge_init(struct device *dev)
 
 	/* Create and register MIPI DSI host */
 	if (!dsi_host) {
-		dsi_host = kzalloc(sizeof(*dsi_host), GFP_KERNEL);
+		dsi_host = kzalloc_obj(*dsi_host);
 		if (!dsi_host)
 			return -ENOMEM;
 
 		dsi_host->ops = &kmb_dsi_host_ops;
 
 		if (!dsi_device) {
-			dsi_device = kzalloc(sizeof(*dsi_device), GFP_KERNEL);
+			dsi_device = kzalloc_obj(*dsi_device);
 			if (!dsi_device) {
 				kfree(dsi_host);
 				return -ENOMEM;
@@ -251,7 +251,7 @@ int kmb_dsi_host_bridge_init(struct device *dev)
 		return -EINVAL;
 	}
 	/* Locate drm bridge from the hdmi encoder DT node */
-	adv_bridge = of_drm_find_bridge(encoder_node);
+	adv_bridge = of_drm_find_and_get_bridge(encoder_node);
 	of_node_put(dsi_out);
 	of_node_put(encoder_node);
 	if (!adv_bridge) {
@@ -1333,7 +1333,7 @@ static u32 mipi_tx_init_dphy(struct kmb_dsi *kmb_dsi,
 }
 
 static void connect_lcd_to_mipi(struct kmb_dsi *kmb_dsi,
-				struct drm_atomic_state *old_state)
+				struct drm_atomic_commit *old_state)
 {
 	struct regmap *msscam;
 
@@ -1353,7 +1353,7 @@ static void connect_lcd_to_mipi(struct kmb_dsi *kmb_dsi,
 }
 
 int kmb_dsi_mode_set(struct kmb_dsi *kmb_dsi, struct drm_display_mode *mode,
-		     int sys_clk_mhz, struct drm_atomic_state *old_state)
+		     int sys_clk_mhz, struct drm_atomic_commit *old_state)
 {
 	u64 data_rate;
 
@@ -1427,6 +1427,10 @@ struct kmb_dsi *kmb_dsi_init(struct platform_device *pdev)
 	return kmb_dsi;
 }
 
+static const struct drm_encoder_funcs kmb_dsi_encoder_funcs = {
+	.destroy = drm_encoder_cleanup,
+};
+
 int kmb_dsi_encoder_init(struct drm_device *dev, struct kmb_dsi *kmb_dsi)
 {
 	struct drm_encoder *encoder;
@@ -1437,7 +1441,8 @@ int kmb_dsi_encoder_init(struct drm_device *dev, struct kmb_dsi *kmb_dsi)
 	encoder->possible_crtcs = 1;
 	encoder->possible_clones = 0;
 
-	ret = drm_simple_encoder_init(dev, encoder, DRM_MODE_ENCODER_DSI);
+	ret = drm_encoder_init(dev, encoder, &kmb_dsi_encoder_funcs,
+			       DRM_MODE_ENCODER_DSI, NULL);
 	if (ret) {
 		dev_err(kmb_dsi->dev, "Failed to init encoder %d\n", ret);
 		return ret;
@@ -1457,7 +1462,7 @@ int kmb_dsi_encoder_init(struct drm_device *dev, struct kmb_dsi *kmb_dsi)
 		drm_encoder_cleanup(encoder);
 		return PTR_ERR(connector);
 	}
-	drm_connector_attach_encoder(connector, encoder);
+
 	return 0;
 }
 

@@ -6,11 +6,17 @@
 
 use crate::{
     bindings,
-    block::mq::{request::RequestDataWrapper, Request},
-    error::{from_result, Result},
+    block::mq::{
+        request::RequestDataWrapper,
+        Request, //
+    },
+    error::from_result,
     prelude::*,
-    sync::Refcount,
-    types::{ARef, ForeignOwnable},
+    sync::{
+        aref::ARef,
+        Refcount, //
+    },
+    types::ForeignOwnable, //
 };
 use core::marker::PhantomData;
 
@@ -30,7 +36,7 @@ type ForeignBorrowed<'a, T> = <T as ForeignOwnable>::Borrowed<'a>;
 pub trait Operations: Sized {
     /// Data associated with the `struct request_queue` that is allocated for
     /// the `GenDisk` associated with this `Operations` implementation.
-    type QueueData: ForeignOwnable;
+    type QueueData: ForeignOwnable + Sync;
 
     /// Called by the kernel to queue a request with the driver. If `is_last` is
     /// `false`, the driver is allowed to defer committing the request.
@@ -218,7 +224,7 @@ impl<T: Operations> OperationsVTable<T> {
         _set: *mut bindings::blk_mq_tag_set,
         rq: *mut bindings::request,
         _hctx_idx: crate::ffi::c_uint,
-        _numa_node: crate::ffi::c_uint,
+        _numa_node: crate::ffi::c_int,
     ) -> crate::ffi::c_int {
         from_result(|| {
             // SAFETY: By the safety requirements of this function, `rq` points

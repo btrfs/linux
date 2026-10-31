@@ -908,6 +908,7 @@ static int cx25821_dev_setup(struct cx25821_dev *dev)
 
 	if (!dev->lmmio) {
 		CX25821_ERR("ioremap failed, maybe increasing __VMALLOC_RESERVE in page.h\n");
+		release_mem_region(dev->base_io_addr, pci_resource_len(dev->pci, 0));
 		cx25821_iounmap(dev);
 		return -ENOMEM;
 	}
@@ -1265,7 +1266,7 @@ static int cx25821_initdev(struct pci_dev *pci_dev,
 	struct cx25821_dev *dev;
 	int err = 0;
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (NULL == dev)
 		return -ENOMEM;
 
@@ -1346,16 +1347,10 @@ static void cx25821_finidev(struct pci_dev *pci_dev)
 static const struct pci_device_id cx25821_pci_tbl[] = {
 	{
 		/* CX25821 Athena */
-		.vendor = 0x14f1,
-		.device = 0x8210,
-		.subvendor = 0x14f1,
-		.subdevice = 0x0920,
+		PCI_DEVICE_SUB(0x14f1, 0x8210, 0x14f1, 0x0920),
 	}, {
 		/* CX25821 No Brand */
-		.vendor = 0x14f1,
-		.device = 0x8210,
-		.subvendor = 0x0000,
-		.subdevice = 0x0000,
+		PCI_DEVICE_SUB(0x14f1, 0x8210, 0x0000, 0x0000),
 	}, {
 		/* --- end of list --- */
 	}

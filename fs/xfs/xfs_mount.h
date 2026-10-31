@@ -13,6 +13,7 @@ struct xfs_ail;
 struct xfs_quotainfo;
 struct xfs_da_geometry;
 struct xfs_perag;
+struct xfs_healthmon;
 
 /* dynamic preallocation free space thresholds, 5% down to 1% */
 enum {
@@ -141,6 +142,12 @@ struct xfs_freecounter {
 	uint64_t		res_saved;
 };
 
+enum xfs_read_bounce {
+	XFS_READ_BOUNCE_NEVER,
+	XFS_READ_BOUNCE_ALWAYS,
+	XFS_READ_BOUNCE_LAZY,
+};
+
 /*
  * The struct xfsmount layout is optimised to separate read-mostly variables
  * from variables that are frequently modified. We put the read-mostly variables
@@ -176,6 +183,7 @@ typedef struct xfs_mount {
 	struct workqueue_struct	*m_sync_workqueue;
 	struct workqueue_struct *m_blockgc_wq;
 	struct workqueue_struct *m_inodegc_wq;
+	enum xfs_read_bounce	m_read_bounce;
 
 	int			m_bsize;	/* fs logical block size */
 	uint8_t			m_blkbit_log;	/* blocklog + NBBY */
@@ -290,6 +298,7 @@ typedef struct xfs_mount {
 	struct xfs_zone_info	*m_zone_info;	/* zone allocator information */
 	struct dentry		*m_debugfs;	/* debugfs parent */
 	struct xfs_kobj		m_kobj;
+	struct xfs_kobj		m_csum_kobj;
 	struct xfs_kobj		m_error_kobj;
 	struct xfs_kobj		m_error_meta_kobj;
 	struct xfs_error_cfg	m_error_cfg[XFS_ERR_CLASS_MAX][XFS_ERR_ERRNO_MAX];
@@ -342,6 +351,19 @@ typedef struct xfs_mount {
 
 	/* Hook to feed dirent updates to an active online repair. */
 	struct xfs_hooks	m_dir_update_hooks;
+
+	/* Private data referring to a health monitor object. */
+	struct xfs_healthmon __rcu	*m_healthmon;
+
+	/* Index of uuid record in the uuid xarray. */
+	unsigned int		m_uuid_table_index;
+
+	/*
+	 * Old io_pages/ra_pages valued in the main bdev BDI, and our initial
+	 * calculated values.
+	 */
+	unsigned long		m_old_io_pages, m_initial_io_pages;
+	unsigned long		m_old_ra_pages, m_initial_ra_pages;
 } xfs_mount_t;
 
 #define M_IGEO(mp)		(&(mp)->m_ino_geo)
@@ -573,8 +595,6 @@ __XFS_HAS_FEAT(nouuid, NOUUID)
 #define XFS_OPSTATE_WARNED_METADIR	17
 /* Filesystem should use qflags to determine quotaon status */
 #define XFS_OPSTATE_RESUMING_QUOTAON	18
-/* Kernel has logged a warning about zoned RT device being used on this fs. */
-#define XFS_OPSTATE_WARNED_ZONED	19
 /* (Zoned) GC is in progress */
 #define XFS_OPSTATE_ZONEGC_RUNNING	20
 
@@ -800,6 +820,8 @@ static inline void xfs_mod_sb_delalloc(struct xfs_mount *mp, int64_t delta)
 
 int xfs_set_max_atomic_write_opt(struct xfs_mount *mp,
 		unsigned long long new_max_bytes);
+xfs_extlen_t xfs_calc_group_awu_align_max(struct xfs_mount *mp,
+		enum xfs_group_type type);
 
 static inline struct xfs_buftarg *
 xfs_group_type_buftarg(

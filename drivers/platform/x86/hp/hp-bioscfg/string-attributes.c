@@ -101,8 +101,13 @@ static const struct attribute_group string_attr_group = {
 int hp_alloc_string_data(void)
 {
 	bioscfg_drv.string_instances_count = hp_get_instance_count(HP_WMI_BIOS_STRING_GUID);
-	bioscfg_drv.string_data = kcalloc(bioscfg_drv.string_instances_count,
-					  sizeof(*bioscfg_drv.string_data), GFP_KERNEL);
+
+	if (!bioscfg_drv.string_instances_count)
+		return -EINVAL;
+	bioscfg_drv.string_data =
+			kvzalloc_objs(*bioscfg_drv.string_data,
+					bioscfg_drv.string_instances_count);
+
 	if (!bioscfg_drv.string_data) {
 		bioscfg_drv.string_instances_count = 0;
 		return -ENOMEM;
@@ -135,9 +140,7 @@ static int hp_populate_string_elements_from_package(union acpi_object *string_ob
 	int ret = 0;
 	u32 int_value = 0;
 	int elem;
-	int reqs;
 	int eloc;
-	int size;
 	struct string_data *string_data = &bioscfg_drv.string_data[instance_id];
 
 	if (!string_obj)
@@ -181,62 +184,18 @@ static int hp_populate_string_elements_from_package(union acpi_object *string_ob
 			strscpy(string_data->current_value, str_value);
 			break;
 		case PATH:
-			strscpy(string_data->common.path, str_value);
-			break;
 		case IS_READONLY:
-			string_data->common.is_readonly = int_value;
-			break;
 		case DISPLAY_IN_UI:
-			string_data->common.display_in_ui = int_value;
-			break;
 		case REQUIRES_PHYSICAL_PRESENCE:
-			string_data->common.requires_physical_presence = int_value;
-			break;
 		case SEQUENCE:
-			string_data->common.sequence = int_value;
-			break;
 		case PREREQUISITES_SIZE:
-			if (int_value > MAX_PREREQUISITES_SIZE) {
-				pr_warn("Prerequisites size value exceeded the maximum number of elements supported or data may be malformed\n");
-				int_value = MAX_PREREQUISITES_SIZE;
-			}
-			string_data->common.prerequisites_size = int_value;
-
-			/*
-			 * This step is needed to keep the expected
-			 * element list pointing to the right obj[elem].type
-			 * when the size is zero. PREREQUISITES
-			 * object is omitted by BIOS when the size is
-			 * zero.
-			 */
-			if (string_data->common.prerequisites_size == 0)
-				eloc++;
-			break;
 		case PREREQUISITES:
-			size = min_t(u32, string_data->common.prerequisites_size,
-				     MAX_PREREQUISITES_SIZE);
-
-			for (reqs = 0; reqs < size; reqs++) {
-				if (elem >= string_obj_count) {
-					pr_err("Error elem-objects package is too small\n");
-					return -EINVAL;
-				}
-
-				ret = hp_convert_hexstr_to_str(string_obj[elem + reqs].string.pointer,
-							       string_obj[elem + reqs].string.length,
-							       &str_value, &value_len);
-
-				if (ret)
-					continue;
-
-				strscpy(string_data->common.prerequisites[reqs], str_value);
-				kfree(str_value);
-				str_value = NULL;
-			}
-			break;
-
 		case SECURITY_LEVEL:
-			string_data->common.security_level = int_value;
+			ret = hp_get_common_data_from_package(string_obj, string_obj_count,
+							      &elem, &eloc, int_value, &str_value,
+							      &string_data->common);
+			if (ret)
+				return ret;
 			break;
 		case STR_MIN_LENGTH:
 			string_data->min_length = int_value;
@@ -263,10 +222,12 @@ exit_string_package:
  * Populate all properties of an instance under string attribute
  *
  * @string_obj: ACPI object with string data
+ * @string_obj_count: Number of elements in @string_obj
  * @instance_id: The instance to enumerate
  * @attr_name_kobj: The parent kernel object
  */
 int hp_populate_string_package_data(union acpi_object *string_obj,
+				    int string_obj_count,
 				    int instance_id,
 				    struct kobject *attr_name_kobj)
 {
@@ -275,7 +236,7 @@ int hp_populate_string_package_data(union acpi_object *string_obj,
 	string_data->attr_name_kobj = attr_name_kobj;
 
 	hp_populate_string_elements_from_package(string_obj,
-						 string_obj->package.count,
+						 string_obj_count,
 						 instance_id);
 
 	hp_update_attribute_permissions(string_data->common.is_readonly,
@@ -386,6 +347,6 @@ void hp_exit_string_attributes(void)
 	}
 	bioscfg_drv.string_instances_count = 0;
 
-	kfree(bioscfg_drv.string_data);
+	kvfree(bioscfg_drv.string_data);
 	bioscfg_drv.string_data = NULL;
 }

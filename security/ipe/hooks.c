@@ -9,6 +9,7 @@
 #include <linux/binfmts.h>
 #include <linux/mman.h>
 #include <linux/blk_types.h>
+#include <linux/rcupdate.h>
 
 #include "ipe.h"
 #include "hooks.h"
@@ -32,6 +33,33 @@ int ipe_bprm_check_security(struct linux_binprm *bprm)
 	struct ipe_eval_ctx ctx = IPE_EVAL_CTX_INIT;
 
 	ipe_build_eval_ctx(&ctx, bprm->file, IPE_OP_EXEC, IPE_HOOK_BPRM_CHECK);
+	return ipe_evaluate_event(&ctx);
+}
+
+/**
+ * ipe_bprm_creds_for_exec() - ipe security hook function for bprm creds check.
+ * @bprm: Supplies a pointer to a linux_binprm structure to source the file
+ *	  being evaluated.
+ *
+ * This LSM hook is called when userspace signals the kernel to check a file
+ * for execution through the execveat syscall with the AT_EXECVE_CHECK flag.
+ * The hook triggers IPE policy evaluation on the script file and returns
+ * the policy decision to userspace. The userspace program receives the
+ * return code and can decide whether to proceed with script execution.
+ *
+ * Return:
+ * * %0		- Success
+ * * %-EACCES	- Did not pass IPE policy
+ */
+int ipe_bprm_creds_for_exec(struct linux_binprm *bprm)
+{
+	struct ipe_eval_ctx ctx = IPE_EVAL_CTX_INIT;
+
+	if (!bprm->is_check)
+		return 0;
+
+	ipe_build_eval_ctx(&ctx, bprm->file, IPE_OP_EXEC,
+			   IPE_HOOK_BPRM_CREDS_FOR_EXEC);
 	return ipe_evaluate_event(&ctx);
 }
 
@@ -118,6 +146,7 @@ int ipe_kernel_read_file(struct file *file, enum kernel_read_file_id id,
 		op = IPE_OP_FIRMWARE;
 		break;
 	case READING_MODULE:
+	case READING_MODULE_COMPRESSED:
 		op = IPE_OP_KERNEL_MODULE;
 		break;
 	case READING_KEXEC_INITRAMFS:
@@ -204,7 +233,20 @@ void ipe_bdev_free_security(struct block_device *bdev)
 {
 	struct ipe_bdev *blob = ipe_bdev(bdev);
 
-	ipe_digest_free(blob->root_hash);
+	ipe_digest_free(rcu_access_pointer(blob->root_hash));
+}
+
+static void ipe_set_dmverity_roothash(struct ipe_bdev *blob,
+				      struct digest_info *info)
+{
+	struct digest_info *old;
+
+	/* Protected by device-mapper's md->suspend_lock */
+	old = rcu_replace_pointer(blob->root_hash, info, true);
+	if (old) {
+		synchronize_rcu();
+		ipe_digest_free(old);
+	}
 }
 
 #ifdef CONFIG_IPE_PROP_DM_VERITY_SIGNATURE
@@ -252,14 +294,13 @@ int ipe_bdev_setintegrity(struct block_device *bdev, enum lsm_integrity_type typ
 		return -EINVAL;
 
 	if (!value) {
-		ipe_digest_free(blob->root_hash);
-		blob->root_hash = NULL;
+		ipe_set_dmverity_roothash(blob, NULL);
 
 		return 0;
 	}
 	digest = value;
 
-	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	info = kzalloc_obj(*info);
 	if (!info)
 		return -ENOMEM;
 
@@ -273,8 +314,7 @@ int ipe_bdev_setintegrity(struct block_device *bdev, enum lsm_integrity_type typ
 
 	info->digest_len = digest->digest_len;
 
-	ipe_digest_free(blob->root_hash);
-	blob->root_hash = info;
+	ipe_set_dmverity_roothash(blob, info);
 
 	return 0;
 err:
@@ -311,4 +351,4 @@ int ipe_inode_setintegrity(const struct inode *inode,
 
 	return -EINVAL;
 }
-#endif /* CONFIG_CONFIG_IPE_PROP_FS_VERITY_BUILTIN_SIG */
+#endif /* CONFIG_IPE_PROP_FS_VERITY_BUILTIN_SIG */

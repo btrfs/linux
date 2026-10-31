@@ -555,8 +555,6 @@ static int kgdb_reenter_check(struct kgdb_state *ks)
 #endif
 	dump_stack();
 	panic("Recursive entry to debugger");
-
-	return 1;
 }
 NOKPROBE_SYMBOL(kgdb_reenter_check);
 
@@ -704,7 +702,7 @@ return_normal:
 	if (ks->send_ready)
 		atomic_set(ks->send_ready, 1);
 
-	/* Signal the other CPUs to enter kgdb_wait() */
+	/* Signal the other CPUs to enter the debug trap handler */
 	else if ((!kgdb_single_step) && kgdb_do_roundup)
 		kgdb_roundup_cpus();
 #endif

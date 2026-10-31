@@ -20,8 +20,12 @@ void pwrseq_put(struct pwrseq_desc *desc);
 struct pwrseq_desc * __must_check
 devm_pwrseq_get(struct device *dev, const char *target);
 
-int pwrseq_power_on(struct pwrseq_desc *desc);
-int pwrseq_power_off(struct pwrseq_desc *desc);
+int pwrseq_enable(struct pwrseq_desc *desc);
+int pwrseq_disable(struct pwrseq_desc *desc);
+
+struct device *pwrseq_to_device(struct pwrseq_desc *desc);
+
+bool pwrseq_is_controllable(struct pwrseq_desc *desc);
 
 #else /* CONFIG_POWER_SEQUENCING */
 
@@ -41,14 +45,24 @@ devm_pwrseq_get(struct device *dev, const char *target)
 	return ERR_PTR(-ENOSYS);
 }
 
-static inline int pwrseq_power_on(struct pwrseq_desc *desc)
+static inline int pwrseq_enable(struct pwrseq_desc *desc)
 {
 	return -ENOSYS;
 }
 
-static inline int pwrseq_power_off(struct pwrseq_desc *desc)
+static inline int pwrseq_disable(struct pwrseq_desc *desc)
 {
 	return -ENOSYS;
+}
+
+static inline struct device *pwrseq_to_device(struct pwrseq_desc *desc)
+{
+	return NULL;
+}
+
+static inline bool pwrseq_is_controllable(struct pwrseq_desc *desc)
+{
+	return false;
 }
 
 #endif /* CONFIG_POWER_SEQUENCING */

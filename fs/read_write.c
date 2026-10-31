@@ -20,6 +20,7 @@
 #include <linux/compat.h>
 #include <linux/mount.h>
 #include <linux/fs.h>
+#include <linux/filelock.h>
 #include "internal.h"
 
 #include <linux/uaccess.h>
@@ -30,6 +31,7 @@ const struct file_operations generic_ro_fops = {
 	.read_iter	= generic_file_read_iter,
 	.mmap_prepare	= generic_file_readonly_mmap_prepare,
 	.splice_read	= filemap_splice_read,
+	.setlease	= generic_setlease,
 };
 
 EXPORT_SYMBOL(generic_ro_fops);
@@ -272,7 +274,7 @@ loff_t fixed_size_llseek(struct file *file, loff_t offset, int whence, loff_t si
 EXPORT_SYMBOL(fixed_size_llseek);
 
 /**
- * no_seek_end_llseek - llseek implementation for fixed-sized devices
+ * no_seek_end_llseek - llseek implementation for files without SEEK_END
  * @file:	file structure to seek on
  * @offset:	file offset to seek to
  * @whence:	type of seek
@@ -291,7 +293,7 @@ loff_t no_seek_end_llseek(struct file *file, loff_t offset, int whence)
 EXPORT_SYMBOL(no_seek_end_llseek);
 
 /**
- * no_seek_end_llseek_size - llseek implementation for fixed-sized devices
+ * no_seek_end_llseek_size - llseek implementation for files without SEEK_END
  * @file:	file structure to seek on
  * @offset:	file offset to seek to
  * @whence:	type of seek
@@ -639,13 +641,12 @@ ssize_t __kernel_write(struct file *file, const void *buf, size_t count, loff_t 
 	return __kernel_write_iter(file, &iter, pos);
 }
 /*
- * This "EXPORT_SYMBOL_GPL()" is more of a "EXPORT_SYMBOL_DONTUSE()",
- * but autofs is one of the few internal kernel users that actually
+ * autofs is one of the few internal kernel users that actually
  * wants this _and_ can be built as a module. So we need to export
  * this symbol for autofs, even though it really isn't appropriate
  * for any other kernel modules.
  */
-EXPORT_SYMBOL_GPL(__kernel_write);
+EXPORT_SYMBOL_FOR_MODULES(__kernel_write, "autofs4");
 
 ssize_t kernel_write(struct file *file, const void *buf, size_t count,
 			    loff_t *pos)
@@ -1760,8 +1761,8 @@ EXPORT_SYMBOL(generic_write_checks_count);
  * Performs necessary checks before doing a write
  *
  * Can adjust writing position or amount of bytes to write.
- * Returns appropriate error code that caller should return or
- * zero in case that write should be allowed.
+ * Returns the number of bytes that may be written on success (which
+ * may be less than requested if truncated), or a negative error code.
  */
 ssize_t generic_write_checks(struct kiocb *iocb, struct iov_iter *from)
 {

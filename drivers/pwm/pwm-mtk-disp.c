@@ -210,9 +210,9 @@ static int mtk_disp_pwm_get_state(struct pwm_chip *chip,
 	period = FIELD_GET(PWM_PERIOD_MASK, con1);
 	/*
 	 * period has 12 bits, clk_div 11 and NSEC_PER_SEC has 30,
-	 * so period * (clk_div + 1) * NSEC_PER_SEC doesn't overflow.
+	 * so (period + 1) * (clk_div + 1) * NSEC_PER_SEC doesn't overflow.
 	 */
-	state->period = DIV64_U64_ROUND_UP(period * (clk_div + 1) * NSEC_PER_SEC, rate);
+	state->period = DIV64_U64_ROUND_UP((period + 1) * (clk_div + 1) * NSEC_PER_SEC, rate);
 	high_width = FIELD_GET(PWM_HIGH_WIDTH_MASK, con1);
 	state->duty_cycle = DIV64_U64_ROUND_UP(high_width * (clk_div + 1) * NSEC_PER_SEC,
 					       rate);
@@ -295,10 +295,10 @@ static const struct mtk_pwm_data mt8183_pwm_data = {
 };
 
 static const struct of_device_id mtk_disp_pwm_of_match[] = {
-	{ .compatible = "mediatek,mt2701-disp-pwm", .data = &mt2701_pwm_data},
-	{ .compatible = "mediatek,mt6595-disp-pwm", .data = &mt8173_pwm_data},
-	{ .compatible = "mediatek,mt8173-disp-pwm", .data = &mt8173_pwm_data},
-	{ .compatible = "mediatek,mt8183-disp-pwm", .data = &mt8183_pwm_data},
+	{ .compatible = "mediatek,mt2701-disp-pwm", .data = &mt2701_pwm_data },
+	{ .compatible = "mediatek,mt6595-disp-pwm", .data = &mt8173_pwm_data },
+	{ .compatible = "mediatek,mt8173-disp-pwm", .data = &mt8173_pwm_data },
+	{ .compatible = "mediatek,mt8183-disp-pwm", .data = &mt8183_pwm_data },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, mtk_disp_pwm_of_match);

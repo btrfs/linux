@@ -56,8 +56,7 @@ static struct req {
 
 static int __init mount_param(char *str)
 {
-	mount_dev = simple_strtoul(str, NULL, 0);
-	return 1;
+	return kstrtoint(str, 0, &mount_dev) == 0;
 }
 __setup("devtmpfs.mount=", mount_param);
 
@@ -70,42 +69,93 @@ static struct file_system_type internal_fs_type = {
 #else
 	.init_fs_context = ramfs_init_fs_context,
 #endif
-	.kill_sb = kill_litter_super,
+	.kill_sb = kill_anon_super,
 };
 
-/* Simply take a ref on the existing mount */
+struct devtmpfs_context {
+	struct fs_context *fc;
+};
+
+static void devtmpfs_free(struct fs_context *fc)
+{
+	struct devtmpfs_context *ctx = fc->fs_private;
+
+	if (ctx) {
+		put_fs_context(ctx->fc);
+		kfree(ctx);
+	}
+}
+
+static int devtmpfs_parse_param(struct fs_context *fc, struct fs_parameter *param)
+{
+	struct devtmpfs_context *ctx = fc->fs_private;
+
+	return ctx->fc->ops->parse_param(ctx->fc, param);
+}
+
+static int devtmpfs_parse_monolithic(struct fs_context *fc, void *data)
+{
+	struct devtmpfs_context *ctx = fc->fs_private;
+
+	if (ctx->fc->ops->parse_monolithic)
+		return ctx->fc->ops->parse_monolithic(ctx->fc, data);
+	return generic_parse_monolithic(ctx->fc, data);
+}
+
 static int devtmpfs_get_tree(struct fs_context *fc)
 {
+	struct devtmpfs_context *ctx = fc->fs_private;
 	struct super_block *sb = mnt->mnt_sb;
+	int err;
 
 	atomic_inc(&sb->s_active);
 	down_write(&sb->s_umount);
+
+	if (ctx->fc->ops->reconfigure) {
+		err = ctx->fc->ops->reconfigure(ctx->fc);
+		if (err) {
+			deactivate_locked_super(sb);
+			return err;
+		}
+	}
+
 	fc->root = dget(sb->s_root);
 	return 0;
 }
 
-/* Ops are filled in during init depending on underlying shmem or ramfs type */
-struct fs_context_operations devtmpfs_context_ops = {};
+static const struct fs_context_operations devtmpfs_context_ops = {
+	.free		  = devtmpfs_free,
+	.parse_param	  = devtmpfs_parse_param,
+	.parse_monolithic = devtmpfs_parse_monolithic,
+	.get_tree	  = devtmpfs_get_tree,
+};
 
-/* Call the underlying initialization and set to our ops */
 static int devtmpfs_init_fs_context(struct fs_context *fc)
 {
-	int ret;
-#ifdef CONFIG_TMPFS
-	ret = shmem_init_fs_context(fc);
-#else
-	ret = ramfs_init_fs_context(fc);
-#endif
-	if (ret < 0)
-		return ret;
+	struct devtmpfs_context *ctx;
+	int err;
 
+	ctx = kzalloc_obj(struct devtmpfs_context);
+	if (!ctx)
+		return -ENOMEM;
+
+	/* Each mount will reconfigure the shared superblock w/ new options */
+	ctx->fc = fs_context_for_reconfigure(mnt->mnt_root,
+					     mnt->mnt_sb->s_flags, MS_RMT_MASK);
+	if (IS_ERR(ctx->fc)) {
+		err = PTR_ERR(ctx->fc);
+		kfree(ctx);
+		return err;
+	}
+
+	fc->fs_private = ctx;
 	fc->ops = &devtmpfs_context_ops;
 
 	return 0;
 }
 
 static struct file_system_type dev_fs_type = {
-	.name = "devtmpfs",
+	.name		 = "devtmpfs",
 	.init_fs_context = devtmpfs_init_fs_context,
 };
 
@@ -180,7 +230,7 @@ static int dev_mkdir(const char *name, umode_t mode)
 	if (IS_ERR(dentry))
 		return PTR_ERR(dentry);
 
-	dentry = vfs_mkdir(&nop_mnt_idmap, d_inode(path.dentry), dentry, mode);
+	dentry = vfs_mkdir(&nop_mnt_idmap, d_inode(path.dentry), dentry, mode, NULL);
 	if (!IS_ERR(dentry))
 		/* mark as kernel-created inode */
 		d_inode(dentry)->i_private = &thread;
@@ -231,7 +281,7 @@ static int handle_create(const char *nodename, umode_t mode, kuid_t uid,
 		return PTR_ERR(dentry);
 
 	err = vfs_mknod(&nop_mnt_idmap, d_inode(path.dentry), dentry, mode,
-			dev->devt);
+			dev->devt, NULL);
 	if (!err) {
 		struct iattr newattrs;
 
@@ -261,7 +311,7 @@ static int dev_rmdir(const char *name)
 		return PTR_ERR(dentry);
 	if (d_inode(dentry)->i_private == &thread)
 		err = vfs_rmdir(&nop_mnt_idmap, d_inode(parent.dentry),
-				dentry);
+				dentry, NULL);
 	else
 		err = -EPERM;
 
@@ -414,7 +464,7 @@ static noinline int __init devtmpfs_setup(void *p)
 {
 	int err;
 
-	err = ksys_unshare(CLONE_NEWNS);
+	err = ksys_unshare(UNSHARE_EMPTY_MNTNS);
 	if (err)
 		goto out;
 	err = init_mount("devtmpfs", "/", "devtmpfs", DEVTMPFS_MFLAGS, NULL);
@@ -444,31 +494,6 @@ static int __ref devtmpfsd(void *p)
 }
 
 /*
- * Get the underlying (shmem/ramfs) context ops to build ours
- */
-static int devtmpfs_configure_context(void)
-{
-	struct fs_context *fc;
-
-	fc = fs_context_for_reconfigure(mnt->mnt_root, mnt->mnt_sb->s_flags,
-					MS_RMT_MASK);
-	if (IS_ERR(fc))
-		return PTR_ERR(fc);
-
-	/* Set up devtmpfs_context_ops based on underlying type */
-	devtmpfs_context_ops.free	      = fc->ops->free;
-	devtmpfs_context_ops.dup	      = fc->ops->dup;
-	devtmpfs_context_ops.parse_param      = fc->ops->parse_param;
-	devtmpfs_context_ops.parse_monolithic = fc->ops->parse_monolithic;
-	devtmpfs_context_ops.get_tree	      = &devtmpfs_get_tree;
-	devtmpfs_context_ops.reconfigure      = fc->ops->reconfigure;
-
-	put_fs_context(fc);
-
-	return 0;
-}
-
-/*
  * Create devtmpfs instance, driver-core devices will add their device
  * nodes here.
  */
@@ -481,12 +506,6 @@ int __init devtmpfs_init(void)
 	if (IS_ERR(mnt)) {
 		pr_err("unable to create devtmpfs %ld\n", PTR_ERR(mnt));
 		return PTR_ERR(mnt);
-	}
-
-	err = devtmpfs_configure_context();
-	if (err) {
-		pr_err("unable to configure devtmpfs type %d\n", err);
-		return err;
 	}
 
 	err = register_filesystem(&dev_fs_type);

@@ -151,22 +151,23 @@ static bool dmub_replay_copy_settings(struct dmub_replay *dmub,
 	copy_settings_data->digfe_inst				= replay_context->digfe_inst;
 
 	if (pipe_ctx->plane_res.dpp)
-		copy_settings_data->dpp_inst			= pipe_ctx->plane_res.dpp->inst;
+		copy_settings_data->dpp_inst			= (uint8_t)pipe_ctx->plane_res.dpp->inst;
 	else
 		copy_settings_data->dpp_inst			= 0;
+
 	if (pipe_ctx->stream_res.tg)
-		copy_settings_data->otg_inst			= pipe_ctx->stream_res.tg->inst;
+		copy_settings_data->otg_inst			= (uint8_t)pipe_ctx->stream_res.tg->inst;
 	else
 		copy_settings_data->otg_inst			= 0;
 
 	copy_settings_data->dpphy_inst				= link->link_enc->transmitter;
 
 	// Misc
-	copy_settings_data->line_time_in_ns			= replay_context->line_time_in_ns;
-	copy_settings_data->panel_inst				= panel_inst;
+	copy_settings_data->line_time_in_ns			= (uint16_t)replay_context->line_time_in_ns;
+	copy_settings_data->panel_inst				= (uint16_t)panel_inst;
 	copy_settings_data->debug.u32All			= link->replay_settings.config.debug_flags;
 	copy_settings_data->pixel_deviation_per_line		= link->dpcd_caps.pr_info.pixel_deviation_per_line;
-	copy_settings_data->max_deviation_line			= link->dpcd_caps.pr_info.max_deviation_line;
+	copy_settings_data->max_deviation_line			= (uint16_t)link->dpcd_caps.pr_info.max_deviation_line;
 	copy_settings_data->smu_optimizations_en		= link->replay_settings.replay_smu_opt_enable;
 	copy_settings_data->replay_timing_sync_supported = link->replay_settings.config.replay_timing_sync_supported;
 	copy_settings_data->replay_support_fast_resync_in_ultra_sleep_mode = link->replay_settings.config.replay_support_fast_resync_in_ultra_sleep_mode;
@@ -193,13 +194,13 @@ static bool dmub_replay_copy_settings(struct dmub_replay *dmub,
 
 	copy_settings_data->flags.bitfields.alpm_mode = (enum dmub_alpm_mode)link->replay_settings.config.alpm_mode;
 	if (link->replay_settings.config.alpm_mode == DC_ALPM_AUXLESS) {
-		copy_settings_data->auxless_alpm_data.lfps_setup_ns = dc->dc->debug.auxless_alpm_lfps_setup_ns;
-		copy_settings_data->auxless_alpm_data.lfps_period_ns = dc->dc->debug.auxless_alpm_lfps_period_ns;
-		copy_settings_data->auxless_alpm_data.lfps_silence_ns = dc->dc->debug.auxless_alpm_lfps_silence_ns;
+		copy_settings_data->auxless_alpm_data.lfps_setup_ns = (uint16_t)dc->dc->debug.auxless_alpm_lfps_setup_ns;
+		copy_settings_data->auxless_alpm_data.lfps_period_ns = (uint16_t)dc->dc->debug.auxless_alpm_lfps_period_ns;
+		copy_settings_data->auxless_alpm_data.lfps_silence_ns = (uint16_t)dc->dc->debug.auxless_alpm_lfps_silence_ns;
 		copy_settings_data->auxless_alpm_data.lfps_t1_t2_override_us =
-			dc->dc->debug.auxless_alpm_lfps_t1t2_us;
+			(uint16_t)dc->dc->debug.auxless_alpm_lfps_t1t2_us;
 		copy_settings_data->auxless_alpm_data.lfps_t1_t2_offset_us =
-			dc->dc->debug.auxless_alpm_lfps_t1t2_offset_us;
+			(uint16_t)dc->dc->debug.auxless_alpm_lfps_t1t2_offset_us;
 		copy_settings_data->auxless_alpm_data.lttpr_count = link->dc->link_srv->dp_get_lttpr_count(link);
 	}
 
@@ -213,7 +214,8 @@ static bool dmub_replay_copy_settings(struct dmub_replay *dmub,
  */
 static void dmub_replay_set_coasting_vtotal(struct dmub_replay *dmub,
 		uint32_t coasting_vtotal,
-		uint8_t panel_inst)
+		uint8_t panel_inst,
+		uint16_t frame_skip_number)
 {
 	union dmub_rb_cmd cmd;
 	struct dc_context *dc = dmub->ctx;
@@ -221,12 +223,14 @@ static void dmub_replay_set_coasting_vtotal(struct dmub_replay *dmub,
 
 	pCmd = &(cmd.replay_set_coasting_vtotal);
 
+	(void)panel_inst;
 	memset(&cmd, 0, sizeof(cmd));
 	pCmd->header.type = DMUB_CMD__REPLAY;
 	pCmd->header.sub_type = DMUB_CMD__REPLAY_SET_COASTING_VTOTAL;
 	pCmd->header.payload_bytes = sizeof(struct dmub_cmd_replay_set_coasting_vtotal_data);
 	pCmd->replay_set_coasting_vtotal_data.coasting_vtotal = (coasting_vtotal & 0xFFFF);
 	pCmd->replay_set_coasting_vtotal_data.coasting_vtotal_high = (coasting_vtotal & 0xFFFF0000) >> 16;
+	pCmd->replay_set_coasting_vtotal_data.frame_skip_number = frame_skip_number;
 
 	dc_wake_and_execute_dmub_cmd(dc, &cmd, DM_DMUB_WAIT_TYPE_WAIT);
 }
@@ -283,7 +287,7 @@ static void dmub_replay_residency(struct dmub_replay *dmub, uint8_t panel_inst,
  * Set REPLAY power optimization flags and coasting vtotal.
  */
 static void dmub_replay_set_power_opt_and_coasting_vtotal(struct dmub_replay *dmub,
-		unsigned int power_opt, uint8_t panel_inst, uint32_t coasting_vtotal)
+		unsigned int power_opt, uint8_t panel_inst, uint32_t coasting_vtotal, uint16_t frame_skip_number)
 {
 	union dmub_rb_cmd cmd;
 	struct dc_context *dc = dmub->ctx;
@@ -301,6 +305,7 @@ static void dmub_replay_set_power_opt_and_coasting_vtotal(struct dmub_replay *dm
 	pCmd->replay_set_power_opt_data.panel_inst = panel_inst;
 	pCmd->replay_set_coasting_vtotal_data.coasting_vtotal = (coasting_vtotal & 0xFFFF);
 	pCmd->replay_set_coasting_vtotal_data.coasting_vtotal_high = (coasting_vtotal & 0xFFFF0000) >> 16;
+	pCmd->replay_set_coasting_vtotal_data.frame_skip_number = frame_skip_number;
 
 	dc_wake_and_execute_dmub_cmd(dc, &cmd, DM_DMUB_WAIT_TYPE_WAIT);
 }
@@ -410,6 +415,30 @@ static void dmub_replay_send_cmd(struct dmub_replay *dmub,
 	dc_wake_and_execute_dmub_cmd(ctx, &cmd, DM_DMUB_WAIT_TYPE_WAIT);
 }
 
+static bool dmub_replay_get_cumulative_residency(struct dmub_replay *dmub,
+	uint8_t panel_inst, uint32_t *residency_milli_pct)
+{
+	uint32_t milli_pct = 0;
+	uint16_t param = (uint16_t)panel_inst;
+
+	if (!residency_milli_pct)
+		return false;
+
+	/* Zero on failure so the caller never reads a stale value, and report
+	 * false so a failed query is still distinguishable from a genuine 0%.
+	 */
+	*residency_milli_pct = 0;
+
+	if (!dc_wake_and_execute_gpint(dmub->ctx,
+			DMUB_GPINT__REPLAY_SNAPSHOT_CUMULATIVE_RESIDENCY,
+			param, &milli_pct, DM_DMUB_WAIT_TYPE_WAIT_WITH_REPLY))
+		return false;
+
+	*residency_milli_pct = milli_pct;
+
+	return true;
+}
+
 static const struct dmub_replay_funcs replay_funcs = {
 	.replay_copy_settings				= dmub_replay_copy_settings,
 	.replay_enable					= dmub_replay_enable,
@@ -419,6 +448,7 @@ static const struct dmub_replay_funcs replay_funcs = {
 	.replay_residency				= dmub_replay_residency,
 	.replay_set_power_opt_and_coasting_vtotal	= dmub_replay_set_power_opt_and_coasting_vtotal,
 	.replay_send_cmd				= dmub_replay_send_cmd,
+	.replay_get_cumulative_residency		= dmub_replay_get_cumulative_residency,
 };
 
 /*
@@ -428,6 +458,7 @@ static void dmub_replay_construct(struct dmub_replay *replay, struct dc_context 
 {
 	replay->ctx = ctx;
 	replay->funcs = &replay_funcs;
+	replay->inst = 0;
 }
 
 /*
@@ -435,7 +466,7 @@ static void dmub_replay_construct(struct dmub_replay *replay, struct dc_context 
  */
 struct dmub_replay *dmub_replay_create(struct dc_context *ctx)
 {
-	struct dmub_replay *replay = kzalloc(sizeof(struct dmub_replay), GFP_KERNEL);
+	struct dmub_replay *replay = kzalloc_obj(struct dmub_replay);
 
 	if (replay == NULL) {
 		BREAK_TO_DEBUGGER();

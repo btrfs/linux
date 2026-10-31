@@ -289,9 +289,18 @@ static int rt9120_hw_params(struct snd_pcm_substream *substream,
 	return 0;
 }
 
+static const u64 rt9120_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B;
+
 static const struct snd_soc_dai_ops rt9120_dai_ops = {
 	.set_fmt = rt9120_set_fmt,
 	.hw_params = rt9120_hw_params,
+	.auto_selectable_formats = &rt9120_selectable_formats,
+	.num_auto_selectable_formats = 1,
 };
 
 static struct snd_soc_dai_driver rt9120_dai = {
@@ -606,12 +615,19 @@ static int rt9120_runtime_suspend(struct device *dev)
 static int rt9120_runtime_resume(struct device *dev)
 {
 	struct rt9120_data *data = dev_get_drvdata(dev);
+	int ret;
 
 	if (data->pwdnn_gpio) {
 		gpiod_set_value(data->pwdnn_gpio, 1);
 		msleep(RT9120_CHIPON_WAITMS);
 		regcache_cache_only(data->regmap, false);
-		regcache_sync(data->regmap);
+		ret = regcache_sync(data->regmap);
+		if (ret) {
+			regcache_cache_only(data->regmap, true);
+			regcache_mark_dirty(data->regmap);
+			gpiod_set_value(data->pwdnn_gpio, 0);
+			return ret;
+		}
 	}
 
 	return 0;

@@ -1943,6 +1943,7 @@ static int adv76xx_get_format(struct v4l2_subdev *sd,
 }
 
 static int adv76xx_get_selection(struct v4l2_subdev *sd,
+				 const struct v4l2_subdev_client_info *ci,
 				 struct v4l2_subdev_state *sd_state,
 				 struct v4l2_subdev_selection *sel)
 {
@@ -1963,6 +1964,7 @@ static int adv76xx_get_selection(struct v4l2_subdev *sd,
 }
 
 static int adv76xx_set_format(struct v4l2_subdev *sd,
+			      const struct v4l2_subdev_client_info *ci,
 			      struct v4l2_subdev_state *sd_state,
 			      struct v4l2_subdev_format *format)
 {
@@ -2449,7 +2451,7 @@ static int adv76xx_set_edid(struct v4l2_subdev *sd, struct v4l2_edid *edid)
 	cec_s_phys_addr(state->cec_adap, parent_pa, false);
 
 	/* enable hotplug after 143 ms */
-	schedule_delayed_work(&state->delayed_work_enable_hotplug, HZ / 7);
+	schedule_delayed_work(&state->delayed_work_enable_hotplug, V4L2_SET_EDID_HPD_LOW_JIFFIES);
 	return 0;
 }
 
@@ -2641,8 +2643,9 @@ static int adv76xx_log_status(struct v4l2_subdev *sd)
 					"(16-235)" : "(0-255)",
 				(reg_io_0x02 & 0x08) ? "enabled" : "disabled");
 	}
+	ret = cp_read(sd, info->cp_csc) >> 4;
 	v4l2_info(sd, "Color space conversion: %s\n",
-			csc_coeff_sel_rb[cp_read(sd, info->cp_csc) >> 4]);
+			ret < 0 ? "" : csc_coeff_sel_rb[ret]);
 
 	if (!is_digital_input(sd))
 		return 0;
@@ -3236,10 +3239,10 @@ static const struct adv76xx_chip_info adv76xx_chip_info[] = {
 };
 
 static const struct i2c_device_id adv76xx_i2c_id[] = {
-	{ "adv7604", (kernel_ulong_t)&adv76xx_chip_info[ADV7604] },
-	{ "adv7610", (kernel_ulong_t)&adv76xx_chip_info[ADV7611] },
-	{ "adv7611", (kernel_ulong_t)&adv76xx_chip_info[ADV7611] },
-	{ "adv7612", (kernel_ulong_t)&adv76xx_chip_info[ADV7612] },
+	{ .name = "adv7604", .driver_data = (kernel_ulong_t)&adv76xx_chip_info[ADV7604] },
+	{ .name = "adv7610", .driver_data = (kernel_ulong_t)&adv76xx_chip_info[ADV7611] },
+	{ .name = "adv7611", .driver_data = (kernel_ulong_t)&adv76xx_chip_info[ADV7611] },
+	{ .name = "adv7612", .driver_data = (kernel_ulong_t)&adv76xx_chip_info[ADV7612] },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, adv76xx_i2c_id);
@@ -3453,7 +3456,13 @@ static int configure_regmaps(struct adv76xx_state *state)
 static void adv76xx_reset(struct adv76xx_state *state)
 {
 	if (state->reset_gpio) {
-		/* ADV76XX can be reset by a low reset pulse of minimum 5 ms. */
+		/*
+		 * Note: Misinterpretation of reset assertion - do not re-use
+		 * this code.  The reset pin is using incorrect (for a reset
+		 * signal) logical level.
+		 *
+		 * ADV76XX can be reset by a low reset pulse of minimum 5 ms.
+		 */
 		gpiod_set_value_cansleep(state->reset_gpio, 0);
 		usleep_range(5000, 10000);
 		gpiod_set_value_cansleep(state->reset_gpio, 1);
@@ -3662,6 +3671,12 @@ static int adv76xx_probe(struct i2c_client *client)
 
 	state->source_pad = state->info->num_dv_ports
 			  + (state->info->has_afe ? 2 : 0);
+	if (WARN_ON(state->source_pad >= ADV76XX_PAD_MAX)) {
+		err = -EINVAL;
+		v4l2_err(sd, "invalid chip info\n");
+		goto err_i2c;
+	}
+
 	for (i = 0; i < state->source_pad; ++i)
 		state->pads[i].flags = MEDIA_PAD_FL_SINK;
 	state->pads[state->source_pad].flags = MEDIA_PAD_FL_SOURCE;
@@ -3670,7 +3685,7 @@ static int adv76xx_probe(struct i2c_client *client)
 	err = media_entity_pads_init(&sd->entity, state->source_pad + 1,
 				state->pads);
 	if (err)
-		goto err_work_queues;
+		goto err_i2c;
 
 	/* Configure regmaps */
 	err = configure_regmaps(state);
@@ -3711,8 +3726,6 @@ static int adv76xx_probe(struct i2c_client *client)
 
 err_entity:
 	media_entity_cleanup(&sd->entity);
-err_work_queues:
-	cancel_delayed_work(&state->delayed_work_enable_hotplug);
 err_i2c:
 	adv76xx_unregister_clients(state);
 err_hdl:

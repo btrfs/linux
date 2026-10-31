@@ -82,11 +82,11 @@ static struct clk *clk_sp810_timerclken_of_get(struct of_phandle_args *clkspec,
 
 static void __init clk_sp810_of_setup(struct device_node *node)
 {
-	struct clk_sp810 *sp810 = kzalloc(sizeof(*sp810), GFP_KERNEL);
+	struct clk_sp810 *sp810 = kzalloc_obj(*sp810);
 	const char *parent_names[2];
 	int num = ARRAY_SIZE(parent_names);
 	char name[12];
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	static int instance;
 	int i;
 	bool deprecated;

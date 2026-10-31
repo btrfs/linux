@@ -5,6 +5,8 @@
 
 #include "dsi.h"
 
+#include <drm/drm_panel.h>
+
 bool msm_dsi_is_cmd_mode(struct msm_dsi *msm_dsi)
 {
 	unsigned long host_flags = msm_dsi_host_get_mode_flags(msm_dsi->host);
@@ -198,6 +200,7 @@ static const struct of_device_id dt_match[] = {
 	{ .compatible = "qcom,dsi-ctrl-6g-qcm2290" },
 	{}
 };
+MODULE_DEVICE_TABLE(of, dt_match);
 
 static const struct dev_pm_ops dsi_pm_ops = {
 	SET_RUNTIME_PM_OPS(msm_dsi_runtime_suspend, msm_dsi_runtime_resume, NULL)
@@ -266,4 +269,3 @@ void msm_dsi_snapshot(struct msm_disp_state *disp_state, struct msm_dsi *msm_dsi
 	msm_dsi_host_snapshot(disp_state, msm_dsi->host);
 	msm_dsi_phy_snapshot(disp_state, msm_dsi->phy);
 }
-

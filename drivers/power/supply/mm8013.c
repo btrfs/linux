@@ -284,8 +284,8 @@ static int mm8013_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id mm8013_id_table[] = {
-	{ "mm8013" },
-	{}
+	{ .name = "mm8013" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mm8013_id_table);
 
@@ -293,6 +293,7 @@ static const struct of_device_id mm8013_match_table[] = {
 	{ .compatible = "mitsumi,mm8013" },
 	{}
 };
+MODULE_DEVICE_TABLE(of, mm8013_match_table);
 
 static struct i2c_driver mm8013_i2c_driver = {
 	.probe = mm8013_probe,

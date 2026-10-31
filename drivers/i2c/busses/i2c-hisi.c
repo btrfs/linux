@@ -13,7 +13,6 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/units.h>
@@ -482,7 +481,7 @@ static int hisi_i2c_probe(struct platform_device *pdev)
 
 	ret = devm_request_irq(dev, ctlr->irq, hisi_i2c_irq, 0, "hisi-i2c", ctlr);
 	if (ret)
-		return dev_err_probe(dev, ret, "failed to request irq handler\n");
+		return ret;
 
 	ctlr->clk = devm_clk_get_optional_enabled(&pdev->dev, NULL);
 	if (IS_ERR_OR_NULL(ctlr->clk)) {
@@ -517,7 +516,7 @@ static int hisi_i2c_probe(struct platform_device *pdev)
 }
 
 static const struct acpi_device_id hisi_i2c_acpi_ids[] = {
-	{ "HISI03D1", 0 },
+	{ .id = "HISI03D1" },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, hisi_i2c_acpi_ids);

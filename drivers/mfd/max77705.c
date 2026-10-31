@@ -105,7 +105,7 @@ static int max77705_i2c_probe(struct i2c_client *i2c)
 		return -ENODEV;
 
 	pmic_rev = pmic_rev_value & MAX77705_REVISION_MASK;
-	if (pmic_rev != MAX77705_PASS3)
+	if (pmic_rev != MAX77705_PASS2 && pmic_rev != MAX77705_PASS3)
 		return dev_err_probe(dev, -ENODEV, "Rev.0x%x is not tested\n", pmic_rev);
 
 	/* Active Discharge Enable */
@@ -157,7 +157,7 @@ static int max77705_resume(struct device *dev)
 
 	return 0;
 }
-DEFINE_SIMPLE_DEV_PM_OPS(max77705_pm_ops, max77705_suspend, max77705_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(max77705_pm_ops, max77705_suspend, max77705_resume);
 
 static const struct of_device_id max77705_i2c_of_match[] = {
 	{ .compatible = "maxim,max77705" },

@@ -108,7 +108,7 @@ struct owl_composite {
 		},							\
 	}
 
-static inline struct owl_composite *hw_to_owl_comp(const struct clk_hw *hw)
+static inline struct owl_composite *hw_to_owl_comp(struct clk_hw *hw)
 {
 	struct owl_clk_common *common = hw_to_owl_clk_common(hw);
 
@@ -119,6 +119,5 @@ extern const struct clk_ops owl_comp_div_ops;
 extern const struct clk_ops owl_comp_fact_ops;
 extern const struct clk_ops owl_comp_fix_fact_ops;
 extern const struct clk_ops owl_comp_pass_ops;
-extern const struct clk_ops clk_fixed_factor_ops;
 
 #endif /* _OWL_COMPOSITE_H_ */

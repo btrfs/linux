@@ -26,16 +26,16 @@
  *   Class, Class Mask, private data (not used) }
  */
 static const struct pci_device_id txgbevf_pci_tbl[] = {
-	{ PCI_VDEVICE(WANGXUN, TXGBEVF_DEV_ID_SP1000), 0},
-	{ PCI_VDEVICE(WANGXUN, TXGBEVF_DEV_ID_WX1820), 0},
-	{ PCI_VDEVICE(WANGXUN, TXGBEVF_DEV_ID_AML500F), 0},
-	{ PCI_VDEVICE(WANGXUN, TXGBEVF_DEV_ID_AML510F), 0},
-	{ PCI_VDEVICE(WANGXUN, TXGBEVF_DEV_ID_AML5024), 0},
-	{ PCI_VDEVICE(WANGXUN, TXGBEVF_DEV_ID_AML5124), 0},
-	{ PCI_VDEVICE(WANGXUN, TXGBEVF_DEV_ID_AML503F), 0},
-	{ PCI_VDEVICE(WANGXUN, TXGBEVF_DEV_ID_AML513F), 0},
+	{ PCI_VDEVICE(WANGXUN, TXGBEVF_DEV_ID_SP1000) },
+	{ PCI_VDEVICE(WANGXUN, TXGBEVF_DEV_ID_WX1820) },
+	{ PCI_VDEVICE(WANGXUN, TXGBEVF_DEV_ID_AML500F) },
+	{ PCI_VDEVICE(WANGXUN, TXGBEVF_DEV_ID_AML510F) },
+	{ PCI_VDEVICE(WANGXUN, TXGBEVF_DEV_ID_AML5024) },
+	{ PCI_VDEVICE(WANGXUN, TXGBEVF_DEV_ID_AML5124) },
+	{ PCI_VDEVICE(WANGXUN, TXGBEVF_DEV_ID_AML503F) },
+	{ PCI_VDEVICE(WANGXUN, TXGBEVF_DEV_ID_AML513F) },
 	/* required last entry */
-	{ .device = 0 }
+	{ }
 };
 
 static const struct net_device_ops txgbevf_netdev_ops = {
@@ -156,6 +156,18 @@ static int txgbevf_sw_init(struct wx *wx)
 	wx->rx_work_limit = TXGBEVF_DEFAULT_RX_WORK;
 
 	wx->set_num_queues = txgbevf_set_num_queues;
+
+	switch (wx->mac.type) {
+	case wx_mac_sp:
+		break;
+	case wx_mac_aml:
+	case wx_mac_aml40:
+		set_bit(WX_FLAG_RX_MERGE_ENABLED, wx->flags);
+		set_bit(WX_FLAG_TXHEAD_WB_ENABLED, wx->flags);
+		break;
+	default:
+		break;
+	}
 
 	return 0;
 err_reset_hw:

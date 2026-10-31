@@ -20,6 +20,7 @@
 #include <linux/debugfs.h>
 
 #include <asm/cpu_device_id.h>
+#include <asm/cpuid/api.h>
 #include <asm/msr.h>
 
 #include "thermal_interrupt.h"
@@ -50,8 +51,7 @@ MODULE_PARM_DESC(notify_delay_ms,
 struct zone_device {
 	int				cpu;
 	bool				work_scheduled;
-	u32				msr_pkg_therm_low;
-	u32				msr_pkg_therm_high;
+	u64				msr_pkg_therm;
 	struct delayed_work		work;
 	struct thermal_zone_device	*tzone;
 	struct cpumask			cpumask;
@@ -125,8 +125,12 @@ sys_set_trip_temp(struct thermal_zone_device *tzd,
 {
 	struct zone_device *zonedev = thermal_zone_device_priv(tzd);
 	unsigned int trip_index = THERMAL_TRIP_PRIV_TO_INT(trip->priv);
-	u32 l, h, mask, shift, intr;
+	u32 mask, shift, intr;
 	int tj_max, val, ret;
+	struct msr v;
+
+	if (temp == THERMAL_TEMP_INVALID)
+		temp = 0;
 
 	tj_max = intel_tcc_get_tjmax(zonedev->cpu);
 	if (tj_max < 0)
@@ -138,8 +142,7 @@ sys_set_trip_temp(struct thermal_zone_device *tzd,
 	if (trip_index >= MAX_NUMBER_OF_TRIPS || val < 0 || val > 0x7f)
 		return -EINVAL;
 
-	ret = rdmsr_on_cpu(zonedev->cpu, MSR_IA32_PACKAGE_THERM_INTERRUPT,
-			   &l, &h);
+	ret = rdmsrq_on_cpu(zonedev->cpu, MSR_IA32_PACKAGE_THERM_INTERRUPT, &v.q);
 	if (ret < 0)
 		return ret;
 
@@ -152,20 +155,19 @@ sys_set_trip_temp(struct thermal_zone_device *tzd,
 		shift = THERM_SHIFT_THRESHOLD0;
 		intr = THERM_INT_THRESHOLD0_ENABLE;
 	}
-	l &= ~mask;
+	v.l &= ~mask;
 	/*
 	* When users space sets a trip temperature == 0, which is indication
 	* that, it is no longer interested in receiving notifications.
 	*/
 	if (!temp) {
-		l &= ~intr;
+		v.l &= ~intr;
 	} else {
-		l |= val << shift;
-		l |= intr;
+		v.l |= val << shift;
+		v.l |= intr;
 	}
 
-	return wrmsr_on_cpu(zonedev->cpu, MSR_IA32_PACKAGE_THERM_INTERRUPT,
-			l, h);
+	return wrmsrq_on_cpu(zonedev->cpu, MSR_IA32_PACKAGE_THERM_INTERRUPT, v.q);
 }
 
 /* Thermal zone callback registry */
@@ -183,28 +185,28 @@ static bool pkg_thermal_rate_control(void)
 static inline void enable_pkg_thres_interrupt(void)
 {
 	u8 thres_0, thres_1;
-	u32 l, h;
+	struct msr val;
 
-	rdmsr(MSR_IA32_PACKAGE_THERM_INTERRUPT, l, h);
+	rdmsrq(MSR_IA32_PACKAGE_THERM_INTERRUPT, val.q);
 	/* only enable/disable if it had valid threshold value */
-	thres_0 = (l & THERM_MASK_THRESHOLD0) >> THERM_SHIFT_THRESHOLD0;
-	thres_1 = (l & THERM_MASK_THRESHOLD1) >> THERM_SHIFT_THRESHOLD1;
+	thres_0 = (val.l & THERM_MASK_THRESHOLD0) >> THERM_SHIFT_THRESHOLD0;
+	thres_1 = (val.l & THERM_MASK_THRESHOLD1) >> THERM_SHIFT_THRESHOLD1;
 	if (thres_0)
-		l |= THERM_INT_THRESHOLD0_ENABLE;
+		val.l |= THERM_INT_THRESHOLD0_ENABLE;
 	if (thres_1)
-		l |= THERM_INT_THRESHOLD1_ENABLE;
-	wrmsr(MSR_IA32_PACKAGE_THERM_INTERRUPT, l, h);
+		val.l |= THERM_INT_THRESHOLD1_ENABLE;
+	wrmsrq(MSR_IA32_PACKAGE_THERM_INTERRUPT, val.q);
 }
 
 /* Disable threshold interrupt on local package/cpu */
 static inline void disable_pkg_thres_interrupt(void)
 {
-	u32 l, h;
+	struct msr val;
 
-	rdmsr(MSR_IA32_PACKAGE_THERM_INTERRUPT, l, h);
+	rdmsrq(MSR_IA32_PACKAGE_THERM_INTERRUPT, val.q);
 
-	l &= ~(THERM_INT_THRESHOLD0_ENABLE | THERM_INT_THRESHOLD1_ENABLE);
-	wrmsr(MSR_IA32_PACKAGE_THERM_INTERRUPT, l, h);
+	val.l &= ~(THERM_INT_THRESHOLD0_ENABLE | THERM_INT_THRESHOLD1_ENABLE);
+	wrmsrq(MSR_IA32_PACKAGE_THERM_INTERRUPT, val.q);
 }
 
 static void pkg_temp_thermal_threshold_work_fn(struct work_struct *work)
@@ -274,7 +276,8 @@ static int pkg_temp_thermal_trips_init(int cpu, int tj_max,
 				       struct thermal_trip *trips, int num_trips)
 {
 	unsigned long thres_reg_value;
-	u32 mask, shift, eax, edx;
+	u32 mask, shift;
+	struct msr val;
 	int ret, i;
 
 	for (i = 0; i < num_trips; i++) {
@@ -287,12 +290,11 @@ static int pkg_temp_thermal_trips_init(int cpu, int tj_max,
 			shift = THERM_SHIFT_THRESHOLD0;
 		}
 
-		ret = rdmsr_on_cpu(cpu, MSR_IA32_PACKAGE_THERM_INTERRUPT,
-				   &eax, &edx);
+		ret = rdmsrq_on_cpu(cpu, MSR_IA32_PACKAGE_THERM_INTERRUPT, &val.q);
 		if (ret < 0)
 			return ret;
 
-		thres_reg_value = (eax & mask) >> shift;
+		thres_reg_value = (val.l & mask) >> shift;
 
 		trips[i].temperature = thres_reg_value ?
 			tj_max - thres_reg_value * 1000 : THERMAL_TEMP_INVALID;
@@ -332,7 +334,7 @@ static int pkg_temp_thermal_device_add(unsigned int cpu)
 		return tj_max;
 	tj_max *= 1000;
 
-	zonedev = kzalloc(sizeof(*zonedev), GFP_KERNEL);
+	zonedev = kzalloc_obj(*zonedev);
 	if (!zonedev)
 		return -ENOMEM;
 
@@ -354,8 +356,7 @@ static int pkg_temp_thermal_device_add(unsigned int cpu)
 		goto out_unregister_tz;
 
 	/* Store MSR value for package thermal interrupt, to restore at exit */
-	rdmsr(MSR_IA32_PACKAGE_THERM_INTERRUPT, zonedev->msr_pkg_therm_low,
-	      zonedev->msr_pkg_therm_high);
+	rdmsrq(MSR_IA32_PACKAGE_THERM_INTERRUPT, zonedev->msr_pkg_therm);
 
 	cpumask_set_cpu(cpu, &zonedev->cpumask);
 	raw_spin_lock_irq(&pkg_temp_lock);
@@ -423,8 +424,8 @@ static int pkg_thermal_cpu_offline(unsigned int cpu)
 	if (lastcpu) {
 		zones[topology_logical_die_id(cpu)] = NULL;
 		/* After this point nothing touches the MSR anymore. */
-		wrmsr(MSR_IA32_PACKAGE_THERM_INTERRUPT,
-		      zonedev->msr_pkg_therm_low, zonedev->msr_pkg_therm_high);
+		wrmsrq(MSR_IA32_PACKAGE_THERM_INTERRUPT,
+		       zonedev->msr_pkg_therm);
 	}
 
 	/*
@@ -489,8 +490,7 @@ static int __init pkg_temp_thermal_init(void)
 		return -ENODEV;
 
 	max_id = topology_max_packages() * topology_max_dies_per_package();
-	zones = kcalloc(max_id, sizeof(struct zone_device *),
-			   GFP_KERNEL);
+	zones = kzalloc_objs(struct zone_device *, max_id);
 	if (!zones)
 		return -ENOMEM;
 

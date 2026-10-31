@@ -36,7 +36,7 @@ logicvc_crtc_mode_valid(struct drm_crtc *drm_crtc,
 }
 
 static void logicvc_crtc_atomic_begin(struct drm_crtc *drm_crtc,
-				      struct drm_atomic_state *state)
+				      struct drm_atomic_commit *state)
 {
 	struct logicvc_crtc *crtc = logicvc_crtc(drm_crtc);
 	struct drm_crtc_state *old_state =
@@ -60,7 +60,7 @@ static void logicvc_crtc_atomic_begin(struct drm_crtc *drm_crtc,
 }
 
 static void logicvc_crtc_atomic_enable(struct drm_crtc *drm_crtc,
-				       struct drm_atomic_state *state)
+				       struct drm_atomic_commit *state)
 {
 	struct logicvc_crtc *crtc = logicvc_crtc(drm_crtc);
 	struct logicvc_drm *logicvc = logicvc_drm(drm_crtc->dev);
@@ -150,7 +150,7 @@ static void logicvc_crtc_atomic_enable(struct drm_crtc *drm_crtc,
 }
 
 static void logicvc_crtc_atomic_disable(struct drm_crtc *drm_crtc,
-					struct drm_atomic_state *state)
+					struct drm_atomic_commit *state)
 {
 	struct logicvc_drm *logicvc = logicvc_drm(drm_crtc->dev);
 	struct drm_device *drm_dev = drm_crtc->dev;
@@ -213,10 +213,10 @@ static void logicvc_crtc_disable_vblank(struct drm_crtc *drm_crtc)
 }
 
 static const struct drm_crtc_funcs logicvc_crtc_funcs = {
-	.reset			= drm_atomic_helper_crtc_reset,
 	.destroy		= drm_crtc_cleanup,
 	.set_config		= drm_atomic_helper_set_config,
 	.page_flip		= drm_atomic_helper_page_flip,
+	.atomic_create_state	= drm_atomic_helper_crtc_create_state,
 	.atomic_duplicate_state	= drm_atomic_helper_crtc_duplicate_state,
 	.atomic_destroy_state	= drm_atomic_helper_crtc_destroy_state,
 	.enable_vblank		= logicvc_crtc_enable_vblank,
