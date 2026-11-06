@@ -530,7 +530,7 @@ pxa3xx_gcu_add_buffer(struct device *dev,
 {
 	struct pxa3xx_gcu_batch *buffer;
 
-	buffer = kzalloc(sizeof(struct pxa3xx_gcu_batch), GFP_KERNEL);
+	buffer = kzalloc_obj(struct pxa3xx_gcu_batch);
 	if (!buffer)
 		return -ENOMEM;
 
@@ -615,10 +615,8 @@ static int pxa3xx_gcu_probe(struct platform_device *pdev)
 
 	ret = devm_request_irq(dev, irq, pxa3xx_gcu_handle_irq,
 			       0, DRV_NAME, priv);
-	if (ret < 0) {
-		dev_err(dev, "request_irq failed\n");
+	if (ret < 0)
 		return ret;
-	}
 
 	/* allocate dma memory */
 	priv->shared = dma_alloc_coherent(dev, SHARED_SIZE,

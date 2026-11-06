@@ -42,7 +42,7 @@ If you are interested in the deep debugging of HD-audio, read the
 HD-audio specification at first.  The specification is found on
 Intel's web page, for example:
 
-* https://www.intel.com/content/www/us/en/standards/high-definition-audio-specification.html
+* https://www.intel.com/content/dam/www/public/us/en/documents/product-specifications/high-definition-audio-specification.pdf
 
 
 HD-Audio Controller
@@ -191,7 +191,7 @@ model is found in the white-list, the driver assumes the static
 configuration of that preset with the correct pin setup, etc.
 Thus, if you have a newer machine with a slightly different PCI SSID
 (or codec SSID) from the existing one, you may have a good chance to
-re-use the same model.  You can pass the ``model`` option to specify the
+reuse the same model.  You can pass the ``model`` option to specify the
 preset model instead of PCI (and codec-) SSID look-up.
 
 What ``model`` option values are available depends on the codec chip.

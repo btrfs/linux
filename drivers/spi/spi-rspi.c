@@ -22,7 +22,6 @@
 #include <linux/of.h>
 #include <linux/pm_runtime.h>
 #include <linux/reset.h>
-#include <linux/sh_dma.h>
 #include <linux/spi/spi.h>
 #include <linux/spinlock.h>
 
@@ -1091,24 +1090,15 @@ static irqreturn_t rspi_irq_tx(int irq, void *_sr)
 
 static struct dma_chan *rspi_request_dma_chan(struct device *dev,
 					      enum dma_transfer_direction dir,
-					      unsigned int id,
 					      dma_addr_t port_addr)
 {
-	dma_cap_mask_t mask;
 	struct dma_chan *chan;
 	struct dma_slave_config cfg;
 	int ret;
 
-	dma_cap_zero(mask);
-	dma_cap_set(DMA_SLAVE, mask);
-
-	chan = dma_request_slave_channel_compat(mask, shdma_chan_filter,
-				(void *)(unsigned long)id, dev,
-				dir == DMA_MEM_TO_DEV ? "tx" : "rx");
-	if (!chan) {
-		dev_warn(dev, "dma_request_slave_channel_compat failed\n");
-		return NULL;
-	}
+	chan = dma_request_chan(dev, dir == DMA_MEM_TO_DEV ? "tx" : "rx");
+	if (IS_ERR(chan))
+		return chan;
 
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.dst_addr = port_addr + RSPI_SPDR;
@@ -1121,7 +1111,7 @@ static struct dma_chan *rspi_request_dma_chan(struct device *dev,
 	if (ret) {
 		dev_warn(dev, "dmaengine_slave_config failed %d\n", ret);
 		dma_release_channel(chan);
-		return NULL;
+		return ERR_PTR(ret);
 	}
 
 	return chan;
@@ -1130,29 +1120,23 @@ static struct dma_chan *rspi_request_dma_chan(struct device *dev,
 static int rspi_request_dma(struct device *dev, struct spi_controller *ctlr,
 			    const struct resource *res)
 {
-	unsigned int dma_tx_id, dma_rx_id;
+	struct dma_chan *chan;
 
-	if (dev->of_node) {
-		/* In the OF case we will get the slave IDs from the DT */
-		dma_tx_id = 0;
-		dma_rx_id = 0;
-	} else {
-		/* The driver assumes no error. */
+	if (!dev->of_node)
 		return 0;
-	}
 
-	ctlr->dma_tx = rspi_request_dma_chan(dev, DMA_MEM_TO_DEV, dma_tx_id,
-					     res->start);
-	if (!ctlr->dma_tx)
-		return -ENODEV;
+	chan = rspi_request_dma_chan(dev, DMA_MEM_TO_DEV, res->start);
+	if (IS_ERR(chan))
+		return PTR_ERR(chan);
+	ctlr->dma_tx = chan;
 
-	ctlr->dma_rx = rspi_request_dma_chan(dev, DMA_DEV_TO_MEM, dma_rx_id,
-					     res->start);
-	if (!ctlr->dma_rx) {
+	chan = rspi_request_dma_chan(dev, DMA_DEV_TO_MEM, res->start);
+	if (IS_ERR(chan)) {
 		dma_release_channel(ctlr->dma_tx);
 		ctlr->dma_tx = NULL;
-		return -ENODEV;
+		return PTR_ERR(chan);
 	}
+	ctlr->dma_rx = chan;
 
 	ctlr->can_dma = rspi_can_dma;
 	dev_info(dev, "DMA available");
@@ -1170,6 +1154,8 @@ static void rspi_release_dma(struct spi_controller *ctlr)
 static void rspi_remove(struct platform_device *pdev)
 {
 	struct rspi_data *rspi = platform_get_drvdata(pdev);
+
+	spi_unregister_controller(rspi->ctlr);
 
 	rspi_release_dma(rspi->ctlr);
 	pm_runtime_disable(&pdev->dev);
@@ -1220,11 +1206,6 @@ static const struct of_device_id rspi_of_match[] __maybe_unused = {
 MODULE_DEVICE_TABLE(of, rspi_of_match);
 
 #ifdef CONFIG_OF
-static void rspi_reset_control_assert(void *data)
-{
-	reset_control_assert(data);
-}
-
 static int rspi_parse_dt(struct device *dev, struct spi_controller *ctlr)
 {
 	struct reset_control *rstc;
@@ -1240,22 +1221,10 @@ static int rspi_parse_dt(struct device *dev, struct spi_controller *ctlr)
 
 	ctlr->num_chipselect = num_cs;
 
-	rstc = devm_reset_control_get_optional_exclusive(dev, NULL);
+	rstc = devm_reset_control_get_optional_exclusive_deasserted(dev, NULL);
 	if (IS_ERR(rstc))
 		return dev_err_probe(dev, PTR_ERR(rstc),
-					     "failed to get reset ctrl\n");
-
-	error = reset_control_deassert(rstc);
-	if (error) {
-		dev_err(dev, "failed to deassert reset %d\n", error);
-		return error;
-	}
-
-	error = devm_add_action_or_reset(dev, rspi_reset_control_assert, rstc);
-	if (error) {
-		dev_err(dev, "failed to register assert devm action, %d\n", error);
-		return error;
-	}
+				     "failed to get reset ctrl and deassert reset\n");
 
 	return 0;
 }
@@ -1288,7 +1257,7 @@ static int rspi_probe(struct platform_device *pdev)
 	const struct spi_ops *ops;
 	unsigned long clksrc;
 
-	ctlr = spi_alloc_host(&pdev->dev, sizeof(struct rspi_data));
+	ctlr = devm_spi_alloc_host(&pdev->dev, sizeof(struct rspi_data));
 	if (ctlr == NULL)
 		return -ENOMEM;
 
@@ -1296,7 +1265,7 @@ static int rspi_probe(struct platform_device *pdev)
 	if (ops) {
 		ret = rspi_parse_dt(&pdev->dev, ctlr);
 		if (ret)
-			goto error1;
+			return ret;
 	} else {
 		ops = (struct spi_ops *)pdev->id_entry->driver_data;
 		ctlr->num_chipselect = 2; /* default */
@@ -1308,16 +1277,13 @@ static int rspi_probe(struct platform_device *pdev)
 	rspi->ctlr = ctlr;
 
 	rspi->addr = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
-	if (IS_ERR(rspi->addr)) {
-		ret = PTR_ERR(rspi->addr);
-		goto error1;
-	}
+	if (IS_ERR(rspi->addr))
+		return PTR_ERR(rspi->addr);
 
 	rspi->clk = devm_clk_get(&pdev->dev, NULL);
 	if (IS_ERR(rspi->clk)) {
 		dev_err(&pdev->dev, "cannot get clock\n");
-		ret = PTR_ERR(rspi->clk);
-		goto error1;
+		return PTR_ERR(rspi->clk);
 	}
 
 	rspi->pdev = pdev;
@@ -1338,7 +1304,6 @@ static int rspi_probe(struct platform_device *pdev)
 	ctlr->min_speed_hz = DIV_ROUND_UP(clksrc, ops->max_div);
 	ctlr->max_speed_hz = DIV_ROUND_UP(clksrc, ops->min_div);
 	ctlr->flags = ops->flags;
-	ctlr->dev.of_node = pdev->dev.of_node;
 	ctlr->use_gpio_descriptors = true;
 	ctlr->max_native_cs = rspi->ops->num_hw_ss;
 
@@ -1374,12 +1339,17 @@ static int rspi_probe(struct platform_device *pdev)
 	}
 
 	ret = rspi_request_dma(&pdev->dev, ctlr, res);
+	if (ret == -EPROBE_DEFER) {
+		dev_err_probe(&pdev->dev, ret,
+			      "failed to request DMA channels\n");
+		goto error2;
+	}
 	if (ret < 0)
 		dev_warn(&pdev->dev, "DMA not available, using PIO\n");
 
-	ret = devm_spi_register_controller(&pdev->dev, ctlr);
+	ret = spi_register_controller(ctlr);
 	if (ret < 0) {
-		dev_err(&pdev->dev, "devm_spi_register_controller error.\n");
+		dev_err(&pdev->dev, "failed to register controller\n");
 		goto error3;
 	}
 
@@ -1391,15 +1361,13 @@ error3:
 	rspi_release_dma(ctlr);
 error2:
 	pm_runtime_disable(&pdev->dev);
-error1:
-	spi_controller_put(ctlr);
 
 	return ret;
 }
 
 static const struct platform_device_id spi_driver_ids[] = {
-	{ "rspi",	(kernel_ulong_t)&rspi_ops },
-	{},
+	{ .name = "rspi", .driver_data = (kernel_ulong_t)&rspi_ops },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(platform, spi_driver_ids);

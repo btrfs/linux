@@ -122,6 +122,7 @@
 		#address-cells = <1>;
 		#size-cells = <1>;
 		ranges = <0x0 0x0 0xf0000000 0x10000000>;
+		dma-ranges = <0x0 0x0 0x0 0x40000000>;
 
 		crg: clock-reset-controller@8a22000 {
 			compatible = "hisilicon,hi3798cv200-crg", "syscon", "simple-mfd";
@@ -632,9 +633,7 @@
 			clocks = <&crg HISTB_USB2_BUS_CLK>,
 				 <&crg HISTB_USB2_12M_CLK>,
 				 <&crg HISTB_USB2_48M_CLK>;
-			clock-names = "bus", "clk12", "clk48";
 			resets = <&crg 0xb8 12>;
-			reset-names = "bus";
 			phys = <&usb2_phy1_port0>;
 			phy-names = "usb";
 			status = "disabled";
@@ -647,11 +646,9 @@
 			clocks = <&crg HISTB_USB2_BUS_CLK>,
 				 <&crg HISTB_USB2_PHY_CLK>,
 				 <&crg HISTB_USB2_UTMI_CLK>;
-			clock-names = "bus", "phy", "utmi";
 			resets = <&crg 0xb8 12>,
 				 <&crg 0xb8 16>,
 				 <&crg 0xb8 13>;
-			reset-names = "bus", "phy", "utmi";
 			phys = <&usb2_phy1_port0>;
 			phy-names = "usb";
 			status = "disabled";

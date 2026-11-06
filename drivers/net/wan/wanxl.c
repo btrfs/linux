@@ -37,7 +37,6 @@ static const char *version = "wanXL serial card driver version: 0.48";
 #define PLX_CTL_RESET   0x40000000 /* adapter reset */
 
 #undef DEBUG_PKT
-#undef DEBUG_PCI
 
 /* MAILBOX #1 - PUTS COMMANDS */
 #define MBX1_CMD_ABORTJ 0x85000000 /* Abort and Jump */
@@ -87,22 +86,6 @@ static inline port_status_t *get_status(struct port *port)
 {
 	return &port->card->status->port_status[port->node];
 }
-
-#ifdef DEBUG_PCI
-static inline dma_addr_t pci_map_single_debug(struct pci_dev *pdev, void *ptr,
-					      size_t size, int direction)
-{
-	dma_addr_t addr = dma_map_single(&pdev->dev, ptr, size, direction);
-
-	if (addr + size > 0x100000000LL)
-		pr_crit("%s: pci_map_single() returned memory at 0x%llx!\n",
-			pci_name(pdev), (unsigned long long)addr);
-	return addr;
-}
-
-#undef pci_map_single
-#define pci_map_single pci_map_single_debug
-#endif
 
 /* Cable and/or personality module change interrupt service */
 static inline void wanxl_cable_intr(struct port *port)
@@ -514,7 +497,8 @@ static void wanxl_pci_remove_one(struct pci_dev *pdev)
 	if (card->irq)
 		free_irq(card->irq, card);
 
-	wanxl_reset(card);
+	if (card->plx)
+		wanxl_reset(card);
 
 	for (i = 0; i < RX_QUEUE_LENGTH; i++)
 		if (card->rx_skbs[i]) {
@@ -598,7 +582,7 @@ static int wanxl_pci_init_one(struct pci_dev *pdev,
 		ports = 4;
 	}
 
-	card = kzalloc(struct_size(card, ports, ports), GFP_KERNEL);
+	card = kzalloc_flex(*card, ports, ports);
 	if (!card) {
 		pci_release_regions(pdev);
 		pci_disable_device(pdev);
@@ -806,13 +790,10 @@ static int wanxl_pci_init_one(struct pci_dev *pdev,
 }
 
 static const struct pci_device_id wanxl_pci_tbl[] = {
-	{ PCI_VENDOR_ID_SBE, PCI_DEVICE_ID_SBE_WANXL100, PCI_ANY_ID,
-	  PCI_ANY_ID, 0, 0, 0 },
-	{ PCI_VENDOR_ID_SBE, PCI_DEVICE_ID_SBE_WANXL200, PCI_ANY_ID,
-	  PCI_ANY_ID, 0, 0, 0 },
-	{ PCI_VENDOR_ID_SBE, PCI_DEVICE_ID_SBE_WANXL400, PCI_ANY_ID,
-	  PCI_ANY_ID, 0, 0, 0 },
-	{ 0, }
+	{ PCI_VDEVICE(SBE, PCI_DEVICE_ID_SBE_WANXL100) },
+	{ PCI_VDEVICE(SBE, PCI_DEVICE_ID_SBE_WANXL200) },
+	{ PCI_VDEVICE(SBE, PCI_DEVICE_ID_SBE_WANXL400) },
+	{ }
 };
 
 static struct pci_driver wanxl_pci_driver = {

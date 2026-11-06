@@ -21,9 +21,9 @@
 #include <linux/device.h>
 #include <linux/init.h>
 #include <linux/i2c.h>
-#include <linux/mutex.h>
 #include <linux/hwmon.h>
 #include <linux/watchdog.h>
+#include <linux/stringify.h>
 
 #define VENDOR_ID_REG		0x7A	/* Any bank */
 #define NUVOTON_ID		0x50
@@ -114,12 +114,12 @@
 static int timeout;
 module_param(timeout, int, 0);
 MODULE_PARM_DESC(timeout, "Watchdog timeout in minutes. 1 <= timeout <= 255, default="
-			__MODULE_STRING(WATCHDOG_TIMEOUT) ".");
+			__stringify(WATCHDOG_TIMEOUT) ".");
 
 static bool nowayout = WATCHDOG_NOWAYOUT;
 module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started (default="
-			__MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
+			__stringify(WATCHDOG_NOWAYOUT) ")");
 
 static const unsigned short normal_i2c[] = {
 	0x2d, 0x2e, I2C_CLIENT_END
@@ -127,8 +127,8 @@ static const unsigned short normal_i2c[] = {
 
 struct nct7904_data {
 	struct i2c_client *client;
+	struct device *hwmon_dev;
 	struct watchdog_device wdt;
-	struct mutex bank_lock;
 	int bank_sel;
 	u32 fanin_mask;
 	u32 vsen_mask;
@@ -142,24 +142,19 @@ struct nct7904_data {
 };
 
 /* Access functions */
-static int nct7904_bank_lock(struct nct7904_data *data, unsigned int bank)
+static int nct7904_bank_select(struct nct7904_data *data, unsigned int bank)
 {
 	int ret;
 
-	mutex_lock(&data->bank_lock);
 	if (data->bank_sel == bank)
 		return 0;
 	ret = i2c_smbus_write_byte_data(data->client, BANK_SEL_REG, bank);
-	if (ret == 0)
-		data->bank_sel = bank;
-	else
+	if (ret < 0) {
 		data->bank_sel = -1;
-	return ret;
-}
-
-static inline void nct7904_bank_release(struct nct7904_data *data)
-{
-	mutex_unlock(&data->bank_lock);
+		return ret;
+	}
+	data->bank_sel = bank;
+	return 0;
 }
 
 /* Read 1-byte register. Returns unsigned reg or -ERRNO on error. */
@@ -169,12 +164,10 @@ static int nct7904_read_reg(struct nct7904_data *data,
 	struct i2c_client *client = data->client;
 	int ret;
 
-	ret = nct7904_bank_lock(data, bank);
-	if (ret == 0)
-		ret = i2c_smbus_read_byte_data(client, reg);
-
-	nct7904_bank_release(data);
-	return ret;
+	ret = nct7904_bank_select(data, bank);
+	if (ret < 0)
+		return ret;
+	return i2c_smbus_read_byte_data(client, reg);
 }
 
 /*
@@ -187,19 +180,16 @@ static int nct7904_read_reg16(struct nct7904_data *data,
 	struct i2c_client *client = data->client;
 	int ret, hi;
 
-	ret = nct7904_bank_lock(data, bank);
-	if (ret == 0) {
-		ret = i2c_smbus_read_byte_data(client, reg);
-		if (ret >= 0) {
-			hi = ret;
-			ret = i2c_smbus_read_byte_data(client, reg + 1);
-			if (ret >= 0)
-				ret |= hi << 8;
-		}
-	}
-
-	nct7904_bank_release(data);
-	return ret;
+	ret = nct7904_bank_select(data, bank);
+	if (ret < 0)
+		return ret;
+	hi = i2c_smbus_read_byte_data(client, reg);
+	if (hi < 0)
+		return hi;
+	ret = i2c_smbus_read_byte_data(client, reg + 1);
+	if (ret < 0)
+		return ret;
+	return ret | (hi << 8);
 }
 
 /* Write 1-byte register. Returns 0 or -ERRNO on error. */
@@ -209,12 +199,10 @@ static int nct7904_write_reg(struct nct7904_data *data,
 	struct i2c_client *client = data->client;
 	int ret;
 
-	ret = nct7904_bank_lock(data, bank);
-	if (ret == 0)
-		ret = i2c_smbus_write_byte_data(client, reg, val);
-
-	nct7904_bank_release(data);
-	return ret;
+	ret = nct7904_bank_select(data, bank);
+	if (ret < 0)
+		return ret;
+	return i2c_smbus_write_byte_data(client, reg, val);
 }
 
 static int nct7904_read_fan(struct device *dev, u32 attr, int channel,
@@ -927,6 +915,8 @@ static int nct7904_wdt_start(struct watchdog_device *wdt)
 {
 	struct nct7904_data *data = watchdog_get_drvdata(wdt);
 
+	guard(hwmon_lock)(data->hwmon_dev);
+
 	/* Enable soft watchdog timer */
 	return nct7904_write_reg(data, BANK_0, WDT_LOCK_REG, WDT_SOFT_EN);
 }
@@ -934,6 +924,8 @@ static int nct7904_wdt_start(struct watchdog_device *wdt)
 static int nct7904_wdt_stop(struct watchdog_device *wdt)
 {
 	struct nct7904_data *data = watchdog_get_drvdata(wdt);
+
+	guard(hwmon_lock)(data->hwmon_dev);
 
 	return nct7904_write_reg(data, BANK_0, WDT_LOCK_REG, WDT_SOFT_DIS);
 }
@@ -953,6 +945,8 @@ static int nct7904_wdt_set_timeout(struct watchdog_device *wdt,
 	 */
 	wdt->timeout = timeout / 60 * 60;
 
+	guard(hwmon_lock)(data->hwmon_dev);
+
 	return nct7904_write_reg(data, BANK_0, WDT_TIMER_REG,
 				 wdt->timeout / 60);
 }
@@ -967,6 +961,8 @@ static int nct7904_wdt_ping(struct watchdog_device *wdt)
 	 */
 	struct nct7904_data *data = watchdog_get_drvdata(wdt);
 	int ret;
+
+	guard(hwmon_lock)(data->hwmon_dev);
 
 	/* Disable soft watchdog timer */
 	ret = nct7904_write_reg(data, BANK_0, WDT_LOCK_REG, WDT_SOFT_DIS);
@@ -986,6 +982,8 @@ static unsigned int nct7904_wdt_get_timeleft(struct watchdog_device *wdt)
 {
 	struct nct7904_data *data = watchdog_get_drvdata(wdt);
 	int ret;
+
+	guard(hwmon_lock)(data->hwmon_dev);
 
 	ret = nct7904_read_reg(data, BANK_0, WDT_TIMER_REG);
 	if (ret < 0)
@@ -1023,7 +1021,6 @@ static int nct7904_probe(struct i2c_client *client)
 		return -ENOMEM;
 
 	data->client = client;
-	mutex_init(&data->bank_lock);
 	data->bank_sel = -1;
 
 	/* Setup sensor groups. */
@@ -1142,6 +1139,9 @@ static int nct7904_probe(struct i2c_client *client)
 	if (ret)
 		return ret;
 
+	/* The watchdog callbacks take its lock */
+	data->hwmon_dev = hwmon_dev;
+
 	/* Watchdog initialization */
 	data->wdt.ops = &nct7904_wdt_ops;
 	data->wdt.info = &nct7904_wdt_info;
@@ -1161,8 +1161,8 @@ static int nct7904_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id nct7904_id[] = {
-	{"nct7904"},
-	{}
+	{ .name = "nct7904" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, nct7904_id);
 

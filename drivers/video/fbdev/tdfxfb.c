@@ -67,16 +67,19 @@
 #include <linux/aperture.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
+#include <linux/vmalloc.h>
 #include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <asm/io.h>
 
 #include <video/tdfx.h>
+#include <video/vga.h>
 
 #define DPRINTK(a, b...) pr_debug("fb: %s: " a, __func__ , ## b)
 
@@ -123,16 +126,17 @@ static int tdfxfb_probe(struct pci_dev *pdev, const struct pci_device_id *id);
 static void tdfxfb_remove(struct pci_dev *pdev);
 
 static const struct pci_device_id tdfxfb_id_table[] = {
-	{ PCI_VENDOR_ID_3DFX, PCI_DEVICE_ID_3DFX_BANSHEE,
-	  PCI_ANY_ID, PCI_ANY_ID, PCI_BASE_CLASS_DISPLAY << 16,
-	  0xff0000, 0 },
-	{ PCI_VENDOR_ID_3DFX, PCI_DEVICE_ID_3DFX_VOODOO3,
-	  PCI_ANY_ID, PCI_ANY_ID, PCI_BASE_CLASS_DISPLAY << 16,
-	  0xff0000, 0 },
-	{ PCI_VENDOR_ID_3DFX, PCI_DEVICE_ID_3DFX_VOODOO5,
-	  PCI_ANY_ID, PCI_ANY_ID, PCI_BASE_CLASS_DISPLAY << 16,
-	  0xff0000, 0 },
-	{ 0, }
+	{
+		PCI_DEVICE(PCI_VENDOR_ID_3DFX, PCI_DEVICE_ID_3DFX_BANSHEE),
+		.class = PCI_BASE_CLASS_DISPLAY << 16, .class_mask = 0xff0000,
+	}, {
+		PCI_DEVICE(PCI_VENDOR_ID_3DFX, PCI_DEVICE_ID_3DFX_VOODOO3),
+		.class = PCI_BASE_CLASS_DISPLAY << 16, .class_mask = 0xff0000,
+	}, {
+		PCI_DEVICE(PCI_VENDOR_ID_3DFX, PCI_DEVICE_ID_3DFX_VOODOO5),
+		.class = PCI_BASE_CLASS_DISPLAY << 16, .class_mask = 0xff0000,
+	},
+	{ }
 };
 
 static struct pci_driver tdfxfb_driver = {
@@ -334,6 +338,144 @@ static u32 do_calc_pll(int freq, int *freq_out)
 	return (n << 8) | (m << 2) | k;
 }
 
+/*
+ * Convert a pllctrl register value back to a frequency in kHz.
+ * Formula from 3dfx documentation.
+ */
+static u32 tdfx_pll_to_khz(u32 pll)
+{
+	return (14318 * (((pll >> 8) & 0xff) + 2) /
+		(((pll >> 2) & 0x3f) + 2)) >> (pll & 3);
+}
+
+/* Layout of the "OEM config" table in voodoo 3 BIOS */
+struct tdfx_bios_cfg {
+	__le32 pciinit0;	/* 0x00 */
+	__le32 miscinit0;	/* 0x04 */
+	__le32 miscinit1;	/* 0x08 */
+	__le32 draminit0;	/* 0x0c */
+	__le32 draminit1;	/* 0x10 */
+	__le32 agpinit0;	/* 0x14 */
+	__le32 pllctrl1;	/* 0x18 - memory PLL */
+	__le32 pllctrl2;	/* 0x1c - graphics PLL */
+	__le32 sgrammode;	/* 0x20 - SGRAM/SDRAM mode register data */
+} __packed;
+
+#define TDFX_ROM_CFG_PTR	0x50
+
+static bool tdfxfb_get_bios_cfg(struct pci_dev *pdev,
+				struct tdfx_bios_cfg *cfg)
+{
+	u16 romcfg, oemcfg;
+	void __iomem *rom;
+	size_t romsize;
+	u8 *image;
+	u32 khz;
+
+	/* This only works for the Voodoo 3 for now */
+	if (pdev->device != PCI_DEVICE_ID_3DFX_VOODOO3)
+		return false;
+
+	rom = pci_map_rom(pdev, &romsize);
+	if (!rom || !romsize)
+		return false;
+
+	image = vmalloc(romsize);
+	if (!image) {
+		pci_unmap_rom(pdev, rom);
+		return false;
+	}
+	memcpy_fromio(image, rom, romsize);
+	pci_unmap_rom(pdev, rom);
+
+	/* ROM[0x50] -> ROM config table -> OEM config table */
+	if (TDFX_ROM_CFG_PTR + 2 > romsize)
+		goto out;
+	romcfg = image[TDFX_ROM_CFG_PTR] | image[TDFX_ROM_CFG_PTR + 1] << 8;
+	if (romcfg == 0xffff || romcfg + 2 > romsize)
+		goto out;
+	oemcfg = image[romcfg] | image[romcfg + 1] << 8;
+	if (oemcfg == 0xffff || oemcfg + sizeof(*cfg) > romsize)
+		goto out;
+	memcpy(cfg, image + oemcfg, sizeof(*cfg));
+	vfree(image);
+
+	/*
+	 * Make sure we didn't read garbage from the BIOS and will
+	 * end up setting a frequency that explodes someone's expensive
+	 * card.
+	 */
+	khz = tdfx_pll_to_khz(le32_to_cpu(cfg->pllctrl1));
+	if (khz < 40000 || khz > 250000 || !le32_to_cpu(cfg->draminit0))
+		return false;
+	return true;
+
+out:
+	vfree(image);
+	return false;
+}
+
+/*
+ * Try to work out if the card was booted or not, just checks if
+ * one of the dram config registers matches what is in the config
+ * table if there is one.
+ *
+ * If we have a BIOS config table attempt to manually boot the
+ * card if needed.
+ */
+static int tdfxfb_hw_init(struct fb_info *info, struct pci_dev *pdev)
+{
+	u32 mempll, gfxpll, draminit0, draminit1, miscinit1, dram_mode;
+	struct tdfx_par *par = info->par;
+	struct tdfx_bios_cfg cfg;
+	bool have_cfg = tdfxfb_get_bios_cfg(pdev, &cfg);
+
+	/*
+	 * Can't tell if the card is booted or not,
+	 * also cannot boot it. Card might not function.
+	 */
+	if (!have_cfg)
+		return 0;
+
+	/* Card is, probably, already configured. */
+	if (tdfx_inl(par, DRAMINIT0) == le32_to_cpu(cfg.draminit0))
+		return 0;
+
+	dev_info(&pdev->dev,
+		 "Manually booting card using config table\n");
+
+	mempll = le32_to_cpu(cfg.pllctrl1);
+	gfxpll = le32_to_cpu(cfg.pllctrl2);
+	draminit0 = le32_to_cpu(cfg.draminit0);
+	draminit1 = le32_to_cpu(cfg.draminit1);
+	miscinit1 = le32_to_cpu(cfg.miscinit1);
+	dram_mode = le32_to_cpu(cfg.sgrammode);
+	tdfx_outl(par, PCIINIT0, le32_to_cpu(cfg.pciinit0));
+	tdfx_outl(par, AGPINIT, le32_to_cpu(cfg.agpinit0));
+
+	/* memory clock, and the graphics clock if the card wants one */
+	tdfx_outl(par, PLLCTRL1, mempll);
+	if (gfxpll)
+		tdfx_outl(par, PLLCTRL2, gfxpll);
+	/* flush posted writes */
+	tdfx_inl(par, PLLCTRL1);
+	/* PLL lock */
+	udelay(100);
+
+	tdfx_outl(par, MISCINIT1, miscinit1);
+	tdfx_outl(par, DRAMINIT0, draminit0);
+	tdfx_outl(par, DRAMINIT1, draminit1);
+
+	/* SDRAM/SGRAM wake up: load the mode register */
+	tdfx_outl(par, DRAMDATA, dram_mode);
+	tdfx_outl(par, DRAMCOMMAND, 0x10d);
+
+	tdfx_outl(par, LFBMEMORYCONFIG, 0x00001fff);
+	tdfx_outl(par, MISCINIT0, le32_to_cpu(cfg.miscinit0));
+
+	return 0;
+}
+
 static void do_write_regs(struct fb_info *info, struct banshee_reg *reg)
 {
 	struct tdfx_par *par = info->par;
@@ -342,6 +484,10 @@ static void do_write_regs(struct fb_info *info, struct banshee_reg *reg)
 	banshee_wait_idle(info);
 
 	tdfx_outl(par, MISCINIT1, tdfx_inl(par, MISCINIT1) | 0x01);
+
+	/* Wake the VGA core if it hasn't already been woken up */
+	tdfx_outl(par, VGAINIT0, reg->vgainit0);
+	vga_outb(par, 0x3c3, 0x01);
 
 	crt_outb(par, 0x11, crt_inb(par, 0x11) & 0x7f); /* CRT unprotect */
 
@@ -496,6 +642,9 @@ static int tdfxfb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 		}
 	}
 
+	if (!var->pixclock)
+		return -EINVAL;
+
 	if (PICOS2KHZ(var->pixclock) > par->max_pixclock) {
 		DPRINTK("pixclock too high (%ldKHz)\n",
 			PICOS2KHZ(var->pixclock));
@@ -591,7 +740,7 @@ static int tdfxfb_set_par(struct fb_info *info)
 		vt = ve + (info->var.upper_margin << 1) - 1;
 		reg.screensize = info->var.xres | (info->var.yres << 13);
 		reg.vidcfg |= VIDCFG_HALF_MODE;
-		reg.crt[0x09] = 0x80;
+		reg.crt[VGA_CRTC_MAX_SCAN] = 0x80;
 	} else {
 		vd = info->var.yres - 1;
 		vs  = vd + info->var.lower_margin;
@@ -609,59 +758,59 @@ static int tdfxfb_set_par(struct fb_info *info)
 			 info->var.xres < 480 ? 0x60 :
 			 info->var.xres < 768 ? 0xe0 : 0x20);
 
-	reg.gra[0x05] = 0x40;
-	reg.gra[0x06] = 0x05;
-	reg.gra[0x07] = 0x0f;
-	reg.gra[0x08] = 0xff;
+	reg.gra[VGA_GFX_MODE]         = 0x40;
+	reg.gra[VGA_GFX_MISC]         = 0x05;
+	reg.gra[VGA_GFX_COMPARE_MASK] = 0x0f;
+	reg.gra[VGA_GFX_BIT_MASK]     = 0xff;
 
-	reg.att[0x00] = 0x00;
-	reg.att[0x01] = 0x01;
-	reg.att[0x02] = 0x02;
-	reg.att[0x03] = 0x03;
-	reg.att[0x04] = 0x04;
-	reg.att[0x05] = 0x05;
-	reg.att[0x06] = 0x06;
-	reg.att[0x07] = 0x07;
-	reg.att[0x08] = 0x08;
-	reg.att[0x09] = 0x09;
-	reg.att[0x0a] = 0x0a;
-	reg.att[0x0b] = 0x0b;
-	reg.att[0x0c] = 0x0c;
-	reg.att[0x0d] = 0x0d;
-	reg.att[0x0e] = 0x0e;
-	reg.att[0x0f] = 0x0f;
-	reg.att[0x10] = 0x41;
-	reg.att[0x12] = 0x0f;
+	reg.att[VGA_ATC_PALETTE0]     = 0x00;
+	reg.att[VGA_ATC_PALETTE1]     = 0x01;
+	reg.att[VGA_ATC_PALETTE2]     = 0x02;
+	reg.att[VGA_ATC_PALETTE3]     = 0x03;
+	reg.att[VGA_ATC_PALETTE4]     = 0x04;
+	reg.att[VGA_ATC_PALETTE5]     = 0x05;
+	reg.att[VGA_ATC_PALETTE6]     = 0x06;
+	reg.att[VGA_ATC_PALETTE7]     = 0x07;
+	reg.att[VGA_ATC_PALETTE8]     = 0x08;
+	reg.att[VGA_ATC_PALETTE9]     = 0x09;
+	reg.att[VGA_ATC_PALETTEA]     = 0x0a;
+	reg.att[VGA_ATC_PALETTEB]     = 0x0b;
+	reg.att[VGA_ATC_PALETTEC]     = 0x0c;
+	reg.att[VGA_ATC_PALETTED]     = 0x0d;
+	reg.att[VGA_ATC_PALETTEE]     = 0x0e;
+	reg.att[VGA_ATC_PALETTEF]     = 0x0f;
+	reg.att[VGA_ATC_MODE]         = 0x41;
+	reg.att[VGA_ATC_PLANE_ENABLE] = 0x0f;
 
-	reg.seq[0x00] = 0x03;
-	reg.seq[0x01] = 0x01; /* fixme: clkdiv2? */
-	reg.seq[0x02] = 0x0f;
-	reg.seq[0x03] = 0x00;
-	reg.seq[0x04] = 0x0e;
+	reg.seq[VGA_SEQ_RESET]         = 0x03;
+	reg.seq[VGA_SEQ_CLOCK_MODE]    = 0x01; /* fixme: clkdiv2? */
+	reg.seq[VGA_SEQ_PLANE_WRITE]   = 0x0f;
+	reg.seq[VGA_SEQ_CHARACTER_MAP] = 0x00;
+	reg.seq[VGA_SEQ_MEMORY_MODE]   = 0x0e;
 
-	reg.crt[0x00] = ht - 4;
-	reg.crt[0x01] = hd;
-	reg.crt[0x02] = hbs;
-	reg.crt[0x03] = 0x80 | (hbe & 0x1f);
-	reg.crt[0x04] = hs;
-	reg.crt[0x05] = ((hbe & 0x20) << 2) | (he & 0x1f);
-	reg.crt[0x06] = vt;
-	reg.crt[0x07] = ((vs & 0x200) >> 2) |
-			((vd & 0x200) >> 3) |
-			((vt & 0x200) >> 4) | 0x10 |
-			((vbs & 0x100) >> 5) |
-			((vs & 0x100) >> 6) |
-			((vd & 0x100) >> 7) |
-			((vt & 0x100) >> 8);
-	reg.crt[0x09] |= 0x40 | ((vbs & 0x200) >> 4);
-	reg.crt[0x10] = vs;
-	reg.crt[0x11] = (ve & 0x0f) | 0x20;
-	reg.crt[0x12] = vd;
-	reg.crt[0x13] = wd;
-	reg.crt[0x15] = vbs;
-	reg.crt[0x16] = vbe + 1;
-	reg.crt[0x17] = 0xc3;
-	reg.crt[0x18] = 0xff;
+	reg.crt[VGA_CRTC_H_TOTAL]       = ht - 4;
+	reg.crt[VGA_CRTC_H_DISP]        = hd;
+	reg.crt[VGA_CRTC_H_BLANK_START] = hbs;
+	reg.crt[VGA_CRTC_H_BLANK_END]   = 0x80 | (hbe & 0x1f);
+	reg.crt[VGA_CRTC_H_SYNC_START]  = hs;
+	reg.crt[VGA_CRTC_H_SYNC_END]    = ((hbe & 0x20) << 2) | (he & 0x1f);
+	reg.crt[VGA_CRTC_V_TOTAL]       = vt;
+	reg.crt[VGA_CRTC_OVERFLOW]      = ((vs & 0x200) >> 2) |
+					  ((vd & 0x200) >> 3) |
+					  ((vt & 0x200) >> 4) | 0x10 |
+					  ((vbs & 0x100) >> 5) |
+					  ((vs & 0x100) >> 6) |
+					  ((vd & 0x100) >> 7) |
+					  ((vt & 0x100) >> 8);
+	reg.crt[VGA_CRTC_MAX_SCAN]     |= 0x40 | ((vbs & 0x200) >> 4);
+	reg.crt[VGA_CRTC_V_SYNC_START]  = vs;
+	reg.crt[VGA_CRTC_V_SYNC_END]    = (ve & 0x0f) | 0x20;
+	reg.crt[VGA_CRTC_V_DISP_END]    = vd;
+	reg.crt[VGA_CRTC_OFFSET]        = wd;
+	reg.crt[VGA_CRTC_V_BLANK_START] = vbs;
+	reg.crt[VGA_CRTC_V_BLANK_END]   = vbe + 1;
+	reg.crt[VGA_CRTC_MODE]          = 0xc3;
+	reg.crt[VGA_CRTC_LINE_COMPARE]  = 0xff;
 
 	/* Banshee's nonvga stuff */
 	reg.ext[0x00] = (((ht & 0x100) >> 8) |
@@ -1380,7 +1529,7 @@ static int tdfxfb_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (err)
 		return err;
 
-	err = pci_enable_device(pdev);
+	err = pcim_enable_device(pdev);
 	if (err) {
 		printk(KERN_ERR "tdfxfb: Can't enable pdev: %d\n", err);
 		return err;
@@ -1425,6 +1574,9 @@ static int tdfxfb_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 				info->fix.id);
 		goto out_err_regbase;
 	}
+
+	if (tdfxfb_hw_init(info, pdev))
+		goto out_err_regbase;
 
 	info->fix.smem_start = pci_resource_start(pdev, 1);
 	info->fix.smem_len = do_lfb_size(default_par, pdev->device);
@@ -1534,6 +1686,14 @@ static int tdfxfb_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		goto out_err_iobase;
 	}
 
+	/*
+	 * Program a video mode and clear the framebuffer now, this
+	 * ensures the display comes up even if fbcon doesn't bind
+	 * when the framebuffer is registered.
+	 */
+	tdfxfb_set_par(info);
+	memset_io(info->screen_base, 0, info->fix.smem_len);
+
 	if (register_framebuffer(info) < 0) {
 		printk(KERN_ERR "tdfxfb: can't register framebuffer\n");
 		fb_dealloc_cmap(&info->cmap);
@@ -1547,6 +1707,7 @@ static int tdfxfb_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 out_err_iobase:
 #ifdef CONFIG_FB_3DFX_I2C
+	fb_destroy_modelist(&info->modelist);
 	tdfxfb_delete_i2c_busses(default_par);
 #endif
 	arch_phys_wc_del(default_par->wc_cookie);

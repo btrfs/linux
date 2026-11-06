@@ -59,8 +59,7 @@ static int cbas_ec_query_base(struct cros_ec_device *ec_dev, bool get_state,
 	struct cros_ec_command *msg;
 	int ret;
 
-	msg = kzalloc(struct_size(msg, data, max(sizeof(u32), sizeof(*params))),
-		      GFP_KERNEL);
+	msg = kzalloc_flex(*msg, data, max(sizeof(u32), sizeof(*params)));
 	if (!msg)
 		return -ENOMEM;
 
@@ -269,7 +268,7 @@ static void cbas_ec_remove(struct platform_device *pdev)
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id cbas_ec_acpi_ids[] = {
-	{ "GOOG000B", 0 },
+	{ .id = "GOOG000B" },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, cbas_ec_acpi_ids);
@@ -497,7 +496,7 @@ static int hammer_probe(struct hid_device *hdev,
 	if (error)
 		return error;
 
-	error = devm_add_action(&hdev->dev, hammer_stop, hdev);
+	error = devm_add_action_or_reset(&hdev->dev, hammer_stop, hdev);
 	if (error)
 		return error;
 

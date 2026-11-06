@@ -589,7 +589,7 @@ static int isofs_fill_super(struct super_block *s, struct fs_context *fc)
 	unsigned int vol_desc_start;
 	int silent = fc->sb_flags & SB_SILENT;
 
-	sbi = kzalloc(sizeof(*sbi), GFP_KERNEL);
+	sbi = kzalloc_obj(*sbi);
 	if (!sbi)
 		return -ENOMEM;
 	s->s_fs_info = sbi;
@@ -818,8 +818,11 @@ root_found:
 	 * entries.  By forcing the blocksize in this way, we ensure
 	 * that we will never be required to do this.
 	 */
-	sb_set_blocksize(s, orig_zonesize);
+	if (!sb_set_blocksize(s, orig_zonesize))
+		goto out_freesbi;
 
+	sbi->s_session_start = (sector_t)vol_desc_start <<
+				(ISOFS_BLOCK_BITS - s->s_blocksize_bits);
 	sbi->s_nls_iocharset = NULL;
 
 #ifdef CONFIG_JOLIET
@@ -1009,7 +1012,8 @@ static int isofs_statfs (struct dentry *dentry, struct kstatfs *buf)
 	buf->f_files = ISOFS_SB(sb)->s_ninodes;
 	buf->f_ffree = 0;
 	buf->f_fsid = u64_to_fsid(id);
-	buf->f_namelen = NAME_MAX;
+	buf->f_namelen = ISOFS_SB(sb)->s_joliet_level ?
+			 JOLIET_NAME_MAX : NAME_MAX;
 	return 0;
 }
 
@@ -1170,10 +1174,9 @@ static int isofs_read_level3_size(struct inode *inode)
 	unsigned long bufsize = ISOFS_BUFFER_SIZE(inode);
 	int high_sierra = ISOFS_SB(inode->i_sb)->s_high_sierra;
 	struct buffer_head *bh = NULL;
-	unsigned long block, offset, block_saved, offset_saved;
+	unsigned long block, offset;
 	int i = 0;
 	int more_entries = 0;
-	struct iso_directory_record *tmpde = NULL;
 	struct iso_inode_info *ei = ISOFS_I(inode);
 
 	inode->i_size = 0;
@@ -1197,9 +1200,17 @@ static int isofs_read_level3_size(struct inode *inode)
 				goto out_noread;
 		}
 		de = (struct iso_directory_record *) (bh->b_data + offset);
-		de_len = *(unsigned char *) de;
 
-		if (de_len == 0) {
+		/*
+		 * If we are at the end of a block (or at its zero-padded
+		 * tail), move on to the next block.  A zero length byte at
+		 * the start of a block means the whole block is empty;
+		 * count that towards the same limit as sections below, or a
+		 * chain of empty blocks could be walked without bound.
+		 */
+		if (offset >= bufsize || de->length[0] == 0) {
+			if (offset == 0 && ++i > 100)
+				goto out_toomany;
 			brelse(bh);
 			bh = NULL;
 			++block;
@@ -1207,61 +1218,37 @@ static int isofs_read_level3_size(struct inode *inode)
 			continue;
 		}
 
-		block_saved = block;
-		offset_saved = offset;
-		offset += de_len;
-
-		/* Make sure we have a full directory entry */
-		if (offset >= bufsize) {
-			int slop = bufsize - offset + de_len;
-			if (!tmpde) {
-				tmpde = kmalloc(256, GFP_KERNEL);
-				if (!tmpde)
-					goto out_nomem;
-			}
-			memcpy(tmpde, de, slop);
-			offset &= bufsize - 1;
-			block++;
+		if (!isofs_dir_record_valid(de, offset, bufsize)) {
+			printk(KERN_NOTICE "iso9660: Corrupted directory entry in block %lu of inode %llu\n",
+			       block, inode->i_ino);
 			brelse(bh);
-			bh = NULL;
-			if (offset) {
-				bh = sb_bread(inode->i_sb, block);
-				if (!bh)
-					goto out_noread;
-				memcpy((void *)tmpde+slop, bh->b_data, offset);
-			}
-			de = tmpde;
+			return -EIO;
 		}
 
+		/* Save the first continuation directory entry in the inode */
+		if (more_entries && !ei->i_next_section_block) {
+			ei->i_next_section_block = block;
+			ei->i_next_section_offset = offset;
+		}
+		de_len = de->length[0];
+		offset += de_len;
 		inode->i_size += isonum_733(de->size);
-		if (i == 1) {
-			ei->i_next_section_block = block_saved;
-			ei->i_next_section_offset = offset_saved;
-		}
-
 		more_entries = de->flags[-high_sierra] & 0x80;
 
-		i++;
-		if (i > 100)
+		if (++i > 100)
 			goto out_toomany;
 	} while (more_entries);
 out:
-	kfree(tmpde);
 	brelse(bh);
 	return 0;
 
-out_nomem:
-	brelse(bh);
-	return -ENOMEM;
-
 out_noread:
 	printk(KERN_INFO "ISOFS: unable to read i-node block %lu\n", block);
-	kfree(tmpde);
 	return -EIO;
 
 out_toomany:
-	printk(KERN_INFO "%s: More than 100 file sections ?!?, aborting...\n"
-		"isofs_read_level3_size: inode=%lu\n",
+	printk(KERN_INFO "%s: More than 100 file sections/empty blocks ?!?, aborting...\n"
+		"isofs_read_level3_size: inode=%llu\n",
 		__func__, inode->i_ino);
 	goto out;
 }
@@ -1380,7 +1367,7 @@ static int isofs_read_inode(struct inode *inode, int relocated)
 	/* I have no idea what file_unit_size is used for, so
 	   we will flag it for now */
 	if (de->file_unit_size[0] != 0) {
-		printk(KERN_DEBUG "ISOFS: File unit size != 0 for ISO file (%ld).\n",
+		printk(KERN_DEBUG "ISOFS: File unit size != 0 for ISO file (%llu).\n",
 			inode->i_ino);
 	}
 
@@ -1389,7 +1376,7 @@ static int isofs_read_inode(struct inode *inode, int relocated)
 #ifdef DEBUG
 	if((de->flags[-high_sierra] & ~2)!= 0){
 		printk(KERN_DEBUG "ISOFS: Unusual flag settings for ISO file "
-				"(%ld %x).\n",
+				"(%llu %x).\n",
 			inode->i_ino, de->flags[-high_sierra]);
 	}
 #endif
@@ -1450,7 +1437,7 @@ static int isofs_read_inode(struct inode *inode, int relocated)
 		/* XXX - parse_rock_ridge_inode() had already set i_rdev. */
 		init_special_inode(inode, inode->i_mode, inode->i_rdev);
 	} else {
-		printk(KERN_DEBUG "ISOFS: Invalid file type 0%04o for inode %lu.\n",
+		printk(KERN_DEBUG "ISOFS: Invalid file type 0%04o for inode %llu.\n",
 			inode->i_mode, inode->i_ino);
 		ret = -EIO;
 		goto fail;
@@ -1520,7 +1507,7 @@ struct inode *__isofs_iget(struct super_block *sb,
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
 
-	if (inode->i_state & I_NEW) {
+	if (inode_state_read_once(inode) & I_NEW) {
 		ret = isofs_read_inode(inode, relocated);
 		if (ret < 0) {
 			iget_failed(inode);
@@ -1557,7 +1544,7 @@ static int isofs_init_fs_context(struct fs_context *fc)
 {
 	struct isofs_options *opt;
 
-	opt = kzalloc(sizeof(*opt), GFP_KERNEL);
+	opt = kzalloc_obj(*opt);
 	if (!opt)
 		return -ENOMEM;
 

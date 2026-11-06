@@ -27,8 +27,8 @@
 #define CCU_BRANCH_HAVE_DIV2	BIT(1)
 
 struct lpc18xx_branch_clk_data {
-	const char **name;
 	int num;
+	const char *name[] __counted_by(num);
 };
 
 struct lpc18xx_clk_branch {
@@ -208,7 +208,7 @@ static void lpc18xx_ccu_register_branch_gate_div(struct lpc18xx_clk_branch *bran
 	struct clk_hw *div_hw = NULL;
 
 	if (branch->flags & CCU_BRANCH_HAVE_DIV2) {
-		div = kzalloc(sizeof(*div), GFP_KERNEL);
+		div = kzalloc_obj(*div);
 		if (!div)
 			return;
 
@@ -266,6 +266,7 @@ static void __init lpc18xx_ccu_init(struct device_node *np)
 {
 	struct lpc18xx_branch_clk_data *clk_data;
 	void __iomem *reg_base;
+	size_t size;
 	int i, ret;
 
 	reg_base = of_iomap(np, 0);
@@ -274,19 +275,14 @@ static void __init lpc18xx_ccu_init(struct device_node *np)
 		return;
 	}
 
-	clk_data = kzalloc(sizeof(*clk_data), GFP_KERNEL);
+	size = of_property_count_strings(np, "clock-names");
+	clk_data = kzalloc_flex(*clk_data, name, size);
 	if (!clk_data) {
 		iounmap(reg_base);
 		return;
 	}
 
-	clk_data->num = of_property_count_strings(np, "clock-names");
-	clk_data->name = kcalloc(clk_data->num, sizeof(char *), GFP_KERNEL);
-	if (!clk_data->name) {
-		iounmap(reg_base);
-		kfree(clk_data);
-		return;
-	}
+	clk_data->num = size;
 
 	for (i = 0; i < clk_data->num; i++) {
 		ret = of_property_read_string_index(np, "clock-names", i,

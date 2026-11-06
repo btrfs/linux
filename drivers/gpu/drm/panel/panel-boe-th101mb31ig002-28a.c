@@ -15,6 +15,7 @@
 #include <drm/drm_connector.h>
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_modes.h>
+#include <drm/drm_of.h>
 #include <drm/drm_panel.h>
 #include <drm/drm_probe_helper.h>
 
@@ -221,6 +222,7 @@ static int boe_th101mb31ig002_prepare(struct drm_panel *panel)
 						      struct boe_th101mb31ig002,
 						      panel);
 	struct device *dev = &ctx->dsi->dev;
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
 	int ret;
 
 	ret = regulator_enable(ctx->power);
@@ -233,9 +235,9 @@ static int boe_th101mb31ig002_prepare(struct drm_panel *panel)
 		msleep(ctx->desc->vcioo_to_lp11_delay_ms);
 
 	if (ctx->desc->lp11_before_reset) {
-		ret = mipi_dsi_dcs_nop(ctx->dsi);
-		if (ret)
-			return ret;
+		mipi_dsi_dcs_nop_multi(&dsi_ctx);
+		if (dsi_ctx.accum_err)
+			return dsi_ctx.accum_err;
 	}
 
 	if (ctx->desc->lp11_to_reset_delay_ms)
@@ -379,7 +381,7 @@ static int boe_th101mb31ig002_dsi_probe(struct mipi_dsi_device *dsi)
 		return dev_err_probe(&dsi->dev, PTR_ERR(ctx->reset),
 				     "Failed to get reset GPIO\n");
 
-	ret = of_drm_get_panel_orientation(dsi->dev.of_node,
+	ret = drm_of_get_panel_orientation(dsi->dev.of_node,
 					   &ctx->orientation);
 	if (ret)
 		return dev_err_probe(&dsi->dev, ret,

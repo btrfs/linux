@@ -22,8 +22,12 @@ pub use self::kvec::Vec;
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct AllocError;
 
-use crate::error::{code::EINVAL, Result};
-use core::{alloc::Layout, ptr::NonNull};
+use crate::prelude::*;
+
+use core::{
+    alloc::Layout,
+    ptr::NonNull, //
+};
 
 /// Flags to be used when allocating memory.
 ///
@@ -125,6 +129,12 @@ impl NumaNode {
             return Err(EINVAL);
         }
         Ok(Self(node))
+    }
+
+    /// Returns the raw NUMA node identifier as an `i32`.
+    #[inline]
+    pub fn id(&self) -> i32 {
+        self.0
     }
 }
 

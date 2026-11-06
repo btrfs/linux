@@ -38,7 +38,7 @@ use crate::{bindings, prelude::*, types::Opaque};
 ///             done <- Completion::new(),
 ///         }), GFP_KERNEL)?;
 ///
-///         let _ = workqueue::system().enqueue(this.clone());
+///         let _ = workqueue::system_dfl().enqueue(this.clone());
 ///
 ///         Ok(this)
 ///     }
@@ -94,6 +94,7 @@ impl Completion {
     ///
     /// This method wakes up all tasks waiting on this completion; after this operation the
     /// completion is permanently done, i.e. signals all current and future waiters.
+    #[inline]
     pub fn complete_all(&self) {
         // SAFETY: `self.as_raw()` is a pointer to a valid `struct completion`.
         unsafe { bindings::complete_all(self.as_raw()) };
@@ -105,6 +106,7 @@ impl Completion {
     /// timeout.
     ///
     /// See also [`Completion::complete_all`].
+    #[inline]
     pub fn wait_for_completion(&self) {
         // SAFETY: `self.as_raw()` is a pointer to a valid `struct completion`.
         unsafe { bindings::wait_for_completion(self.as_raw()) };

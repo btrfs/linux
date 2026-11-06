@@ -25,10 +25,12 @@ enum {
 	LINK_CAPA_40000FD,
 	LINK_CAPA_50000FD,
 	LINK_CAPA_56000FD,
+	LINK_CAPA_80000FD,
 	LINK_CAPA_100000FD,
 	LINK_CAPA_200000FD,
 	LINK_CAPA_400000FD,
 	LINK_CAPA_800000FD,
+	LINK_CAPA_1600000FD,
 
 	__LINK_CAPA_MAX,
 };
@@ -59,5 +61,12 @@ phy_caps_lookup_by_linkmode_rev(const unsigned long *linkmodes, bool fdx_only);
 const struct link_capabilities *
 phy_caps_lookup(int speed, unsigned int duplex, const unsigned long *supported,
 		bool exact);
+
+void phy_caps_medium_get_supported(unsigned long *supported,
+				   enum ethtool_link_medium medium,
+				   int lanes);
+u32 phy_caps_mediums_from_linkmodes(unsigned long *linkmodes);
+void phy_caps_linkmode_filter_ifaces(unsigned long *to, const unsigned long *from,
+				     const unsigned long *interfaces);
 
 #endif /* __PHY_CAPS_H */

@@ -1187,13 +1187,12 @@ static bool intel_tv_vert_scaling(const struct drm_display_mode *tv_mode,
 }
 
 static int
-intel_tv_compute_config(struct intel_encoder *encoder,
+intel_tv_compute_config(struct intel_atomic_state *state,
+			struct intel_encoder *encoder,
 			struct intel_crtc_state *pipe_config,
 			struct drm_connector_state *conn_state)
 {
 	struct intel_display *display = to_intel_display(encoder);
-	struct intel_atomic_state *state =
-		to_intel_atomic_state(pipe_config->uapi.state);
 	struct intel_crtc *crtc = to_intel_crtc(pipe_config->uapi.crtc);
 	struct intel_tv_connector_state *tv_conn_state =
 		to_intel_tv_connector_state(conn_state);
@@ -1724,7 +1723,7 @@ intel_tv_detect(struct drm_connector *connector,
 		return connector->status;
 
 	if (force) {
-		struct drm_atomic_state *state;
+		struct drm_atomic_commit *state;
 
 		state = intel_load_detect_get_pipe(connector, ctx);
 		if (IS_ERR(state))
@@ -1847,7 +1846,7 @@ static const struct drm_connector_funcs intel_tv_connector_funcs = {
 };
 
 static int intel_tv_atomic_check(struct drm_connector *connector,
-				 struct drm_atomic_state *state)
+				 struct drm_atomic_commit *state)
 {
 	struct drm_connector_state *new_state;
 	struct drm_crtc_state *new_crtc_state;
@@ -1966,7 +1965,7 @@ intel_tv_init(struct intel_display *display)
 	    (tv_dac_off & TVDAC_STATE_CHG_EN) != 0)
 		return;
 
-	intel_tv = kzalloc(sizeof(*intel_tv), GFP_KERNEL);
+	intel_tv = kzalloc_obj(*intel_tv);
 	if (!intel_tv) {
 		return;
 	}

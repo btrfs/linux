@@ -57,8 +57,8 @@ struct irdma_alloc_ucontext_resp {
 	__u8 rsvd2;
 	__aligned_u64 comp_mask;
 	__u16 min_hw_wq_size;
+	__u8 revd3[2];
 	__u32 max_hw_srq_quanta;
-	__u8 rsvd3[2];
 };
 
 struct irdma_alloc_pd_resp {
@@ -88,6 +88,7 @@ struct irdma_create_srq_resp {
 struct irdma_create_qp_req {
 	__aligned_u64 user_wqe_bufs;
 	__aligned_u64 user_compl_ctx;
+	__aligned_u64 legacy_dontuse[2];
 };
 
 struct irdma_mem_reg_req {

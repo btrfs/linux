@@ -13,6 +13,8 @@
 /*
  * Characters to print to indicate error conditions or uncommon filesystem state.
  * RO is not an error.
+ * Don't use 'E' because that's used to signal that there's an error stored in
+ * fs_info->fs_error (see btrfs_state_to_string() below).
  */
 static const char fs_state_chars[] = {
 	[BTRFS_FS_STATE_REMOUNTING]		= 'M',
@@ -24,36 +26,37 @@ static const char fs_state_chars[] = {
 	[BTRFS_FS_STATE_NO_DATA_CSUMS]		= 'C',
 	[BTRFS_FS_STATE_SKIP_META_CSUMS]	= 'S',
 	[BTRFS_FS_STATE_LOG_CLEANUP_ERROR]	= 'L',
+	[BTRFS_FS_STATE_NO_DELAYED_IPUT]	= 'I',
+	[BTRFS_FS_STATE_EMERGENCY_SHUTDOWN]	= 'H',
 };
 
 static void btrfs_state_to_string(const struct btrfs_fs_info *info, char *buf)
 {
 	unsigned int bit;
-	bool states_printed = false;
 	unsigned long fs_state = READ_ONCE(info->fs_state);
 	char *curr = buf;
+
+	if (likely(BTRFS_FS_ERROR(info) == 0 && fs_state == 0)) {
+		*curr = 0;
+		return;
+	}
 
 	memcpy(curr, STATE_STRING_PREFACE, sizeof(STATE_STRING_PREFACE));
 	curr += sizeof(STATE_STRING_PREFACE) - 1;
 
-	if (BTRFS_FS_ERROR(info)) {
+	if (BTRFS_FS_ERROR(info))
 		*curr++ = 'E';
-		states_printed = true;
-	}
 
-	for_each_set_bit(bit, &fs_state, sizeof(fs_state)) {
-		WARN_ON_ONCE(bit >= BTRFS_FS_STATE_COUNT);
-		if ((bit < BTRFS_FS_STATE_COUNT) && fs_state_chars[bit]) {
+	for_each_set_bit(bit, &fs_state, BTRFS_FS_STATE_COUNT) {
+		if (fs_state_chars[bit])
 			*curr++ = fs_state_chars[bit];
-			states_printed = true;
-		}
 	}
 
-	/* If no states were printed, reset the buffer */
-	if (!states_printed)
+	/* If nothing printed, ensure we return an empty string. */
+	if (curr == (buf + sizeof(STATE_STRING_PREFACE) - 1))
 		curr = buf;
 
-	*curr++ = 0;
+	*curr = 0;
 }
 #endif
 
@@ -210,33 +213,19 @@ static struct ratelimit_state printk_limits[] = {
 	RATELIMIT_STATE_INIT(printk_limits[7], DEFAULT_RATELIMIT_INTERVAL, 100),
 };
 
-void __cold _btrfs_printk(const struct btrfs_fs_info *fs_info, const char *fmt, ...)
+__printf(3, 4) __cold
+void _btrfs_printk(const struct btrfs_fs_info *fs_info, unsigned int level, const char *fmt, ...)
 {
-	char lvl[PRINTK_MAX_SINGLE_HEADER_LEN + 1] = "\0";
 	struct va_format vaf;
 	va_list args;
-	int kern_level;
-	const char *type = logtypes[4];
-	struct ratelimit_state *ratelimit = &printk_limits[4];
+	const char *type = logtypes[level];
+	struct ratelimit_state *ratelimit = &printk_limits[level];
 
 #ifdef CONFIG_PRINTK_INDEX
 	printk_index_subsys_emit("%sBTRFS %s (device %s): ", NULL, fmt);
 #endif
 
 	va_start(args, fmt);
-
-	while ((kern_level = printk_get_level(fmt)) != 0) {
-		size_t size = printk_skip_level(fmt) - fmt;
-
-		if (kern_level >= '0' && kern_level <= '7') {
-			memcpy(lvl, fmt,  size);
-			lvl[size] = '\0';
-			type = logtypes[kern_level - '0'];
-			ratelimit = &printk_limits[kern_level - '0'];
-		}
-		fmt += size;
-	}
-
 	vaf.fmt = fmt;
 	vaf.va = &args;
 
@@ -246,10 +235,10 @@ void __cold _btrfs_printk(const struct btrfs_fs_info *fs_info, const char *fmt, 
 			char statestr[STATE_STRING_BUF_LEN];
 
 			btrfs_state_to_string(fs_info, statestr);
-			_printk("%sBTRFS %s (device %s%s): %pV\n", lvl, type,
+			_printk(KERN_SOH "%dBTRFS %s (device %s%s): %pV\n", level, type,
 				fs_info->sb->s_id, statestr, &vaf);
 		} else {
-			_printk("%sBTRFS %s: %pV\n", lvl, type, &vaf);
+			_printk(KERN_SOH "%dBTRFS %s: %pV\n", level, type, &vaf);
 		}
 	}
 
@@ -292,7 +281,6 @@ void __btrfs_panic(const struct btrfs_fs_info *fs_info, const char *function,
 		   unsigned int line, int error, const char *fmt, ...)
 {
 	char *s_id = "<unknown>";
-	const char *errstr;
 	struct va_format vaf = { .fmt = fmt };
 	va_list args;
 
@@ -302,13 +290,12 @@ void __btrfs_panic(const struct btrfs_fs_info *fs_info, const char *function,
 	va_start(args, fmt);
 	vaf.va = &args;
 
-	errstr = btrfs_decode_error(error);
 	if (fs_info && (btrfs_test_opt(fs_info, PANIC_ON_FATAL_ERROR)))
-		panic(KERN_CRIT "BTRFS panic (device %s) in %s:%d: %pV (errno=%d %s)\n",
-			s_id, function, line, &vaf, error, errstr);
+		panic(KERN_CRIT "BTRFS panic (device %s) in %s:%d: %pV (errno=%d %pe)\n",
+			s_id, function, line, &vaf, error, ERR_PTR(error));
 
-	btrfs_crit(fs_info, "panic in %s:%d: %pV (errno=%d %s)",
-		   function, line, &vaf, error, errstr);
+	btrfs_crit(fs_info, "panic in %s:%d: %pV (errno=%d %pe)",
+		   function, line, &vaf, error, ERR_PTR(error));
 	va_end(args);
 	/* Caller calls BUG() */
 }

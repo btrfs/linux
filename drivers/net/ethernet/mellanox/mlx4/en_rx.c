@@ -497,7 +497,7 @@ static int mlx4_en_complete_rx_desc(struct mlx4_en_priv *priv,
 fail:
 	while (nr > 0) {
 		nr--;
-		__skb_frag_unref(skb_shinfo(skb)->frags + nr, false);
+		skb_frag_unref(skb, nr);
 	}
 	return 0;
 }
@@ -1094,7 +1094,7 @@ static int mlx4_en_config_rss_qp(struct mlx4_en_priv *priv, int qpn,
 	struct mlx4_qp_context *context;
 	int err = 0;
 
-	context = kzalloc(sizeof(*context), GFP_KERNEL);
+	context = kzalloc_obj(*context);
 	if (!context)
 		return -ENOMEM;
 
@@ -1208,7 +1208,7 @@ int mlx4_en_config_rss_steer(struct mlx4_en_priv *priv)
 		return 0;
 	}
 
-	rss_map->indir_qp = kzalloc(sizeof(*rss_map->indir_qp), GFP_KERNEL);
+	rss_map->indir_qp = kzalloc_obj(*rss_map->indir_qp);
 	if (!rss_map->indir_qp) {
 		err = -ENOMEM;
 		goto rss_err;

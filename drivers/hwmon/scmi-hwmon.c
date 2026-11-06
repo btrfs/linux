@@ -240,6 +240,8 @@ static int scmi_hwmon_probe(struct scmi_device *sdev)
 	const struct hwmon_channel_info **ptr_scmi_ci;
 	const struct scmi_handle *handle = sdev->handle;
 	struct scmi_protocol_handle *ph;
+	u32 sensor_config = FIELD_PREP(SCMI_SENS_CFG_SENSOR_ENABLED_MASK,
+				       SCMI_SENS_CFG_SENSOR_ENABLE);
 
 	if (!handle)
 		return -ENODEV;
@@ -303,7 +305,8 @@ static int scmi_hwmon_probe(struct scmi_device *sdev)
 
 		scmi_sensors->info[type] =
 			devm_kcalloc(dev, nr_count[type],
-				     sizeof(*scmi_sensors->info), GFP_KERNEL);
+				     sizeof(*scmi_sensors->info[type]),
+				     GFP_KERNEL);
 		if (!scmi_sensors->info[type])
 			return -ENOMEM;
 	}
@@ -338,6 +341,13 @@ static int scmi_hwmon_probe(struct scmi_device *sdev)
 		sensor = *(scmi_sensors->info[hwmon_temp] + i);
 		if (!sensor)
 			continue;
+
+		ret = sensor_ops->config_set(ph, i, sensor_config);
+		if (ret) {
+			dev_err(dev, "Error enabling sensor %s. err=%d\n",
+				sensor->name, ret);
+			continue;
+		}
 
 		/*
 		 * Warn on any misconfiguration related to thermal zones but

@@ -884,10 +884,7 @@ static int ncsi_rsp_handler_gp(struct ncsi_request *nr)
 	spin_lock_irqsave(&nc->lock, flags);
 	bitmap = &ncmf->bitmap;
 	for (i = 0; i < rsp->mac_cnt; i++, pdata += 6) {
-		if (!(enable & (0x1 << i)))
-			clear_bit(i, bitmap);
-		else
-			set_bit(i, bitmap);
+		assign_bit(i, bitmap, enable & (0x1 << i));
 
 		memcpy(&ncmf->addrs[i * ETH_ALEN], pdata, ETH_ALEN);
 	}
@@ -899,10 +896,7 @@ static int ncsi_rsp_handler_gp(struct ncsi_request *nr)
 	bitmap = &ncvf->bitmap;
 	spin_lock_irqsave(&nc->lock, flags);
 	for (i = 0; i < rsp->vlan_cnt; i++, pdata += 2) {
-		if (!(enable & (0x1 << i)))
-			clear_bit(i, bitmap);
-		else
-			set_bit(i, bitmap);
+		assign_bit(i, bitmap, enable & (0x1 << i));
 
 		ncvf->vids[i] = ntohs(*(__be16 *)pdata);
 	}
@@ -1176,8 +1170,10 @@ int ncsi_rcv_rsp(struct sk_buff *skb, struct net_device *dev,
 	/* Find the NCSI device */
 	nd = ncsi_find_dev(orig_dev);
 	ndp = nd ? TO_NCSI_DEV_PRIV(nd) : NULL;
-	if (!ndp)
-		return -ENODEV;
+	if (!ndp) {
+		ret = -ENODEV;
+		goto err_free_skb;
+	}
 
 	/* Check if it is AEN packet */
 	hdr = (struct ncsi_pkt_hdr *)skb_network_header(skb);
@@ -1199,7 +1195,8 @@ int ncsi_rcv_rsp(struct sk_buff *skb, struct net_device *dev,
 	if (!nrh) {
 		netdev_err(nd->dev, "Received unrecognized packet (0x%x)\n",
 			   hdr->type);
-		return -ENOENT;
+		ret = -ENOENT;
+		goto err_free_skb;
 	}
 
 	/* Associate with the request */
@@ -1207,7 +1204,8 @@ int ncsi_rcv_rsp(struct sk_buff *skb, struct net_device *dev,
 	nr = &ndp->requests[hdr->id];
 	if (!nr->used) {
 		spin_unlock_irqrestore(&ndp->lock, flags);
-		return -ENODEV;
+		ret = -ENODEV;
+		goto err_free_skb;
 	}
 
 	nr->rsp = skb;
@@ -1260,5 +1258,9 @@ out_netlink:
 
 out:
 	ncsi_free_request(nr);
+	return ret;
+
+err_free_skb:
+	kfree_skb(skb);
 	return ret;
 }

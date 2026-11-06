@@ -24,13 +24,12 @@ static struct cgroup_namespace *alloc_cgroup_ns(void)
 	struct cgroup_namespace *new_ns __free(kfree) = NULL;
 	int ret;
 
-	new_ns = kzalloc(sizeof(struct cgroup_namespace), GFP_KERNEL_ACCOUNT);
+	new_ns = kzalloc_obj(struct cgroup_namespace, GFP_KERNEL_ACCOUNT);
 	if (!new_ns)
 		return ERR_PTR(-ENOMEM);
 	ret = ns_common_init(new_ns);
 	if (ret)
 		return ERR_PTR(ret);
-	ns_tree_add(new_ns);
 	return no_free_ptr(new_ns);
 }
 
@@ -53,8 +52,6 @@ struct cgroup_namespace *copy_cgroup_ns(u64 flags,
 	struct cgroup_namespace *new_ns;
 	struct ucounts *ucounts;
 	struct css_set *cset;
-
-	BUG_ON(!old_ns);
 
 	if (!(flags & CLONE_NEWCGROUP)) {
 		get_cgroup_ns(old_ns);
@@ -86,6 +83,7 @@ struct cgroup_namespace *copy_cgroup_ns(u64 flags,
 	new_ns->ucounts = ucounts;
 	new_ns->root_cset = cset;
 
+	ns_tree_add(new_ns);
 	return new_ns;
 }
 

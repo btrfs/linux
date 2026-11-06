@@ -70,12 +70,22 @@ static const struct hda_dai_widget_dma_ops *
 hda_dai_get_ops(struct snd_pcm_substream *substream, struct snd_soc_dai *cpu_dai)
 {
 	struct snd_soc_dapm_widget *w = snd_soc_dai_get_widget(cpu_dai, substream->stream);
-	struct snd_sof_widget *swidget = w->dobj.private;
+	struct snd_sof_widget *swidget;
 	struct snd_sof_dev *sdev;
 	struct snd_sof_dai *sdai;
 
-	sdev = widget_to_sdev(w);
+	/*
+	 * this is unlikely if the topology and the machine driver DAI links match.
+	 * But if there's a missing DAI link in topology, this will prevent a NULL pointer
+	 * dereference later on.
+	 */
+	if (!w) {
+		dev_err(cpu_dai->dev, "%s: widget is NULL\n", __func__);
+		return NULL;
+	}
 
+	sdev = widget_to_sdev(w);
+	swidget = w->dobj.private;
 	if (!swidget) {
 		dev_err(sdev->dev, "%s: swidget is NULL\n", __func__);
 		return NULL;
@@ -178,7 +188,7 @@ static int hda_link_dma_hw_params(struct snd_pcm_substream *substream,
 
 	if (!hext_stream) {
 		if (ops->assign_hext_stream)
-			hext_stream = ops->assign_hext_stream(sdev, cpu_dai, substream);
+			hext_stream = ops->assign_hext_stream(sdev, cpu_dai, substream, hlink);
 	}
 
 	if (!hext_stream)
@@ -750,8 +760,20 @@ void hda_set_dai_drv_ops(struct snd_sof_dev *sdev, struct snd_sof_dsp_ops *ops)
 
 	if (sdev->pdata->ipc_type == SOF_IPC_TYPE_4 && !hda_use_tplg_nhlt) {
 		struct sof_ipc4_fw_data *ipc4_data = sdev->private;
+		struct snd_ipc4_nhlt *entry;
 
-		ipc4_data->nhlt = intel_nhlt_init(sdev->dev);
+		entry = devm_kzalloc(sdev->dev, sizeof(*entry), GFP_KERNEL);
+		if (!entry)
+			return;
+
+		entry->nhlt = intel_nhlt_init(sdev->dev);
+		if (!entry->nhlt) {
+			devm_kfree(sdev->dev, entry);
+			return;
+		}
+
+		entry->from_acpi = true;
+		list_add(&entry->list, &ipc4_data->nhlt_list);
 	}
 }
 EXPORT_SYMBOL_NS(hda_set_dai_drv_ops, "SND_SOC_SOF_INTEL_HDA_COMMON");
@@ -760,9 +782,17 @@ void hda_ops_free(struct snd_sof_dev *sdev)
 {
 	if (sdev->pdata->ipc_type == SOF_IPC_TYPE_4) {
 		struct sof_ipc4_fw_data *ipc4_data = sdev->private;
+		struct snd_ipc4_nhlt *entry;
+		struct snd_ipc4_nhlt *tmp;
 
-		if (!hda_use_tplg_nhlt)
-			intel_nhlt_free(ipc4_data->nhlt);
+		if (!hda_use_tplg_nhlt) {
+			list_for_each_entry_safe(entry, tmp, &ipc4_data->nhlt_list, list) {
+				if (entry->from_acpi && entry->nhlt)
+					intel_nhlt_free(entry->nhlt);
+
+				list_del(&entry->list);
+			}
+		}
 
 		kfree(sdev->private);
 		sdev->private = NULL;
@@ -854,6 +884,14 @@ struct snd_soc_dai_driver skl_dai[] = {
 	.capture = {
 		.channels_min = 1,
 		.channels_max = 4,
+	},
+},
+{
+	/* Virtual CPU DAI for Echo reference */
+	.name = "Loopback Virtual Pin",
+	.capture = {
+		.channels_min = 1,
+		.channels_max = 2,
 	},
 },
 #if IS_ENABLED(CONFIG_SND_SOC_SOF_HDA_AUDIO_CODEC)

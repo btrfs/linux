@@ -206,12 +206,10 @@ static int int0002_probe(struct platform_device *pdev)
 	 * FIXME: augment this if we managed to pull handling of shared
 	 * IRQs into gpiolib.
 	 */
-	ret = devm_request_irq(dev, irq, int0002_irq,
-			       IRQF_ONESHOT | IRQF_SHARED, "INT0002", chip);
-	if (ret) {
-		dev_err(dev, "Error requesting IRQ %d: %d\n", irq, ret);
+	ret = devm_request_irq(dev, irq, int0002_irq, IRQF_SHARED, "INT0002",
+			       chip);
+	if (ret)
 		return ret;
-	}
 
 	girq = &chip->irq;
 	gpio_irq_chip_set_chip(girq, &int0002_irqchip);

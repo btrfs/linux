@@ -1,9 +1,11 @@
-/* SPDX-License-Identifier: ISC */
+/* SPDX-License-Identifier: BSD-3-Clause-Clear */
 /*
  * Copyright (C) 2016 Felix Fietkau <nbd@nbd.name>
  */
 #ifndef __MT76_DMA_H
 #define __MT76_DMA_H
+
+#include <linux/regmap.h>
 
 #define DMA_DUMMY_DATA			((void *)~0)
 
@@ -11,7 +13,7 @@
 
 #define MT_DMA_CTL_SD_LEN1		GENMASK(13, 0)
 #define MT_DMA_CTL_LAST_SEC1		BIT(14)
-#define MT_DMA_CTL_BURST		BIT(15)
+#define MT_DMA_CTL_M_DONE		BIT(15)
 #define MT_DMA_CTL_SD_LEN0		GENMASK(29, 16)
 #define MT_DMA_CTL_LAST_SEC0		BIT(30)
 #define MT_DMA_CTL_DMA_DONE		BIT(31)
@@ -45,6 +47,75 @@
 #define MT_RX_INFO_LEN			4
 #define MT_FCE_INFO_LEN			4
 #define MT_RX_RXWI_LEN			32
+
+static inline bool
+mt76_dma_handle_read(struct mt76_queue *q, u32 offset, u32 *val)
+{
+#if IS_ENABLED(CONFIG_NET_MEDIATEK_SOC_WED)
+	if (q->flags & MT_QFLAG_WED) {
+		*val = mtk_wed_device_reg_read(q->wed, q->wed_regs + offset);
+
+		return true;
+	}
+#endif
+#if IS_ENABLED(CONFIG_MT76_NPU)
+	if (q->flags & MT_QFLAG_NPU) {
+		struct airoha_npu *npu;
+
+		*val = 0;
+		rcu_read_lock();
+		npu = rcu_dereference(q->dev->mmio.npu);
+		if (npu)
+			regmap_read(npu->regmap, q->wed_regs + offset, val);
+		rcu_read_unlock();
+
+		return true;
+	}
+#endif
+
+	return false;
+}
+
+static inline bool
+mt76_dma_handle_write(struct mt76_queue *q, u32 offset, u32 val)
+{
+#if IS_ENABLED(CONFIG_NET_MEDIATEK_SOC_WED)
+	if (q->flags & MT_QFLAG_WED) {
+		mtk_wed_device_reg_write(q->wed, q->wed_regs + offset, val);
+
+		return true;
+	}
+#endif
+#if IS_ENABLED(CONFIG_MT76_NPU)
+	if (q->flags & MT_QFLAG_NPU) {
+		struct airoha_npu *npu;
+
+		rcu_read_lock();
+		npu = rcu_dereference(q->dev->mmio.npu);
+		if (npu)
+			regmap_write(npu->regmap, q->wed_regs + offset, val);
+		rcu_read_unlock();
+
+		return true;
+	}
+#endif
+
+	return false;
+}
+
+#define Q_READ(_q, _field) ({						\
+	u32 _offset = offsetof(struct mt76_queue_regs, _field);		\
+	u32 _val;							\
+	if (!mt76_dma_handle_read(_q, _offset, &_val))			\
+		_val = readl(&(_q)->regs->_field);			\
+	_val;								\
+})
+
+#define Q_WRITE(_q, _field, _val)	do {				\
+	u32 _offset = offsetof(struct mt76_queue_regs, _field);		\
+	if (!mt76_dma_handle_write(_q, _offset, _val))			\
+		writel(_val, &(_q)->regs->_field);			\
+} while (0)
 
 struct mt76_desc {
 	__le32 buf0;
@@ -107,7 +178,9 @@ void mt76_dma_queue_reset(struct mt76_dev *dev, struct mt76_queue *q,
 static inline void
 mt76_dma_reset_tx_queue(struct mt76_dev *dev, struct mt76_queue *q)
 {
-	dev->queue_ops->reset_q(dev, q, true);
+	bool reset_idx = q && !mt76_queue_is_npu_tx(q);
+
+	dev->queue_ops->reset_q(dev, q, reset_idx);
 	if (mtk_wed_device_active(&dev->mmio.wed))
 		mt76_wed_dma_setup(dev, q, true);
 }

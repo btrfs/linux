@@ -198,20 +198,25 @@ int hda_dsp_stream_spib_config(struct snd_sof_dev *sdev,
 
 	mask = (1 << hstream->index);
 
+	/* Reset the spib_addr before disabling SPIB */
+	if (!enable)
+		sof_io_write(sdev, hstream->spib_addr, 0);
+
 	/* enable/disable SPIB for the stream */
 	snd_sof_dsp_update_bits(sdev, HDA_DSP_SPIB_BAR,
 				SOF_HDA_ADSP_REG_CL_SPBFIFO_SPBFCCTL, mask,
 				enable << hstream->index);
 
 	/* set the SPIB value */
-	sof_io_write(sdev, hstream->spib_addr, size);
+	if (enable)
+		sof_io_write(sdev, hstream->spib_addr, size);
 
 	return 0;
 }
 
 /* get next unused stream */
-struct hdac_ext_stream *
-hda_dsp_stream_get(struct snd_sof_dev *sdev, int direction, u32 flags)
+static struct hdac_ext_stream *
+_hda_dsp_stream_get(struct snd_sof_dev *sdev, int direction, u32 flags, bool pair)
 {
 	const struct sof_intel_dsp_desc *chip_info =  get_chip_info(sdev->pdata);
 	struct sof_intel_hda_dev *hda = sdev->pdata->hw_pdata;
@@ -233,7 +238,14 @@ hda_dsp_stream_get(struct snd_sof_dev *sdev, int direction, u32 flags)
 			if (hda_stream->host_reserved)
 				continue;
 
+			if (pair && hext_stream->link_locked)
+				continue;
+
 			s->opened = true;
+
+			if (pair)
+				hext_stream->link_locked = true;
+
 			break;
 		}
 	}
@@ -264,14 +276,26 @@ hda_dsp_stream_get(struct snd_sof_dev *sdev, int direction, u32 flags)
 	return hext_stream;
 }
 
+struct hdac_ext_stream *
+hda_dsp_stream_get(struct snd_sof_dev *sdev, int direction, u32 flags)
+{
+	return _hda_dsp_stream_get(sdev, direction, flags, false);
+}
+
+struct hdac_ext_stream *
+hda_dsp_stream_pair_get(struct snd_sof_dev *sdev, int direction, u32 flags)
+{
+	return _hda_dsp_stream_get(sdev, direction, flags, true);
+}
+
 /* free a stream */
-int hda_dsp_stream_put(struct snd_sof_dev *sdev, int direction, int stream_tag)
+static int _hda_dsp_stream_put(struct snd_sof_dev *sdev, int direction, int stream_tag, bool pair)
 {
 	const struct sof_intel_dsp_desc *chip_info =  get_chip_info(sdev->pdata);
 	struct sof_intel_hda_dev *hda = sdev->pdata->hw_pdata;
+	struct hdac_ext_stream *hext_stream_match = NULL;
 	struct hdac_bus *bus = sof_to_bus(sdev);
-	struct sof_intel_hda_stream *hda_stream;
-	struct hdac_ext_stream *hext_stream;
+	struct hdac_ext_stream *link_stream;
 	struct hdac_stream *s;
 	bool dmi_l1_enable = true;
 	bool found = false;
@@ -283,6 +307,9 @@ int hda_dsp_stream_put(struct snd_sof_dev *sdev, int direction, int stream_tag)
 	 * that are DMI L1 incompatible.
 	 */
 	list_for_each_entry(s, &bus->stream_list, list) {
+		struct sof_intel_hda_stream *hda_stream;
+		struct hdac_ext_stream *hext_stream;
+
 		hext_stream = stream_to_hdac_ext_stream(s);
 		hda_stream = container_of(hext_stream, struct sof_intel_hda_stream, hext_stream);
 
@@ -290,10 +317,28 @@ int hda_dsp_stream_put(struct snd_sof_dev *sdev, int direction, int stream_tag)
 			continue;
 
 		if (s->direction == direction && s->stream_tag == stream_tag) {
+			hext_stream_match = hext_stream;
 			s->opened = false;
 			found = true;
+			s->curr_pos = 0;
+			if (pair)
+				link_stream = hext_stream;
 		} else if (!(hda_stream->flags & SOF_HDA_STREAM_DMI_L1_COMPATIBLE)) {
 			dmi_l1_enable = false;
+		}
+	}
+
+	if (!sdev->dspless_mode_selected && !pair && hext_stream_match) {
+		/*
+		 * Couple host and link DMA if link DMA is unused
+		 * In case of channel pair the snd_hdac_ext_stream_release() will
+		 * take care of coupling te HDA channel.
+		 */
+		if (!hext_stream_match->link_locked) {
+			u32 mask = BIT(hext_stream_match->hstream.index);
+
+			snd_sof_dsp_update_bits(sdev, HDA_DSP_PP_BAR,
+						SOF_HDA_REG_PP_PPCTL, mask, 0);
 		}
 	}
 
@@ -312,7 +357,20 @@ int hda_dsp_stream_put(struct snd_sof_dev *sdev, int direction, int stream_tag)
 		return -ENODEV;
 	}
 
+	if (pair)
+		snd_hdac_ext_stream_release(link_stream, HDAC_EXT_STREAM_TYPE_LINK);
+
 	return 0;
+}
+
+int hda_dsp_stream_put(struct snd_sof_dev *sdev, int direction, int stream_tag)
+{
+	return _hda_dsp_stream_put(sdev, direction, stream_tag, false);
+}
+
+int hda_dsp_stream_pair_put(struct snd_sof_dev *sdev, int direction, int stream_tag)
+{
+	return _hda_dsp_stream_put(sdev, direction, stream_tag, true);
 }
 
 static int hda_dsp_stream_reset(struct snd_sof_dev *sdev, struct hdac_stream *hstream)
@@ -445,15 +503,19 @@ int hda_dsp_iccmax_stream_hw_params(struct snd_sof_dev *sdev, struct hdac_ext_st
 				    struct snd_dma_buffer *dmab,
 				    struct snd_pcm_hw_params *params)
 {
-	struct hdac_stream *hstream = &hext_stream->hstream;
-	int sd_offset = SOF_STREAM_SD_OFFSET(hstream);
+	struct hdac_stream *hstream;
+	int sd_offset;
 	int ret;
-	u32 mask = 0x1 << hstream->index;
+	u32 mask;
 
 	if (!hext_stream) {
 		dev_err(sdev->dev, "error: no stream available\n");
 		return -ENODEV;
 	}
+
+	hstream = &hext_stream->hstream;
+	sd_offset = SOF_STREAM_SD_OFFSET(hstream);
+	mask = 0x1 << hstream->index;
 
 	if (!dmab) {
 		dev_err(sdev->dev, "error: no dma buffer allocated!\n");
@@ -568,6 +630,9 @@ int hda_dsp_stream_hw_params(struct snd_sof_dev *sdev,
 		kfree(stream_name);
 		return ret;
 	}
+
+	/* Host DMA is not running */
+	hstream->running = false;
 
 	snd_sof_dsp_update_bits(sdev, HDA_DSP_HDA_BAR,
 				sd_offset + SOF_HDA_ADSP_REG_SD_STS,
@@ -707,13 +772,12 @@ int hda_dsp_stream_hw_params(struct snd_sof_dev *sdev,
 	return ret;
 }
 
-int hda_dsp_stream_hw_free(struct snd_sof_dev *sdev,
-			   struct snd_pcm_substream *substream)
+static int _hda_dsp_stream_hw_free(struct snd_sof_dev *sdev,
+				   struct hdac_stream *hstream)
 {
-	struct hdac_stream *hstream = substream->runtime->private_data;
 	struct hdac_ext_stream *hext_stream = container_of(hstream,
-							 struct hdac_ext_stream,
-							 hstream);
+							   struct hdac_ext_stream,
+							   hstream);
 	int ret;
 
 	ret = hda_dsp_stream_reset(sdev, hstream);
@@ -724,12 +788,12 @@ int hda_dsp_stream_hw_free(struct snd_sof_dev *sdev,
 		struct hdac_bus *bus = sof_to_bus(sdev);
 		u32 mask = BIT(hstream->index);
 
-		spin_lock_irq(&bus->reg_lock);
+		guard(spinlock_irq)(&bus->reg_lock);
+
 		/* couple host and link DMA if link DMA channel is idle */
 		if (!hext_stream->link_locked)
 			snd_sof_dsp_update_bits(sdev, HDA_DSP_PP_BAR,
 						SOF_HDA_REG_PP_PPCTL, mask, 0);
-		spin_unlock_irq(&bus->reg_lock);
 	}
 
 	hda_dsp_stream_spib_config(sdev, hext_stream, HDA_DSP_SPIB_DISABLE, 0);
@@ -738,7 +802,20 @@ int hda_dsp_stream_hw_free(struct snd_sof_dev *sdev,
 
 	return 0;
 }
+
+int hda_dsp_stream_hw_free(struct snd_sof_dev *sdev,
+			   struct snd_pcm_substream *substream)
+{
+	return _hda_dsp_stream_hw_free(sdev, substream->runtime->private_data);
+}
 EXPORT_SYMBOL_NS(hda_dsp_stream_hw_free, "SND_SOC_SOF_INTEL_HDA_COMMON");
+
+int hda_dsp_stream_compr_hw_free(struct snd_sof_dev *sdev,
+				 struct snd_compr_stream *cstream)
+{
+	return _hda_dsp_stream_hw_free(sdev, cstream->runtime->private_data);
+}
+EXPORT_SYMBOL_NS(hda_dsp_stream_compr_hw_free, "SND_SOC_SOF_INTEL_HDA_COMMON");
 
 bool hda_dsp_check_stream_irq(struct snd_sof_dev *sdev)
 {
@@ -747,7 +824,7 @@ bool hda_dsp_check_stream_irq(struct snd_sof_dev *sdev)
 	u32 status;
 
 	/* The function can be called at irq thread, so use spin_lock_irq */
-	spin_lock_irq(&bus->reg_lock);
+	guard(spinlock_irq)(&bus->reg_lock);
 
 	status = snd_sof_dsp_read(sdev, HDA_DSP_HDA_BAR, SOF_HDA_INTSTS);
 
@@ -756,8 +833,6 @@ bool hda_dsp_check_stream_irq(struct snd_sof_dev *sdev)
 	/* if Register inaccessible, ignore it.*/
 	if (status != 0xffffffff)
 		ret = true;
-
-	spin_unlock_irq(&bus->reg_lock);
 
 	return ret;
 }
@@ -842,7 +917,7 @@ irqreturn_t hda_dsp_stream_threaded_handler(int irq, void *context)
 	 * unsolicited responses from the codec
 	 */
 	for (i = 0, active = true; i < 10 && active; i++) {
-		spin_lock_irq(&bus->reg_lock);
+		guard(spinlock_irq)(&bus->reg_lock);
 
 		status = snd_sof_dsp_read(sdev, HDA_DSP_HDA_BAR, SOF_HDA_INTSTS);
 
@@ -853,7 +928,6 @@ irqreturn_t hda_dsp_stream_threaded_handler(int irq, void *context)
 		if (status & AZX_INT_CTRL_EN) {
 			active |= hda_codec_check_rirb_status(sdev);
 		}
-		spin_unlock_irq(&bus->reg_lock);
 	}
 
 	return IRQ_HANDLED;
@@ -1117,19 +1191,9 @@ EXPORT_SYMBOL_NS(hda_dsp_stream_get_position, "SND_SOC_SOF_INTEL_HDA_COMMON");
 
 #define merge_u64(u32_u, u32_l) (((u64)(u32_u) << 32) | (u32_l))
 
-/**
- * hda_dsp_get_stream_llp - Retrieve the LLP (Linear Link Position) of the stream
- * @sdev: SOF device
- * @component: ASoC component
- * @substream: PCM substream
- *
- * Returns the raw Linear Link Position value
- */
-u64 hda_dsp_get_stream_llp(struct snd_sof_dev *sdev,
-			   struct snd_soc_component *component,
-			   struct snd_pcm_substream *substream)
+static u64 hda_dsp_get_llp(struct snd_sof_dev *sdev,
+			   struct snd_soc_pcm_runtime *rtd, int dir)
 {
-	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_pcm_runtime *be_rtd = NULL;
 	struct hdac_ext_stream *hext_stream;
 	struct snd_soc_dai *cpu_dai;
@@ -1140,7 +1204,7 @@ u64 hda_dsp_get_stream_llp(struct snd_sof_dev *sdev,
 	 * The LLP needs to be read from the Link DMA used for this FE as it is
 	 * allowed to use any combination of Link and Host channels
 	 */
-	for_each_dpcm_be(rtd, substream->stream, dpcm) {
+	for_each_dpcm_be(rtd, dir, dpcm) {
 		if (dpcm->fe != rtd)
 			continue;
 
@@ -1154,7 +1218,7 @@ u64 hda_dsp_get_stream_llp(struct snd_sof_dev *sdev,
 	if (!cpu_dai)
 		return 0;
 
-	hext_stream = snd_soc_dai_get_dma_data(cpu_dai, substream);
+	hext_stream = snd_soc_dai_dma_data_get(cpu_dai, dir);
 	if (!hext_stream)
 		return 0;
 
@@ -1178,7 +1242,36 @@ u64 hda_dsp_get_stream_llp(struct snd_sof_dev *sdev,
 
 	return merge_u64(llp_u, llp_l);
 }
+
+/**
+ * hda_dsp_get_stream_llp - Retrieve the LLP (Linear Link Position) of the stream
+ * @sdev: SOF device
+ * @component: ASoC component
+ * @substream: PCM substream
+ *
+ * Returns the raw Linear Link Position value
+ */
+u64 hda_dsp_get_stream_llp(struct snd_sof_dev *sdev,
+			   struct snd_soc_component *component,
+			   struct snd_pcm_substream *substream)
+{
+	return hda_dsp_get_llp(sdev, snd_soc_substream_to_rtd(substream),
+			       substream->stream);
+}
 EXPORT_SYMBOL_NS(hda_dsp_get_stream_llp, "SND_SOC_SOF_INTEL_HDA_COMMON");
+
+/**
+ * hda_dsp_compr_get_stream_llp - Retrieve the LLP (Linear Link Position) of the stream
+ * @sdev: SOF device
+ * @cstream: Compress stream
+ *
+ * Returns the raw Linear Link Position value
+ */
+u64 hda_dsp_compr_get_stream_llp(struct snd_sof_dev *sdev, struct snd_compr_stream *cstream)
+{
+	return hda_dsp_get_llp(sdev, cstream->private_data, cstream->direction);
+}
+EXPORT_SYMBOL_NS(hda_dsp_compr_get_stream_llp, "SND_SOC_SOF_INTEL_HDA_COMMON");
 
 /**
  * hda_dsp_get_stream_ldp - Retrieve the LDP (Linear DMA Position) of the stream
@@ -1211,3 +1304,121 @@ u64 hda_dsp_get_stream_ldp(struct snd_sof_dev *sdev,
 	return ((u64)ldp_u << 32) | ldp_l;
 }
 EXPORT_SYMBOL_NS(hda_dsp_get_stream_ldp, "SND_SOC_SOF_INTEL_HDA_COMMON");
+
+struct hdac_ext_stream *
+hda_data_stream_prepare(struct device *dev, unsigned int format, unsigned int size,
+			struct snd_dma_buffer *dmab, bool persistent_buffer, int direction,
+			bool is_iccmax, bool pair)
+{
+	struct snd_sof_dev *sdev = dev_get_drvdata(dev);
+	struct hdac_ext_stream *hext_stream;
+	struct hdac_stream *hstream;
+	int ret;
+
+	if (pair)
+		hext_stream = hda_dsp_stream_pair_get(sdev, direction, 0);
+	else
+		hext_stream = hda_dsp_stream_get(sdev, direction, 0);
+
+	if (!hext_stream) {
+		dev_err(sdev->dev, "%s: no stream available\n", __func__);
+		return ERR_PTR(-ENODEV);
+	}
+	hstream = &hext_stream->hstream;
+	hstream->substream = NULL;
+
+	/*
+	 * Allocate DMA buffer if it is temporary or if the buffer is intended
+	 * to be persistent but not yet allocated.
+	 * We cannot rely solely on !dmab->area as caller might use a struct on
+	 * stack (when it is temporary) without clearing it to 0.
+	 */
+	if (!persistent_buffer || !dmab->area) {
+		ret = snd_dma_alloc_pages(SNDRV_DMA_TYPE_DEV_SG, dev, size, dmab);
+		if (ret < 0) {
+			dev_err(sdev->dev, "%s: memory alloc failed: %d\n",
+				__func__, ret);
+			goto out_put;
+		}
+	}
+
+	hstream->period_bytes = 0; /* initialize period_bytes */
+	hstream->format_val = format;
+	hstream->bufsize = size;
+
+	if (is_iccmax) {
+		ret = hda_dsp_iccmax_stream_hw_params(sdev, hext_stream, dmab, NULL);
+		if (ret < 0) {
+			dev_err(sdev->dev, "%s: iccmax stream prepare failed: %d\n",
+				__func__, ret);
+			goto out_free;
+		}
+	} else {
+		ret = hda_dsp_stream_hw_params(sdev, hext_stream, dmab, NULL);
+		if (ret < 0) {
+			dev_err(sdev->dev, "%s: hdac prepare failed: %d\n", __func__, ret);
+			goto out_free;
+		}
+		hda_dsp_stream_spib_config(sdev, hext_stream, HDA_DSP_SPIB_ENABLE, size);
+	}
+
+	return hext_stream;
+
+out_free:
+	snd_dma_free_pages(dmab);
+	dmab->area = NULL;
+	dmab->bytes = 0;
+	hstream->bufsize = 0;
+	hstream->format_val = 0;
+out_put:
+	if (pair)
+		hda_dsp_stream_pair_put(sdev, direction, hstream->stream_tag);
+	else
+		hda_dsp_stream_put(sdev, direction, hstream->stream_tag);
+	return ERR_PTR(ret);
+}
+EXPORT_SYMBOL_NS(hda_data_stream_prepare, "SND_SOC_SOF_INTEL_HDA_COMMON");
+
+int hda_data_stream_cleanup(struct device *dev, struct snd_dma_buffer *dmab,
+			    bool persistent_buffer, struct hdac_ext_stream *hext_stream,
+			    bool is_iccmax, bool pair)
+{
+	struct snd_sof_dev *sdev =  dev_get_drvdata(dev);
+	struct hdac_stream *hstream = hdac_stream(hext_stream);
+	int sd_offset = SOF_STREAM_SD_OFFSET(hstream);
+	int ret = 0;
+
+	if (!is_iccmax)
+		ret = hda_dsp_stream_spib_config(sdev, hext_stream, HDA_DSP_SPIB_DISABLE, 0);
+
+	if (hstream->direction == SNDRV_PCM_STREAM_CAPTURE)
+		snd_sof_dsp_update_bits(sdev, HDA_DSP_HDA_BAR, sd_offset,
+					SOF_HDA_SD_CTL_DMA_START, 0);
+
+	if (pair)
+		hda_dsp_stream_pair_put(sdev, hstream->direction, hstream->stream_tag);
+	else
+		hda_dsp_stream_put(sdev, hstream->direction, hstream->stream_tag);
+
+	hstream->running = 0;
+	hstream->substream = NULL;
+
+	/* reset BDL address */
+	snd_sof_dsp_write(sdev, HDA_DSP_HDA_BAR,
+			  sd_offset + SOF_HDA_ADSP_REG_SD_BDLPL, 0);
+	snd_sof_dsp_write(sdev, HDA_DSP_HDA_BAR,
+			  sd_offset + SOF_HDA_ADSP_REG_SD_BDLPU, 0);
+
+	snd_sof_dsp_write(sdev, HDA_DSP_HDA_BAR, sd_offset, 0);
+
+	if (!persistent_buffer) {
+		snd_dma_free_pages(dmab);
+		dmab->area = NULL;
+		dmab->bytes = 0;
+		hstream->bufsize = 0;
+		hstream->format_val = 0;
+	}
+
+	return ret;
+}
+EXPORT_SYMBOL_NS(hda_data_stream_cleanup, "SND_SOC_SOF_INTEL_HDA_COMMON");

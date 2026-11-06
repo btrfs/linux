@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2012-2014, 2018-2024 Intel Corporation
+ * Copyright (C) 2012-2014, 2018-2026 Intel Corporation
  * Copyright (C) 2013-2015 Intel Mobile Communications GmbH
  * Copyright (C) 2016-2017 Intel Deutschland GmbH
  */
@@ -129,7 +129,7 @@ struct iwl_scan_offload_profile {
 } __packed;
 
 /**
- * struct iwl_scan_offload_profile_cfg_data
+ * struct iwl_scan_offload_profile_cfg_data - scan offload profile configs
  * @blocklist_len:	length of blocklist
  * @num_profiles:	num of profiles in the list
  * @match_notify:	clients waiting for match found notification
@@ -159,7 +159,7 @@ struct iwl_scan_offload_profile_cfg_v1 {
 } __packed; /* SCAN_OFFLOAD_PROFILES_CFG_API_S_VER_1-2*/
 
 /**
- * struct iwl_scan_offload_profile_cfg
+ * struct iwl_scan_offload_profile_cfg - scan offload profile config
  * @profiles:	profiles to search for match
  * @data:	the rest of the data for profile_cfg
  */
@@ -507,7 +507,7 @@ enum iwl_uhb_chan_cfg_flags {
 	IWL_UHB_CHAN_CFG_FLAG_FORCE_PASSIVE         = BIT(26),
 };
 /**
- * struct iwl_scan_dwell
+ * struct iwl_scan_dwell - scan dwell configuration
  * @active:		default dwell time for active scan
  * @passive:		default dwell time for passive scan
  * @fragmented:		default dwell time for fragmented scan
@@ -728,7 +728,7 @@ enum iwl_umac_scan_general_params_flags2 {
 };
 
 /**
- * struct iwl_scan_channel_cfg_umac
+ * struct iwl_scan_channel_cfg_umac - scan channel config
  * @flags:		bitmap - 0-19:	directed scan to i'th ssid.
  * @channel_num:	channel number 1-13 etc.
  * @v1:			command version 1
@@ -774,7 +774,7 @@ struct  iwl_scan_channel_cfg_umac {
 } __packed;
 
 /**
- * struct iwl_scan_umac_schedule
+ * struct iwl_scan_umac_schedule - scan schedule parameters
  * @interval: interval in seconds between scan iterations
  * @iter_count: num of scan iterations for schedule plan, 0xff for infinite loop
  * @reserved: for alignment and future use
@@ -815,7 +815,7 @@ struct iwl_scan_req_umac_tail_v2 {
 } __packed;
 
 /**
- * struct iwl_scan_umac_chan_param
+ * struct iwl_scan_umac_chan_param - scan channel parameters
  * @flags: channel flags &enum iwl_scan_channel_flags
  * @count: num of channels in scan request
  * @reserved: for future use and alignment
@@ -827,33 +827,37 @@ struct iwl_scan_umac_chan_param {
 } __packed; /*SCAN_CHANNEL_PARAMS_API_S_VER_1 */
 
 /**
- * struct iwl_scan_req_umac
+ * struct iwl_scan_req_umac - scan request command
  * @flags: &enum iwl_umac_scan_flags
  * @uid: scan id, &enum iwl_umac_scan_uid_offsets
  * @ooc_priority: out of channel priority - &enum iwl_scan_priority
  * @general_flags: &enum iwl_umac_scan_general_flags
+ * @reserved: reserved
  * @scan_start_mac_id: report the scan start TSF time according to this mac TSF
- * @extended_dwell: dwell time for channels 1, 6 and 11
- * @active_dwell: dwell time for active scan per LMAC
- * @passive_dwell: dwell time for passive scan per LMAC
- * @fragmented_dwell: dwell time for fragmented passive scan
- * @adwell_default_n_aps: for adaptive dwell the default number of APs
+ * @v1: version 1 command data
+ * @v6: version 6 command data
+ * @v7: version 7 command data
+ * @v8: version 8 command data
+ * @v9: version 9 command data
+ * @v1.extended_dwell: dwell time for channels 1, 6 and 11
+ * @v1.active_dwell: dwell time for active scan per LMAC
+ * @v1.passive_dwell: dwell time for passive scan per LMAC
+ * @v1.fragmented_dwell: dwell time for fragmented passive scan
+ * @v7.adwell_default_n_aps: for adaptive dwell the default number of APs
  *	per channel
- * @adwell_default_n_aps_social: for adaptive dwell the default
+ * @v7.adwell_default_n_aps_social: for adaptive dwell the default
  *	number of APs per social (1,6,11) channel
- * @general_flags2: &enum iwl_umac_scan_general_flags2
- * @adwell_max_budget: for adaptive dwell the maximal budget of TU to be added
- *	to total scan time
- * @max_out_time: max out of serving channel time, per LMAC - for CDB there
- *	are 2 LMACs
- * @suspend_time: max suspend time, per LMAC - for CDB there are 2 LMACs
- * @scan_priority: scan internal prioritization &enum iwl_scan_priority
- * @num_of_fragments: Number of fragments needed for full coverage per band.
+ * @v8.general_flags2: &enum iwl_umac_scan_general_flags2
+ * @v7.adwell_max_budget: for adaptive dwell the maximal budget of TU to be
+ *	added to total scan time
+ * @v1.max_out_time: max out of serving channel time, per LMAC - for CDB
+ *	there are 2 LMACs
+ * @v1.suspend_time: max suspend time, per LMAC - for CDB there are 2 LMACs
+ * @v1.scan_priority: scan internal prioritization &enum iwl_scan_priority
+ * @v8.num_of_fragments: Number of fragments needed for full coverage per band.
  *	Relevant only for fragmented scan.
- * @channel: &struct iwl_scan_umac_chan_param
- * @reserved: for future use and alignment
- * @reserved3: for future use and alignment
- * @data: &struct iwl_scan_channel_cfg_umac and
+ * @v1.channel: &struct iwl_scan_umac_chan_param
+ * @v1.data: &struct iwl_scan_channel_cfg_umac and
  *	&struct iwl_scan_req_umac_tail
  */
 struct iwl_scan_req_umac {
@@ -939,7 +943,7 @@ struct iwl_scan_req_umac {
 #define IWL_SCAN_REQ_UMAC_SIZE_V1 36
 
 /**
- * struct iwl_scan_probe_params_v3
+ * struct iwl_scan_probe_params_v3 - scan probe parameters
  * @preq: scan probe request params
  * @ssid_num: number of valid SSIDs in direct scan array
  * @short_ssid_num: number of valid short SSIDs in short ssid array
@@ -961,7 +965,7 @@ struct iwl_scan_probe_params_v3 {
 } __packed; /* SCAN_PROBE_PARAMS_API_S_VER_3 */
 
 /**
- * struct iwl_scan_probe_params_v4
+ * struct iwl_scan_probe_params_v4 - scan probe parameters
  * @preq: scan probe request params
  * @short_ssid_num: number of valid short SSIDs in short ssid array
  * @bssid_num: number of valid bssid in bssids array
@@ -981,9 +985,12 @@ struct iwl_scan_probe_params_v4 {
 } __packed; /* SCAN_PROBE_PARAMS_API_S_VER_4 */
 
 #define SCAN_MAX_NUM_CHANS_V3 67
+#define SCAN_MAX_NUM_CHANS_V4 68
+
+#define SCAN_MAX_NUM_NOTIF_RESULTS 112
 
 /**
- * struct iwl_scan_channel_params_v4
+ * struct iwl_scan_channel_params_v4 - channel params
  * @flags: channel flags &enum iwl_scan_channel_flags
  * @count: num of channels in scan request
  * @num_of_aps_override: override the number of APs the FW uses to calculate
@@ -1006,7 +1013,7 @@ struct iwl_scan_channel_params_v4 {
 	       SCAN_CHANNEL_PARAMS_API_S_VER_5 */
 
 /**
- * struct iwl_scan_channel_params_v7
+ * struct iwl_scan_channel_params_v7 - channel params
  * @flags: channel flags &enum iwl_scan_channel_flags
  * @count: num of channels in scan request
  * @n_aps_override: override the number of APs the FW uses to calculate dwell
@@ -1024,7 +1031,25 @@ struct iwl_scan_channel_params_v7 {
 } __packed; /* SCAN_CHANNEL_PARAMS_API_S_VER_6 */
 
 /**
- * struct iwl_scan_general_params_v11
+ * struct iwl_scan_channel_params_v8 - channel params
+ * @flags: channel flags &enum iwl_scan_channel_flags
+ * @count: num of channels in scan request
+ * @n_aps_override: override the number of APs the FW uses to calculate dwell
+ *	time when adaptive dwell is used.
+ *	Channel k will use n_aps_override[i] when BIT(20 + i) is set in
+ *	channel_config[k].flags
+ * @channel_config: array of explicit channel configurations
+ *      for 2.4Ghz and 5.2Ghz bands
+ */
+struct iwl_scan_channel_params_v8 {
+	u8 flags;
+	u8 count;
+	u8 n_aps_override[2];
+	struct iwl_scan_channel_cfg_umac channel_config[SCAN_MAX_NUM_CHANS_V4];
+} __packed; /* SCAN_CHANNEL_PARAMS_API_S_VER_8 */
+
+/**
+ * struct iwl_scan_general_params_v11 - channel params
  * @flags: &enum iwl_umac_scan_general_flags_v2
  * @reserved: reserved for future
  * @scan_start_mac_or_link_id: report the scan start TSF time according to this
@@ -1066,7 +1091,7 @@ struct iwl_scan_general_params_v11 {
 } __packed; /* SCAN_GENERAL_PARAMS_API_S_VER_12, *_VER_11  and *_VER_10 */
 
 /**
- * struct iwl_scan_periodic_parms_v1
+ * struct iwl_scan_periodic_parms_v1 - periodicity parameters
  * @schedule: can scheduling parameter
  * @delay: initial delay of the periodic scan in seconds
  * @reserved: reserved for future
@@ -1078,7 +1103,7 @@ struct iwl_scan_periodic_parms_v1 {
 } __packed; /* SCAN_PERIODIC_PARAMS_API_S_VER_1 */
 
 /**
- * struct iwl_scan_req_params_v12
+ * struct iwl_scan_req_params_v12 - scan request parameters (v12)
  * @general_params: &struct iwl_scan_general_params_v11
  * @channel_params: &struct iwl_scan_channel_params_v4
  * @periodic_params: &struct iwl_scan_periodic_parms_v1
@@ -1106,7 +1131,21 @@ struct iwl_scan_req_params_v17 {
 } __packed; /* SCAN_REQUEST_PARAMS_API_S_VER_17 - 14 */
 
 /**
- * struct iwl_scan_req_umac_v12
+ * struct iwl_scan_req_params_v18 - scan request parameters (v18)
+ * @general_params: &struct iwl_scan_general_params_v11
+ * @channel_params: &struct iwl_scan_channel_params_v8
+ * @periodic_params: &struct iwl_scan_periodic_parms_v1
+ * @probe_params: &struct iwl_scan_probe_params_v4
+ */
+struct iwl_scan_req_params_v18 {
+	struct iwl_scan_general_params_v11 general_params;
+	struct iwl_scan_channel_params_v8 channel_params;
+	struct iwl_scan_periodic_parms_v1 periodic_params;
+	struct iwl_scan_probe_params_v4 probe_params;
+} __packed; /* SCAN_REQUEST_PARAMS_API_S_VER_18 */
+
+/**
+ * struct iwl_scan_req_umac_v12 - scan request command (v12)
  * @uid: scan id, &enum iwl_umac_scan_uid_offsets
  * @ooc_priority: out of channel priority - &enum iwl_scan_priority
  * @scan_params: scan parameters
@@ -1130,7 +1169,19 @@ struct iwl_scan_req_umac_v17 {
 } __packed; /* SCAN_REQUEST_CMD_UMAC_API_S_VER_17 - 14 */
 
 /**
- * struct iwl_umac_scan_abort
+ * struct iwl_scan_req_umac_v18 - scan request command (v18)
+ * @uid: scan id, &enum iwl_umac_scan_uid_offsets
+ * @ooc_priority: out of channel priority - &enum iwl_scan_priority
+ * @scan_params: scan parameters
+ */
+struct iwl_scan_req_umac_v18 {
+	__le32 uid;
+	__le32 ooc_priority;
+	struct iwl_scan_req_params_v18 scan_params;
+} __packed; /* SCAN_REQUEST_CMD_UMAC_API_S_VER_18 */
+
+/**
+ * struct iwl_umac_scan_abort - scan abort command
  * @uid: scan id, &enum iwl_umac_scan_uid_offsets
  * @flags: reserved
  */
@@ -1140,7 +1191,7 @@ struct iwl_umac_scan_abort {
 } __packed; /* SCAN_ABORT_CMD_UMAC_API_S_VER_1 */
 
 /**
- * enum iwl_umac_scan_abort_status
+ * enum iwl_umac_scan_abort_status - scan abort status
  *
  * @IWL_UMAC_SCAN_ABORT_STATUS_SUCCESS: scan was successfully aborted
  * @IWL_UMAC_SCAN_ABORT_STATUS_IN_PROGRESS: scan abort is in progress
@@ -1153,7 +1204,17 @@ enum iwl_umac_scan_abort_status {
 };
 
 /**
- * struct iwl_umac_scan_complete
+ * struct iwl_umac_scan_start - scan start notification
+ * @uid: scan id, &enum iwl_umac_scan_uid_offsets
+ * @reserved: for future use
+ */
+struct iwl_umac_scan_start {
+	__le32 uid;
+	__le32 reserved;
+} __packed; /* SCAN_START_UMAC_API_S_VER_1 */
+
+/**
+ * struct iwl_umac_scan_complete - scan complete notification
  * @uid: scan id, &enum iwl_umac_scan_uid_offsets
  * @last_schedule: last scheduling line
  * @last_iter: last scan iteration number
@@ -1173,7 +1234,8 @@ struct iwl_umac_scan_complete {
 } __packed; /* SCAN_COMPLETE_NTF_UMAC_API_S_VER_1 */
 
 #define SCAN_OFFLOAD_MATCHING_CHANNELS_LEN_V1 5
-#define SCAN_OFFLOAD_MATCHING_CHANNELS_LEN    7
+#define SCAN_OFFLOAD_MATCHING_CHANNELS_LEN_V2 7
+#define SCAN_OFFLOAD_MATCHING_CHANNELS_LEN    16
 
 /**
  * struct iwl_scan_offload_profile_match_v1 - match information
@@ -1220,10 +1282,30 @@ struct iwl_scan_offload_profiles_query_v1 {
 } __packed; /* SCAN_OFFLOAD_PROFILES_QUERY_RSP_S_VER_2 */
 
 /**
+ * struct iwl_scan_offload_profile_match_v2 - match information
+ * @bssid: matched bssid
+ * @reserved: reserved
+ * @channel: channel where the match occurred
+ * @energy: energy
+ * @matching_feature: feature matches
+ * @matching_channels: bitmap of channels that matched, referencing
+ *	the channels passed in the scan offload request.
+ */
+struct iwl_scan_offload_profile_match_v2 {
+	u8 bssid[ETH_ALEN];
+	__le16 reserved;
+	u8 channel;
+	u8 energy;
+	u8 matching_feature;
+	u8 matching_channels[SCAN_OFFLOAD_MATCHING_CHANNELS_LEN_V2];
+} __packed; /* SCAN_OFFLOAD_PROFILE_MATCH_RESULTS_S_VER_2 */
+
+/**
  * struct iwl_scan_offload_profile_match - match information
  * @bssid: matched bssid
  * @reserved: reserved
  * @channel: channel where the match occurred
+ * @band: band where the match occurred
  * @energy: energy
  * @matching_feature: feature matches
  * @matching_channels: bitmap of channels that matched, referencing
@@ -1233,10 +1315,11 @@ struct iwl_scan_offload_profile_match {
 	u8 bssid[ETH_ALEN];
 	__le16 reserved;
 	u8 channel;
+	u8 band;
 	u8 energy;
 	u8 matching_feature;
 	u8 matching_channels[SCAN_OFFLOAD_MATCHING_CHANNELS_LEN];
-} __packed; /* SCAN_OFFLOAD_PROFILE_MATCH_RESULTS_S_VER_2 */
+} __packed; /* SCAN_OFFLOAD_PROFILE_MATCH_RESULTS_S_VER_3 */
 
 /**
  * struct iwl_scan_offload_match_info - match results information
@@ -1260,13 +1343,14 @@ struct iwl_scan_offload_match_info {
 	u8 resume_while_scanning;
 	u8 self_recovery;
 	__le16 reserved;
-	struct iwl_scan_offload_profile_match matches[];
-} __packed; /* SCAN_OFFLOAD_PROFILES_QUERY_RSP_S_VER_3 and
+	struct iwl_scan_offload_profile_match matches[IWL_SCAN_MAX_PROFILES_V2];
+} __packed; /* SCAN_OFFLOAD_PROFILES_QUERY_RSP_S_VER_5 and
 	     * SCAN_OFFLOAD_MATCH_INFO_NOTIFICATION_S_VER_1
 	     */
 
 /**
- * struct iwl_umac_scan_iter_complete_notif - notifies end of scanning iteration
+ * struct iwl_umac_scan_iter_complete_notif_v2 - notifies end of scanning
+ *	iteration
  * @uid: scan id, &enum iwl_umac_scan_uid_offsets
  * @scanned_channels: number of channels scanned and number of valid elements in
  *	results array
@@ -1277,7 +1361,7 @@ struct iwl_scan_offload_match_info {
  *	in &struct iwl_scan_req_umac.
  * @results: array of scan results, length in @scanned_channels
  */
-struct iwl_umac_scan_iter_complete_notif {
+struct iwl_umac_scan_iter_complete_notif_v2 {
 	__le32 uid;
 	u8 scanned_channels;
 	u8 status;
@@ -1286,6 +1370,39 @@ struct iwl_umac_scan_iter_complete_notif {
 	__le64 start_tsf;
 	struct iwl_scan_results_notif results[];
 } __packed; /* SCAN_ITER_COMPLETE_NTF_UMAC_API_S_VER_2 */
+
+/**
+ * struct iwl_umac_scan_iter_complete_notif - notifies end of scanning
+ *	iteration
+ * @uid: scan id, &enum iwl_umac_scan_uid_offsets
+ * @scanned_channels: number of channels scanned and number of valid elements in
+ *	results array
+ * @status: one of SCAN_COMP_STATUS_*
+ * @bt_status: BT on/off status
+ * @last_channel: last channel that was scanned
+ * @start_tsf: TSF timer in usecs of the scan start time for the mac specified
+ *	in &struct iwl_scan_req_umac.
+ * @results: array of scan results, only @scanned_channels of them are valid
+ * @ebs_status: EBS completion status, &enum iwl_scan_ebs_status
+ * @reserved: reserved for alignment
+ * @ebs_channel_status: only valid when @ebs_status is %IWL_SCAN_EBS_SUCCESS.
+ *	Bitmap of the 5 GHz channels on which EBS found energy:
+ *	bit i in [0..27]:  channel = 36 + 4 * i   (channels 36 - 144)
+ *	bit i in [28..35]: channel = 37 + 4 * i   (channels 149 - 177)
+ *	bit 36: channel 181 (reserved, not currently covered by EBS)
+ */
+struct iwl_umac_scan_iter_complete_notif {
+	__le32 uid;
+	u8 scanned_channels;
+	u8 status;
+	u8 bt_status;
+	u8 last_channel;
+	__le64 start_tsf;
+	struct iwl_scan_results_notif results[SCAN_MAX_NUM_NOTIF_RESULTS];
+	u8 ebs_status;
+	u8 reserved[3];
+	__le64 ebs_channel_status;
+} __packed; /* SCAN_ITER_COMPLETE_NTF_UMAC_API_S_VER_3 */
 
 /**
  * struct iwl_umac_scan_channel_survey_notif - data for survey

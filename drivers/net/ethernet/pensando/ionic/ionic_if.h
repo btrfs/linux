@@ -7,6 +7,7 @@
 #define IONIC_DEV_INFO_SIGNATURE		0x44455649      /* 'DEVI' */
 #define IONIC_DEV_INFO_VERSION			1
 #define IONIC_IFNAMSIZ				16
+#define IONIC_CREATE_CQ_CMD_V2_MAGIC		-1
 
 /*
  * enum ionic_cmd_opcode - Device commands
@@ -273,10 +274,12 @@ union ionic_drv_identity {
  * enum ionic_dev_capability - Device capabilities
  * @IONIC_DEV_CAP_VF_CTRL:     Device supports VF ctrl operations
  * @IONIC_DEV_CAP_DISC_CMB:    Device supports CMB discovery operations
+ * @IONIC_DEV_CAP_EXTRA_STATS: Device supports extra stats schema
  */
 enum ionic_dev_capability {
 	IONIC_DEV_CAP_VF_CTRL        = BIT(0),
 	IONIC_DEV_CAP_DISC_CMB       = BIT(1),
+	IONIC_DEV_CAP_EXTRA_STATS    = BIT(4),
 };
 
 /**
@@ -512,6 +515,23 @@ enum ionic_lif_rdma_cap_stats {
 };
 
 /**
+ * enum ionic_lif_rdma_alloc_qid - RDMA QID allocation capability
+ *
+ * Bitmask of RDMA queue types for which firmware can automatically
+ * allocate queue IDs. When a bit is set, the driver can request the
+ * firmware to allocate QIDs for that queue type during creation.
+ *
+ * @IONIC_LIF_RDMA_ALLOC_QID_CQ:  Firmware can allocate QIDs for
+ *                                Completion Queues
+ * @IONIC_LIF_RDMA_ALLOC_QID_SRQ: Firmware can allocate QIDs for
+ *                                Shared Receive Queues
+ */
+enum ionic_lif_rdma_alloc_qid {
+	IONIC_LIF_RDMA_ALLOC_QID_CQ = BIT(0),
+	IONIC_LIF_RDMA_ALLOC_QID_SRQ = BIT(1),
+};
+
+/**
  * struct ionic_lif_identity - LIF identity information (type-specific)
  *
  * @capabilities:        LIF capabilities
@@ -553,6 +573,12 @@ enum ionic_lif_rdma_cap_stats {
  *	@rdma.eq_qtype:        RDMA Event Qtype
  *	@rdma.stats_type:      Supported statistics type
  *	                       (enum ionic_lif_rdma_cap_stats)
+ *	@rdma.rsvd:            Reserved byte
+ *	@rdma.rcq_sign_bit:    RCQ sign bit
+ *	@rdma.srq_qtype:       RDMA Shared Receive Qtype
+ *	@rdma.rsvd2:           Reserved byte(s)
+ *	@rdma.alloc_qid_cap:   RDMA queue type QID allocation capability
+ *	                       (bitmask of enum ionic_lif_rdma_alloc_qid)
  *	@rdma.rsvd1:           Reserved byte(s)
  * @words:               word access to struct contents
  */
@@ -598,7 +624,12 @@ union ionic_lif_identity {
 			struct ionic_lif_logical_qtype cq_qtype;
 			struct ionic_lif_logical_qtype eq_qtype;
 			__le16 stats_type;
-			u8 rsvd1[162];
+			u8 rsvd;
+			u8 rcq_sign_bit;
+			struct ionic_lif_logical_qtype srq_qtype;
+			u8 rsvd2[5];
+			u8 alloc_qid_cap;
+			u8 rsvd1[142];
 		} __packed rdma;
 	} __packed;
 	__le32 words[478];
@@ -1179,6 +1210,7 @@ enum ionic_eth_hw_features {
 	IONIC_ETH_HW_TX_CSUM_GENEVE	= BIT(18),
 	IONIC_ETH_HW_TSO_GENEVE		= BIT(19),
 	IONIC_ETH_HW_TIMESTAMP		= BIT(20),
+	IONIC_ETH_HW_RDMA_TIMESTAMP	= BIT(21),
 };
 
 /**
@@ -1341,6 +1373,12 @@ enum ionic_xcvr_pid {
 	IONIC_XCVR_PID_QSFP_400G_DR4    = 80,
 	IONIC_XCVR_PID_QSFP_400G_SR4    = 81,
 	IONIC_XCVR_PID_QSFP_400G_VR4    = 82,
+	IONIC_XCVR_PID_QSFP_400G_AOC    = 83,
+	IONIC_XCVR_PID_QSFP_400G_AEC    = 84,
+	IONIC_XCVR_PID_QSFP_200G_AEC    = 85,
+	IONIC_XCVR_PID_QSFP_400G_LPO    = 86,
+	IONIC_XCVR_PID_QSFP_100G_FR4    = 87,
+	IONIC_XCVR_PID_QSFP_100G_DR4    = 88,
 };
 
 /**
@@ -2323,7 +2361,7 @@ struct ionic_qos_identify_comp {
 /* Capri max supported, should be renamed. */
 #define IONIC_QOS_CLASS_MAX		7
 #define IONIC_QOS_PCP_MAX		8
-#define IONIC_QOS_CLASS_NAME_SZ	32
+#define IONIC_QOS_CLASS_NAME_SZ		32
 #define IONIC_QOS_DSCP_MAX		64
 #define IONIC_QOS_ALL_PCP		0xFF
 #define IONIC_DSCP_BLOCK_SIZE		8
@@ -2595,6 +2633,7 @@ struct ionic_rdma_reset_cmd {
  * @depth_log2:    log base two of queue depth
  * @stride_log2:   log base two of queue stride
  * @dma_addr:      address of the queue memory
+ * @udma_idx:      udma index
  * @rsvd2:         reserved byte(s)
  *
  * The same command struct is used to create an RDMA event queue, completion
@@ -2624,7 +2663,8 @@ struct ionic_rdma_queue_cmd {
 	u8     depth_log2;
 	u8     stride_log2;
 	__le64 dma_addr;
-	u8     rsvd2[40];
+	u8     udma_idx;
+	u8     rsvd2[39];
 };
 
 /******************************************************************
@@ -2849,54 +2889,12 @@ struct ionic_mgmt_port_stats {
 	__le64 frames_tx_pause;
 };
 
-enum ionic_pb_buffer_drop_stats {
-	IONIC_BUFFER_INTRINSIC_DROP = 0,
-	IONIC_BUFFER_DISCARDED,
-	IONIC_BUFFER_ADMITTED,
-	IONIC_BUFFER_OUT_OF_CELLS_DROP,
-	IONIC_BUFFER_OUT_OF_CELLS_DROP_2,
-	IONIC_BUFFER_OUT_OF_CREDIT_DROP,
-	IONIC_BUFFER_TRUNCATION_DROP,
-	IONIC_BUFFER_PORT_DISABLED_DROP,
-	IONIC_BUFFER_COPY_TO_CPU_TAIL_DROP,
-	IONIC_BUFFER_SPAN_TAIL_DROP,
-	IONIC_BUFFER_MIN_SIZE_VIOLATION_DROP,
-	IONIC_BUFFER_ENQUEUE_ERROR_DROP,
-	IONIC_BUFFER_INVALID_PORT_DROP,
-	IONIC_BUFFER_INVALID_OUTPUT_QUEUE_DROP,
-	IONIC_BUFFER_DROP_MAX,
-};
-
-enum ionic_oflow_drop_stats {
-	IONIC_OFLOW_OCCUPANCY_DROP,
-	IONIC_OFLOW_EMERGENCY_STOP_DROP,
-	IONIC_OFLOW_WRITE_BUFFER_ACK_FILL_UP_DROP,
-	IONIC_OFLOW_WRITE_BUFFER_ACK_FULL_DROP,
-	IONIC_OFLOW_WRITE_BUFFER_FULL_DROP,
-	IONIC_OFLOW_CONTROL_FIFO_FULL_DROP,
-	IONIC_OFLOW_DROP_MAX,
-};
-
-/* struct ionic_port_pb_stats - packet buffers system stats
- * uses ionic_pb_buffer_drop_stats for drop_counts[]
- */
-struct ionic_port_pb_stats {
-	__le64 sop_count_in;
-	__le64 eop_count_in;
-	__le64 sop_count_out;
-	__le64 eop_count_out;
-	__le64 drop_counts[IONIC_BUFFER_DROP_MAX];
-	__le64 input_queue_buffer_occupancy[IONIC_QOS_TC_MAX];
-	__le64 input_queue_port_monitor[IONIC_QOS_TC_MAX];
-	__le64 output_queue_port_monitor[IONIC_QOS_TC_MAX];
-	__le64 oflow_drop_counts[IONIC_OFLOW_DROP_MAX];
-	__le64 input_queue_good_pkts_in[IONIC_QOS_TC_MAX];
-	__le64 input_queue_good_pkts_out[IONIC_QOS_TC_MAX];
-	__le64 input_queue_err_pkts_in[IONIC_QOS_TC_MAX];
-	__le64 input_queue_fifo_depth[IONIC_QOS_TC_MAX];
-	__le64 input_queue_max_fifo_depth[IONIC_QOS_TC_MAX];
-	__le64 input_queue_peak_occupancy[IONIC_QOS_TC_MAX];
-	__le64 output_queue_buffer_occupancy[IONIC_QOS_TC_MAX];
+struct ionic_port_extra_stats {
+	__le64 rsfec_correctable_blocks;
+	__le64 rsfec_uncorrectable_blocks;
+	__le64 fec_corrected_bits_total;
+	__le64 rx_bits_phy;
+	__le64 fec_codeword_error_bin[16];
 };
 
 /**
@@ -2944,7 +2942,7 @@ union ionic_port_identity {
  * @sprom_page2:     Extended Transceiver sprom, page 2
  * @sprom_page17:    Extended Transceiver sprom, page 17
  * @rsvd:            reserved byte(s)
- * @pb_stats:        uplink pb drop stats
+ * @extra_stats:     Extra port statistics data
  */
 struct ionic_port_info {
 	union ionic_port_config config;
@@ -2962,9 +2960,7 @@ struct ionic_port_info {
 		};
 	};
 	u8     rsvd[376];
-
-	/* pb_stats must start at 2k offset */
-	struct ionic_port_pb_stats  pb_stats;
+	struct ionic_port_extra_stats extra_stats;
 };
 
 /*

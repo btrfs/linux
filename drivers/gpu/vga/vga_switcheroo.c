@@ -31,12 +31,10 @@
 #define pr_fmt(fmt) "vga_switcheroo: " fmt
 
 #include <linux/apple-gmux.h>
-#include <linux/console.h>
 #include <linux/debugfs.h>
-#include <linux/fb.h>
+#include <linux/export.h>
 #include <linux/fs.h>
-#include <linux/fbcon.h>
-#include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/pci.h>
 #include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
@@ -92,7 +90,6 @@
 /**
  * struct vga_switcheroo_client - registered client
  * @pdev: client pci device
- * @fb_info: framebuffer to which console is remapped on switching
  * @pwr_state: current power state if manual power control is used.
  *	For driver power control, call vga_switcheroo_pwr_state().
  * @ops: client callbacks
@@ -107,12 +104,11 @@
  * @vga_dev: pci device, indicate which GPU is bound to current audio client
  *
  * Registered client. A client can be either a GPU or an audio device on a GPU.
- * For audio clients, the @fb_info and @active members are bogus. For GPU
- * clients, the @vga_dev is bogus.
+ * For audio clients, the @active member is bogus. For GPU clients, the @vga_dev
+ * is bogus.
  */
 struct vga_switcheroo_client {
 	struct pci_dev *pdev;
-	struct fb_info *fb_info;
 	enum vga_switcheroo_state pwr_state;
 	const struct vga_switcheroo_client_ops *ops;
 	enum vga_switcheroo_client_id id;
@@ -297,7 +293,7 @@ static int register_client(struct pci_dev *pdev,
 {
 	struct vga_switcheroo_client *client;
 
-	client = kzalloc(sizeof(*client), GFP_KERNEL);
+	client = kzalloc_obj(*client);
 	if (!client)
 		return -ENOMEM;
 
@@ -517,27 +513,6 @@ void vga_switcheroo_unregister_client(struct pci_dev *pdev)
 EXPORT_SYMBOL(vga_switcheroo_unregister_client);
 
 /**
- * vga_switcheroo_client_fb_set() - set framebuffer of a given client
- * @pdev: client pci device
- * @info: framebuffer
- *
- * Set framebuffer of a given client. The console will be remapped to this
- * on switching.
- */
-void vga_switcheroo_client_fb_set(struct pci_dev *pdev,
-				 struct fb_info *info)
-{
-	struct vga_switcheroo_client *client;
-
-	mutex_lock(&vgasr_mutex);
-	client = find_client_from_pci(&vgasr_priv.clients, pdev);
-	if (client)
-		client->fb_info = info;
-	mutex_unlock(&vgasr_mutex);
-}
-EXPORT_SYMBOL(vga_switcheroo_client_fb_set);
-
-/**
  * vga_switcheroo_lock_ddc() - temporarily switch DDC lines to a given client
  * @pdev: client pci device
  *
@@ -735,8 +710,8 @@ static int vga_switchto_stage2(struct vga_switcheroo_client *new_client)
 	if (!active->driver_power_control)
 		set_audio_state(active->id, VGA_SWITCHEROO_OFF);
 
-	if (new_client->fb_info)
-		fbcon_remap_all(new_client->fb_info);
+	if (new_client->ops->pre_switch)
+		new_client->ops->pre_switch(new_client->pdev);
 
 	mutex_lock(&vgasr_priv.mux_hw_lock);
 	ret = vgasr_priv.handler->switchto(new_client->id);
@@ -744,8 +719,8 @@ static int vga_switchto_stage2(struct vga_switcheroo_client *new_client)
 	if (ret)
 		return ret;
 
-	if (new_client->ops->reprobe)
-		new_client->ops->reprobe(new_client->pdev);
+	if (new_client->ops->post_switch)
+		new_client->ops->post_switch(new_client->pdev);
 
 	if (vga_switcheroo_pwr_state(active) == VGA_SWITCHEROO_ON)
 		vga_switchoff(active);

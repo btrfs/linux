@@ -87,6 +87,33 @@ atomic context on realtime kernels (inside hard IRQ handlers and similar
 contexts). Normally this should not be required.
 
 
+GPIO level semantics
+--------------------
+
+The gpip_chip .get/set[_multiple]() line values are clamped to the boolean
+space [0, 1], low level or high level.
+
+Low and high values are defined as physical low on the line in/out to the
+connector such as a physical pad, pin or rail.
+
+The GPIO library has internal logic to handle lines that are active low, such
+as indicated by overstrike or #name in a schematic, and the driver should not
+try to second-guess the logic value of a line.
+
+The way GPIO values are handled by the consumers is that the library present
+the *logical* value to the consumer. A line is *asserted* if its *logical*
+value is 1, and *de-asserted* if its logical value is 0. If inversion is
+required, this is handled by gpiolib and configured using hardware descriptions
+such as device tree or ACPI that can clearly indicate if a line is active
+high or low.
+
+Since electronics commonly insert inverters as driving stages or protection
+buffers in front of a GPIO line it is necessary that this semantic is part
+of the hardware description, so that consumers such as kernel drivers need
+not worry about this, and can for example assert a RESET line tied to a GPIO
+pin by setting it to logic 1 even if it is physically active low.
+
+
 GPIO electrical configuration
 -----------------------------
 
@@ -106,6 +133,13 @@ which will result in pinctrl_gpio_set_config() being called and eventually
 ending up in the pin control back-end "behind" the GPIO controller, usually
 closer to the actual pins. This way the pin controller can manage the below
 listed GPIO configurations.
+
+The optional .get_config() callback reads a configuration back: the packed
+parameter to query goes in, its bare argument comes out, the way
+pinctrl_gpio_get_config() answers. gpiochip_generic_get_config() is its pin
+control backed counterpart. Nothing in gpiolib calls it; it is for the GPIO
+driver's own use, for example to learn the direction of a line when the pin
+controller owns it.
 
 If a pin controller back-end is used, the GPIO controller or hardware
 description needs to provide "GPIO ranges" mapping the GPIO line offsets to pin

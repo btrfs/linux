@@ -19,6 +19,7 @@
 #include <linux/i2c.h>
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
+#include <linux/kstrtox.h>
 #include <linux/unaligned.h>
 
 /*
@@ -494,11 +495,13 @@ static ssize_t pac1934_shunt_value_store(struct device *dev,
 	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
 	struct pac1934_chip_info *info = iio_priv(indio_dev);
 	struct iio_dev_attr *this_attr = to_iio_dev_attr(attr);
-	int sh_val;
+	unsigned int sh_val;
+	int ret;
 
-	if (kstrtouint(buf, 10, &sh_val)) {
+	ret = kstrtouint(buf, 10, &sh_val);
+	if (ret) {
 		dev_err(dev, "Shunt value is not valid\n");
-		return -EINVAL;
+		return ret;
 	}
 
 	scoped_guard(mutex, &info->lock)
@@ -665,9 +668,9 @@ static int pac1934_reg_snapshot(struct pac1934_chip_info *info,
 			/* add the power_acc field */
 			curr_energy += inc;
 
-			clamp(curr_energy, PAC_193X_MIN_POWER_ACC, PAC_193X_MAX_POWER_ACC);
-
-			reg_data->energy_sec_acc[cnt] = curr_energy;
+			reg_data->energy_sec_acc[cnt] = clamp(curr_energy,
+							      PAC_193X_MIN_POWER_ACC,
+							      PAC_193X_MAX_POWER_ACC);
 		}
 
 		offset_reg_data_p += PAC1934_VPOWER_ACC_REG_LEN;
@@ -768,7 +771,7 @@ static int pac1934_retrieve_data(struct pac1934_chip_info *info,
 		 * Re-schedule the work for the read registers on timeout
 		 * (to prevent chip registers saturation)
 		 */
-		mod_delayed_work(system_wq, &info->work_chip_rfsh,
+		mod_delayed_work(system_percpu_wq, &info->work_chip_rfsh,
 				 msecs_to_jiffies(PAC1934_MAX_RFSH_LIMIT_MS));
 	}
 
@@ -1108,6 +1111,10 @@ static int pac1934_acpi_parse_channel_config(struct i2c_client *client,
 			devm_kmemdup(dev, rez->package.elements[i].string.pointer,
 				     (size_t)rez->package.elements[i].string.length + 1,
 				     GFP_KERNEL);
+		if (!info->labels[idx]) {
+			ACPI_FREE(rez);
+			return -ENOMEM;
+		}
 		info->labels[idx][rez->package.elements[i].string.length] = '\0';
 		info->shunts[idx] = rez->package.elements[i + 1].integer.value * 1000;
 		info->active_channels[idx] = (info->shunts[idx] != 0);
@@ -1351,7 +1358,7 @@ static int pac1934_prep_iio_channels(struct pac1934_chip_info *info, struct iio_
 
 	dyn_ch_struct = devm_kzalloc(dev, channel_size, GFP_KERNEL);
 	if (!dyn_ch_struct)
-		return -EINVAL;
+		return -ENOMEM;
 
 	tmp_data = dyn_ch_struct;
 

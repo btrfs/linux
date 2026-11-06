@@ -245,7 +245,7 @@ int template_desc_init_fields(const char *template_fmt,
 	}
 
 	if (fields && num_fields) {
-		*fields = kmalloc_array(i, sizeof(**fields), GFP_KERNEL);
+		*fields = kmalloc_objs(**fields, i);
 		if (*fields == NULL)
 			return -ENOMEM;
 
@@ -334,7 +334,7 @@ static struct ima_template_desc *restore_template_fmt(char *template_name)
 		goto out;
 	}
 
-	template_desc = kzalloc(sizeof(*template_desc), GFP_KERNEL);
+	template_desc = kzalloc_obj(*template_desc);
 	if (!template_desc)
 		goto out;
 
@@ -362,13 +362,14 @@ static int ima_restore_template_data(struct ima_template_desc *template_desc,
 	int ret = 0;
 	int i;
 
-	*entry = kzalloc(struct_size(*entry, template_data,
-				     template_desc->num_fields), GFP_NOFS);
+	*entry = kzalloc_flex(**entry, template_data, template_desc->num_fields,
+			      GFP_NOFS);
 	if (!*entry)
 		return -ENOMEM;
 
-	digests = kcalloc(NR_BANKS(ima_tpm_chip) + ima_extra_slots,
-			  sizeof(*digests), GFP_NOFS);
+	digests = kzalloc_objs(*digests,
+			       NR_BANKS(ima_tpm_chip) + ima_extra_slots,
+			       GFP_NOFS);
 	if (!digests) {
 		kfree(*entry);
 		return -ENOMEM;
@@ -449,6 +450,11 @@ int ima_restore_measurement_list(loff_t size, void *buf)
 		return -EINVAL;
 	}
 
+	if (khdr->buffer_size > size) {
+		pr_err("attempting to restore a corrupted measurement list");
+		return -EINVAL;
+	}
+
 	bitmap_zero(hdr_mask, HDR__LAST);
 	bitmap_set(hdr_mask, HDR_PCR, 1);
 	bitmap_set(hdr_mask, HDR_DIGEST, 1);
@@ -523,6 +529,13 @@ int ima_restore_measurement_list(loff_t size, void *buf)
 				ret = -EINVAL;
 				break;
 			}
+		} else {
+			/*
+			 * If the template hash found in the kexec buffer is all
+			 * zeros, record it as a violation. Note that this can
+			 * be a false positive.
+			 */
+			atomic_long_inc(&ima_num_violations);
 		}
 
 		entry->pcr = !ima_canonical_fmt ? *(u32 *)(hdr[HDR_PCR].data) :

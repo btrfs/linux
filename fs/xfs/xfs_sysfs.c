@@ -4,7 +4,7 @@
  * All Rights Reserved.
  */
 
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
 #include "xfs_log_format.h"
@@ -13,7 +13,9 @@
 #include "xfs_log.h"
 #include "xfs_log_priv.h"
 #include "xfs_mount.h"
+#include "xfs_zone_priv.h"
 #include "xfs_zones.h"
+#include "xfs_zone_alloc.h"
 
 struct xfs_sysfs_attr {
 	struct attribute attr;
@@ -390,6 +392,71 @@ const struct kobj_type xfs_stats_ktype = {
 	.default_groups = xfs_stats_groups,
 };
 
+static inline struct xfs_mount *csum_to_mp(struct kobject *kobj)
+{
+	return container_of(to_kobj(kobj), struct xfs_mount, m_csum_kobj);
+}
+
+static bool
+xfs_has_read_bounce(
+	struct xfs_mount	*mp)
+{
+	if (bdev_has_integrity_csum(mp->m_ddev_targp->bt_bdev))
+		return true;
+	if (mp->m_rtdev_targp &&
+	    bdev_has_integrity_csum(mp->m_rtdev_targp->bt_bdev))
+		return true;
+	return false;
+}
+
+static const char * const bounce_modes[] = {
+	[XFS_READ_BOUNCE_NEVER]		= "never",
+	[XFS_READ_BOUNCE_ALWAYS]	= "always",
+	[XFS_READ_BOUNCE_LAZY]		= "lazy",
+};
+
+static ssize_t
+read_bounce_show(
+	struct kobject		*kobj,
+	char			*buf)
+{
+	struct xfs_mount	*mp = csum_to_mp(kobj);
+
+	return sysfs_emit(buf, "%s\n",
+			bounce_modes[READ_ONCE(mp->m_read_bounce)]);
+}
+
+static ssize_t
+read_bounce_store(
+	struct kobject		*kobj,
+	const char		*buf,
+	size_t			count)
+{
+	struct xfs_mount	*mp = csum_to_mp(kobj);
+	int			ret;
+
+	if (!xfs_has_read_bounce(mp))
+		return -EINVAL;
+	ret = sysfs_match_string(bounce_modes, buf);
+	if (ret < 0)
+		return ret;
+	WRITE_ONCE(mp->m_read_bounce, ret);
+	return count;
+}
+XFS_SYSFS_ATTR_RW(read_bounce);
+
+static struct attribute *xfs_csum_attrs[] = {
+	ATTR_LIST(read_bounce),
+	NULL,
+};
+ATTRIBUTE_GROUPS(xfs_csum);
+
+static const struct kobj_type xfs_csum_ktype = {
+	.release = xfs_sysfs_release,
+	.sysfs_ops = &xfs_sysfs_ops,
+	.default_groups = xfs_csum_groups,
+};
+
 /* xlog */
 
 static inline struct xlog *
@@ -719,11 +786,23 @@ max_open_zones_show(
 XFS_SYSFS_ATTR_RO(max_open_zones);
 
 static ssize_t
+nr_open_zones_show(
+	struct kobject		*kobj,
+	char			*buf)
+{
+	struct xfs_zone_info	*zi = zoned_to_mp(kobj)->m_zone_info;
+
+	return sysfs_emit(buf, "%u\n", READ_ONCE(zi->zi_nr_open_zones));
+}
+XFS_SYSFS_ATTR_RO(nr_open_zones);
+
+static ssize_t
 zonegc_low_space_store(
 	struct kobject		*kobj,
 	const char		*buf,
 	size_t			count)
 {
+	struct xfs_mount	*mp = zoned_to_mp(kobj);
 	int			ret;
 	unsigned int		val;
 
@@ -734,7 +813,10 @@ zonegc_low_space_store(
 	if (val > 100)
 		return -EINVAL;
 
-	zoned_to_mp(kobj)->m_zonegc_low_space = val;
+	if (mp->m_zonegc_low_space != val) {
+		mp->m_zonegc_low_space = val;
+		xfs_zone_gc_wakeup(mp);
+	}
 
 	return count;
 }
@@ -751,6 +833,7 @@ XFS_SYSFS_ATTR_RW(zonegc_low_space);
 
 static struct attribute *xfs_zoned_attrs[] = {
 	ATTR_LIST(max_open_zones),
+	ATTR_LIST(nr_open_zones),
 	ATTR_LIST(zonegc_low_space),
 	NULL,
 };
@@ -761,6 +844,23 @@ static const struct kobj_type xfs_zoned_ktype = {
 	.sysfs_ops = &xfs_sysfs_ops,
 	.default_groups = xfs_zoned_groups,
 };
+
+int
+xfs_zoned_sysfs_init(struct xfs_mount *mp)
+{
+	if (!IS_ENABLED(CONFIG_XFS_RT) || !xfs_has_zoned(mp))
+		return 0;
+
+	return xfs_sysfs_init(&mp->m_zoned_kobj, &xfs_zoned_ktype,
+			&mp->m_kobj, "zoned");
+}
+
+void
+xfs_zoned_sysfs_del(struct xfs_mount *mp)
+{
+	if (IS_ENABLED(CONFIG_XFS_RT) && xfs_has_zoned(mp))
+		xfs_sysfs_del(&mp->m_zoned_kobj);
+}
 
 int
 xfs_mount_sysfs_init(
@@ -782,11 +882,17 @@ xfs_mount_sysfs_init(
 	if (error)
 		goto out_remove_fsdir;
 
+	/* .../xfs/<dev>/csum/ */
+	error = xfs_sysfs_init(&mp->m_csum_kobj, &xfs_csum_ktype, &mp->m_kobj,
+			"csum");
+	if (error)
+		goto out_remove_stats_dir;
+
 	/* .../xfs/<dev>/error/ */
 	error = xfs_sysfs_init(&mp->m_error_kobj, &xfs_error_ktype,
 				&mp->m_kobj, "error");
 	if (error)
-		goto out_remove_stats_dir;
+		goto out_remove_csum_dir;
 
 	/* .../xfs/<dev>/error/fail_at_unmount */
 	error = sysfs_create_file(&mp->m_error_kobj.kobject,
@@ -800,20 +906,14 @@ xfs_mount_sysfs_init(
 				"metadata", &mp->m_error_meta_kobj,
 				xfs_error_meta_init);
 	if (error)
-		goto out_remove_error_dir;
-
-	if (IS_ENABLED(CONFIG_XFS_RT) && xfs_has_zoned(mp)) {
-		/* .../xfs/<dev>/zoned/ */
-		error = xfs_sysfs_init(&mp->m_zoned_kobj, &xfs_zoned_ktype,
-					&mp->m_kobj, "zoned");
-		if (error)
-			goto out_remove_error_dir;
-	}
+		goto out_remove_csum_dir;
 
 	return 0;
 
 out_remove_error_dir:
 	xfs_sysfs_del(&mp->m_error_kobj);
+out_remove_csum_dir:
+	xfs_sysfs_del(&mp->m_csum_kobj);
 out_remove_stats_dir:
 	xfs_sysfs_del(&mp->m_stats.xs_kobj);
 out_remove_fsdir:
@@ -828,9 +928,6 @@ xfs_mount_sysfs_del(
 	struct xfs_error_cfg	*cfg;
 	int			i, j;
 
-	if (IS_ENABLED(CONFIG_XFS_RT) && xfs_has_zoned(mp))
-		xfs_sysfs_del(&mp->m_zoned_kobj);
-
 	for (i = 0; i < XFS_ERR_CLASS_MAX; i++) {
 		for (j = 0; j < XFS_ERR_ERRNO_MAX; j++) {
 			cfg = &mp->m_error_cfg[i][j];
@@ -840,6 +937,7 @@ xfs_mount_sysfs_del(
 	}
 	xfs_sysfs_del(&mp->m_error_meta_kobj);
 	xfs_sysfs_del(&mp->m_error_kobj);
+	xfs_sysfs_del(&mp->m_csum_kobj);
 	xfs_sysfs_del(&mp->m_stats.xs_kobj);
 	xfs_sysfs_del(&mp->m_kobj);
 }

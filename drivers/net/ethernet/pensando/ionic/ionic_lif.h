@@ -6,7 +6,7 @@
 
 #include <linux/ptp_clock_kernel.h>
 #include <linux/timecounter.h>
-#include <uapi/linux/net_tstamp.h>
+#include <linux/net_tstamp.h>
 #include <linux/dim.h>
 #include <linux/pci.h>
 #include "ionic_rx_filter.h"
@@ -214,7 +214,6 @@ struct ionic_lif {
 	bool registered;
 	bool doorbell_wa;
 	u16 lif_type;
-	unsigned int link_down_count;
 	unsigned int nmcast;
 	unsigned int nucast;
 	unsigned int nvlans;
@@ -249,12 +248,12 @@ struct ionic_lif {
 };
 
 struct ionic_phc {
-	spinlock_t lock; /* lock for cc and tc */
+	spinlock_t lock; /* lock for state_page, cc and tc */
 	struct cyclecounter cc;
 	struct timecounter tc;
 
 	struct mutex config_lock; /* lock for ts_config */
-	struct hwtstamp_config ts_config;
+	struct kernel_hwtstamp_config ts_config;
 	u64 ts_config_rx_filt;
 	u32 ts_config_tx_mode;
 
@@ -262,6 +261,7 @@ struct ionic_phc {
 	long aux_work_delay;
 
 	struct ptp_clock_info ptp_info;
+	struct ib_uverbs_clock_info *state_page;
 	struct ptp_clock *ptp;
 	struct ionic_lif *lif;
 };
@@ -362,8 +362,11 @@ int ionic_lif_size(struct ionic *ionic);
 #if IS_ENABLED(CONFIG_PTP_1588_CLOCK)
 void ionic_lif_hwstamp_replay(struct ionic_lif *lif);
 void ionic_lif_hwstamp_recreate_queues(struct ionic_lif *lif);
-int ionic_lif_hwstamp_set(struct ionic_lif *lif, struct ifreq *ifr);
-int ionic_lif_hwstamp_get(struct ionic_lif *lif, struct ifreq *ifr);
+int ionic_hwstamp_set(struct net_device *netdev,
+		      struct kernel_hwtstamp_config *config,
+		      struct netlink_ext_ack *extack);
+int ionic_hwstamp_get(struct net_device *netdev,
+		      struct kernel_hwtstamp_config *config);
 ktime_t ionic_lif_phc_ktime(struct ionic_lif *lif, u64 counter);
 void ionic_lif_register_phc(struct ionic_lif *lif);
 void ionic_lif_unregister_phc(struct ionic_lif *lif);
@@ -373,12 +376,15 @@ void ionic_lif_free_phc(struct ionic_lif *lif);
 static inline void ionic_lif_hwstamp_replay(struct ionic_lif *lif) {}
 static inline void ionic_lif_hwstamp_recreate_queues(struct ionic_lif *lif) {}
 
-static inline int ionic_lif_hwstamp_set(struct ionic_lif *lif, struct ifreq *ifr)
+static inline int ionic_hwstamp_set(struct net_device *netdev,
+				    struct kernel_hwtstamp_config *config,
+				    struct netlink_ext_ack *extack)
 {
 	return -EOPNOTSUPP;
 }
 
-static inline int ionic_lif_hwstamp_get(struct ionic_lif *lif, struct ifreq *ifr)
+static inline int ionic_hwstamp_get(struct net_device *netdev,
+				    struct kernel_hwtstamp_config *config)
 {
 	return -EOPNOTSUPP;
 }

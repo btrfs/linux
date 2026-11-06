@@ -17,9 +17,12 @@ static struct asymmetric_key_id *ca_keyid;
 
 #ifndef MODULE
 static struct {
-	struct asymmetric_key_id id;
-	unsigned char data[10];
+	/* Must be last as it ends in a flexible-array member. */
+	TRAILING_OVERLAP(struct asymmetric_key_id, id, data,
+		unsigned char data[10];
+	);
 } cakey;
+static_assert(offsetof(typeof(cakey), id.data) == offsetof(typeof(cakey), data));
 
 static int __init ca_keys_setup(char *str)
 {
@@ -240,10 +243,14 @@ static int key_or_keyring_common(struct key *dest_keyring,
 			if (IS_ERR(key))
 				key = NULL;
 		} else if (trusted->type == &key_type_asymmetric) {
+			const struct asymmetric_key_ids *kids;
 			const struct asymmetric_key_id **signer_ids;
 
-			signer_ids = (const struct asymmetric_key_id **)
-				asymmetric_key_ids(trusted)->id;
+			kids = asymmetric_key_ids(trusted);
+			if (!kids)
+				return -ENOKEY;
+
+			signer_ids = (const struct asymmetric_key_id **)kids->id;
 
 			/*
 			 * The auth_ids come from the candidate key (the

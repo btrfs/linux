@@ -12,8 +12,6 @@
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/init.h>
-#include <linux/llc.h>
-#include <net/llc.h>
 #include <net/stp.h>
 #include <net/switchdev.h>
 
@@ -202,7 +200,7 @@ static int br_switchdev_event(struct notifier_block *unused,
 	case SWITCHDEV_FDB_FLUSH_TO_BRIDGE:
 		fdb_info = ptr;
 		/* Don't delete static entries */
-		br_fdb_delete_by_port(br, p, fdb_info->vid, 0);
+		br_fdb_cleanup_by_dst(br, br_port_to_dst(p), fdb_info->vid, 0);
 		break;
 	}
 
@@ -396,10 +394,7 @@ void br_opt_toggle(struct net_bridge *br, enum net_bridge_opts opt, bool on)
 	if (cur == on)
 		return;
 
-	if (on)
-		set_bit(opt, &br->options);
-	else
-		clear_bit(opt, &br->options);
+	assign_bit(opt, &br->options, on);
 }
 
 static void __net_exit br_net_exit_rtnl(struct net *net,
@@ -464,10 +459,6 @@ static int __init br_init(void)
 
 	brioctl_set(br_ioctl_stub);
 
-#if IS_ENABLED(CONFIG_ATM_LANE)
-	br_fdb_test_addr_hook = br_fdb_test_addr;
-#endif
-
 #if IS_MODULE(CONFIG_BRIDGE_NETFILTER)
 	pr_info("bridge: filtering via arp/ip/ip6tables is no longer available "
 		"by default. Update your scripts to load br_netfilter if you "
@@ -506,9 +497,6 @@ static void __exit br_deinit(void)
 	rcu_barrier(); /* Wait for completion of call_rcu()'s */
 
 	br_nf_core_fini();
-#if IS_ENABLED(CONFIG_ATM_LANE)
-	br_fdb_test_addr_hook = NULL;
-#endif
 	br_fdb_fini();
 }
 

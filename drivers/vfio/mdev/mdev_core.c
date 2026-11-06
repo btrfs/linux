@@ -50,7 +50,7 @@ static int mdev_device_remove_cb(struct device *dev, void *data)
  * @types: Array of supported mdev types
  * @nr_types: Number of entries in @types
  *
- * Registers the @parent stucture as a parent for mdev types and thus mdev
+ * Registers the @parent structure as a parent for mdev types and thus mdev
  * devices.  The caller needs to hold a reference on @dev that must not be
  * released until after the call to mdev_unregister_parent().
  *
@@ -154,7 +154,7 @@ int mdev_device_create(struct mdev_type *type, const guid_t *uuid)
 		atomic_dec(&parent->available_instances);
 	}
 
-	mdev = kzalloc(sizeof(*mdev), GFP_KERNEL);
+	mdev = kzalloc_obj(*mdev);
 	if (!mdev) {
 		mutex_unlock(&mdev_list_lock);
 		return -ENOMEM;

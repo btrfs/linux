@@ -98,9 +98,12 @@ Compilare il codice
      e correggere i problemi
 
 2) Compilare per diverse architetture di processore usando strumenti per la
-   cross-compilazione o altri. Una buona architettura per la verifica della
-   cross-compilazione è la ppc64 perché tende ad usare ``unsigned long`` per le
-   quantità a 64-bit.
+   cross-compilazione o altri.
+   Da notare che testare su architetture con diverse dimensioni delle parole
+   (32 e 64 bit) e diverso ordinamento dei byte (*big-* e *little-endian*) è
+   efficace nell'individuare vari problemi di portabilità dovuti ad
+   assunzioni errate sull'intervallo di valori rappresentabili, l'allineamento
+   dei dati, o l'ordinamento dei byte, fra le altre cose.
 
 3) Il nuovo codice è stato compilato con ``gcc -W`` (usate
     ``make KCFLAGS=-W``).  Questo genererà molti avvisi, ma è ottimo
@@ -122,7 +125,7 @@ Verificate il vostro codice
 
 1) La patch è stata verificata con le seguenti opzioni abilitate
    contemporaneamente: ``CONFIG_PREEMPT``, ``CONFIG_DEBUG_PREEMPT``,
-   ``CONFIG_DEBUG_SLAB``, ``CONFIG_DEBUG_PAGEALLOC``, ``CONFIG_DEBUG_MUTEXES``,
+   ``CONFIG_SLUB_DEBUG``, ``CONFIG_DEBUG_PAGEALLOC``, ``CONFIG_DEBUG_MUTEXES``,
    ``CONFIG_DEBUG_SPINLOCK``, ``CONFIG_DEBUG_ATOMIC_SLEEP``,
    ``CONFIG_PROVE_RCU`` e ``CONFIG_DEBUG_OBJECTS_RCU_HEAD``.
 

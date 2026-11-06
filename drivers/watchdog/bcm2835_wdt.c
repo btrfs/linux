@@ -19,6 +19,8 @@
 #include <linux/platform_device.h>
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
+#include <linux/reboot.h>
+#include <linux/stringify.h>
 
 #define PM_RSTC				0x1c
 #define PM_RSTS				0x20
@@ -48,8 +50,6 @@ struct bcm2835_wdt {
 	void __iomem		*base;
 	spinlock_t		lock;
 };
-
-static struct bcm2835_wdt *bcm2835_power_off_wdt;
 
 static unsigned int heartbeat;
 static bool nowayout = WATCHDOG_NOWAYOUT;
@@ -150,9 +150,9 @@ static struct watchdog_device bcm2835_wdt_wdd = {
  * indicate to bootcode.bin not to reboot, then most of the chip will be
  * powered off.
  */
-static void bcm2835_power_off(void)
+static int bcm2835_power_off(struct sys_off_data *data)
 {
-	struct bcm2835_wdt *wdt = bcm2835_power_off_wdt;
+	struct bcm2835_wdt *wdt = data->cb_data;
 	u32 val;
 
 	/*
@@ -166,6 +166,8 @@ static void bcm2835_power_off(void)
 
 	/* Continue with normal reset mechanism */
 	__bcm2835_restart(wdt);
+
+	return NOTIFY_DONE;
 }
 
 static int bcm2835_wdt_probe(struct platform_device *pdev)
@@ -206,28 +208,17 @@ static int bcm2835_wdt_probe(struct platform_device *pdev)
 	if (err)
 		return err;
 
-	if (of_device_is_system_power_controller(pdev->dev.parent->of_node)) {
-		if (!pm_power_off) {
-			pm_power_off = bcm2835_power_off;
-			bcm2835_power_off_wdt = wdt;
-		} else {
-			dev_info(dev, "Poweroff handler already present!\n");
-		}
-	}
+	if (of_device_is_system_power_controller(pdev->dev.parent->of_node))
+		devm_register_sys_off_handler(dev, SYS_OFF_MODE_POWER_OFF,
+					      SYS_OFF_PRIO_DEFAULT,
+					      bcm2835_power_off, wdt);
 
 	dev_info(dev, "Broadcom BCM2835 watchdog timer");
 	return 0;
 }
 
-static void bcm2835_wdt_remove(struct platform_device *pdev)
-{
-	if (pm_power_off == bcm2835_power_off)
-		pm_power_off = NULL;
-}
-
 static struct platform_driver bcm2835_wdt_driver = {
 	.probe		= bcm2835_wdt_probe,
-	.remove		= bcm2835_wdt_remove,
 	.driver = {
 		.name =		"bcm2835-wdt",
 	},
@@ -239,7 +230,7 @@ MODULE_PARM_DESC(heartbeat, "Initial watchdog heartbeat in seconds");
 
 module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started (default="
-				__MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
+				__stringify(WATCHDOG_NOWAYOUT) ")");
 
 MODULE_ALIAS("platform:bcm2835-wdt");
 MODULE_AUTHOR("Lubomir Rintel <lkundrak@v3.sk>");

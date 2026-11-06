@@ -9,6 +9,7 @@
 #define __DWC2_CORE_H__
 
 #include <linux/acpi.h>
+#include <linux/device-id/pci.h>
 #include <linux/phy/phy.h>
 #include <linux/regulator/consumer.h>
 #include <linux/usb/gadget.h>
@@ -333,7 +334,7 @@ enum dwc2_ep0_state {
  *                           (default when phy_type is Full Speed)
  * @oc_disable:		Flag to disable overcurrent condition.
  *			0 - Allow overcurrent condition to get detected
- *			1 - Disable overcurrent condtion to get detected
+ *			1 - Disable overcurrent condition to get detected
  * @ts_dline:           Enable Term Select Dline pulsing
  *                       0 - No (default)
  *                       1 - Yes

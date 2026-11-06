@@ -92,7 +92,7 @@ static int ntp8835_mute_info(struct snd_kcontrol *kcontrol,
 static int ntp8835_mute_get(struct snd_kcontrol *kcontrol,
 			    struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	unsigned int val;
 
 	val = snd_soc_component_read(component, NTP8835_SOFT_MUTE);
@@ -104,7 +104,7 @@ static int ntp8835_mute_get(struct snd_kcontrol *kcontrol,
 static int ntp8835_mute_put(struct snd_kcontrol *kcontrol,
 			    struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	unsigned int val;
 
 	val = ucontrol->value.integer.value[0] ? 0 : 7;
@@ -385,9 +385,16 @@ static int ntp8835_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	return 0;
 };
 
+static const u64 ntp8835_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J;
+
 static const struct snd_soc_dai_ops ntp8835_dai_ops = {
 	.hw_params = ntp8835_hw_params,
 	.set_fmt = ntp8835_set_fmt,
+	.auto_selectable_formats = &ntp8835_selectable_formats,
+	.num_auto_selectable_formats = 1,
 };
 
 static struct snd_soc_dai_driver ntp8835_dai = {
@@ -454,8 +461,8 @@ static int ntp8835_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id ntp8835_i2c_id[] = {
-	{ "ntp8835" },
-	{}
+	{ .name = "ntp8835" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ntp8835_i2c_id);
 

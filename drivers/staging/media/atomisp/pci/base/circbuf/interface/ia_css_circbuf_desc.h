@@ -17,7 +17,7 @@
  * Inline functions.
  *
  ****************************************************************/
-/**
+/*
  * @brief Test if the circular buffer is empty.
  *
  * @param cb_desc The pointer to the circular buffer descriptor.
@@ -33,7 +33,7 @@ static inline bool ia_css_circbuf_desc_is_empty(
 	return (cb_desc->end == cb_desc->start);
 }
 
-/**
+/*
  * @brief Test if the circular buffer descriptor is full.
  *
  * @param cb_desc	The pointer to the circular buffer
@@ -47,10 +47,10 @@ static inline bool ia_css_circbuf_desc_is_full(
     ia_css_circbuf_desc_t *cb_desc)
 {
 	OP___assert(cb_desc);
-	return (OP_std_modadd(cb_desc->end, 1, cb_desc->size) == cb_desc->start);
+	return ((cb_desc->end + 1) % cb_desc->size) == cb_desc->start;
 }
 
-/**
+/*
  * @brief Initialize the circular buffer descriptor
  *
  * @param cb_desc	The pointer circular buffer descriptor
@@ -64,7 +64,7 @@ static inline void ia_css_circbuf_desc_init(
 	cb_desc->size = size;
 }
 
-/**
+/*
  * @brief Get a position in the circular buffer descriptor.
  *
  * @param cb     The pointer to the circular buffer descriptor.
@@ -78,23 +78,18 @@ static inline uint8_t ia_css_circbuf_desc_get_pos_at_offset(
     u32 base,
     int offset)
 {
-	u8 dest;
-
 	OP___assert(cb_desc);
 	OP___assert(cb_desc->size > 0);
 
 	/* step 1: adjust the offset  */
-	while (offset < 0) {
+	while (offset < 0)
 		offset += cb_desc->size;
-	}
 
 	/* step 2: shift and round by the upper limit */
-	dest = OP_std_modadd(base, offset, cb_desc->size);
-
-	return dest;
+	return (base + offset) % cb_desc->size;
 }
 
-/**
+/*
  * @brief Get the offset between two positions in the circular buffer
  * descriptor.
  * Get the offset from the source position to the terminal position,
@@ -121,7 +116,7 @@ static inline int ia_css_circbuf_desc_get_offset(
 	return offset;
 }
 
-/**
+/*
  * @brief Get the number of available elements.
  *
  * @param cb_desc The pointer to the circular buffer.
@@ -142,7 +137,7 @@ static inline uint32_t ia_css_circbuf_desc_get_num_elems(
 	return (uint32_t)num;
 }
 
-/**
+/*
  * @brief Get the number of free elements.
  *
  * @param cb_desc The pointer to the circular buffer descriptor.

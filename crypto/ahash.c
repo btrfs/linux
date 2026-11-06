@@ -423,7 +423,11 @@ static int ahash_update_finish(struct ahash_request *req, int err)
 
 	req->nbytes += nonzero - blen;
 
-	blen = err < 0 ? 0 : err + nonzero;
+	blen = 0;
+	if (err >= 0) {
+		blen = err + nonzero;
+		err = 0;
+	}
 	if (ahash_request_isvirt(req))
 		memcpy(buf, req->svirt + req->nbytes - blen, blen);
 	else
@@ -661,6 +665,12 @@ int crypto_ahash_import_core(struct ahash_request *req, const void *in)
 						in);
 	if (crypto_ahash_get_flags(tfm) & CRYPTO_TFM_NEED_KEY)
 		return -ENOKEY;
+	if (crypto_ahash_block_only(tfm)) {
+		unsigned int reqsize = crypto_ahash_reqsize(tfm);
+		u8 *buf = ahash_request_ctx(req);
+
+		buf[reqsize - 1] = 0;
+	}
 	return crypto_ahash_alg(tfm)->import_core(req, in);
 }
 EXPORT_SYMBOL_GPL(crypto_ahash_import_core);
@@ -674,10 +684,14 @@ int crypto_ahash_import(struct ahash_request *req, const void *in)
 	if (crypto_ahash_get_flags(tfm) & CRYPTO_TFM_NEED_KEY)
 		return -ENOKEY;
 	if (crypto_ahash_block_only(tfm)) {
+		unsigned int plen = crypto_ahash_blocksize(tfm) + 1;
 		unsigned int reqsize = crypto_ahash_reqsize(tfm);
+		unsigned int ss = crypto_ahash_statesize(tfm);
 		u8 *buf = ahash_request_ctx(req);
 
-		buf[reqsize - 1] = 0;
+		memcpy(buf + reqsize - plen, in + ss - plen, plen);
+		if (buf[reqsize - 1] >= plen)
+			return -EOVERFLOW;
 	}
 	return crypto_ahash_alg(tfm)->import(req, in);
 }
@@ -775,11 +789,9 @@ static void crypto_ahash_free_instance(struct crypto_instance *inst)
 static int __maybe_unused crypto_ahash_report(
 	struct sk_buff *skb, struct crypto_alg *alg)
 {
-	struct crypto_report_hash rhash;
-
-	memset(&rhash, 0, sizeof(rhash));
-
-	strscpy(rhash.type, "ahash", sizeof(rhash.type));
+	struct crypto_report_hash rhash = {
+		.type = "ahash",
+	};
 
 	rhash.blocksize = alg->cra_blocksize;
 	rhash.digestsize = __crypto_hash_alg_common(alg)->digestsize;
@@ -787,9 +799,8 @@ static int __maybe_unused crypto_ahash_report(
 	return nla_put(skb, CRYPTOCFGA_REPORT_HASH, sizeof(rhash), &rhash);
 }
 
-static void crypto_ahash_show(struct seq_file *m, struct crypto_alg *alg)
-	__maybe_unused;
-static void crypto_ahash_show(struct seq_file *m, struct crypto_alg *alg)
+static void __maybe_unused crypto_ahash_show(struct seq_file *m,
+					     struct crypto_alg *alg)
 {
 	seq_printf(m, "type         : ahash\n");
 	seq_printf(m, "async        : %s\n",
@@ -848,76 +859,6 @@ bool crypto_hash_alg_has_setkey(struct hash_alg_common *halg)
 	return __crypto_ahash_alg(alg)->setkey != ahash_nosetkey;
 }
 EXPORT_SYMBOL_GPL(crypto_hash_alg_has_setkey);
-
-struct crypto_ahash *crypto_clone_ahash(struct crypto_ahash *hash)
-{
-	struct hash_alg_common *halg = crypto_hash_alg_common(hash);
-	struct crypto_tfm *tfm = crypto_ahash_tfm(hash);
-	struct crypto_ahash *fb = NULL;
-	struct crypto_ahash *nhash;
-	struct ahash_alg *alg;
-	int err;
-
-	if (!crypto_hash_alg_has_setkey(halg)) {
-		tfm = crypto_tfm_get(tfm);
-		if (IS_ERR(tfm))
-			return ERR_CAST(tfm);
-
-		return hash;
-	}
-
-	nhash = crypto_clone_tfm(&crypto_ahash_type, tfm);
-
-	if (IS_ERR(nhash))
-		return nhash;
-
-	nhash->reqsize = hash->reqsize;
-	nhash->statesize = hash->statesize;
-
-	if (likely(hash->using_shash)) {
-		struct crypto_shash **nctx = crypto_ahash_ctx(nhash);
-		struct crypto_shash *shash;
-
-		shash = crypto_clone_shash(ahash_to_shash(hash));
-		if (IS_ERR(shash)) {
-			err = PTR_ERR(shash);
-			goto out_free_nhash;
-		}
-		crypto_ahash_tfm(nhash)->exit = crypto_exit_ahash_using_shash;
-		nhash->using_shash = true;
-		*nctx = shash;
-		return nhash;
-	}
-
-	if (crypto_ahash_need_fallback(hash)) {
-		fb = crypto_clone_ahash(crypto_ahash_fb(hash));
-		err = PTR_ERR(fb);
-		if (IS_ERR(fb))
-			goto out_free_nhash;
-
-		crypto_ahash_tfm(nhash)->fb = crypto_ahash_tfm(fb);
-	}
-
-	err = -ENOSYS;
-	alg = crypto_ahash_alg(hash);
-	if (!alg->clone_tfm)
-		goto out_free_fb;
-
-	err = alg->clone_tfm(nhash, hash);
-	if (err)
-		goto out_free_fb;
-
-	crypto_ahash_tfm(nhash)->exit = crypto_ahash_exit_tfm;
-
-	return nhash;
-
-out_free_fb:
-	crypto_free_ahash(fb);
-out_free_nhash:
-	crypto_free_ahash(nhash);
-	return ERR_PTR(err);
-}
-EXPORT_SYMBOL_GPL(crypto_clone_ahash);
 
 static int ahash_default_export_core(struct ahash_request *req, void *out)
 {
@@ -1006,17 +947,13 @@ int crypto_register_ahashes(struct ahash_alg *algs, int count)
 
 	for (i = 0; i < count; i++) {
 		ret = crypto_register_ahash(&algs[i]);
-		if (ret)
-			goto err;
+		if (ret) {
+			crypto_unregister_ahashes(algs, i);
+			return ret;
+		}
 	}
 
 	return 0;
-
-err:
-	for (--i; i >= 0; --i)
-		crypto_unregister_ahash(&algs[i]);
-
-	return ret;
 }
 EXPORT_SYMBOL_GPL(crypto_register_ahashes);
 

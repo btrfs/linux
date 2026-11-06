@@ -24,12 +24,17 @@ struct rdma_cgroup {
 	 * that belongs to this cgroup.
 	 */
 	struct list_head		rpools;
+
+	/* Handles for rdma.events[.local] */
+	struct cgroup_file		events_file;
+	struct cgroup_file		events_local_file;
 };
 
 struct rdmacg_device {
 	struct list_head	dev_node;
 	struct list_head	rpools;
 	char			*name;
+	u32			index;
 };
 
 /*

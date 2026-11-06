@@ -16,7 +16,6 @@
 #define _MASTER_FILE
 #include "global.h"
 
-static char *viafb_name = "Via";
 static u32 pseudo_pal[17];
 
 /* video mode */
@@ -144,7 +143,7 @@ static void viafb_setup_fixinfo(struct fb_fix_screeninfo *fix,
 	struct viafb_par *viaparinfo)
 {
 	memset(fix, 0, sizeof(struct fb_fix_screeninfo));
-	strcpy(fix->id, viafb_name);
+	strcpy(fix->id, "Via");
 
 	fix->smem_start = viaparinfo->fbmem;
 	fix->smem_len = viaparinfo->fbmem_free;
@@ -191,7 +190,7 @@ static int viafb_check_var(struct fb_var_screeninfo *var,
 
 	DEBUG_MSG(KERN_INFO "viafb_check_var!\n");
 	/* Sanity check */
-	/* HW neither support interlacte nor double-scaned mode */
+	/* HW neither support interlacte nor double-scanned mode */
 	if (var->vmode & FB_VMODE_INTERLACED || var->vmode & FB_VMODE_DOUBLE)
 		return -EINVAL;
 
@@ -766,7 +765,7 @@ static int viafb_cursor(struct fb_info *info, struct fb_cursor *cursor)
 	if (info->flags & FBINFO_HWACCEL_DISABLED || info != viafbinfo)
 		return -ENODEV;
 
-	/* LCD ouput does not support hw cursors (at least on VN896) */
+	/* LCD output does not support hw cursors (at least on VN896) */
 	if ((chip_name == UNICHROME_CLE266 && viapar->iga_path == IGA2) ||
 		viafb_LCD_ON)
 		return -ENODEV;
@@ -840,7 +839,7 @@ static int viafb_cursor(struct fb_info *info, struct fb_cursor *cursor)
 		struct {
 			u8 data[CURSOR_SIZE];
 			u32 bak[CURSOR_SIZE / 4];
-		} *cr_data = kzalloc(sizeof(*cr_data), GFP_ATOMIC);
+		} *cr_data = kzalloc_obj(*cr_data, GFP_ATOMIC);
 		int size = ((cursor->image.width + 7) >> 3) *
 			cursor->image.height;
 

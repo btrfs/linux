@@ -43,19 +43,25 @@ rogue_bif_init(struct pvr_device *pvr_dev)
 	pc_dma_addr = pvr_vm_get_page_table_root_addr(pvr_dev->kernel_vm_ctx);
 
 	/* Write the kernel catalogue base. */
-	pc_addr = ((((u64)pc_dma_addr >> ROGUE_CR_BIF_CAT_BASE0_ADDR_ALIGNSHIFT)
-		    << ROGUE_CR_BIF_CAT_BASE0_ADDR_SHIFT) &
-		   ~ROGUE_CR_BIF_CAT_BASE0_ADDR_CLRMSK);
+	pc_addr = ((((u64)pc_dma_addr >> ROGUE_CR_BIF_CAT_BASEx_ADDR_ALIGNSHIFT)
+		    << ROGUE_CR_BIF_CAT_BASEx_ADDR_SHIFT) &
+		   ~ROGUE_CR_BIF_CAT_BASEx_ADDR_CLRMSK);
 
-	pvr_cr_write64(pvr_dev, BIF_CAT_BASEX(MMU_CONTEXT_MAPPING_FWPRIV),
+	pvr_cr_write64(pvr_dev,
+		       PVR_CR_REPEAT_X(ROGUE_CR_BIF_CAT_BASE,
+				       MMU_CONTEXT_MAPPING_FWPRIV),
 		       pc_addr);
 
 	if (pvr_dev->fw_dev.processor_type == PVR_FW_PROCESSOR_TYPE_RISCV) {
-		pc_addr = (((u64)pc_dma_addr >> ROGUE_CR_FWCORE_MEM_CAT_BASE0_ADDR_ALIGNSHIFT)
-			   << ROGUE_CR_FWCORE_MEM_CAT_BASE0_ADDR_SHIFT) &
-			  ~ROGUE_CR_FWCORE_MEM_CAT_BASE0_ADDR_CLRMSK;
+		pc_addr = (((u64)pc_dma_addr
+			    >> ROGUE_CR_FWCORE_MEM_CAT_BASEx_ADDR_ALIGNSHIFT)
+			   << ROGUE_CR_FWCORE_MEM_CAT_BASEx_ADDR_SHIFT) &
+			  ~ROGUE_CR_FWCORE_MEM_CAT_BASEx_ADDR_CLRMSK;
 
-		pvr_cr_write64(pvr_dev, FWCORE_MEM_CAT_BASEX(MMU_CONTEXT_MAPPING_FWPRIV), pc_addr);
+		pvr_cr_write64(pvr_dev,
+			       PVR_CR_REPEAT_X(ROGUE_CR_FWCORE_MEM_CAT_BASE,
+					       MMU_CONTEXT_MAPPING_FWPRIV),
+			       pc_addr);
 	}
 }
 
@@ -209,18 +215,32 @@ pvr_fw_stop(struct pvr_device *pvr_dev)
 					 ROGUE_CR_SIDEKICK_IDLE_SOCIF_EN |
 					 ROGUE_CR_SIDEKICK_IDLE_HOSTIF_EN);
 	bool skip_garten_idle = false;
+	u64 layout_mars_value = 0;
+	bool layout_mars = false;
+	bool meta_fw = pvr_dev->fw_dev.processor_type == PVR_FW_PROCESSOR_TYPE_META;
 	u32 reg_value;
 	int err;
 
+	if (PVR_FEATURE_VALUE(pvr_dev, layout_mars, &layout_mars_value) == 0)
+		layout_mars = layout_mars_value > 0;
+
 	/*
-	 * Wait for Sidekick/Jones to signal IDLE except for the Garten Wrapper.
-	 * For cores with the LAYOUT_MARS feature, SIDEKICK would have been
+	 * For cores with the LAYOUT_MARS feature, SIDEKICK and SLC would have been
 	 * powered down by the FW.
 	 */
-	err = pvr_cr_poll_reg32(pvr_dev, ROGUE_CR_SIDEKICK_IDLE, sidekick_idle_mask,
-				sidekick_idle_mask, POLL_TIMEOUT_USEC);
-	if (err)
-		return err;
+	if (!layout_mars) {
+		/* Wait for Sidekick/Jones to signal IDLE except for the Garten Wrapper. */
+		err = pvr_cr_poll_reg32(pvr_dev, ROGUE_CR_SIDEKICK_IDLE, sidekick_idle_mask,
+					sidekick_idle_mask, POLL_TIMEOUT_USEC);
+		if (err)
+			return err;
+
+		/* Wait for SLC to signal IDLE. */
+		err = pvr_cr_poll_reg32(pvr_dev, ROGUE_CR_SLC_IDLE, ROGUE_CR_SLC_IDLE_MASKFULL,
+					ROGUE_CR_SLC_IDLE_MASKFULL, POLL_TIMEOUT_USEC);
+		if (err)
+			return err;
+	}
 
 	/* Unset MTS DM association with threads. */
 	pvr_cr_write32(pvr_dev, ROGUE_CR_MTS_INTCTX_THREAD0_DM_ASSOC,
@@ -229,12 +249,15 @@ pvr_fw_stop(struct pvr_device *pvr_dev)
 	pvr_cr_write32(pvr_dev, ROGUE_CR_MTS_BGCTX_THREAD0_DM_ASSOC,
 		       ROGUE_CR_MTS_BGCTX_THREAD0_DM_ASSOC_MASKFULL &
 		       ROGUE_CR_MTS_BGCTX_THREAD0_DM_ASSOC_DM_ASSOC_CLRMSK);
-	pvr_cr_write32(pvr_dev, ROGUE_CR_MTS_INTCTX_THREAD1_DM_ASSOC,
-		       ROGUE_CR_MTS_INTCTX_THREAD1_DM_ASSOC_MASKFULL &
-		       ROGUE_CR_MTS_INTCTX_THREAD1_DM_ASSOC_DM_ASSOC_CLRMSK);
-	pvr_cr_write32(pvr_dev, ROGUE_CR_MTS_BGCTX_THREAD1_DM_ASSOC,
-		       ROGUE_CR_MTS_BGCTX_THREAD1_DM_ASSOC_MASKFULL &
-		       ROGUE_CR_MTS_BGCTX_THREAD1_DM_ASSOC_DM_ASSOC_CLRMSK);
+
+	if (meta_fw) {
+		pvr_cr_write32(pvr_dev, ROGUE_CR_MTS_INTCTX_THREAD1_DM_ASSOC,
+			       ROGUE_CR_MTS_INTCTX_THREAD1_DM_ASSOC_MASKFULL &
+			       ROGUE_CR_MTS_INTCTX_THREAD1_DM_ASSOC_DM_ASSOC_CLRMSK);
+		pvr_cr_write32(pvr_dev, ROGUE_CR_MTS_BGCTX_THREAD1_DM_ASSOC,
+			       ROGUE_CR_MTS_BGCTX_THREAD1_DM_ASSOC_MASKFULL &
+			       ROGUE_CR_MTS_BGCTX_THREAD1_DM_ASSOC_DM_ASSOC_CLRMSK);
+	}
 
 	/* Extra Idle checks. */
 	err = pvr_cr_poll_reg32(pvr_dev, ROGUE_CR_BIF_STATUS_MMU, 0,
@@ -270,27 +293,25 @@ pvr_fw_stop(struct pvr_device *pvr_dev)
 		return err;
 
 	/*
-	 * Wait for SLC to signal IDLE.
-	 * For cores with the LAYOUT_MARS feature, SLC would have been powered
-	 * down by the FW.
+	 * For cores with the LAYOUT_MARS feature, SIDEKICK and SLC would have been
+	 * powered down by the FW.
 	 */
-	err = pvr_cr_poll_reg32(pvr_dev, ROGUE_CR_SLC_IDLE,
-				ROGUE_CR_SLC_IDLE_MASKFULL,
-				ROGUE_CR_SLC_IDLE_MASKFULL, POLL_TIMEOUT_USEC);
-	if (err)
-		return err;
+	if (!layout_mars) {
+		/* Wait for SLC to signal IDLE. */
+		err = pvr_cr_poll_reg32(pvr_dev, ROGUE_CR_SLC_IDLE,
+					ROGUE_CR_SLC_IDLE_MASKFULL,
+					ROGUE_CR_SLC_IDLE_MASKFULL, POLL_TIMEOUT_USEC);
+		if (err)
+			return err;
 
-	/*
-	 * Wait for Sidekick/Jones to signal IDLE except for the Garten Wrapper.
-	 * For cores with the LAYOUT_MARS feature, SIDEKICK would have been powered
-	 * down by the FW.
-	 */
-	err = pvr_cr_poll_reg32(pvr_dev, ROGUE_CR_SIDEKICK_IDLE, sidekick_idle_mask,
-				sidekick_idle_mask, POLL_TIMEOUT_USEC);
-	if (err)
-		return err;
+		/* Wait for Sidekick/Jones to signal IDLE except for the Garten Wrapper. */
+		err = pvr_cr_poll_reg32(pvr_dev, ROGUE_CR_SIDEKICK_IDLE, sidekick_idle_mask,
+					sidekick_idle_mask, POLL_TIMEOUT_USEC);
+		if (err)
+			return err;
+	}
 
-	if (pvr_dev->fw_dev.processor_type == PVR_FW_PROCESSOR_TYPE_META) {
+	if (meta_fw) {
 		err = pvr_meta_cr_read32(pvr_dev, META_CR_TxVECINT_BHALT, &reg_value);
 		if (err)
 			return err;
@@ -304,11 +325,28 @@ pvr_fw_stop(struct pvr_device *pvr_dev)
 			skip_garten_idle = true;
 	}
 
-	if (!skip_garten_idle) {
-		err = pvr_cr_poll_reg32(pvr_dev, ROGUE_CR_SIDEKICK_IDLE,
-					ROGUE_CR_SIDEKICK_IDLE_GARTEN_EN,
-					ROGUE_CR_SIDEKICK_IDLE_GARTEN_EN,
+	if (meta_fw || !layout_mars) {
+		if (!skip_garten_idle) {
+			err = pvr_cr_poll_reg32(pvr_dev, ROGUE_CR_SIDEKICK_IDLE,
+						ROGUE_CR_SIDEKICK_IDLE_GARTEN_EN,
+						ROGUE_CR_SIDEKICK_IDLE_GARTEN_EN,
+						POLL_TIMEOUT_USEC);
+			if (err)
+				return err;
+		}
+	} else {
+		/*
+		 * As FW core has been moved from SIDEKICK to the new MARS domain, checking
+		 * idle bits for CPU & System Arbiter excluding SOCIF which will never be
+		 * idle if Host polling on this register
+		 */
+		err = pvr_cr_poll_reg32(pvr_dev, ROGUE_CR_MARS_IDLE,
+					ROGUE_CR_MARS_IDLE_CPU_EN |
+					ROGUE_CR_MARS_IDLE_MH_SYSARB0_EN,
+					ROGUE_CR_MARS_IDLE_CPU_EN |
+					ROGUE_CR_MARS_IDLE_MH_SYSARB0_EN,
 					POLL_TIMEOUT_USEC);
+
 		if (err)
 			return err;
 	}

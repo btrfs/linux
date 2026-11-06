@@ -305,9 +305,9 @@ struct snd_azf3328 {
 };
 
 static const struct pci_device_id snd_azf3328_ids[] = {
-	{ 0x122D, 0x50DC, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },   /* PCI168/3328 */
-	{ 0x122D, 0x80DA, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },   /* 3328 */
-	{ 0, }
+	{ PCI_DEVICE(0x122D, 0x50DC) },   /* PCI168/3328 */
+	{ PCI_DEVICE(0x122D, 0x80DA) },   /* 3328 */
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, snd_azf3328_ids);
@@ -2403,10 +2403,10 @@ snd_azf3328_create(struct snd_card *card,
 }
 
 static int
-__snd_azf3328_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
+snd_azf3328_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
 {
 	static int dev;
-	struct snd_card *card;
+	struct snd_card *card __free(snd_card_free) = NULL;
 	struct snd_azf3328 *chip;
 	struct snd_opl3 *opl3;
 	int err;
@@ -2492,14 +2492,9 @@ __snd_azf3328_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
 	snd_azf3328_gameport(chip, dev);
 
 	pci_set_drvdata(pci, card);
+	card = NULL; /* probe succeeded, don't release as error */
 	dev++;
 	return 0;
-}
-
-static int
-snd_azf3328_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
-{
-	return snd_card_free_on_error(&pci->dev, __snd_azf3328_probe(pci, pci_id));
 }
 
 static inline void

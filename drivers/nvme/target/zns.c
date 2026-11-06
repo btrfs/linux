@@ -69,20 +69,16 @@ bool nvmet_bdev_zns_enable(struct nvmet_ns *ns)
 void nvmet_execute_identify_ctrl_zns(struct nvmet_req *req)
 {
 	u8 zasl = req->sq->ctrl->subsys->zasl;
-	struct nvmet_ctrl *ctrl = req->sq->ctrl;
 	struct nvme_id_ctrl_zns *id;
 	u16 status;
 
-	id = kzalloc(sizeof(*id), GFP_KERNEL);
+	id = kzalloc_obj(*id);
 	if (!id) {
 		status = NVME_SC_INTERNAL;
 		goto out;
 	}
 
-	if (ctrl->ops->get_mdts)
-		id->zasl = min_t(u8, ctrl->ops->get_mdts(ctrl), zasl);
-	else
-		id->zasl = zasl;
+	id->zasl = min_not_zero(nvmet_ctrl_mdts(req), zasl);
 
 	status = nvmet_copy_to_sgl(req, 0, id, sizeof(*id));
 
@@ -104,7 +100,7 @@ void nvmet_execute_identify_ns_zns(struct nvmet_req *req)
 		goto out;
 	}
 
-	id_zns = kzalloc(sizeof(*id_zns), GFP_KERNEL);
+	id_zns = kzalloc_obj(*id_zns);
 	if (!id_zns) {
 		status = NVME_SC_INTERNAL;
 		goto out;
@@ -120,7 +116,7 @@ void nvmet_execute_identify_ns_zns(struct nvmet_req *req)
 		mutex_unlock(&req->ns->subsys->lock);
 	}
 
-	if (!bdev_is_zoned(req->ns->bdev)) {
+	if (!req->ns->bdev || !bdev_is_zoned(req->ns->bdev)) {
 		status = NVME_SC_INVALID_FIELD | NVME_STATUS_DNR;
 		req->error_loc = offsetof(struct nvme_identify, nsid);
 		goto out;
@@ -286,6 +282,11 @@ static void nvmet_bdev_zone_zmgmt_recv_work(struct work_struct *w)
 	if (status)
 		goto out;
 
+	/* Only the zone count and matching descriptors are written below. */
+	status = nvmet_zero_sgl(req, 0, out_bufsize);
+	if (status)
+		goto out;
+
 	if (!req_slba_nr_zones) {
 		status = NVME_SC_SUCCESS;
 		goto out;
@@ -299,11 +300,18 @@ static void nvmet_bdev_zone_zmgmt_recv_work(struct work_struct *w)
 	}
 
 	/*
-	 * When partial bit is set nr_zones must indicate the number of zone
-	 * descriptors actually transferred.
+	 * Partial report (PR bit set): the host accepts an incomplete listing,
+	 * so cap Number of Zones to the descriptors that fit in the buffer.
+	 * Full report (PR bit clear): Number of Zones is the match count; fail
+	 * if the buffer cannot hold every matching zone descriptor.
 	 */
-	if (req->cmd->zmr.pr)
+	if (req->cmd->zmr.pr) {
 		rz_data.nr_zones = min(rz_data.nr_zones, rz_data.out_nr_zones);
+	} else if (rz_data.nr_zones > rz_data.out_nr_zones) {
+		req->error_loc = offsetof(struct nvme_zone_mgmt_recv_cmd, numd);
+		status = NVME_SC_INVALID_FIELD | NVME_STATUS_DNR;
+		goto out;
+	}
 
 	nr_zones = cpu_to_le64(rz_data.nr_zones);
 	status = nvmet_copy_to_sgl(req, 0, &nr_zones, sizeof(nr_zones));
@@ -314,6 +322,19 @@ out:
 
 void nvmet_bdev_execute_zone_mgmt_recv(struct nvmet_req *req)
 {
+	u32 numd = le32_to_cpu(req->cmd->zmr.numd);
+
+	/* From U32_MAX / 4 up, (numd + 1) << 2 wraps here and in the work. */
+	if (numd >= U32_MAX / 4) {
+		req->error_loc = offsetof(struct nvme_zone_mgmt_recv_cmd, numd);
+		nvmet_req_complete(req,
+				   NVME_SC_INVALID_FIELD | NVME_STATUS_DNR);
+		return;
+	}
+
+	if (!nvmet_check_transfer_len(req, (numd + 1) << 2))
+		return;
+
 	INIT_WORK(&req->z.zmgmt_work, nvmet_bdev_zone_zmgmt_recv_work);
 	queue_work(zbd_wq, &req->z.zmgmt_work);
 }

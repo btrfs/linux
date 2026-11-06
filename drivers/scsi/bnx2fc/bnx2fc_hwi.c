@@ -561,7 +561,7 @@ void bnx2fc_process_l2_frame_compl(struct bnx2fc_rport *tgt,
 	u8 op;
 
 
-	unsol_els = kzalloc(sizeof(*unsol_els), GFP_ATOMIC);
+	unsol_els = kzalloc_obj(*unsol_els, GFP_ATOMIC);
 	if (!unsol_els) {
 		BNX2FC_TGT_DBG(tgt, "Unable to allocate unsol_work\n");
 		return;
@@ -943,7 +943,7 @@ void bnx2fc_process_cq_compl(struct bnx2fc_rport *tgt, u16 wqe,
 	case BNX2FC_SEQ_CLEANUP:
 		BNX2FC_IO_DBG(io_req, "cq_compl(0x%x) - seq cleanup resp\n",
 			      io_req->xid);
-		bnx2fc_process_seq_cleanup_compl(io_req, task, rx_state);
+		bnx2fc_process_seq_cleanup_compl(tgt, io_req, task, rx_state);
 		kref_put(&io_req->refcount, bnx2fc_cmd_release);
 		break;
 
@@ -972,7 +972,7 @@ static struct bnx2fc_work *bnx2fc_alloc_work(struct bnx2fc_rport *tgt, u16 wqe,
 					     struct fcoe_task_ctx_entry *task)
 {
 	struct bnx2fc_work *work;
-	work = kzalloc(sizeof(struct bnx2fc_work), GFP_ATOMIC);
+	work = kzalloc_obj(struct bnx2fc_work, GFP_ATOMIC);
 	if (!work)
 		return NULL;
 

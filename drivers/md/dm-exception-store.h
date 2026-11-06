@@ -29,7 +29,7 @@ typedef sector_t chunk_t;
  * chunk within the device.
  */
 struct dm_exception {
-	struct hlist_bl_node hash_list;
+	struct hlist_node hash_list;
 
 	chunk_t old_chunk;
 	chunk_t new_chunk;
@@ -135,7 +135,7 @@ struct dm_dev *dm_snap_origin(struct dm_snapshot *snap);
 struct dm_dev *dm_snap_cow(struct dm_snapshot *snap);
 
 /*
- * Funtions to manipulate consecutive chunks
+ * Functions to manipulate consecutive chunks
  */
 #define DM_CHUNK_CONSECUTIVE_BITS 8
 #define DM_CHUNK_NUMBER_BITS 56

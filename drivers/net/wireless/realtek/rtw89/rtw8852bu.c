@@ -5,12 +5,37 @@
 #include <linux/module.h>
 #include <linux/usb.h>
 #include "rtw8852b.h"
+#include "reg.h"
 #include "usb.h"
+
+static const struct rtw89_usb_info rtw8852b_usb_info = {
+	.usb_host_request_2		= R_AX_USB_HOST_REQUEST_2,
+	.usb_wlan0_1			= R_AX_USB_WLAN0_1,
+	.hci_func_en			= R_AX_HCI_FUNC_EN,
+	.usb3_mac_npi_config_intf_0	= R_AX_USB3_MAC_NPI_CONFIG_INTF_0,
+	.usb_endpoint_0			= R_AX_USB_ENDPOINT_0,
+	.usb_endpoint_2			= R_AX_USB_ENDPOINT_2,
+	.rx_agg_alignment		= 8,
+	.bulkout_id = {
+		[RTW89_DMA_ACH0] = 3,
+		[RTW89_DMA_ACH1] = 4,
+		[RTW89_DMA_ACH2] = 5,
+		[RTW89_DMA_ACH3] = 6,
+		[RTW89_DMA_B0MG] = 0,
+		[RTW89_DMA_B0HI] = 1,
+		[RTW89_DMA_H2C] = 2,
+	},
+};
 
 static const struct rtw89_driver_info rtw89_8852bu_info = {
 	.chip = &rtw8852b_chip_info,
 	.variant = NULL,
+	.board = NULL,
 	.quirks = NULL,
+	.dev_id_quirks = 0,
+	.bus = {
+		.usb = &rtw8852b_usb_info,
+	}
 };
 
 static const struct usb_device_id rtw_8852bu_id_table[] = {
@@ -28,7 +53,11 @@ static const struct usb_device_id rtw_8852bu_id_table[] = {
 	  .driver_info = (kernel_ulong_t)&rtw89_8852bu_info },
 	{ USB_DEVICE_AND_INTERFACE_INFO(0x0b05, 0x1a62, 0xff, 0xff, 0xff),
 	  .driver_info = (kernel_ulong_t)&rtw89_8852bu_info },
+	{ USB_DEVICE_AND_INTERFACE_INFO(0x0b05, 0x1cb6, 0xff, 0xff, 0xff),
+	  .driver_info = (kernel_ulong_t)&rtw89_8852bu_info },
 	{ USB_DEVICE_AND_INTERFACE_INFO(0x0db0, 0x6931, 0xff, 0xff, 0xff),
+	  .driver_info = (kernel_ulong_t)&rtw89_8852bu_info },
+	{ USB_DEVICE_AND_INTERFACE_INFO(0x0db0, 0xf0c8, 0xff, 0xff, 0xff),
 	  .driver_info = (kernel_ulong_t)&rtw89_8852bu_info },
 	{ USB_DEVICE_AND_INTERFACE_INFO(0x2001, 0x3327, 0xff, 0xff, 0xff),
 	  .driver_info = (kernel_ulong_t)&rtw89_8852bu_info },
@@ -44,10 +73,16 @@ static const struct usb_device_id rtw_8852bu_id_table[] = {
 };
 MODULE_DEVICE_TABLE(usb, rtw_8852bu_id_table);
 
+static int rtw8852bu_probe(struct usb_interface *intf,
+			   const struct usb_device_id *id)
+{
+	return rtw89_usb_probe(intf, id, &rtw89_8852bu_info);
+}
+
 static struct usb_driver rtw_8852bu_driver = {
 	.name = KBUILD_MODNAME,
 	.id_table = rtw_8852bu_id_table,
-	.probe = rtw89_usb_probe,
+	.probe = rtw8852bu_probe,
 	.disconnect = rtw89_usb_disconnect,
 };
 module_usb_driver(rtw_8852bu_driver);

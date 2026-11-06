@@ -396,7 +396,7 @@ il_dbgfs_stations_read(struct file *file, char __user *user_buf, size_t count,
 	int i, j, pos = 0;
 	ssize_t ret;
 	/* Add 30 for initial string */
-	const size_t bufsz = 30 + sizeof(char) * 500 * (il->num_stations);
+	const size_t bufsz = 30 + sizeof(char) * 500 * max_sta;
 
 	buf = kmalloc(bufsz, GFP_KERNEL);
 	if (!buf)
@@ -1361,6 +1361,9 @@ il_dbgfs_register(struct il_priv *il, const char *name)
 		DEBUGFS_ADD_BOOL(disable_chain_noise, dir_rf,
 				 &il->disable_chain_noise_cal);
 	DEBUGFS_ADD_BOOL(disable_tx_power, dir_rf, &il->disable_tx_power_cal);
+#ifdef CONFIG_IWLEGACY_DEBUG
+	debugfs_create_x32("debug_level", 0600, dir_debug, &il->debug_level);
+#endif
 }
 EXPORT_SYMBOL(il_dbgfs_register);
 

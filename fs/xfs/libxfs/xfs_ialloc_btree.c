@@ -3,7 +3,7 @@
  * Copyright (c) 2000-2001,2005 Silicon Graphics, Inc.
  * All Rights Reserved.
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -687,7 +687,6 @@ xfs_inobt_irec_to_allocmask(
  */
 int
 xfs_inobt_rec_check_count(
-	struct xfs_mount		*mp,
 	struct xfs_inobt_rec_incore	*rec)
 {
 	int				inocount = 0;

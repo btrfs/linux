@@ -643,8 +643,10 @@ static void ppl_do_flush(struct ppl_io_unit *io)
 	log->disk_flush_bitmap = 0;
 
 	for (i = flushed_disks ; i < raid_disks; i++) {
-		if (atomic_dec_and_test(&io->pending_flushes))
+		if (atomic_dec_and_test(&io->pending_flushes)) {
 			ppl_io_unit_finished(io);
+			break;
+		}
 	}
 }
 
@@ -1316,6 +1318,7 @@ int ppl_init_log(struct r5conf *conf)
 {
 	struct ppl_conf *ppl_conf;
 	struct mddev *mddev = conf->mddev;
+	char cache_name[48];
 	int ret = 0;
 	int max_disks;
 	int i;
@@ -1352,13 +1355,22 @@ int ppl_init_log(struct r5conf *conf)
 		return -EINVAL;
 	}
 
-	ppl_conf = kzalloc(sizeof(struct ppl_conf), GFP_KERNEL);
+	ppl_conf = kzalloc_obj(struct ppl_conf);
 	if (!ppl_conf)
 		return -ENOMEM;
 
 	ppl_conf->mddev = mddev;
 
-	ppl_conf->io_kc = KMEM_CACHE(ppl_io_unit, 0);
+	if (mddev_is_dm(mddev))
+		snprintf(cache_name, sizeof(cache_name), "ppl_io_unit-%p", mddev);
+	else
+		snprintf(cache_name, sizeof(cache_name), "ppl_io_unit-%s",
+			 mdname(mddev));
+
+	ppl_conf->io_kc = kmem_cache_create(cache_name,
+					    sizeof(struct ppl_io_unit),
+					    __alignof__(struct ppl_io_unit),
+					    0, NULL);
 	if (!ppl_conf->io_kc) {
 		ret = -ENOMEM;
 		goto err;
@@ -1378,8 +1390,7 @@ int ppl_init_log(struct r5conf *conf)
 		goto err;
 
 	ppl_conf->count = conf->raid_disks;
-	ppl_conf->child_logs = kcalloc(ppl_conf->count, sizeof(struct ppl_log),
-				       GFP_KERNEL);
+	ppl_conf->child_logs = kzalloc_objs(struct ppl_log, ppl_conf->count);
 	if (!ppl_conf->child_logs) {
 		ret = -ENOMEM;
 		goto err;

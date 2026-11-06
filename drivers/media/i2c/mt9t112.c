@@ -872,6 +872,7 @@ static int mt9t112_set_params(struct mt9t112_priv *priv,
 }
 
 static int mt9t112_get_selection(struct v4l2_subdev *sd,
+				 const struct v4l2_subdev_client_info *ci,
 				 struct v4l2_subdev_state *sd_state,
 				 struct v4l2_subdev_selection *sel)
 {
@@ -897,6 +898,7 @@ static int mt9t112_get_selection(struct v4l2_subdev *sd,
 }
 
 static int mt9t112_set_selection(struct v4l2_subdev *sd,
+				 const struct v4l2_subdev_client_info *ci,
 				 struct v4l2_subdev_state *sd_state,
 				 struct v4l2_subdev_selection *sel)
 {
@@ -953,6 +955,7 @@ static int mt9t112_s_fmt(struct v4l2_subdev *sd,
 }
 
 static int mt9t112_set_fmt(struct v4l2_subdev *sd,
+			   const struct v4l2_subdev_client_info *ci,
 			   struct v4l2_subdev_state *sd_state,
 			   struct v4l2_subdev_format *format)
 {
@@ -1079,11 +1082,12 @@ static int mt9t112_probe(struct i2c_client *client)
 	v4l2_i2c_subdev_init(&priv->subdev, client, &mt9t112_subdev_ops);
 
 	priv->clk = devm_v4l2_sensor_clk_get(&client->dev, "extclk");
-	if (PTR_ERR(priv->clk) == -ENOENT)
+	if (IS_ERR(priv->clk)) {
+		if (PTR_ERR(priv->clk) != -ENOENT)
+			return dev_err_probe(&client->dev, PTR_ERR(priv->clk),
+					     "Unable to get clock \"extclk\"\n");
 		priv->clk = NULL;
-	else if (IS_ERR(priv->clk))
-		return dev_err_probe(&client->dev, PTR_ERR(priv->clk),
-				     "Unable to get clock \"extclk\"\n");
+	}
 
 	priv->standby_gpio = devm_gpiod_get_optional(&client->dev, "standby",
 						     GPIOD_OUT_HIGH);
@@ -1108,7 +1112,7 @@ static void mt9t112_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id mt9t112_id[] = {
-	{ "mt9t112" },
+	{ .name = "mt9t112" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mt9t112_id);

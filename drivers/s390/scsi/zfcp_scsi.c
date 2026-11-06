@@ -7,8 +7,7 @@
  * Copyright IBM Corp. 2002, 2020
  */
 
-#define KMSG_COMPONENT "zfcp"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "zfcp: " fmt
 
 #include <linux/module.h>
 #include <linux/types.h>
@@ -64,8 +63,8 @@ static void zfcp_scsi_command_fail(struct scsi_cmnd *scpnt, int result)
 	scsi_done(scpnt);
 }
 
-static
-int zfcp_scsi_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *scpnt)
+static enum scsi_qc_status zfcp_scsi_queuecommand(struct Scsi_Host *shost,
+						  struct scsi_cmnd *scpnt)
 {
 	struct zfcp_scsi_dev *zfcp_sdev = sdev_to_zfcp(scpnt->device);
 	struct fc_rport *rport = starget_to_rport(scsi_target(scpnt->device));
@@ -543,7 +542,7 @@ zfcp_scsi_init_fc_host_stats(struct zfcp_adapter *adapter)
 	struct fc_host_statistics *fc_stats;
 
 	if (!adapter->fc_stats) {
-		fc_stats = kmalloc(sizeof(*fc_stats), GFP_KERNEL);
+		fc_stats = kmalloc_obj(*fc_stats);
 		if (!fc_stats)
 			return NULL;
 		adapter->fc_stats = fc_stats; /* freed in adapter_release */
@@ -623,7 +622,7 @@ zfcp_scsi_get_fc_host_stats(struct Scsi_Host *host)
 	if (!fc_stats)
 		return NULL;
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data)
 		return NULL;
 
@@ -652,7 +651,7 @@ static void zfcp_scsi_reset_fc_host_stats(struct Scsi_Host *shost)
 	int ret;
 
 	adapter = (struct zfcp_adapter *)shost->hostdata[0];
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data)
 		return;
 
@@ -850,14 +849,14 @@ void zfcp_scsi_set_prot(struct zfcp_adapter *adapter)
 /**
  * zfcp_scsi_dif_sense_error - Report DIF/DIX error as driver sense error
  * @scmd: The SCSI command to report the error for
- * @ascq: The ASCQ to put in the sense buffer
+ * @sense_code: The combined ASC and ASCQ to put in the sense buffer
  *
  * See the error handling in sd_done for the sense codes used here.
  * Set DID_SOFT_ERROR to retry the request, if possible.
  */
-void zfcp_scsi_dif_sense_error(struct scsi_cmnd *scmd, int ascq)
+void zfcp_scsi_dif_sense_error(struct scsi_cmnd *scmd, u16 sense_code)
 {
-	scsi_build_sense(scmd, 1, ILLEGAL_REQUEST, 0x10, ascq);
+	scsi_set_sense(scmd, 1, ILLEGAL_REQUEST, sense_code);
 	set_host_byte(scmd, DID_SOFT_ERROR);
 }
 

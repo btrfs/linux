@@ -335,6 +335,7 @@ static int adau7118_set_bias_level(struct snd_soc_component *component,
 				   enum snd_soc_bias_level level)
 {
 	struct adau7118_data *st = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	int ret = 0;
 
 	dev_dbg(st->dev, "Set bias level %d\n", level);
@@ -345,8 +346,7 @@ static int adau7118_set_bias_level(struct snd_soc_component *component,
 		break;
 
 	case SND_SOC_BIAS_STANDBY:
-		if (snd_soc_component_get_bias_level(component) ==
-							SND_SOC_BIAS_OFF) {
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF) {
 			/* power on */
 			ret = regulator_enable(st->iovdd);
 			if (ret)
@@ -393,8 +393,7 @@ static int adau7118_set_bias_level(struct snd_soc_component *component,
 static int adau7118_component_probe(struct snd_soc_component *component)
 {
 	struct adau7118_data *st = snd_soc_component_get_drvdata(component);
-	struct snd_soc_dapm_context *dapm =
-					snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	int ret = 0;
 
 	if (st->hw_mode) {
@@ -419,12 +418,24 @@ static int adau7118_component_probe(struct snd_soc_component *component)
 	return ret;
 }
 
+static const u64 adau7118_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF;
+
 static const struct snd_soc_dai_ops adau7118_ops = {
 	.hw_params = adau7118_hw_params,
 	.set_channel_map = adau7118_set_channel_map,
 	.set_fmt = adau7118_set_fmt,
 	.set_tdm_slot = adau7118_set_tdm_slot,
 	.set_tristate = adau7118_set_tristate,
+	.auto_selectable_formats = &adau7118_selectable_formats,
+	.num_auto_selectable_formats = 1,
 };
 
 static struct snd_soc_dai_driver adau7118_dai = {

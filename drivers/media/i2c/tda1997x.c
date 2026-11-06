@@ -590,7 +590,7 @@ static void tda1997x_enable_edid(struct v4l2_subdev *sd)
 	v4l2_dbg(1, debug, sd, "%s\n", __func__);
 
 	/* Enable hotplug after 143ms */
-	schedule_delayed_work(&state->delayed_work_enable_hpd, HZ / 7);
+	schedule_delayed_work(&state->delayed_work_enable_hpd, V4L2_SET_EDID_HPD_LOW_JIFFIES);
 }
 
 /* -----------------------------------------------------------------------------
@@ -1798,6 +1798,7 @@ static int tda1997x_get_format(struct v4l2_subdev *sd,
 }
 
 static int tda1997x_set_format(struct v4l2_subdev *sd,
+			       const struct v4l2_subdev_client_info *ci,
 			       struct v4l2_subdev_state *sd_state,
 			       struct v4l2_subdev_format *format)
 {
@@ -2274,9 +2275,9 @@ static int tda1997x_set_power(struct tda1997x_state *state, bool on)
 }
 
 static const struct i2c_device_id tda1997x_i2c_id[] = {
-	{"tda19971", (kernel_ulong_t)&tda1997x_chip_info[TDA19971]},
-	{"tda19973", (kernel_ulong_t)&tda1997x_chip_info[TDA19973]},
-	{ },
+	{ .name = "tda19971", .driver_data = (kernel_ulong_t)&tda1997x_chip_info[TDA19971] },
+	{ .name = "tda19973", .driver_data = (kernel_ulong_t)&tda1997x_chip_info[TDA19973] },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tda1997x_i2c_id);
 
@@ -2538,7 +2539,7 @@ static int tda1997x_probe(struct i2c_client *client)
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_BYTE_DATA))
 		return -EIO;
 
-	state = kzalloc(sizeof(struct tda1997x_state), GFP_KERNEL);
+	state = kzalloc_obj(struct tda1997x_state);
 	if (!state)
 		return -ENOMEM;
 
@@ -2797,7 +2798,6 @@ err_free_media:
 err_free_handler:
 	v4l2_ctrl_handler_free(&state->hdl);
 err_free_mutex:
-	cancel_delayed_work(&state->delayed_work_enable_hpd);
 	mutex_destroy(&state->page_lock);
 	mutex_destroy(&state->lock);
 	tda1997x_set_power(state, 0);

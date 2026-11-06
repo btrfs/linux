@@ -3,7 +3,7 @@
  * Copyright (C) 2018-2023 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -39,6 +39,7 @@
 #include "scrub/newbt.h"
 #include "scrub/reap.h"
 #include "scrub/rcbag.h"
+#include "scrub/refcount.h"
 
 /*
  * Rebuilding the Reference Count Btree
@@ -123,13 +124,7 @@ int
 xrep_setup_ag_refcountbt(
 	struct xfs_scrub	*sc)
 {
-	char			*descr;
-	int			error;
-
-	descr = xchk_xfile_ag_descr(sc, "rmap record bag");
-	error = xrep_setup_xfbtree(sc, descr);
-	kfree(descr);
-	return error;
+	return xrep_setup_xfbtree(sc, "rmap record bag");
 }
 
 /* Check for any obvious conflicts with this shared/CoW staging extent. */
@@ -301,7 +296,7 @@ xrep_refc_encode_startblock(
 }
 
 /* Sort in the same order as the ondisk records. */
-static int
+int
 xrep_refc_extent_cmp(
 	const void			*a,
 	const void			*b)
@@ -417,7 +412,7 @@ xrep_refc_find_refcounts(
 	bool			have;
 	int			error;
 
-	xrep_ag_btcur_init(sc, &sc->sa);
+	xrep_ag_btcur_init(sc);
 
 	/*
 	 * Set up a bag to store all the rmap records that we're tracking to
@@ -509,7 +504,7 @@ xrep_refc_find_refcounts(
 out_bag:
 	rcbag_free(&rcstack);
 out_cur:
-	xchk_ag_btcur_free(&sc->sa);
+	xchk_ag_btcur_free(sc);
 	return error;
 }
 
@@ -704,24 +699,21 @@ xrep_refcountbt(
 {
 	struct xrep_refc	*rr;
 	struct xfs_mount	*mp = sc->mp;
-	char			*descr;
 	int			error;
 
 	/* We require the rmapbt to rebuild anything. */
 	if (!xfs_has_rmapbt(mp))
 		return -EOPNOTSUPP;
 
-	rr = kzalloc(sizeof(struct xrep_refc), XCHK_GFP_FLAGS);
+	rr = kzalloc_obj(struct xrep_refc, XCHK_GFP_FLAGS);
 	if (!rr)
 		return -ENOMEM;
 	rr->sc = sc;
 
 	/* Set up enough storage to handle one refcount record per block. */
-	descr = xchk_xfile_ag_descr(sc, "reference count records");
-	error = xfarray_create(descr, mp->m_sb.sb_agblocks,
+	error = xfarray_create("reference count records", mp->m_sb.sb_agblocks,
 			sizeof(struct xfs_refcount_irec),
 			&rr->refcount_records);
-	kfree(descr);
 	if (error)
 		goto out_rr;
 

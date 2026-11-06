@@ -56,10 +56,10 @@ struct link_follower {
 
 static int follower_update(struct link_follower *follower)
 {
-	struct snd_ctl_elem_value *uctl __free(kfree) = NULL;
 	int err, ch;
+	struct snd_ctl_elem_value *uctl __free(kfree) =
+		kzalloc_obj(*uctl);
 
-	uctl = kzalloc(sizeof(*uctl), GFP_KERNEL);
 	if (!uctl)
 		return -ENOMEM;
 	uctl->id = follower->follower.id;
@@ -74,7 +74,6 @@ static int follower_update(struct link_follower *follower)
 /* get the follower ctl info and save the initial values */
 static int follower_init(struct link_follower *follower)
 {
-	struct snd_ctl_elem_info *uinfo __free(kfree) = NULL;
 	int err;
 
 	if (follower->info.count) {
@@ -84,7 +83,8 @@ static int follower_init(struct link_follower *follower)
 		return 0;
 	}
 
-	uinfo = kmalloc(sizeof(*uinfo), GFP_KERNEL);
+	struct snd_ctl_elem_info *uinfo __free(kfree) =
+		kmalloc_obj(*uinfo);
 	if (!uinfo)
 		return -ENOMEM;
 	uinfo->id = follower->follower.id;
@@ -256,8 +256,7 @@ int _snd_ctl_add_follower(struct snd_kcontrol *master,
 	struct link_master *master_link = snd_kcontrol_chip(master);
 	struct link_follower *srec;
 
-	srec = kzalloc(struct_size(srec, follower.vd, follower->count),
-		       GFP_KERNEL);
+	srec = kzalloc_flex(*srec, follower.vd, follower->count);
 	if (!srec)
 		return -ENOMEM;
 	srec->kctl = follower;
@@ -288,6 +287,8 @@ EXPORT_SYMBOL(_snd_ctl_add_follower);
  *
  * Adds the multiple follower kcontrols with the given names.
  * Returns 0 for success or a negative error code.
+ *
+ * Note that this function takes card->controls_rwsem lock internally.
  */
 int snd_ctl_add_followers(struct snd_card *card, struct snd_kcontrol *master,
 			  const char * const *list)
@@ -295,6 +296,7 @@ int snd_ctl_add_followers(struct snd_card *card, struct snd_kcontrol *master,
 	struct snd_kcontrol *follower;
 	int err;
 
+	guard(rwsem_write)(&card->controls_rwsem);
 	for (; *list; list++) {
 		follower = snd_ctl_find_id_mixer(card, *list);
 		if (follower) {
@@ -341,9 +343,9 @@ static int master_get(struct snd_kcontrol *kcontrol,
 static int sync_followers(struct link_master *master, int old_val, int new_val)
 {
 	struct link_follower *follower;
-	struct snd_ctl_elem_value *uval __free(kfree) = NULL;
+	struct snd_ctl_elem_value *uval __free(kfree) =
+		kmalloc_obj(*uval);
 
-	uval = kmalloc(sizeof(*uval), GFP_KERNEL);
 	if (!uval)
 		return -ENOMEM;
 	list_for_each_entry(follower, &master->followers, list) {
@@ -430,7 +432,7 @@ struct snd_kcontrol *snd_ctl_make_virtual_master(char *name,
 	knew.name = name;
 	knew.info = master_info;
 
-	master = kzalloc(sizeof(*master), GFP_KERNEL);
+	master = kzalloc_obj(*master);
 	if (!master)
 		return NULL;
 	INIT_LIST_HEAD(&master->followers);
@@ -464,6 +466,7 @@ EXPORT_SYMBOL(snd_ctl_make_virtual_master);
 
 /**
  * snd_ctl_add_vmaster_hook - Add a hook to a vmaster control
+ * @card: the card instance
  * @kcontrol: vmaster kctl element
  * @hook: the hook function
  * @private_data: the private_data pointer to be saved
@@ -471,13 +474,17 @@ EXPORT_SYMBOL(snd_ctl_make_virtual_master);
  * Adds the given hook to the vmaster control element so that it's called
  * at each time when the value is changed.
  *
+ * Takes the card's controls_rwsem lock internally.
+ *
  * Return: Zero.
  */
-int snd_ctl_add_vmaster_hook(struct snd_kcontrol *kcontrol,
+int snd_ctl_add_vmaster_hook(struct snd_card *card, struct snd_kcontrol *kcontrol,
 			     void (*hook)(void *private_data, int),
 			     void *private_data)
 {
 	struct link_master *master = snd_kcontrol_chip(kcontrol);
+
+	guard(rwsem_write)(&card->controls_rwsem);
 	master->hook = hook;
 	master->hook_private_data = private_data;
 	return 0;

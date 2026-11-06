@@ -18,10 +18,10 @@
 #include <linux/ethtool.h>
 #include <linux/ethtool_netlink.h>
 #include <linux/kernel.h>
+#include <linux/if_vlan.h>
 #include <linux/list.h>
 #include <linux/netdevice.h>
 #include <linux/ptp_mock.h>
-#include <linux/u64_stats_sync.h>
 #include <net/devlink.h>
 #include <net/udp_tunnel.h>
 #include <net/xdp.h>
@@ -42,8 +42,8 @@
 struct nsim_sa {
 	struct xfrm_state *xs;
 	__be32 ipaddr[4];
-	u32 key[4];
-	u32 salt;
+	__be32 key[4];
+	__be32 salt;
 	bool used;
 	bool crypt;
 	bool rx;
@@ -75,6 +75,11 @@ struct nsim_macsec {
 	u8 nsim_secy_count;
 };
 
+struct nsim_vlan {
+	DECLARE_BITMAP(ctag, VLAN_N_VID);
+	DECLARE_BITMAP(stag, VLAN_N_VID);
+};
+
 struct nsim_ethtool_pauseparam {
 	bool rx;
 	bool tx;
@@ -82,10 +87,13 @@ struct nsim_ethtool_pauseparam {
 	bool report_stats_tx;
 };
 
+#define NSIM_RSS_INDIR_SIZE		128
+
 struct nsim_ethtool {
 	u32 get_err;
 	u32 set_err;
 	u32 channels;
+	u8 rss_key[NETDEV_RSS_KEY_LEN];
 	struct nsim_ethtool_pauseparam pauseparam;
 	struct ethtool_coalesce coalesce;
 	struct ethtool_ringparam ring;
@@ -109,9 +117,14 @@ struct netdevsim {
 	int rq_reset_mode;
 
 	struct {
-		struct psp_dev *dev;
+		atomic64_t rx_packets;
+		atomic64_t rx_bytes;
+		atomic64_t tx_packets;
+		atomic64_t tx_bytes;
+		struct psp_dev __rcu *dev;
+		struct dentry *rereg;
+		struct mutex rereg_lock;
 		u32 spi;
-		u32 assoc_cnt;
 	} psp;
 
 	struct nsim_bus_dev *nsim_bus_dev;
@@ -130,6 +143,7 @@ struct netdevsim {
 	bool bpf_map_accept;
 	struct nsim_ipsec ipsec;
 	struct nsim_macsec macsec;
+	struct nsim_vlan vlan;
 	struct {
 		u32 inject_error;
 		u32 __ports[2][NSIM_UDP_TUNNEL_N_PORTS];
@@ -141,6 +155,8 @@ struct netdevsim {
 	struct page *page;
 	struct dentry *pp_dfs;
 	struct dentry *qr_dfs;
+	struct dentry *vlan_dfs;
+	struct dentry *ethtool_ddir;
 
 	struct nsim_ethtool ethtool;
 	struct netdevsim __rcu *peer;
@@ -156,6 +172,7 @@ void nsim_destroy(struct netdevsim *ns);
 bool netdev_is_nsim(struct net_device *dev);
 
 void nsim_ethtool_init(struct netdevsim *ns);
+void nsim_ethtool_fini(struct netdevsim *ns);
 
 void nsim_udp_tunnels_debugfs_create(struct nsim_dev *nsim_dev);
 int nsim_udp_tunnels_info_create(struct nsim_dev *nsim_dev,
@@ -219,6 +236,10 @@ enum nsim_resource_id {
 	NSIM_RESOURCE_NEXTHOPS,
 };
 
+enum nsim_port_resource_id {
+	NSIM_PORT_RESOURCE_TEST = 1,
+};
+
 struct nsim_dev_health {
 	struct devlink_health_reporter *empty_reporter;
 	struct devlink_health_reporter *dummy_reporter;
@@ -273,7 +294,6 @@ enum nsim_dev_port_type {
 };
 
 #define NSIM_DEV_VF_PORT_INDEX_BASE 128
-#define NSIM_DEV_VF_PORT_INDEX_MAX UINT_MAX
 
 struct nsim_dev_port {
 	struct list_head list;
@@ -319,6 +339,7 @@ struct nsim_dev {
 	u32 prog_id_gen;
 	struct list_head bpf_bound_progs;
 	struct list_head bpf_bound_maps;
+	struct mutex progs_list_lock;
 	struct netdev_phys_item_id switch_id;
 	struct list_head port_list;
 	bool fw_update_status;
@@ -326,6 +347,7 @@ struct nsim_dev {
 	u32 fw_update_flash_chunk_time_ms;
 	u32 max_macs;
 	bool test1;
+	u32 test2;
 	bool dont_allow_reload;
 	bool fail_reload;
 	struct devlink_region *dummy_region;
@@ -448,6 +470,10 @@ static inline void
 nsim_psp_handle_ext(struct sk_buff *skb, struct skb_ext *psp_ext) {}
 #endif
 
+int nsim_setup_tc(struct net_device *dev, enum tc_setup_type type,
+		  void *type_data);
+
+#define NSIM_BUS_DEV_MAX_VFS 4
 struct nsim_bus_dev {
 	struct device dev;
 	struct list_head list;
@@ -456,7 +482,6 @@ struct nsim_bus_dev {
 	struct net *initial_net; /* Purpose of this is to carry net pointer
 				  * during the probe time only.
 				  */
-	unsigned int max_vfs;
 	unsigned int num_vfs;
 	bool init;
 };

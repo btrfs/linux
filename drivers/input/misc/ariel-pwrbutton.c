@@ -9,7 +9,6 @@
 #include <linux/gfp.h>
 #include <linux/input.h>
 #include <linux/interrupt.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/spi/spi.h>
 
@@ -114,7 +113,6 @@ static int ariel_pwrbutton_probe(struct spi_device *spi)
 	if (!priv->input)
 		return -ENOMEM;
 	priv->input->name = "Power Button";
-	priv->input->dev.parent = &spi->dev;
 	input_set_capability(priv->input, EV_KEY, KEY_POWER);
 	error = input_register_device(priv->input);
 	if (error) {

@@ -170,15 +170,16 @@ static int sprd_pcm_request_dma_channel(struct snd_soc_component *component,
 
 	for (i = 0; i < channels; i++) {
 		struct sprd_pcm_dma_data *data = &dma_private->data[i];
+		struct dma_chan *chan;
 
-		data->chan = dma_request_slave_channel(dev,
-						       dma_params->chan_name[i]);
-		if (!data->chan) {
+		chan = dma_request_chan(dev, dma_params->chan_name[i]);
+		if (IS_ERR(chan)) {
 			dev_err(dev, "failed to request dma channel:%s\n",
 				dma_params->chan_name[i]);
 			sprd_pcm_release_dma_channel(substream);
 			return -ENODEV;
 		}
+		data->chan = chan;
 	}
 
 	return 0;
@@ -453,24 +454,21 @@ static const struct snd_soc_component_driver sprd_soc_component = {
 	.hw_free	= sprd_pcm_hw_free,
 	.trigger	= sprd_pcm_trigger,
 	.pointer	= sprd_pcm_pointer,
-	.pcm_construct	= sprd_pcm_new,
+	.pcm_new	= sprd_pcm_new,
 	.compress_ops	= &sprd_platform_compress_ops,
 };
 
 static int sprd_soc_platform_probe(struct platform_device *pdev)
 {
-	struct device_node *np = pdev->dev.of_node;
 	int ret;
 
-	ret = of_reserved_mem_device_init_by_idx(&pdev->dev, np, 0);
+	ret = devm_of_reserved_mem_device_init(&pdev->dev);
 	if (ret)
 		dev_warn(&pdev->dev,
 			 "no reserved DMA memory for audio platform device\n");
 
 	ret = devm_snd_soc_register_component(&pdev->dev, &sprd_soc_component,
 					      NULL, 0);
-	if (ret)
-		dev_err(&pdev->dev, "could not register platform:%d\n", ret);
 
 	return ret;
 }

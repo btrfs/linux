@@ -3,11 +3,6 @@
 #define RESYNC_BLOCK_SIZE (64*1024)
 #define RESYNC_PAGES ((RESYNC_BLOCK_SIZE + PAGE_SIZE-1) / PAGE_SIZE)
 
-/*
- * Number of guaranteed raid bios in case of extreme VM load:
- */
-#define	NR_RAID_BIOS 256
-
 /* when we get a read error on a read-only array, we redirect to another
  * device without failing the first device, or trying to over-write to
  * correct the read error.  To keep track of bad blocks on a per-bio
@@ -160,6 +155,16 @@ static inline bool raid1_add_bio_to_plug(struct mddev *mddev, struct bio *bio,
 	return true;
 }
 
+/* Block size used when narrowing a write error down to badblocks granularity. */
+static inline int rdev_bb_block_sectors(struct md_rdev *rdev)
+{
+	int lbs = bdev_logical_block_size(rdev->bdev) >> 9;
+
+	if (rdev->badblocks.shift < 0)
+		return lbs;
+	return roundup(1 << rdev->badblocks.shift, lbs);
+}
+
 /*
  * current->bio_list will be set under submit_bio() context, in this case bitmap
  * io will be added to the list and wait for current io submission to finish,
@@ -169,6 +174,23 @@ static inline bool raid1_add_bio_to_plug(struct mddev *mddev, struct bio *bio,
 static inline void raid1_prepare_flush_writes(struct mddev *mddev)
 {
 	mddev->bitmap_ops->unplug(mddev, current->bio_list == NULL);
+}
+
+static inline void flush_bio_list(struct mddev *mddev, struct bio *bio,
+				  wait_queue_head_t *wait)
+{
+	/* flush any pending bitmap writes to disk before proceeding w/ I/O */
+	raid1_prepare_flush_writes(mddev);
+	if (wq_has_sleeper(wait))
+		wake_up(wait);
+
+	while (bio) { /* submit pending writes */
+		struct bio *next = bio->bi_next;
+
+		raid1_submit_write(bio);
+		bio = next;
+		cond_resched();
+	}
 }
 
 /*
@@ -295,11 +317,14 @@ static inline bool raid1_should_read_first(struct mddev *mddev,
 }
 
 /*
- * bio with REQ_RAHEAD or REQ_NOWAIT can fail at anytime, before such IO is
- * submitted to the underlying disks, hence don't record badblocks or retry
- * in this case.
+ * bio with REQ_RAHEAD can fail at anytime, before such IO is submitted to the
+ * underlying disks, hence don't record badblocks or retry in this case.
+ *
+ * BLK_STS_INVAL means the bio was not valid for the underlying device. This
+ * is a user error, not a device failure, so retrying or recording bad blocks
+ * would be wrong.
  */
 static inline bool raid1_should_handle_error(struct bio *bio)
 {
-	return !(bio->bi_opf & (REQ_RAHEAD | REQ_NOWAIT));
+	return !(bio->bi_opf & REQ_RAHEAD) && bio->bi_status != BLK_STS_INVAL;
 }

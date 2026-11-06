@@ -6,7 +6,6 @@
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/of.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
@@ -777,10 +776,20 @@ static int max98388_dai_tdm_slot(struct snd_soc_dai *dai,
 #define MAX98388_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | \
 	SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S32_LE)
 
+static const u64 max98388_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF;
+
 static const struct snd_soc_dai_ops max98388_dai_ops = {
 	.set_fmt = max98388_dai_set_fmt,
 	.hw_params = max98388_dai_hw_params,
 	.set_tdm_slot = max98388_dai_tdm_slot,
+	.auto_selectable_formats = &max98388_selectable_formats,
+	.num_auto_selectable_formats = 1,
 };
 
 static bool max98388_readable_register(struct device *dev,
@@ -864,10 +873,16 @@ static int max98388_suspend(struct device *dev)
 static int max98388_resume(struct device *dev)
 {
 	struct max98388_priv *max98388 = dev_get_drvdata(dev);
+	int ret;
 
 	regcache_cache_only(max98388->regmap, false);
 	max98388_reset(max98388, dev);
-	regcache_sync(max98388->regmap);
+	ret = regcache_sync(max98388->regmap);
+	if (ret) {
+		regcache_cache_only(max98388->regmap, true);
+		regcache_mark_dirty(max98388->regmap);
+		return ret;
+	}
 
 	return 0;
 }
@@ -977,8 +992,8 @@ static int max98388_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id max98388_i2c_id[] = {
-	{ "max98388"},
-	{ },
+	{ .name = "max98388" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, max98388_i2c_id);

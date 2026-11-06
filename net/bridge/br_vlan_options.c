@@ -43,9 +43,30 @@ bool br_vlan_opts_eq_range(const struct net_bridge_vlan *v_curr,
 	u8 range_mc_rtr = br_vlan_multicast_router(range_end);
 	u8 curr_mc_rtr = br_vlan_multicast_router(v_curr);
 
-	return v_curr->state == range_end->state &&
-	       __vlan_tun_can_enter_range(v_curr, range_end) &&
-	       curr_mc_rtr == range_mc_rtr;
+	if (br_vlan_get_state(v_curr) != br_vlan_get_state(range_end))
+		return false;
+
+	if (!__vlan_tun_can_enter_range(v_curr, range_end))
+		return false;
+
+	if (curr_mc_rtr != range_mc_rtr)
+		return false;
+
+	/* Check user-visible priv_flags that affect output */
+	if ((v_curr->priv_flags ^ range_end->priv_flags) &
+	    (BR_VLFLAG_NEIGH_SUPPRESS_ENABLED | BR_VLFLAG_MCAST_ENABLED |
+	     BR_VLFLAG_NEIGH_FORWARD_GRAT_ENABLED))
+		return false;
+
+#ifdef CONFIG_BRIDGE_IGMP_SNOOPING
+	if (!br_vlan_is_master(v_curr) &&
+	    !br_multicast_port_ctx_vlan_disabled(&v_curr->port_mcast_ctx) &&
+	    !br_multicast_port_ctx_options_equal(&v_curr->port_mcast_ctx,
+						 &range_end->port_mcast_ctx))
+		return false;
+#endif
+
+	return true;
 }
 
 bool br_vlan_opts_fill(struct sk_buff *skb, const struct net_bridge_vlan *v,
@@ -54,7 +75,9 @@ bool br_vlan_opts_fill(struct sk_buff *skb, const struct net_bridge_vlan *v,
 	if (nla_put_u8(skb, BRIDGE_VLANDB_ENTRY_STATE, br_vlan_get_state(v)) ||
 	    !__vlan_tun_put(skb, v) ||
 	    nla_put_u8(skb, BRIDGE_VLANDB_ENTRY_NEIGH_SUPPRESS,
-		       !!(v->priv_flags & BR_VLFLAG_NEIGH_SUPPRESS_ENABLED)))
+		       !!(v->priv_flags & BR_VLFLAG_NEIGH_SUPPRESS_ENABLED)) ||
+	    nla_put_u8(skb, BRIDGE_VLANDB_ENTRY_NEIGH_FORWARD_GRAT,
+		       !!(v->priv_flags & BR_VLFLAG_NEIGH_FORWARD_GRAT_ENABLED)))
 		return false;
 
 #ifdef CONFIG_BRIDGE_IGMP_SNOOPING
@@ -83,11 +106,11 @@ size_t br_vlan_opts_nl_size(void)
 	       + nla_total_size(sizeof(u32)) /* BRIDGE_VLANDB_ENTRY_MCAST_MAX_GROUPS */
 #endif
 	       + nla_total_size(sizeof(u8)) /* BRIDGE_VLANDB_ENTRY_NEIGH_SUPPRESS */
+	       + nla_total_size(sizeof(u8)) /* BRIDGE_VLANDB_ENTRY_NEIGH_FORWARD_GRAT */
 	       + 0;
 }
 
-static int br_vlan_modify_state(struct net_bridge_vlan_group *vg,
-				struct net_bridge_vlan *v,
+static int br_vlan_modify_state(struct net_bridge_vlan *v,
 				u8 state,
 				bool *changed,
 				struct netlink_ext_ack *extack)
@@ -119,9 +142,6 @@ static int br_vlan_modify_state(struct net_bridge_vlan_group *vg,
 	if (v->state == state)
 		return 0;
 
-	if (v->vid == br_get_pvid(vg))
-		br_vlan_set_pvid_state(vg, state);
-
 	br_vlan_set_state(v, state);
 	*changed = true;
 
@@ -148,7 +168,7 @@ static int br_vlan_modify_tunnel(const struct net_bridge_port *p,
 		NL_SET_ERR_MSG_MOD(extack, "Can't modify tunnel mapping of non-port vlans");
 		return -EINVAL;
 	}
-	if (!(p->flags & BR_VLAN_TUNNEL)) {
+	if (!test_bit(BR_VLAN_TUNNEL_BIT, &p->flags)) {
 		NL_SET_ERR_MSG_MOD(extack, "Port doesn't have tunnel flag set");
 		return -EINVAL;
 	}
@@ -192,7 +212,6 @@ static int br_vlan_modify_tunnel(const struct net_bridge_port *p,
 
 static int br_vlan_process_one_opts(const struct net_bridge *br,
 				    const struct net_bridge_port *p,
-				    struct net_bridge_vlan_group *vg,
 				    struct net_bridge_vlan *v,
 				    struct nlattr **tb,
 				    bool *changed,
@@ -204,7 +223,7 @@ static int br_vlan_process_one_opts(const struct net_bridge *br,
 	if (tb[BRIDGE_VLANDB_ENTRY_STATE]) {
 		u8 state = nla_get_u8(tb[BRIDGE_VLANDB_ENTRY_STATE]);
 
-		err = br_vlan_modify_state(vg, v, state, changed, extack);
+		err = br_vlan_modify_state(v, state, changed, extack);
 		if (err)
 			return err;
 	}
@@ -252,7 +271,25 @@ static int br_vlan_process_one_opts(const struct net_bridge *br,
 		}
 
 		if (val != enabled) {
-			v->priv_flags ^= BR_VLFLAG_NEIGH_SUPPRESS_ENABLED;
+			WRITE_ONCE(v->priv_flags, v->priv_flags ^
+				   BR_VLFLAG_NEIGH_SUPPRESS_ENABLED);
+			*changed = true;
+		}
+	}
+
+	if (tb[BRIDGE_VLANDB_ENTRY_NEIGH_FORWARD_GRAT]) {
+		bool enabled = v->priv_flags & BR_VLFLAG_NEIGH_FORWARD_GRAT_ENABLED;
+		bool val = nla_get_u8(tb[BRIDGE_VLANDB_ENTRY_NEIGH_FORWARD_GRAT]);
+
+		if (!p) {
+			NL_SET_ERR_MSG_MOD(extack,
+					   "Can't set neigh_forward_grat for non-port vlans");
+			return -EINVAL;
+		}
+
+		if (val != enabled) {
+			WRITE_ONCE(v->priv_flags, v->priv_flags ^
+				   BR_VLFLAG_NEIGH_FORWARD_GRAT_ENABLED);
 			*changed = true;
 		}
 	}
@@ -297,8 +334,7 @@ int br_vlan_process_options(const struct net_bridge *br,
 			break;
 		}
 
-		err = br_vlan_process_one_opts(br, p, vg, v, tb, &changed,
-					       extack);
+		err = br_vlan_process_one_opts(br, p, v, tb, &changed, extack);
 		if (err)
 			break;
 
@@ -310,8 +346,7 @@ int br_vlan_process_options(const struct net_bridge *br,
 				continue;
 			}
 
-			if (v->vid == pvid ||
-			    !br_vlan_can_enter_range(v, curr_end)) {
+			if (!br_vlan_can_enter_range(v, curr_end, pvid)) {
 				br_vlan_notify(br, p, curr_start->vid,
 					       curr_end->vid, RTM_NEWVLAN);
 				curr_start = v;

@@ -12,6 +12,10 @@
 
 struct xe_bo;
 
+#define LRC_MIGRATION_ULLS_SEMAPHORE_COUNT	64	/* Must be pow2 */
+#define LRC_MIGRATION_ULLS_SEMAPHORE_CLEAR	0
+#define LRC_MIGRATION_ULLS_SEMAPHORE_SIGNAL	1
+
 /**
  * struct xe_lrc - Logical ring context (LRC) and submission ring object
  */
@@ -22,8 +26,17 @@ struct xe_lrc {
 	 */
 	struct xe_bo *bo;
 
+	/**
+	 * @seqno_bo: Buffer object (memory) for seqno numbers. Always in system
+	 * memory as this a CPU read, GPU write path object.
+	 */
+	struct xe_bo *seqno_bo;
+
 	/** @size: size of the lrc and optional indirect ring state */
 	u32 size;
+
+	/** @replay_size: Size LRC needed for replaying a hang */
+	u32 replay_size;
 
 	/** @gt: gt which this LRC belongs to */
 	struct xe_gt *gt;
@@ -54,6 +67,17 @@ struct xe_lrc {
 
 	/** @ctx_timestamp: readout value of CTX_TIMESTAMP on last update */
 	u64 ctx_timestamp;
+
+	/** @queue_timestamp: value of QUEUE_TIMESTAMP on last update */
+	u64 queue_timestamp;
+
+	/** @multi_queue: Multi queue LRC related information */
+	struct {
+		/** @multi_queue.primary_lrc: Primary lrc of this multi-queue group*/
+		struct xe_lrc *primary_lrc;
+		/** @multi_queue.pos: Position of LRC within the multi-queue group */
+		u8 pos;
+	} multi_queue;
 };
 
 struct xe_lrc_snapshot;

@@ -125,7 +125,7 @@ struct pci_controller *pcibios_alloc_controller(struct device_node *dev)
 {
 	struct pci_controller *phb;
 
-	phb = kzalloc(sizeof(struct pci_controller), GFP_KERNEL);
+	phb = kzalloc_obj(struct pci_controller);
 	if (phb == NULL)
 		return NULL;
 
@@ -254,7 +254,7 @@ resource_size_t pcibios_default_alignment(void)
 }
 
 #ifdef CONFIG_PCI_IOV
-resource_size_t pcibios_iov_resource_alignment(struct pci_dev *pdev, int resno)
+resource_size_t pcibios_iov_resource_alignment(const struct pci_dev *pdev, int resno)
 {
 	if (ppc_md.pcibios_iov_resource_alignment)
 		return ppc_md.pcibios_iov_resource_alignment(pdev, resno);
@@ -432,7 +432,7 @@ static int pci_read_irq_line(struct pci_dev *pci_dev)
 	struct pci_intx_virq *vi, *vitmp;
 
 	/* Preallocate vi as rewind is complex if this fails after mapping */
-	vi = kzalloc(sizeof(struct pci_intx_virq), GFP_KERNEL);
+	vi = kzalloc_obj(struct pci_intx_virq);
 	if (!vi)
 		return -1;
 
@@ -626,19 +626,14 @@ int pci_legacy_write(struct pci_bus *bus, loff_t port, u32 val, size_t size)
 		return -ENXIO;
 	addr = hose->io_base_virt + port;
 
-	/* WARNING: The generic code is idiotic. It gets passed a pointer
-	 * to what can be a 1, 2 or 4 byte quantity and always reads that
-	 * as a u32, which means that we have to correct the location of
-	 * the data read within those 32 bits for size 1 and 2
-	 */
 	switch(size) {
 	case 1:
-		out_8(addr, val >> 24);
+		out_8(addr, val);
 		return 1;
 	case 2:
 		if (port & 1)
 			return -EINVAL;
-		out_le16(addr, val >> 16);
+		out_le16(addr, val);
 		return 2;
 	case 4:
 		if (port & 3)
@@ -1132,7 +1127,9 @@ static int skip_isa_ioresource_align(struct pci_dev *dev)
  * which might have be mirrored at 0x0100-0x03ff..
  */
 resource_size_t pcibios_align_resource(void *data, const struct resource *res,
-				resource_size_t size, resource_size_t align)
+				       const struct resource *empty_res,
+				       resource_size_t size,
+				       resource_size_t align)
 {
 	struct pci_dev *dev = data;
 	resource_size_t start = res->start;
@@ -1142,6 +1139,8 @@ resource_size_t pcibios_align_resource(void *data, const struct resource *res,
 			return start;
 		if (start & 0x300)
 			start = (start + 0x3ff) & ~0x3ff;
+	} else if (res->flags & IORESOURCE_MEM) {
+		start = pci_align_resource(dev, res, empty_res, size, align);
 	}
 
 	return start;
@@ -1368,7 +1367,7 @@ static void __init pcibios_reserve_legacy_regions(struct pci_bus *bus)
 	if (!(hose->io_resource.flags & IORESOURCE_IO))
 		goto no_io;
 	offset = (unsigned long)hose->io_base_virt - _IO_BASE;
-	res = kzalloc(sizeof(struct resource), GFP_KERNEL);
+	res = kzalloc_obj(struct resource);
 	BUG_ON(res == NULL);
 	res->name = "Legacy IO";
 	res->flags = IORESOURCE_IO;
@@ -1396,7 +1395,7 @@ static void __init pcibios_reserve_legacy_regions(struct pci_bus *bus)
 	}
 	if (i >= 3)
 		return;
-	res = kzalloc(sizeof(struct resource), GFP_KERNEL);
+	res = kzalloc_obj(struct resource);
 	BUG_ON(res == NULL);
 	res->name = "Legacy VGA memory";
 	res->flags = IORESOURCE_MEM;

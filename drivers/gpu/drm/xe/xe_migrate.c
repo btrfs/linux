@@ -8,6 +8,7 @@
 #include <linux/bitfield.h>
 #include <linux/sizes.h>
 
+#include <drm/drm_drv.h>
 #include <drm/drm_managed.h>
 #include <drm/drm_pagemap.h>
 #include <drm/ttm/ttm_tt.h>
@@ -22,22 +23,181 @@
 #include "xe_assert.h"
 #include "xe_bb.h"
 #include "xe_bo.h"
+#include "xe_configfs.h"
 #include "xe_exec_queue.h"
 #include "xe_ggtt.h"
 #include "xe_gt.h"
+#include "xe_gt_printk.h"
 #include "xe_hw_engine.h"
 #include "xe_lrc.h"
 #include "xe_map.h"
+#include "xe_mem_pool.h"
 #include "xe_mocs.h"
+#include "xe_pat.h"
+#include "xe_pm.h"
+#include "xe_printk.h"
 #include "xe_pt.h"
 #include "xe_res_cursor.h"
 #include "xe_sa.h"
 #include "xe_sched_job.h"
+#include "xe_sriov_vf_ccs.h"
+#include "xe_svm.h"
 #include "xe_sync.h"
 #include "xe_trace_bo.h"
 #include "xe_validation.h"
 #include "xe_vm.h"
 #include "xe_vram.h"
+
+/**
+ * DOC: ULLS (Ultra Low Latency Submission) for migration jobs
+ *
+ * Migration jobs issued on behalf of GPU page faults and SVM prefetches sit
+ * directly in the critical path of a stalled GPU workload. The dominant cost
+ * of such a job is not the copy or clear itself but the submission latency:
+ * the H2G round trip to GuC, the GuC scheduling decision, and the hardware
+ * context switch required to place the migration LRC on an engine.
+ *
+ * ULLS removes that cost by keeping the migration context resident and
+ * *running* on the hardware engine across jobs. Instead of the ring going
+ * empty and the context being switched out between jobs, the tail of every
+ * ULLS job parks the engine on a semaphore wait for the *next* job's
+ * semaphore, and then advances the ring tail itself. Submitting the next job
+ * therefore costs the CPU a single write to signal that semaphore - no H2G,
+ * no GuC round trip, no context switch, no MMIO.
+ *
+ * Requirements
+ * ------------
+ *
+ * ULLS is only used on dGFX platforms with USM support, where a hardware
+ * engine is reserved exclusively for migration jobs. Because the engine
+ * spins on a semaphore while ULLS is active, it cannot be shared with
+ * user submissions.
+ *
+ * ULLS can be disabled by setting the ``migrate_ulls_period_ms`` configfs
+ * attribute to 0. Otherwise, the same attribute controls how long ULLS
+ * remains active before exiting, in milliseconds.
+ *
+ * Fixed size jobs
+ * ---------------
+ *
+ * A job updates the ring tail to cover its successor, but it is emitted long
+ * before that successor exists, so it can not know how much ring the
+ * successor will occupy. Every ULLS job is therefore padded out to exactly
+ * ULLS_JOB_SIZE_BYTES, which lets the next tail be computed arithmetically
+ * from where the current job started.
+ *
+ * This is why the shorter jobs still have to reach the same size: the "last"
+ * job skips the batch buffers and the postamble, and pads the difference with
+ * MI_NOOP. The "first" job is not covered by any predecessor's tail update
+ * and so is unconstrained, but is padded anyway to keep the arithmetic
+ * uniform.
+ *
+ * Leaving ULLS mode always goes through a "last" job, which emits no tail
+ * update, so an ordinary variable length migration job never follows a
+ * prediction.
+ *
+ * Semaphores
+ * ----------
+ *
+ * The semaphores live in the driver-defined portion of the migration LRC's
+ * PPHWSP (see LRC_ULLS_PPHWSP_OFFSET, mutually exclusive with the parallel
+ * submission area). There are LRC_MIGRATION_ULLS_SEMAPHORE_COUNT of them and
+ * a job's semaphore is selected by ``seqno % COUNT``, so the semaphore ring
+ * wraps with the job seqnos. To guarantee a job can never overwrite the
+ * semaphore of a job still in flight, the GuC backend caps the migration
+ * queue's scheduler job count at LRC_MIGRATION_ULLS_SEMAPHORE_COUNT - 1.
+ *
+ * Ring layout of a ULLS job
+ * -------------------------
+ *
+ * Emitted by emit_migration_job_gen12() in xe_ring_ops.c::
+ *
+ *	preamble:	clear semaphore[seqno]	(reuse for a later wrap)
+ *	<copy timestamp, start seqno store>
+ *	<batch buffer start(s)>			(skipped on first/last job)
+ *	<seqno write + user interrupt>
+ *	postamble:	wait on semaphore[seqno + 1]
+ *			SDI saved ring tail = end of next job
+ *			LRI RING_TAIL = end of next job
+ *						(skipped on the last job)
+ *	pad:		MI_NOOP up to ULLS_JOB_SIZE_DW
+ *
+ * The preamble clears the current job's semaphore so it can be reused once
+ * the seqno space wraps. The postamble is what keeps the engine busy: it
+ * blocks on the next job's semaphore, which is only signaled when that job is
+ * actually submitted, and then advances the ring tail over it. It advances
+ * the saved tail as well as the tail register, keeping the two in step
+ * without any help from the CPU, so a context save and restore can not rewind
+ * the tail behind work which has already been published.
+ *
+ * The tail register write must be non-posted, i.e. it must not carry
+ * MI_LRI_FORCE_POSTED. Posted, the new tail is free to land after the command
+ * streamer has already drained the rest of the job, at which point the command
+ * streamer sees head == the old tail and parks as though the ring were empty.
+ * A parked context can be switched off the hardware, and the fast path below
+ * has no H2G with which to ask GuC to bring it back.
+ *
+ * The tail must be published after the semaphore wait, not before it. The
+ * command streamer fetches ring contents up to the tail while it is parked,
+ * so a tail published ahead of the wait lets it fetch the next job's slot
+ * before the CPU has written the job there. Once released it then executes
+ * the MI_NOOPs it fetched instead of the job, that job's fence never signals,
+ * and the engine drains and idles with nothing left to wake it.
+ *
+ * Submission fast path
+ * --------------------
+ *
+ * In submit_exec_queue() (xe_guc_submit.c), a ULLS job that is not the first
+ * one reduces to::
+ *
+ *	xe_lrc_set_ulls_semaphore(lrc, seqno);		release previous job
+ *
+ * The XE_GUC_ACTION_SCHED_CONTEXT H2G is suppressed, and so is the write of
+ * the saved ring tail: the previous job's postamble is parked on this job's
+ * semaphore and publishes this job's tail, both in the tail register and in
+ * the context image, as soon as it is released. The semaphore signal is all
+ * that is left, and the engine walks straight into this job.
+ *
+ * This does assume the context stays resident for as long as ULLS mode is
+ * active. Nothing else is scheduled on the reserved engine, so the only ways
+ * off the hardware are the "last" job below, or a reset - and a migration job
+ * failing already wedges the device.
+ *
+ * Enter / exit
+ * ------------
+ *
+ * xe_migrate_ulls_enter() is called from the page fault handler and from the
+ * SVM prefetch path, i.e. exactly where low latency migration matters. It
+ * takes a PM runtime reference (the device must not suspend while the engine
+ * spins), then submits a "first" ULLS job. That first job carries no batch
+ * buffer; it exists only to get the context onto the hardware through the
+ * normal GuC path and to leave the engine waiting on the next semaphore,
+ * pipelining the GuC/HW context switch out of the critical path.
+ *
+ * No forcewake reference is required. Nothing in the fast path touches MMIO,
+ * and the engine keeps itself awake for as long as it is executing the ring.
+ * Not needing host MMIO access is also what lets ULLS run on SRIOV VFs.
+ *
+ * Keeping an engine spinning costs power, so ULLS is not left enabled
+ * indefinitely. Every enter and every ULLS job submission re-arms
+ * @xe_migrate.ulls.exit_work with a ULLS_EXIT_JIFFIES delay. When it fires
+ * with the queue idle, it submits a "last" ULLS job - again with no batch
+ * buffer and, crucially, with no postamble semaphore wait or tail update -
+ * which lets the ring drain so the context can be switched off the hardware.
+ * The PM reference is then dropped. If the queue was not idle, the worker
+ * simply re-arms itself.
+ *
+ * Job state
+ * ---------
+ *
+ * The state above is communicated to the ring ops and GuC backend via
+ * @xe_sched_job.ulls, set under @xe_migrate.job_mutex:
+ *
+ * - %ULLS_NONE: job submitted outside of ULLS mode
+ * - %ULLS_ENTER: job that enters ULLS mode
+ * - %ULLS_ACTIVE: job submitted while in ULLS mode
+ * - %ULLS_EXIT: job that exits ULLS mode
+ */
 
 /**
  * struct xe_migrate - migrate context.
@@ -57,24 +217,36 @@ struct xe_migrate {
 	u64 usm_batch_base_ofs;
 	/** @cleared_mem_ofs: VM offset of @cleared_bo. */
 	u64 cleared_mem_ofs;
+	/** @large_page_copy_ofs: VM offset of 2M pages used for large copies */
+	u64 large_page_copy_ofs;
+	/**
+	 * @large_page_copy_pdes: BO offset to writeout 2M pages (PDEs) used for
+	 * large copies
+	 */
+	u64 large_page_copy_pdes;
 	/**
 	 * @fence: dma-fence representing the last migration job batch.
 	 * Protected by @job_mutex.
 	 */
 	struct dma_fence *fence;
-	/**
-	 * @vm_update_sa: For integrated, used to suballocate page-tables
-	 * out of the pt_bo.
-	 */
-	struct drm_suballoc_manager vm_update_sa;
 	/** @min_chunk_size: For dgfx, Minimum chunk size */
 	u64 min_chunk_size;
+	/** @ulls: ULLS support */
+	struct {
+		/** @ulls.exit_ms: ULLS exit period milliseconds */
+		u32 exit_ms;
+		/** @ulls.enabled: ULLS is enabled, protected by job_mutex */
+		bool enabled;
+		/** @ulls.exit_work: ULLS exit worker */
+		struct delayed_work exit_work;
+	} ulls;
 };
+
+#define ULLS_EXIT_JIFFIES(_m)	msecs_to_jiffies((_m)->ulls.exit_ms)
 
 #define MAX_PREEMPTDISABLE_TRANSFER SZ_8M /* Around 1ms. */
 #define MAX_CCS_LIMITED_TRANSFER SZ_4M /* XE_PAGE_SIZE * (FIELD_MAX(XE2_CCS_SIZE_MASK) + 1) */
-#define NUM_KERNEL_PDE 15
-#define NUM_PT_SLOTS 32
+#define NUM_PT_SLOTS 48
 #define LEVEL0_PAGE_TABLE_ENCODE_SIZE SZ_2M
 #define MAX_NUM_PTE 512
 #define IDENTITY_OFFSET 256ULL
@@ -88,9 +260,30 @@ struct xe_migrate {
  */
 #define MAX_PTE_PER_SDI 0x1FEU
 
+static bool xe_migrate_ulls_enabled(struct xe_migrate *m)
+{
+	lockdep_assert_held(&m->job_mutex);
+	return m->ulls.enabled;
+}
+
+static void xe_migrate_ulls_toggle_enable(struct xe_migrate *m, bool enabled)
+{
+	lockdep_assert_held(&m->job_mutex);
+	m->ulls.enabled = enabled;
+}
+
 static void xe_migrate_fini(void *arg)
 {
 	struct xe_migrate *m = arg;
+	struct xe_device *xe = tile_to_xe(m->tile);
+
+	disable_delayed_work_sync(&m->ulls.exit_work);
+	scoped_guard(mutex, &m->job_mutex) {
+		if (xe_migrate_ulls_enabled(m)) {
+			xe_pm_runtime_put(xe);
+			xe_migrate_ulls_toggle_enable(m, false);
+		}
+	}
 
 	xe_vm_lock(m->q->vm, false);
 	xe_bo_unpin(m->pt_bo);
@@ -98,10 +291,30 @@ static void xe_migrate_fini(void *arg)
 
 	dma_fence_put(m->fence);
 	xe_bo_put(m->pt_bo);
-	drm_suballoc_manager_fini(&m->vm_update_sa);
 	mutex_destroy(&m->job_mutex);
 	xe_vm_close_and_put(m->q->vm);
 	xe_exec_queue_put(m->q);
+}
+
+static inline u16 xe_migrate_pat_index(struct xe_device *xe,
+				       enum ttm_caching caching,
+				       bool is_comp_pte)
+{
+	enum xe_cache_level cache_level;
+
+	/*
+	 * Select the appropriate PAT index for buffer object PTEs programmed
+	 * by emit_pte(). We choose not to mess with xe_migrate_prepare_vm()
+	 * yet, for simplicity.
+	 */
+	if (is_comp_pte && GRAPHICS_VERx100(xe) >= 2000)
+		cache_level = XE_CACHE_NONE_COMPRESSION;
+	else if (caching == ttm_cached)
+		cache_level = XE_CACHE_WB;
+	else
+		cache_level = XE_CACHE_NONE;
+
+	return xe_cache_pat_idx(xe, cache_level);
 }
 
 static u64 xe_migrate_vm_addr(u64 slot, u32 level)
@@ -129,21 +342,19 @@ static u64 xe_migrate_vram_ofs(struct xe_device *xe, u64 addr, bool is_comp_pte)
 }
 
 static void xe_migrate_program_identity(struct xe_device *xe, struct xe_vm *vm, struct xe_bo *bo,
-					u64 map_ofs, u64 vram_offset, u16 pat_index, u64 pt_2m_ofs)
+					u64 map_ofs, u64 vram_offset, u16 pat_index, u64 pt_2m_ofs,
+					u64 pt_4k_ofs)
 {
 	struct xe_vram_region *vram = xe->mem.vram;
 	resource_size_t dpa_base = xe_vram_region_dpa_base(vram);
 	u64 pos, ofs, flags;
 	u64 entry;
-	/* XXX: Unclear if this should be usable_size? */
-	u64 vram_limit = xe_vram_region_actual_physical_size(vram) + dpa_base;
+	u64 vram_limit = xe_vram_region_usable_size(vram) + dpa_base;
 	u32 level = 2;
 
 	ofs = map_ofs + XE_PAGE_SIZE * level + vram_offset * 8;
 	flags = vm->pt_ops->pte_encode_addr(xe, 0, pat_index, level,
 					    true, 0);
-
-	xe_assert(xe, IS_ALIGNED(xe_vram_region_usable_size(vram), SZ_2M));
 
 	/*
 	 * Use 1GB pages when possible, last chunk always use 2M
@@ -162,8 +373,24 @@ static void xe_migrate_program_identity(struct xe_device *xe, struct xe_vm *vm, 
 							    true, 0);
 
 			for (ofs = pt_2m_ofs; pos < vram_limit;
-			     pos += SZ_2M, ofs += 8)
+			     pos += SZ_2M, ofs += 8) {
+				if (pos + SZ_2M > vram_limit) {
+					entry = vm->pt_ops->pde_encode_bo(bo, pt_4k_ofs);
+					xe_map_wr(xe, &bo->vmap, ofs, u64, entry);
+
+					flags = vm->pt_ops->pte_encode_addr(xe, 0,
+									    pat_index,
+									    level - 2,
+									    true, 0);
+
+					for (ofs = pt_4k_ofs; pos < vram_limit;
+					     pos += SZ_4K, ofs += 8)
+						xe_map_wr(xe, &bo->vmap, ofs, u64, pos | flags);
+					break;
+				}
+
 				xe_map_wr(xe, &bo->vmap, ofs, u64, pos | flags);
+			}
 			break;	/* Ensure pos == vram_limit assert correct */
 		}
 
@@ -173,26 +400,16 @@ static void xe_migrate_program_identity(struct xe_device *xe, struct xe_vm *vm, 
 	xe_assert(xe, pos == vram_limit);
 }
 
-static int xe_migrate_prepare_vm(struct xe_tile *tile, struct xe_migrate *m,
-				 struct xe_vm *vm, struct drm_exec *exec)
+static int xe_migrate_pt_bo_alloc(struct xe_tile *tile, struct xe_migrate *m,
+				  struct xe_vm *vm, struct drm_exec *exec)
 {
-	struct xe_device *xe = tile_to_xe(tile);
-	u16 pat_index = xe->pat.idx[XE_CACHE_WB];
-	u8 id = tile->id;
-	u32 num_entries = NUM_PT_SLOTS, num_level = vm->pt_root[id]->level;
-#define VRAM_IDENTITY_MAP_COUNT	2
-	u32 num_setup = num_level + VRAM_IDENTITY_MAP_COUNT;
-#undef VRAM_IDENTITY_MAP_COUNT
-	u32 map_ofs, level, i;
 	struct xe_bo *bo, *batch = tile->mem.kernel_bb_pool->bo;
-	u64 entry, pt29_ofs;
+	u32 num_entries = NUM_PT_SLOTS;
 
 	/* Can't bump NUM_PT_SLOTS too high */
 	BUILD_BUG_ON(NUM_PT_SLOTS > SZ_2M/XE_PAGE_SIZE);
 	/* Must be a multiple of 64K to support all platforms */
 	BUILD_BUG_ON(NUM_PT_SLOTS * XE_PAGE_SIZE % SZ_64K);
-	/* And one slot reserved for the 4KiB page table updates */
-	BUILD_BUG_ON(!(NUM_KERNEL_PDE & 1));
 
 	/* Need to be sure everything fits in the first PT, or create more */
 	xe_tile_assert(tile, m->batch_base_ofs + xe_bo_size(batch) < SZ_2M);
@@ -205,10 +422,30 @@ static int xe_migrate_prepare_vm(struct xe_tile *tile, struct xe_migrate *m,
 	if (IS_ERR(bo))
 		return PTR_ERR(bo);
 
-	/* PT30 & PT31 reserved for 2M identity map */
-	pt29_ofs = xe_bo_size(bo) - 3 * XE_PAGE_SIZE;
-	entry = vm->pt_ops->pde_encode_bo(bo, pt29_ofs);
-	xe_pt_write(xe, &vm->pt_root[id]->bo->vmap, 0, entry);
+	m->pt_bo = bo;
+	return 0;
+}
+
+static void xe_migrate_prepare_vm(struct xe_tile *tile, struct xe_migrate *m,
+				  struct xe_vm *vm, u32 *ofs)
+{
+	struct xe_device *xe = tile_to_xe(tile);
+	u16 pat_index = xe_cache_pat_idx(xe, XE_CACHE_WB);
+	u8 id = tile->id;
+	u32 num_entries = NUM_PT_SLOTS, num_level =
+		xe_vm_pt_root(vm, id)->level;
+#define VRAM_IDENTITY_MAP_PT_COUNT	4
+	u32 num_setup = num_level + VRAM_IDENTITY_MAP_PT_COUNT;
+#undef VRAM_IDENTITY_MAP_PT_COUNT
+	u32 map_ofs, level, i;
+	struct xe_bo *bo = m->pt_bo, *batch = tile->mem.kernel_bb_pool->bo;
+	u64 entry;
+
+	/* PT44..PT47 reserved for 4K and 2M identity map */
+	u64 l1_pt_ofs = xe_bo_size(bo) - 5 * XE_PAGE_SIZE;
+
+	entry = vm->pt_ops->pde_encode_bo(bo, l1_pt_ofs);
+	xe_pt_write(xe, &xe_vm_pt_root(vm, id)->bo->vmap, 0, entry);
 
 	map_ofs = (num_entries - num_setup) * XE_PAGE_SIZE;
 
@@ -288,6 +525,12 @@ static int xe_migrate_prepare_vm(struct xe_tile *tile, struct xe_migrate *m,
 			  (i + 1) * 8, u64, entry);
 	}
 
+	/* Reserve 2M PDEs */
+	level = 1;
+	m->large_page_copy_ofs = NUM_PT_SLOTS << xe_pt_shift(level);
+	m->large_page_copy_pdes = map_ofs + XE_PAGE_SIZE * level +
+		NUM_PT_SLOTS * 8;
+
 	/* Set up a 1GiB NULL mapping at 255GiB offset. */
 	level = 2;
 	xe_map_wr(xe, &bo->vmap, map_ofs + XE_PAGE_SIZE * level + 255 * 8, u64,
@@ -297,11 +540,12 @@ static int xe_migrate_prepare_vm(struct xe_tile *tile, struct xe_migrate *m,
 
 	/* Identity map the entire vram at 256GiB offset */
 	if (IS_DGFX(xe)) {
-		u64 pt30_ofs = xe_bo_size(bo) - 2 * XE_PAGE_SIZE;
+		u64 pt46_ofs = xe_bo_size(bo) - 2 * XE_PAGE_SIZE;
 		resource_size_t actual_phy_size = xe_vram_region_actual_physical_size(xe->mem.vram);
 
+		u64 pt44_ofs = xe_bo_size(bo) - 4 * XE_PAGE_SIZE;
 		xe_migrate_program_identity(xe, vm, bo, map_ofs, IDENTITY_OFFSET,
-					    pat_index, pt30_ofs);
+					    pat_index, pt46_ofs, pt44_ofs);
 		xe_assert(xe, actual_phy_size <= (MAX_NUM_PTE - IDENTITY_OFFSET) * SZ_1G);
 
 		/*
@@ -309,67 +553,36 @@ static int xe_migrate_prepare_vm(struct xe_tile *tile, struct xe_migrate *m,
 		 * if flat ccs is enabled.
 		 */
 		if (GRAPHICS_VER(xe) >= 20 && xe_device_has_flat_ccs(xe)) {
-			u16 comp_pat_index = xe->pat.idx[XE_CACHE_NONE_COMPRESSION];
+			u16 comp_pat_index = xe_cache_pat_idx(xe, XE_CACHE_NONE_COMPRESSION);
 			u64 vram_offset = IDENTITY_OFFSET +
 				DIV_ROUND_UP_ULL(actual_phy_size, SZ_1G);
-			u64 pt31_ofs = xe_bo_size(bo) - XE_PAGE_SIZE;
+			u64 pt47_ofs = xe_bo_size(bo) - XE_PAGE_SIZE;
 
 			xe_assert(xe, actual_phy_size <= (MAX_NUM_PTE - IDENTITY_OFFSET -
 							  IDENTITY_OFFSET / 2) * SZ_1G);
+			u64 pt45_ofs = xe_bo_size(bo) - 3 * XE_PAGE_SIZE;
 			xe_migrate_program_identity(xe, vm, bo, map_ofs, vram_offset,
-						    comp_pat_index, pt31_ofs);
+						    comp_pat_index, pt47_ofs, pt45_ofs);
 		}
 	}
 
 	/*
 	 * Example layout created above, with root level = 3:
 	 * [PT0...PT7]: kernel PT's for copy/clear; 64 or 4KiB PTE's
-	 * [PT8]: Kernel PT for VM_BIND, 4 KiB PTE's
-	 * [PT9...PT26]: Userspace PT's for VM_BIND, 4 KiB PTE's
-	 * [PT27 = PDE 0] [PT28 = PDE 1] [PT29 = PDE 2] [PT30 & PT31 = 2M vram identity map]
+	 * [PT41 = PDE 0] [PT44...PT47 = 4K and 2M vram identity maps]
 	 *
 	 * This makes the lowest part of the VM point to the pagetables.
 	 * Hence the lowest 2M in the vm should point to itself, with a few writes
 	 * and flushes, other parts of the VM can be used either for copying and
 	 * clearing.
 	 *
-	 * For performance, the kernel reserves PDE's, so about 20 are left
-	 * for async VM updates.
-	 *
 	 * To make it easier to work, each scratch PT is put in slot (1 + PT #)
 	 * everywhere, this allows lockless updates to scratch pages by using
 	 * the different addresses in VM.
 	 */
-#define NUM_VMUSA_UNIT_PER_PAGE	32
-#define VM_SA_UPDATE_UNIT_SIZE		(XE_PAGE_SIZE / NUM_VMUSA_UNIT_PER_PAGE)
-#define NUM_VMUSA_WRITES_PER_UNIT	(VM_SA_UPDATE_UNIT_SIZE / sizeof(u64))
-	drm_suballoc_manager_init(&m->vm_update_sa,
-				  (size_t)(map_ofs / XE_PAGE_SIZE - NUM_KERNEL_PDE) *
-				  NUM_VMUSA_UNIT_PER_PAGE, 0);
 
-	m->pt_bo = bo;
-	return 0;
-}
-
-/*
- * Including the reserved copy engine is required to avoid deadlocks due to
- * migrate jobs servicing the faults gets stuck behind the job that faulted.
- */
-static u32 xe_migrate_usm_logical_mask(struct xe_gt *gt)
-{
-	u32 logical_mask = 0;
-	struct xe_hw_engine *hwe;
-	enum xe_hw_engine_id id;
-
-	for_each_hw_engine(hwe, gt, id) {
-		if (hwe->class != XE_ENGINE_CLASS_COPY)
-			continue;
-
-		if (xe_gt_is_usm_hwe(gt, hwe))
-			logical_mask |= BIT(hwe->logical_instance);
-	}
-
-	return logical_mask;
+	if (ofs)
+		*ofs = map_ofs;
 }
 
 static bool xe_migrate_needs_ccs_emit(struct xe_device *xe)
@@ -399,17 +612,170 @@ static int xe_migrate_lock_prepare_vm(struct xe_tile *tile, struct xe_migrate *m
 	struct xe_device *xe = tile_to_xe(tile);
 	struct xe_validation_ctx ctx;
 	struct drm_exec exec;
+	u32 map_ofs;
 	int err = 0;
 
 	xe_validation_guard(&ctx, &xe->val, &exec, (struct xe_val_flags) {}, err) {
 		err = xe_vm_drm_exec_lock(vm, &exec);
+		if (err)
+			return err;
+
 		drm_exec_retry_on_contention(&exec);
-		err = xe_migrate_prepare_vm(tile, m, vm, &exec);
+
+		err = xe_migrate_pt_bo_alloc(tile, m, vm, &exec);
+		if (err)
+			return err;
+
+		xe_migrate_prepare_vm(tile, m, vm, &map_ofs);
 		drm_exec_retry_on_contention(&exec);
 		xe_validation_retry_on_oom(&ctx, &err);
 	}
 
 	return err;
+}
+
+static struct dma_fence *__xe_migrate_job_push(struct xe_migrate *m,
+					       struct xe_sched_job *job,
+					       enum xe_ulls_state ulls)
+{
+	struct dma_fence *fence;
+
+	lockdep_assert_held(&m->job_mutex);
+	xe_tile_assert(m->tile, m->q == job->q);
+
+	job->ulls = ulls;
+	xe_sched_job_arm(job);
+	fence = dma_fence_get(&job->drm.s_fence->finished);
+	xe_sched_job_push(job);
+
+	return fence;
+}
+
+/*
+ * Arm and push a migration job, tagging it as a ULLS job and deferring the
+ * ULLS exit while ULLS mode is active.
+ *
+ * Returns a reference to the job's finished fence.
+ */
+static struct dma_fence *xe_migrate_job_push(struct xe_migrate *m,
+					     struct xe_sched_job *job)
+{
+	enum xe_ulls_state ulls = ULLS_NONE;
+
+	lockdep_assert_held(&m->job_mutex);
+
+	if (xe_migrate_ulls_enabled(m)) {
+		ulls = ULLS_ACTIVE;
+		mod_delayed_work(system_percpu_wq, &m->ulls.exit_work,
+				 ULLS_EXIT_JIFFIES(m));
+	}
+
+	return __xe_migrate_job_push(m, job, ulls);
+}
+
+/**
+ * xe_migrate_ulls_enter() - Enter ULLS mode
+ * @m: The migration context.
+ *
+ * If DGFX, enter ULLS mode bypassing GuC / HW context switches by utilizing
+ * semaphore and continuously running batches.
+ */
+void xe_migrate_ulls_enter(struct xe_migrate *m)
+{
+	struct xe_device *xe = tile_to_xe(m->tile);
+	struct xe_sched_job *job = NULL;
+	u64 batch_addr[2] = { 0, 0 };
+	bool alloc = false;
+
+	xe_assert(xe, xe->info.has_usm);
+
+	if (!IS_DGFX(xe) || !m->ulls.exit_ms)
+		return;
+
+job_alloc:
+	if (alloc) {
+		/*
+		 * Must be done outside job_mutex as that lock is tainted with
+		 * reclaim.
+		 */
+		job = xe_sched_job_create(m->q, batch_addr);
+		if (WARN_ON_ONCE(IS_ERR(job)))
+			return;		/* Not fatal */
+	}
+
+	mutex_lock(&m->job_mutex);
+	if (!xe_migrate_ulls_enabled(m)) {
+		struct dma_fence *fence;
+
+		if (!job) {
+			alloc = true;
+			mutex_unlock(&m->job_mutex);
+			goto job_alloc;
+		}
+
+		/* Pairs with PM put on ULLS exit */
+		xe_pm_runtime_get_noresume(xe);
+
+		xe_sched_job_get(job);
+		fence = __xe_migrate_job_push(m, job, ULLS_ENTER);
+		dma_fence_put(fence);
+
+		xe_dbg(xe, "Migrate ULLS mode enter");
+		xe_migrate_ulls_toggle_enable(m, true);
+	}
+	if (job)
+		xe_sched_job_put(job);
+	if (xe_migrate_ulls_enabled(m))
+		mod_delayed_work(system_percpu_wq, &m->ulls.exit_work,
+				 ULLS_EXIT_JIFFIES(m));
+	mutex_unlock(&m->job_mutex);
+}
+
+static void xe_migrate_ulls_exit(struct work_struct *work)
+{
+	struct xe_migrate *m = container_of(work, struct xe_migrate,
+					    ulls.exit_work.work);
+	struct xe_device *xe = tile_to_xe(m->tile);
+	struct xe_sched_job *job = NULL;
+	struct dma_fence *fence = NULL;
+	u64 batch_addr[2] = { 0, 0 };
+	int idx;
+
+	xe_assert(xe, m->ulls.enabled);
+
+	if (!drm_dev_enter(&xe->drm, &idx))
+		return;
+
+	/*
+	 * Must be done outside job_mutex as that lock is tainted with
+	 * reclaim and must be done holding a pm ref.
+	 */
+	job = xe_sched_job_create(m->q, batch_addr);
+	if (WARN_ON_ONCE(IS_ERR(job))) {
+		drm_dev_exit(idx);
+		mod_delayed_work(system_percpu_wq, &m->ulls.exit_work,
+				 ULLS_EXIT_JIFFIES(m));
+		return;		/* Not fatal */
+	}
+
+	scoped_guard(mutex, &m->job_mutex) {
+		if (xe_exec_queue_is_idle(m->q, 1)) {
+			fence = __xe_migrate_job_push(m, job, ULLS_EXIT);
+			dma_fence_put(fence);
+
+			xe_pm_runtime_put(xe);	/* Pairs with PM get in enter */
+			xe_migrate_ulls_toggle_enable(m, false);
+			cancel_delayed_work(&m->ulls.exit_work);
+
+			xe_dbg(xe, "Migrate ULLS mode exit");
+		} else {
+			xe_sched_job_put(job);
+			mod_delayed_work(system_percpu_wq, &m->ulls.exit_work,
+					 ULLS_EXIT_JIFFIES(m));
+		}
+	}
+
+	drm_dev_exit(idx);
 }
 
 /**
@@ -437,13 +803,10 @@ int xe_migrate_init(struct xe_migrate *m)
 		goto err_out;
 
 	if (xe->info.has_usm) {
-		struct xe_hw_engine *hwe = xe_gt_hw_engine(primary_gt,
-							   XE_ENGINE_CLASS_COPY,
-							   primary_gt->usm.reserved_bcs_instance,
-							   false);
-		u32 logical_mask = xe_migrate_usm_logical_mask(primary_gt);
+		struct xe_hw_engine *hwe0 = primary_gt->usm.paging_hwe0;
+		u32 logical_mask = primary_gt->usm.paging_logical_mask;
 
-		if (!hwe || !logical_mask) {
+		if (!hwe0 || !logical_mask) {
 			err = -EINVAL;
 			goto err_out;
 		}
@@ -452,16 +815,15 @@ int xe_migrate_init(struct xe_migrate *m)
 		 * XXX: Currently only reserving 1 (likely slow) BCS instance on
 		 * PVC, may want to revisit if performance is needed.
 		 */
-		m->q = xe_exec_queue_create(xe, vm, logical_mask, 1, hwe,
+		m->q = xe_exec_queue_create(xe, vm, logical_mask, 1, hwe0,
 					    EXEC_QUEUE_FLAG_KERNEL |
-					    EXEC_QUEUE_FLAG_PERMANENT |
 					    EXEC_QUEUE_FLAG_HIGH_PRIORITY |
-					    EXEC_QUEUE_FLAG_MIGRATE, 0);
+					    EXEC_QUEUE_FLAG_MIGRATE |
+					    EXEC_QUEUE_FLAG_LOW_LATENCY, 0);
 	} else {
 		m->q = xe_exec_queue_create_class(xe, primary_gt, vm,
 						  XE_ENGINE_CLASS_COPY,
 						  EXEC_QUEUE_FLAG_KERNEL |
-						  EXEC_QUEUE_FLAG_PERMANENT |
 						  EXEC_QUEUE_FLAG_MIGRATE, 0);
 	}
 	if (IS_ERR(m->q)) {
@@ -473,6 +835,8 @@ int xe_migrate_init(struct xe_migrate *m)
 	fs_reclaim_acquire(GFP_KERNEL);
 	might_lock(&m->job_mutex);
 	fs_reclaim_release(GFP_KERNEL);
+
+	INIT_DELAYED_WORK(&m->ulls.exit_work, xe_migrate_ulls_exit);
 
 	err = devm_add_action_or_reset(xe->drm.dev, xe_migrate_fini, m);
 	if (err)
@@ -490,6 +854,9 @@ int xe_migrate_init(struct xe_migrate *m)
 		drm_dbg(&xe->drm, "Migrate min chunk size is 0x%08llx\n",
 			(unsigned long long)m->min_chunk_size);
 	}
+
+	m->ulls.exit_ms =
+		xe_configfs_get_migrate_ulls_period_ms(to_pci_dev(xe->drm.dev));
 
 	return err;
 
@@ -588,17 +955,17 @@ static void emit_pte(struct xe_migrate *m,
 {
 	struct xe_device *xe = tile_to_xe(m->tile);
 	struct xe_vm *vm = m->q->vm;
+	struct xe_bo *bo = ttm_to_xe_bo(res->bo);
+	enum ttm_caching caching = ttm_cached;
 	u16 pat_index;
 	u32 ptes;
 	u64 ofs = (u64)at_pt * XE_PAGE_SIZE;
 	u64 cur_ofs;
 
-	/* Indirect access needs compression enabled uncached PAT index */
-	if (GRAPHICS_VERx100(xe) >= 2000)
-		pat_index = is_comp_pte ? xe->pat.idx[XE_CACHE_NONE_COMPRESSION] :
-					  xe->pat.idx[XE_CACHE_WB];
-	else
-		pat_index = xe->pat.idx[XE_CACHE_WB];
+	if (!is_vram && bo->ttm.ttm)
+		caching = bo->ttm.ttm->caching;
+
+	pat_index = xe_migrate_pat_index(xe, caching, is_comp_pte);
 
 	ptes = DIV_ROUND_UP(size, XE_PAGE_SIZE);
 
@@ -685,14 +1052,30 @@ static void emit_copy_ccs(struct xe_gt *gt, struct xe_bb *bb,
 	bb->len = cs - bb->cs;
 }
 
-#define EMIT_COPY_DW 10
-static void emit_copy(struct xe_gt *gt, struct xe_bb *bb,
-		      u64 src_ofs, u64 dst_ofs, unsigned int size,
-		      unsigned int pitch)
+static u32 blt_fast_copy_cmd_len(struct xe_device *xe)
+{
+	return 10;
+}
+
+static u32 blt_mem_copy_cmd_len(struct xe_device *xe)
+{
+	return 10;
+}
+
+static u32 emit_copy_cmd_len(struct xe_device *xe)
+{
+	return (xe->info.has_mem_copy_instr) ? blt_mem_copy_cmd_len(xe) :
+		  blt_fast_copy_cmd_len(xe);
+}
+
+static void emit_xy_fast_copy(struct xe_gt *gt, struct xe_bb *bb, u64 src_ofs,
+			      u64 dst_ofs, unsigned int size,
+			      unsigned int pitch)
 {
 	struct xe_device *xe = gt_to_xe(gt);
 	u32 mocs = 0;
 	u32 tile_y = 0;
+	u32 len;
 
 	xe_gt_assert(gt, !(pitch & 3));
 	xe_gt_assert(gt, size / pitch <= S16_MAX);
@@ -705,7 +1088,8 @@ static void emit_copy(struct xe_gt *gt, struct xe_bb *bb,
 	if (GRAPHICS_VERx100(xe) >= 1250)
 		tile_y = XY_FAST_COPY_BLT_D1_SRC_TILE4 | XY_FAST_COPY_BLT_D1_DST_TILE4;
 
-	bb->cs[bb->len++] = XY_FAST_COPY_BLT_CMD | (10 - 2);
+	len = blt_fast_copy_cmd_len(xe);
+	bb->cs[bb->len++] = XY_FAST_COPY_BLT_CMD | (len - 2);
 	bb->cs[bb->len++] = XY_FAST_COPY_BLT_DEPTH_32 | pitch | tile_y | mocs;
 	bb->cs[bb->len++] = 0;
 	bb->cs[bb->len++] = (size / pitch) << 16 | pitch / 4;
@@ -715,6 +1099,64 @@ static void emit_copy(struct xe_gt *gt, struct xe_bb *bb,
 	bb->cs[bb->len++] = pitch | mocs;
 	bb->cs[bb->len++] = lower_32_bits(src_ofs);
 	bb->cs[bb->len++] = upper_32_bits(src_ofs);
+}
+
+#define PAGE_COPY_MODE_PS SZ_256 /* hw uses 256 bytes as the page-size */
+static void emit_mem_copy(struct xe_gt *gt, struct xe_bb *bb, u64 src_ofs,
+			  u64 dst_ofs, unsigned int size, unsigned int pitch)
+{
+	u32 mode, copy_type, width;
+	u32 len;
+
+	xe_gt_assert(gt, IS_ALIGNED(size, pitch));
+	xe_gt_assert(gt, pitch <= U16_MAX);
+	xe_gt_assert(gt, pitch);
+	xe_gt_assert(gt, size);
+
+	if (IS_ALIGNED(size, PAGE_COPY_MODE_PS) &&
+	    IS_ALIGNED(lower_32_bits(src_ofs), PAGE_COPY_MODE_PS) &&
+	    IS_ALIGNED(lower_32_bits(dst_ofs), PAGE_COPY_MODE_PS)) {
+		mode = MEM_COPY_PAGE_COPY_MODE;
+		copy_type = 0; /* linear copy */
+		width = size / PAGE_COPY_MODE_PS;
+	} else if (pitch > 1) {
+		xe_gt_assert(gt, size / pitch <= U16_MAX);
+		mode = 0; /* BYTE_COPY */
+		copy_type = MEM_COPY_MATRIX_COPY;
+		width = pitch;
+	} else {
+		mode = 0; /* BYTE_COPY */
+		copy_type = 0; /* linear copy */
+		width = size;
+	}
+
+	xe_gt_assert(gt, width <= U16_MAX);
+
+	len = blt_mem_copy_cmd_len(gt_to_xe(gt));
+
+	bb->cs[bb->len++] = MEM_COPY_CMD | mode | copy_type | (len - 2);
+	bb->cs[bb->len++] = width - 1;
+	bb->cs[bb->len++] = size / pitch - 1; /* ignored by hw for page-copy/linear above */
+	bb->cs[bb->len++] = pitch - 1;
+	bb->cs[bb->len++] = pitch - 1;
+	bb->cs[bb->len++] = lower_32_bits(src_ofs);
+	bb->cs[bb->len++] = upper_32_bits(src_ofs);
+	bb->cs[bb->len++] = lower_32_bits(dst_ofs);
+	bb->cs[bb->len++] = upper_32_bits(dst_ofs);
+	bb->cs[bb->len++] = FIELD_PREP(MEM_COPY_SRC_MOCS_INDEX_MASK, gt->mocs.uc_index) |
+			    FIELD_PREP(MEM_COPY_DST_MOCS_INDEX_MASK, gt->mocs.uc_index);
+}
+
+static void emit_copy(struct xe_gt *gt, struct xe_bb *bb,
+		      u64 src_ofs, u64 dst_ofs, unsigned int size,
+		      unsigned int pitch)
+{
+	struct xe_device *xe = gt_to_xe(gt);
+
+	if (xe->info.has_mem_copy_instr)
+		emit_mem_copy(gt, bb, src_ofs, dst_ofs, size, pitch);
+	else
+		emit_xy_fast_copy(gt, bb, src_ofs, dst_ofs, size, pitch);
 }
 
 static u64 xe_migrate_batch_base(struct xe_migrate *m, bool usm)
@@ -764,31 +1206,13 @@ static u32 xe_migrate_ccs_copy(struct xe_migrate *m,
 	return flush_flags;
 }
 
-/**
- * xe_migrate_copy() - Copy content of TTM resources.
- * @m: The migration context.
- * @src_bo: The buffer object @src is currently bound to.
- * @dst_bo: If copying between resources created for the same bo, set this to
- * the same value as @src_bo. If copying between buffer objects, set it to
- * the buffer object @dst is currently bound to.
- * @src: The source TTM resource.
- * @dst: The dst TTM resource.
- * @copy_only_ccs: If true copy only CCS metadata
- *
- * Copies the contents of @src to @dst: On flat CCS devices,
- * the CCS metadata is copied as well if needed, or if not present,
- * the CCS metadata of @dst is cleared for security reasons.
- *
- * Return: Pointer to a dma_fence representing the last copy batch, or
- * an error pointer on failure. If there is a failure, any copy operation
- * started by the function call has been synced.
- */
-struct dma_fence *xe_migrate_copy(struct xe_migrate *m,
-				  struct xe_bo *src_bo,
-				  struct xe_bo *dst_bo,
-				  struct ttm_resource *src,
-				  struct ttm_resource *dst,
-				  bool copy_only_ccs)
+static struct dma_fence *__xe_migrate_copy(struct xe_migrate *m,
+					   struct xe_bo *src_bo,
+					   struct xe_bo *dst_bo,
+					   struct ttm_resource *src,
+					   struct ttm_resource *dst,
+					   bool copy_only_ccs,
+					   bool is_vram_resolve)
 {
 	struct xe_gt *gt = m->tile->primary_gt;
 	struct xe_device *xe = gt_to_xe(gt);
@@ -809,8 +1233,15 @@ struct dma_fence *xe_migrate_copy(struct xe_migrate *m,
 	bool copy_ccs = xe_device_has_flat_ccs(xe) &&
 		xe_bo_needs_ccs_pages(src_bo) && xe_bo_needs_ccs_pages(dst_bo);
 	bool copy_system_ccs = copy_ccs && (!src_is_vram || !dst_is_vram);
-	bool use_comp_pat = type_device && xe_device_has_flat_ccs(xe) &&
-		GRAPHICS_VER(xe) >= 20 && src_is_vram && !dst_is_vram;
+
+	/*
+	 * For decompression operation, always use the compression PAT index.
+	 * Otherwise, only use the compression PAT index for device memory
+	 * when copying from VRAM to system memory.
+	 */
+	bool use_comp_pat = is_vram_resolve || (type_device &&
+			    xe_device_has_flat_ccs(xe) &&
+			    GRAPHICS_VER(xe) >= 20 && src_is_vram && !dst_is_vram);
 
 	/* Copying CCS between two different BOs is not supported yet. */
 	if (XE_WARN_ON(copy_ccs && src_bo != dst_bo))
@@ -834,7 +1265,7 @@ struct dma_fence *xe_migrate_copy(struct xe_migrate *m,
 				&ccs_it);
 
 	while (size) {
-		u32 batch_size = 2; /* arb_clear() + MI_BATCH_BUFFER_END */
+		u32 batch_size = 1; /* MI_BATCH_BUFFER_END */
 		struct xe_sched_job *job;
 		struct xe_bb *bb;
 		u32 flush_flags = 0;
@@ -880,7 +1311,7 @@ struct dma_fence *xe_migrate_copy(struct xe_migrate *m,
 		}
 
 		/* Add copy commands size here */
-		batch_size += ((copy_only_ccs) ? 0 : EMIT_COPY_DW) +
+		batch_size += ((copy_only_ccs) ? 0 : emit_copy_cmd_len(xe)) +
 			((needs_ccs_emit ? EMIT_COPY_CCS_DW : 0));
 
 		bb = xe_bb_new(gt, batch_size, usm);
@@ -937,10 +1368,8 @@ struct dma_fence *xe_migrate_copy(struct xe_migrate *m,
 		}
 
 		mutex_lock(&m->job_mutex);
-		xe_sched_job_arm(job);
 		dma_fence_put(fence);
-		fence = dma_fence_get(&job->drm.s_fence->finished);
-		xe_sched_job_push(job);
+		fence = xe_migrate_job_push(m, job);
 
 		dma_fence_put(m->fence);
 		m->fence = dma_fence_get(fence);
@@ -970,6 +1399,53 @@ err_sync:
 }
 
 /**
+ * xe_migrate_copy() - Copy content of TTM resources.
+ * @m: The migration context.
+ * @src_bo: The buffer object @src is currently bound to.
+ * @dst_bo: If copying between resources created for the same bo, set this to
+ * the same value as @src_bo. If copying between buffer objects, set it to
+ * the buffer object @dst is currently bound to.
+ * @src: The source TTM resource.
+ * @dst: The dst TTM resource.
+ * @copy_only_ccs: If true copy only CCS metadata
+ *
+ * Copies the contents of @src to @dst: On flat CCS devices,
+ * the CCS metadata is copied as well if needed, or if not present,
+ * the CCS metadata of @dst is cleared for security reasons.
+ *
+ * Return: Pointer to a dma_fence representing the last copy batch, or
+ * an error pointer on failure. If there is a failure, any copy operation
+ * started by the function call has been synced.
+ */
+struct dma_fence *xe_migrate_copy(struct xe_migrate *m,
+				  struct xe_bo *src_bo,
+				  struct xe_bo *dst_bo,
+				  struct ttm_resource *src,
+				  struct ttm_resource *dst,
+				  bool copy_only_ccs)
+{
+	return __xe_migrate_copy(m, src_bo, dst_bo, src, dst, copy_only_ccs, false);
+}
+
+/**
+ * xe_migrate_resolve() - Resolve and decompress a buffer object if required.
+ * @m: The migrate context
+ * @bo: The buffer object to resolve
+ * @res: The reservation object
+ *
+ * Wrapper around __xe_migrate_copy() with is_vram_resolve set to true
+ * to trigger decompression if needed.
+ *
+ * Return: A dma_fence that signals on completion, or an ERR_PTR on failure.
+ */
+struct dma_fence *xe_migrate_resolve(struct xe_migrate *m,
+				     struct xe_bo *bo,
+				     struct ttm_resource *res)
+{
+	return __xe_migrate_copy(m, bo, bo, res, res, false, true);
+}
+
+/**
  * xe_migrate_lrc() - Get the LRC from migrate context.
  * @migrate: Migrate context.
  *
@@ -980,15 +1456,30 @@ struct xe_lrc *xe_migrate_lrc(struct xe_migrate *migrate)
 	return migrate->q->lrc[0];
 }
 
-static int emit_flush_invalidate(struct xe_exec_queue *q, u32 *dw, int i,
-				 u32 flags)
+/* XXX: With CPU binds this can be removed in a follow up */
+#define NUM_KERNEL_PDE 15
+
+static u64 migrate_vm_ppgtt_addr_tlb_inval(void)
 {
-	struct xe_lrc *lrc = xe_exec_queue_lrc(q);
+	/*
+	 * The migrate VM is self-referential so it can modify its own PTEs (see
+	 * pte_update_size() or emit_pte() functions). We reserve NUM_KERNEL_PDE
+	 * entries for kernel operations (copies, clears, CCS migrate), and
+	 * suballocate the rest to user operations (binds/unbinds). With
+	 * NUM_KERNEL_PDE = 15, NUM_KERNEL_PDE - 1 is already used for PTE updates,
+	 * so assign NUM_KERNEL_PDE - 2 for TLB invalidation.
+	 */
+	return (NUM_KERNEL_PDE - 2) * XE_PAGE_SIZE;
+}
+
+static int emit_flush_invalidate(u32 *dw, int i, u32 flags)
+{
+	u64 addr = migrate_vm_ppgtt_addr_tlb_inval();
+
 	dw[i++] = MI_FLUSH_DW | MI_INVALIDATE_TLB | MI_FLUSH_DW_OP_STOREDW |
 		  MI_FLUSH_IMM_DW | flags;
-	dw[i++] = lower_32_bits(xe_lrc_start_seqno_ggtt_addr(lrc)) |
-		  MI_FLUSH_DW_USE_GTT;
-	dw[i++] = upper_32_bits(xe_lrc_start_seqno_ggtt_addr(lrc));
+	dw[i++] = lower_32_bits(addr);
+	dw[i++] = upper_32_bits(addr);
 	dw[i++] = MI_NOOP;
 	dw[i++] = MI_NOOP;
 
@@ -1000,6 +1491,8 @@ static int emit_flush_invalidate(struct xe_exec_queue *q, u32 *dw, int i,
  * @tile: Tile whose migration context to be used.
  * @q : Execution to be used along with migration context.
  * @src_bo: The buffer object @src is currently bound to.
+ * @new_mem: The (not yet committed) destination resource @src_bo is being
+ *          moved into; src_bo->ttm.resource is still the old resource.
  * @read_write : Creates BB commands for CCS read/write.
  *
  * Creates batch buffer instructions to copy CCS metadata from CCS pool to
@@ -1011,22 +1504,28 @@ static int emit_flush_invalidate(struct xe_exec_queue *q, u32 *dw, int i,
  */
 int xe_migrate_ccs_rw_copy(struct xe_tile *tile, struct xe_exec_queue *q,
 			   struct xe_bo *src_bo,
+			   struct ttm_resource *new_mem,
 			   enum xe_sriov_vf_ccs_rw_ctxs read_write)
 
 {
 	bool src_is_pltt = read_write == XE_SRIOV_VF_CCS_READ_CTX;
 	bool dst_is_pltt = read_write == XE_SRIOV_VF_CCS_WRITE_CTX;
-	struct ttm_resource *src = src_bo->ttm.resource;
+	struct ttm_resource *src = new_mem;
 	struct xe_migrate *m = tile->migrate;
 	struct xe_gt *gt = tile->primary_gt;
 	u32 batch_size, batch_size_allocated;
 	struct xe_device *xe = gt_to_xe(gt);
 	struct xe_res_cursor src_it, ccs_it;
+	struct xe_mem_pool *bb_pool;
+	struct xe_sriov_vf_ccs_ctx *ctx;
 	u64 size = xe_bo_size(src_bo);
-	struct xe_bb *bb = NULL;
+	struct xe_mem_pool_node *bb;
 	u64 src_L0, src_L0_ofs;
+	struct xe_bb xe_bb_tmp;
 	u32 src_L0_pt;
 	int err;
+
+	ctx = &xe->sriov.vf.ccs.contexts[read_write];
 
 	xe_res_first_sg(xe_bo_sg(src_bo), 0, size, &src_it);
 
@@ -1060,67 +1559,129 @@ int xe_migrate_ccs_rw_copy(struct xe_tile *tile, struct xe_exec_queue *q,
 		size -= src_L0;
 	}
 
-	bb = xe_bb_ccs_new(gt, batch_size, read_write);
-	if (IS_ERR(bb)) {
-		drm_err(&xe->drm, "BB allocation failed.\n");
-		err = PTR_ERR(bb);
-		goto err_ret;
+	bb = xe_mem_pool_alloc_node();
+	if (IS_ERR(bb))
+		return PTR_ERR(bb);
+
+	bb_pool = ctx->mem.ccs_bb_pool;
+	scoped_guard(mutex, xe_mem_pool_bo_swap_guard(bb_pool)) {
+		xe_mem_pool_swap_shadow_locked(bb_pool);
+
+		err = xe_mem_pool_insert_node(bb_pool, bb, batch_size * sizeof(u32));
+		if (err) {
+			xe_gt_err(gt, "BB allocation failed.\n");
+			kfree(bb);
+			return err;
+		}
+
+		batch_size_allocated = batch_size;
+		size = xe_bo_size(src_bo);
+		batch_size = 0;
+
+		xe_bb_tmp = (struct xe_bb){ .cs = xe_mem_pool_node_cpu_addr(bb), .len = 0 };
+		/*
+		 * Emit PTE and copy commands here.
+		 * The CCS copy command can only support limited size. If the size to be
+		 * copied is more than the limit, divide copy into chunks. So, calculate
+		 * sizes here again before copy command is emitted.
+		 */
+
+		while (size) {
+			batch_size += 10; /* Flush + ggtt addr + 2 NOP */
+			u32 flush_flags = 0;
+			u64 ccs_ofs, ccs_size;
+			u32 ccs_pt;
+
+			u32 avail_pts = max_mem_transfer_per_pass(xe) /
+					LEVEL0_PAGE_TABLE_ENCODE_SIZE;
+
+			src_L0 = xe_migrate_res_sizes(m, &src_it);
+
+			batch_size += pte_update_size(m, false, src, &src_it, &src_L0,
+						      &src_L0_ofs, &src_L0_pt, 0, 0,
+						      avail_pts);
+
+			ccs_size = xe_device_ccs_bytes(xe, src_L0);
+			batch_size += pte_update_size(m, 0, NULL, &ccs_it, &ccs_size, &ccs_ofs,
+						      &ccs_pt, 0, avail_pts, avail_pts);
+			xe_assert(xe, IS_ALIGNED(ccs_it.start, PAGE_SIZE));
+			batch_size += EMIT_COPY_CCS_DW;
+
+			emit_pte(m, &xe_bb_tmp, src_L0_pt, false, true, &src_it, src_L0, src);
+
+			emit_pte(m, &xe_bb_tmp, ccs_pt, false, false, &ccs_it, ccs_size, src);
+
+			xe_bb_tmp.len = emit_flush_invalidate(xe_bb_tmp.cs, xe_bb_tmp.len,
+							      flush_flags);
+			flush_flags = xe_migrate_ccs_copy(m, &xe_bb_tmp, src_L0_ofs, src_is_pltt,
+							  src_L0_ofs, dst_is_pltt,
+							  src_L0, ccs_ofs, true);
+			xe_bb_tmp.len = emit_flush_invalidate(xe_bb_tmp.cs, xe_bb_tmp.len,
+							      flush_flags);
+
+			size -= src_L0;
+		}
+
+		xe_assert(xe, (batch_size_allocated == xe_bb_tmp.len));
+		xe_assert(xe, bb->sa_node.size == xe_bb_tmp.len * sizeof(u32));
+		src_bo->bb_ccs[read_write] = bb;
+
+		xe_sriov_vf_ccs_rw_update_bb_addr(ctx);
+		xe_mem_pool_sync_shadow_locked(bb);
 	}
-
-	batch_size_allocated = batch_size;
-	size = xe_bo_size(src_bo);
-	batch_size = 0;
-
-	/*
-	 * Emit PTE and copy commands here.
-	 * The CCS copy command can only support limited size. If the size to be
-	 * copied is more than the limit, divide copy into chunks. So, calculate
-	 * sizes here again before copy command is emitted.
-	 */
-	while (size) {
-		batch_size += 10; /* Flush + ggtt addr + 2 NOP */
-		u32 flush_flags = 0;
-		u64 ccs_ofs, ccs_size;
-		u32 ccs_pt;
-
-		u32 avail_pts = max_mem_transfer_per_pass(xe) / LEVEL0_PAGE_TABLE_ENCODE_SIZE;
-
-		src_L0 = xe_migrate_res_sizes(m, &src_it);
-
-		batch_size += pte_update_size(m, false, src, &src_it, &src_L0,
-					      &src_L0_ofs, &src_L0_pt, 0, 0,
-					      avail_pts);
-
-		ccs_size = xe_device_ccs_bytes(xe, src_L0);
-		batch_size += pte_update_size(m, 0, NULL, &ccs_it, &ccs_size, &ccs_ofs,
-					      &ccs_pt, 0, avail_pts, avail_pts);
-		xe_assert(xe, IS_ALIGNED(ccs_it.start, PAGE_SIZE));
-		batch_size += EMIT_COPY_CCS_DW;
-
-		emit_pte(m, bb, src_L0_pt, false, true, &src_it, src_L0, src);
-
-		emit_pte(m, bb, ccs_pt, false, false, &ccs_it, ccs_size, src);
-
-		bb->len = emit_flush_invalidate(q, bb->cs, bb->len, flush_flags);
-		flush_flags = xe_migrate_ccs_copy(m, bb, src_L0_ofs, src_is_pltt,
-						  src_L0_ofs, dst_is_pltt,
-						  src_L0, ccs_ofs, true);
-		bb->len = emit_flush_invalidate(q, bb->cs, bb->len, flush_flags);
-
-		size -= src_L0;
-	}
-
-	xe_assert(xe, (batch_size_allocated == bb->len));
-	src_bo->bb_ccs[read_write] = bb;
 
 	return 0;
-
-err_ret:
-	return err;
 }
 
 /**
- * xe_get_migrate_exec_queue() - Get the execution queue from migrate context.
+ * xe_migrate_ccs_rw_copy_clear() - Clear the CCS read/write batch buffer
+ * content.
+ * @src_bo: The buffer object @src is currently bound to.
+ * @read_write : Creates BB commands for CCS read/write.
+ * @bound: Device is bound
+ *
+ * Directly clearing the BB lacks atomicity and can lead to undefined
+ * behavior if the vCPU is halted mid-operation during the clearing
+ * process. To avoid this issue, we use a shadow buffer object approach.
+ *
+ * First swap the SA BO address with the shadow BO, perform the clearing
+ * operation on the BB, update the shadow BO in the ring buffer, then
+ * sync the shadow and the actual buffer to maintain consistency.
+ *
+ * Returns: None.
+ */
+void xe_migrate_ccs_rw_copy_clear(struct xe_bo *src_bo,
+				  enum xe_sriov_vf_ccs_rw_ctxs read_write,
+				  bool bound)
+{
+	struct xe_mem_pool_node *bb = src_bo->bb_ccs[read_write];
+	struct xe_device *xe = xe_bo_device(src_bo);
+	struct xe_mem_pool *bb_pool;
+	struct xe_sriov_vf_ccs_ctx *ctx;
+	u32 *cs;
+
+	xe_assert(xe, IS_SRIOV_VF(xe));
+
+	ctx = &xe->sriov.vf.ccs.contexts[read_write];
+	bb_pool = ctx->mem.ccs_bb_pool;
+
+	scoped_guard(mutex, xe_mem_pool_bo_swap_guard(bb_pool)) {
+		if (bound) {
+			xe_mem_pool_swap_shadow_locked(bb_pool);
+
+			cs = xe_mem_pool_node_cpu_addr(bb);
+			memset(cs, MI_NOOP, bb->sa_node.size);
+			xe_sriov_vf_ccs_rw_update_bb_addr(ctx);
+
+			xe_mem_pool_sync_shadow_locked(bb);
+		}
+		xe_mem_pool_free_node(bb);
+		src_bo->bb_ccs[read_write] = NULL;
+	}
+}
+
+/**
+ * xe_migrate_exec_queue() - Get the execution queue from migrate context.
  * @migrate: Migrate context.
  *
  * Return: Pointer to execution queue on success, error on failure
@@ -1130,12 +1691,137 @@ struct xe_exec_queue *xe_migrate_exec_queue(struct xe_migrate *migrate)
 	return migrate->q;
 }
 
+/**
+ * xe_migrate_vram_copy_chunk() - Copy a chunk of a VRAM buffer object.
+ * @vram_bo: The VRAM buffer object.
+ * @vram_offset: The VRAM offset.
+ * @sysmem_bo: The sysmem buffer object.
+ * @sysmem_offset: The sysmem offset.
+ * @size: The size of VRAM chunk to copy.
+ * @dir: The direction of the copy operation.
+ *
+ * Copies a portion of a buffer object between VRAM and system memory.
+ * On Xe2 platforms that support flat CCS, VRAM data is decompressed when
+ * copying to system memory.
+ *
+ * Return: Pointer to a dma_fence representing the last copy batch, or
+ * an error pointer on failure. If there is a failure, any copy operation
+ * started by the function call has been synced.
+ */
+struct dma_fence *xe_migrate_vram_copy_chunk(struct xe_bo *vram_bo, u64 vram_offset,
+					     struct xe_bo *sysmem_bo, u64 sysmem_offset,
+					     u64 size, enum xe_migrate_copy_dir dir)
+{
+	struct xe_device *xe = xe_bo_device(vram_bo);
+	struct xe_tile *tile = vram_bo->tile;
+	struct xe_gt *gt = tile->primary_gt;
+	struct xe_migrate *m = tile->migrate;
+	struct dma_fence *fence = NULL;
+	struct ttm_resource *vram = vram_bo->ttm.resource;
+	struct ttm_resource *sysmem = sysmem_bo->ttm.resource;
+	struct xe_res_cursor vram_it, sysmem_it;
+	u64 vram_L0_ofs, sysmem_L0_ofs;
+	u32 vram_L0_pt, sysmem_L0_pt;
+	u64 vram_L0, sysmem_L0;
+	bool to_sysmem = (dir == XE_MIGRATE_COPY_TO_SRAM);
+	bool use_comp_pat = to_sysmem &&
+		GRAPHICS_VER(xe) >= 20 && xe_device_has_flat_ccs(xe);
+	int pass = 0;
+	int err;
+
+	xe_assert(xe, IS_ALIGNED(vram_offset | sysmem_offset | size, PAGE_SIZE));
+	xe_assert(xe, xe_bo_is_vram(vram_bo));
+	xe_assert(xe, !xe_bo_is_vram(sysmem_bo));
+	xe_assert(xe, !range_overflows(vram_offset, size, (u64)vram_bo->ttm.base.size));
+	xe_assert(xe, !range_overflows(sysmem_offset, size, (u64)sysmem_bo->ttm.base.size));
+
+	xe_res_first(vram, vram_offset, size, &vram_it);
+	xe_res_first_sg(xe_bo_sg(sysmem_bo), sysmem_offset, size, &sysmem_it);
+
+	while (size) {
+		u32 pte_flags = PTE_UPDATE_FLAG_IS_VRAM;
+		u32 batch_size = 2; /* arb_clear() + MI_BATCH_BUFFER_END */
+		struct xe_sched_job *job;
+		struct xe_bb *bb;
+		u32 update_idx;
+		bool usm = xe->info.has_usm;
+		u32 avail_pts = max_mem_transfer_per_pass(xe) / LEVEL0_PAGE_TABLE_ENCODE_SIZE;
+
+		sysmem_L0 = xe_migrate_res_sizes(m, &sysmem_it);
+		vram_L0 = min(xe_migrate_res_sizes(m, &vram_it), sysmem_L0);
+
+		xe_dbg(xe, "Pass %u, size: %llu\n", pass++, vram_L0);
+
+		pte_flags |= use_comp_pat ? PTE_UPDATE_FLAG_IS_COMP_PTE : 0;
+		batch_size += pte_update_size(m, pte_flags, vram, &vram_it, &vram_L0,
+					      &vram_L0_ofs, &vram_L0_pt, 0, 0, avail_pts);
+
+		batch_size += pte_update_size(m, 0, sysmem, &sysmem_it, &vram_L0, &sysmem_L0_ofs,
+					      &sysmem_L0_pt, 0, avail_pts, avail_pts);
+		batch_size += emit_copy_cmd_len(xe);
+
+		bb = xe_bb_new(gt, batch_size, usm);
+		if (IS_ERR(bb)) {
+			err = PTR_ERR(bb);
+			return ERR_PTR(err);
+		}
+
+		if (xe_migrate_allow_identity(vram_L0, &vram_it))
+			xe_res_next(&vram_it, vram_L0);
+		else
+			emit_pte(m, bb, vram_L0_pt, true, use_comp_pat, &vram_it, vram_L0, vram);
+
+		emit_pte(m, bb, sysmem_L0_pt, false, false, &sysmem_it, vram_L0, sysmem);
+
+		bb->cs[bb->len++] = MI_BATCH_BUFFER_END;
+		update_idx = bb->len;
+
+		if (to_sysmem)
+			emit_copy(gt, bb, vram_L0_ofs, sysmem_L0_ofs, vram_L0, XE_PAGE_SIZE);
+		else
+			emit_copy(gt, bb, sysmem_L0_ofs, vram_L0_ofs, vram_L0, XE_PAGE_SIZE);
+
+		job = xe_bb_create_migration_job(m->q, bb, xe_migrate_batch_base(m, usm),
+						 update_idx);
+		if (IS_ERR(job)) {
+			xe_bb_free(bb, NULL);
+			err = PTR_ERR(job);
+			return ERR_PTR(err);
+		}
+
+		xe_sched_job_add_migrate_flush(job, MI_INVALIDATE_TLB);
+
+		xe_assert(xe, dma_resv_test_signaled(vram_bo->ttm.base.resv,
+						     DMA_RESV_USAGE_BOOKKEEP));
+		xe_assert(xe, dma_resv_test_signaled(sysmem_bo->ttm.base.resv,
+						     DMA_RESV_USAGE_BOOKKEEP));
+
+		scoped_guard(mutex, &m->job_mutex) {
+			dma_fence_put(fence);
+			fence = xe_migrate_job_push(m, job);
+
+			dma_fence_put(m->fence);
+			m->fence = dma_fence_get(fence);
+		}
+
+		xe_bb_free(bb, fence);
+		size -= vram_L0;
+	}
+
+	return fence;
+}
+
+static u32 blt_mem_set_cmd_len(struct xe_device *xe)
+{
+	return 7;
+}
+
 static void emit_clear_link_copy(struct xe_gt *gt, struct xe_bb *bb, u64 src_ofs,
 				 u32 size, u32 pitch)
 {
 	struct xe_device *xe = gt_to_xe(gt);
 	u32 *cs = bb->cs + bb->len;
-	u32 len = PVC_MEM_SET_CMD_LEN_DW;
+	u32 len = blt_mem_set_cmd_len(xe);
 
 	*cs++ = PVC_MEM_SET_CMD | PVC_MEM_SET_MATRIX | (len - 2);
 	*cs++ = pitch - 1;
@@ -1153,15 +1839,21 @@ static void emit_clear_link_copy(struct xe_gt *gt, struct xe_bb *bb, u64 src_ofs
 	bb->len += len;
 }
 
+static u32 blt_fast_color_cmd_len(struct xe_device *xe)
+{
+	if (GRAPHICS_VERx100(xe) >= 1250)
+		return 16;
+	else
+		return 11;
+}
+
 static void emit_clear_main_copy(struct xe_gt *gt, struct xe_bb *bb,
 				 u64 src_ofs, u32 size, u32 pitch, bool is_vram)
 {
 	struct xe_device *xe = gt_to_xe(gt);
 	u32 *cs = bb->cs + bb->len;
-	u32 len = XY_FAST_COLOR_BLT_DW;
+	u32 len = blt_fast_color_cmd_len(xe);
 
-	if (GRAPHICS_VERx100(xe) < 1250)
-		len = 11;
 
 	*cs++ = XY_FAST_COLOR_BLT_CMD | XY_FAST_COLOR_BLT_DEPTH_32 |
 		(len - 2);
@@ -1194,32 +1886,20 @@ static void emit_clear_main_copy(struct xe_gt *gt, struct xe_bb *bb,
 	bb->len += len;
 }
 
-static bool has_service_copy_support(struct xe_gt *gt)
-{
-	/*
-	 * What we care about is whether the architecture was designed with
-	 * service copy functionality (specifically the new MEM_SET / MEM_COPY
-	 * instructions) so check the architectural engine list rather than the
-	 * actual list since these instructions are usable on BCS0 even if
-	 * all of the actual service copy engines (BCS1-BCS8) have been fused
-	 * off.
-	 */
-	return gt->info.engine_mask & GENMASK(XE_HW_ENGINE_BCS8,
-					      XE_HW_ENGINE_BCS1);
-}
-
 static u32 emit_clear_cmd_len(struct xe_gt *gt)
 {
-	if (has_service_copy_support(gt))
-		return PVC_MEM_SET_CMD_LEN_DW;
+	struct xe_device *xe = gt_to_xe(gt);
+
+	if (gt->info.has_xe2_blt_instructions)
+		return blt_mem_set_cmd_len(xe);
 	else
-		return XY_FAST_COLOR_BLT_DW;
+		return blt_fast_color_cmd_len(xe);
 }
 
 static void emit_clear(struct xe_gt *gt, struct xe_bb *bb, u64 src_ofs,
 		       u32 size, u32 pitch, bool is_vram)
 {
-	if (has_service_copy_support(gt))
+	if (gt->info.has_xe2_blt_instructions)
 		emit_clear_link_copy(gt, bb, src_ofs, size, pitch);
 	else
 		emit_clear_main_copy(gt, bb, src_ofs, size, pitch,
@@ -1287,7 +1967,7 @@ struct dma_fence *xe_migrate_clear(struct xe_migrate *m,
 
 		/* Calculate final sizes and batch size.. */
 		pte_flags = clear_vram ? PTE_UPDATE_FLAG_IS_VRAM : 0;
-		batch_size = 2 +
+		batch_size = 1 +
 			pte_update_size(m, pte_flags, src, &src_it,
 					&clear_L0, &clear_L0_ofs, &clear_L0_pt,
 					clear_bo_data ? emit_clear_cmd_len(gt) : 0, 0,
@@ -1352,10 +2032,8 @@ struct dma_fence *xe_migrate_clear(struct xe_migrate *m,
 		}
 
 		mutex_lock(&m->job_mutex);
-		xe_sched_job_arm(job);
 		dma_fence_put(fence);
-		fence = dma_fence_get(&job->drm.s_fence->finished);
-		xe_sched_job_push(job);
+		fence = xe_migrate_job_push(m, job);
 
 		dma_fence_put(m->fence);
 		m->fence = dma_fence_get(fence);
@@ -1385,55 +2063,6 @@ err_sync:
 	return fence;
 }
 
-static void write_pgtable(struct xe_tile *tile, struct xe_bb *bb, u64 ppgtt_ofs,
-			  const struct xe_vm_pgtable_update_op *pt_op,
-			  const struct xe_vm_pgtable_update *update,
-			  struct xe_migrate_pt_update *pt_update)
-{
-	const struct xe_migrate_pt_update_ops *ops = pt_update->ops;
-	u32 chunk;
-	u32 ofs = update->ofs, size = update->qwords;
-
-	/*
-	 * If we have 512 entries (max), we would populate it ourselves,
-	 * and update the PDE above it to the new pointer.
-	 * The only time this can only happen if we have to update the top
-	 * PDE. This requires a BO that is almost vm->size big.
-	 *
-	 * This shouldn't be possible in practice.. might change when 16K
-	 * pages are used. Hence the assert.
-	 */
-	xe_tile_assert(tile, update->qwords < MAX_NUM_PTE);
-	if (!ppgtt_ofs)
-		ppgtt_ofs = xe_migrate_vram_ofs(tile_to_xe(tile),
-						xe_bo_addr(update->pt_bo, 0,
-							   XE_PAGE_SIZE), false);
-
-	do {
-		u64 addr = ppgtt_ofs + ofs * 8;
-
-		chunk = min(size, MAX_PTE_PER_SDI);
-
-		/* Ensure populatefn can do memset64 by aligning bb->cs */
-		if (!(bb->len & 1))
-			bb->cs[bb->len++] = MI_NOOP;
-
-		bb->cs[bb->len++] = MI_STORE_DATA_IMM | MI_SDI_NUM_QW(chunk);
-		bb->cs[bb->len++] = lower_32_bits(addr);
-		bb->cs[bb->len++] = upper_32_bits(addr);
-		if (pt_op->bind)
-			ops->populate(pt_update, tile, NULL, bb->cs + bb->len,
-				      ofs, chunk, update);
-		else
-			ops->clear(pt_update, tile, NULL, bb->cs + bb->len,
-				   ofs, chunk, update);
-
-		bb->len += chunk * 2;
-		ofs += chunk;
-		size -= chunk;
-	} while (size);
-}
-
 struct xe_vm *xe_migrate_get_vm(struct xe_migrate *m)
 {
 	return xe_vm_get(m->q->vm);
@@ -1448,284 +2077,6 @@ struct migrate_test_params {
 #define to_migrate_test_params(_priv) \
 	container_of(_priv, struct migrate_test_params, base)
 #endif
-
-static struct dma_fence *
-xe_migrate_update_pgtables_cpu(struct xe_migrate *m,
-			       struct xe_migrate_pt_update *pt_update)
-{
-	XE_TEST_DECLARE(struct migrate_test_params *test =
-			to_migrate_test_params
-			(xe_cur_kunit_priv(XE_TEST_LIVE_MIGRATE));)
-	const struct xe_migrate_pt_update_ops *ops = pt_update->ops;
-	struct xe_vm *vm = pt_update->vops->vm;
-	struct xe_vm_pgtable_update_ops *pt_update_ops =
-		&pt_update->vops->pt_update_ops[pt_update->tile_id];
-	int err;
-	u32 i, j;
-
-	if (XE_TEST_ONLY(test && test->force_gpu))
-		return ERR_PTR(-ETIME);
-
-	if (ops->pre_commit) {
-		pt_update->job = NULL;
-		err = ops->pre_commit(pt_update);
-		if (err)
-			return ERR_PTR(err);
-	}
-
-	for (i = 0; i < pt_update_ops->num_ops; ++i) {
-		const struct xe_vm_pgtable_update_op *pt_op =
-			&pt_update_ops->ops[i];
-
-		for (j = 0; j < pt_op->num_entries; j++) {
-			const struct xe_vm_pgtable_update *update =
-				&pt_op->entries[j];
-
-			if (pt_op->bind)
-				ops->populate(pt_update, m->tile,
-					      &update->pt_bo->vmap, NULL,
-					      update->ofs, update->qwords,
-					      update);
-			else
-				ops->clear(pt_update, m->tile,
-					   &update->pt_bo->vmap, NULL,
-					   update->ofs, update->qwords, update);
-		}
-	}
-
-	trace_xe_vm_cpu_bind(vm);
-	xe_device_wmb(vm->xe);
-
-	return dma_fence_get_stub();
-}
-
-static struct dma_fence *
-__xe_migrate_update_pgtables(struct xe_migrate *m,
-			     struct xe_migrate_pt_update *pt_update,
-			     struct xe_vm_pgtable_update_ops *pt_update_ops)
-{
-	const struct xe_migrate_pt_update_ops *ops = pt_update->ops;
-	struct xe_tile *tile = m->tile;
-	struct xe_gt *gt = tile->primary_gt;
-	struct xe_device *xe = tile_to_xe(tile);
-	struct xe_sched_job *job;
-	struct dma_fence *fence;
-	struct drm_suballoc *sa_bo = NULL;
-	struct xe_bb *bb;
-	u32 i, j, batch_size = 0, ppgtt_ofs, update_idx, page_ofs = 0;
-	u32 num_updates = 0, current_update = 0;
-	u64 addr;
-	int err = 0;
-	bool is_migrate = pt_update_ops->q == m->q;
-	bool usm = is_migrate && xe->info.has_usm;
-
-	for (i = 0; i < pt_update_ops->num_ops; ++i) {
-		struct xe_vm_pgtable_update_op *pt_op = &pt_update_ops->ops[i];
-		struct xe_vm_pgtable_update *updates = pt_op->entries;
-
-		num_updates += pt_op->num_entries;
-		for (j = 0; j < pt_op->num_entries; ++j) {
-			u32 num_cmds = DIV_ROUND_UP(updates[j].qwords,
-						    MAX_PTE_PER_SDI);
-
-			/* align noop + MI_STORE_DATA_IMM cmd prefix */
-			batch_size += 4 * num_cmds + updates[j].qwords * 2;
-		}
-	}
-
-	/* fixed + PTE entries */
-	if (IS_DGFX(xe))
-		batch_size += 2;
-	else
-		batch_size += 6 * (num_updates / MAX_PTE_PER_SDI + 1) +
-			num_updates * 2;
-
-	bb = xe_bb_new(gt, batch_size, usm);
-	if (IS_ERR(bb))
-		return ERR_CAST(bb);
-
-	/* For sysmem PTE's, need to map them in our hole.. */
-	if (!IS_DGFX(xe)) {
-		u16 pat_index = xe->pat.idx[XE_CACHE_WB];
-		u32 ptes, ofs;
-
-		ppgtt_ofs = NUM_KERNEL_PDE - 1;
-		if (!is_migrate) {
-			u32 num_units = DIV_ROUND_UP(num_updates,
-						     NUM_VMUSA_WRITES_PER_UNIT);
-
-			if (num_units > m->vm_update_sa.size) {
-				err = -ENOBUFS;
-				goto err_bb;
-			}
-			sa_bo = drm_suballoc_new(&m->vm_update_sa, num_units,
-						 GFP_KERNEL, true, 0);
-			if (IS_ERR(sa_bo)) {
-				err = PTR_ERR(sa_bo);
-				goto err_bb;
-			}
-
-			ppgtt_ofs = NUM_KERNEL_PDE +
-				(drm_suballoc_soffset(sa_bo) /
-				 NUM_VMUSA_UNIT_PER_PAGE);
-			page_ofs = (drm_suballoc_soffset(sa_bo) %
-				    NUM_VMUSA_UNIT_PER_PAGE) *
-				VM_SA_UPDATE_UNIT_SIZE;
-		}
-
-		/* Map our PT's to gtt */
-		i = 0;
-		j = 0;
-		ptes = num_updates;
-		ofs = ppgtt_ofs * XE_PAGE_SIZE + page_ofs;
-		while (ptes) {
-			u32 chunk = min(MAX_PTE_PER_SDI, ptes);
-			u32 idx = 0;
-
-			bb->cs[bb->len++] = MI_STORE_DATA_IMM |
-				MI_SDI_NUM_QW(chunk);
-			bb->cs[bb->len++] = ofs;
-			bb->cs[bb->len++] = 0; /* upper_32_bits */
-
-			for (; i < pt_update_ops->num_ops; ++i) {
-				struct xe_vm_pgtable_update_op *pt_op =
-					&pt_update_ops->ops[i];
-				struct xe_vm_pgtable_update *updates = pt_op->entries;
-
-				for (; j < pt_op->num_entries; ++j, ++current_update, ++idx) {
-					struct xe_vm *vm = pt_update->vops->vm;
-					struct xe_bo *pt_bo = updates[j].pt_bo;
-
-					if (idx == chunk)
-						goto next_cmd;
-
-					xe_tile_assert(tile, xe_bo_size(pt_bo) == SZ_4K);
-
-					/* Map a PT at most once */
-					if (pt_bo->update_index < 0)
-						pt_bo->update_index = current_update;
-
-					addr = vm->pt_ops->pte_encode_bo(pt_bo, 0,
-									 pat_index, 0);
-					bb->cs[bb->len++] = lower_32_bits(addr);
-					bb->cs[bb->len++] = upper_32_bits(addr);
-				}
-
-				j = 0;
-			}
-
-next_cmd:
-			ptes -= chunk;
-			ofs += chunk * sizeof(u64);
-		}
-
-		bb->cs[bb->len++] = MI_BATCH_BUFFER_END;
-		update_idx = bb->len;
-
-		addr = xe_migrate_vm_addr(ppgtt_ofs, 0) +
-			(page_ofs / sizeof(u64)) * XE_PAGE_SIZE;
-		for (i = 0; i < pt_update_ops->num_ops; ++i) {
-			struct xe_vm_pgtable_update_op *pt_op =
-				&pt_update_ops->ops[i];
-			struct xe_vm_pgtable_update *updates = pt_op->entries;
-
-			for (j = 0; j < pt_op->num_entries; ++j) {
-				struct xe_bo *pt_bo = updates[j].pt_bo;
-
-				write_pgtable(tile, bb, addr +
-					      pt_bo->update_index * XE_PAGE_SIZE,
-					      pt_op, &updates[j], pt_update);
-			}
-		}
-	} else {
-		/* phys pages, no preamble required */
-		bb->cs[bb->len++] = MI_BATCH_BUFFER_END;
-		update_idx = bb->len;
-
-		for (i = 0; i < pt_update_ops->num_ops; ++i) {
-			struct xe_vm_pgtable_update_op *pt_op =
-				&pt_update_ops->ops[i];
-			struct xe_vm_pgtable_update *updates = pt_op->entries;
-
-			for (j = 0; j < pt_op->num_entries; ++j)
-				write_pgtable(tile, bb, 0, pt_op, &updates[j],
-					      pt_update);
-		}
-	}
-
-	job = xe_bb_create_migration_job(pt_update_ops->q, bb,
-					 xe_migrate_batch_base(m, usm),
-					 update_idx);
-	if (IS_ERR(job)) {
-		err = PTR_ERR(job);
-		goto err_sa;
-	}
-
-	xe_sched_job_add_migrate_flush(job, MI_INVALIDATE_TLB);
-
-	if (ops->pre_commit) {
-		pt_update->job = job;
-		err = ops->pre_commit(pt_update);
-		if (err)
-			goto err_job;
-	}
-	if (is_migrate)
-		mutex_lock(&m->job_mutex);
-
-	xe_sched_job_arm(job);
-	fence = dma_fence_get(&job->drm.s_fence->finished);
-	xe_sched_job_push(job);
-
-	if (is_migrate)
-		mutex_unlock(&m->job_mutex);
-
-	xe_bb_free(bb, fence);
-	drm_suballoc_free(sa_bo, fence);
-
-	return fence;
-
-err_job:
-	xe_sched_job_put(job);
-err_sa:
-	drm_suballoc_free(sa_bo, NULL);
-err_bb:
-	xe_bb_free(bb, NULL);
-	return ERR_PTR(err);
-}
-
-/**
- * xe_migrate_update_pgtables() - Pipelined page-table update
- * @m: The migrate context.
- * @pt_update: PT update arguments
- *
- * Perform a pipelined page-table update. The update descriptors are typically
- * built under the same lock critical section as a call to this function. If
- * using the default engine for the updates, they will be performed in the
- * order they grab the job_mutex. If different engines are used, external
- * synchronization is needed for overlapping updates to maintain page-table
- * consistency. Note that the meaning of "overlapping" is that the updates
- * touch the same page-table, which might be a higher-level page-directory.
- * If no pipelining is needed, then updates may be performed by the cpu.
- *
- * Return: A dma_fence that, when signaled, indicates the update completion.
- */
-struct dma_fence *
-xe_migrate_update_pgtables(struct xe_migrate *m,
-			   struct xe_migrate_pt_update *pt_update)
-
-{
-	struct xe_vm_pgtable_update_ops *pt_update_ops =
-		&pt_update->vops->pt_update_ops[pt_update->tile_id];
-	struct dma_fence *fence;
-
-	fence =  xe_migrate_update_pgtables_cpu(m, pt_update);
-
-	/* -ETIME indicates a job is needed, anything else is legit error */
-	if (!IS_ERR(fence) || PTR_ERR(fence) != -ETIME)
-		return fence;
-
-	return __xe_migrate_update_pgtables(m, pt_update, pt_update_ops);
-}
 
 /**
  * xe_migrate_wait() - Complete all operations using the xe_migrate context
@@ -1766,15 +2117,21 @@ static u32 pte_update_cmd_size(u64 size)
 static void build_pt_update_batch_sram(struct xe_migrate *m,
 				       struct xe_bb *bb, u32 pt_offset,
 				       struct drm_pagemap_addr *sram_addr,
-				       u32 size)
+				       u32 size, int level)
 {
-	u16 pat_index = tile_to_xe(m->tile)->pat.idx[XE_CACHE_WB];
+	u16 pat_index = xe_cache_pat_idx(tile_to_xe(m->tile), XE_CACHE_WB);
+	u64 gpu_page_size = 0x1ull << xe_pt_shift(level);
 	u32 ptes;
 	int i = 0;
 
-	ptes = DIV_ROUND_UP(size, XE_PAGE_SIZE);
+	xe_tile_assert(m->tile, PAGE_ALIGNED(size));
+
+	ptes = DIV_ROUND_UP(size, gpu_page_size);
 	while (ptes) {
 		u32 chunk = min(MAX_PTE_PER_SDI, ptes);
+
+		if (!level)
+			chunk = ALIGN_DOWN(chunk, PAGE_SIZE / XE_PAGE_SIZE);
 
 		bb->cs[bb->len++] = MI_STORE_DATA_IMM | MI_SDI_NUM_QW(chunk);
 		bb->cs[bb->len++] = pt_offset;
@@ -1784,60 +2141,103 @@ static void build_pt_update_batch_sram(struct xe_migrate *m,
 		ptes -= chunk;
 
 		while (chunk--) {
-			u64 addr = sram_addr[i].addr & PAGE_MASK;
+			u64 addr = sram_addr[i].addr;
+			u64 pte;
 
 			xe_tile_assert(m->tile, sram_addr[i].proto ==
-				       DRM_INTERCONNECT_SYSTEM);
+				       DRM_INTERCONNECT_SYSTEM ||
+				       sram_addr[i].proto == XE_INTERCONNECT_P2P);
 			xe_tile_assert(m->tile, addr);
-			addr = m->q->vm->pt_ops->pte_encode_addr(m->tile->xe,
-								 addr, pat_index,
-								 0, false, 0);
-			bb->cs[bb->len++] = lower_32_bits(addr);
-			bb->cs[bb->len++] = upper_32_bits(addr);
+			xe_tile_assert(m->tile, PAGE_ALIGNED(addr));
 
-			i++;
+again:
+			pte = m->q->vm->pt_ops->pte_encode_addr(m->tile->xe,
+								addr, pat_index,
+								level, false, 0);
+			bb->cs[bb->len++] = lower_32_bits(pte);
+			bb->cs[bb->len++] = upper_32_bits(pte);
+
+			if (gpu_page_size < PAGE_SIZE) {
+				addr += XE_PAGE_SIZE;
+				if (!PAGE_ALIGNED(addr)) {
+					chunk--;
+					goto again;
+				}
+				i++;
+			} else {
+				i += gpu_page_size / PAGE_SIZE;
+			}
 		}
 	}
 }
 
-enum xe_migrate_copy_dir {
-	XE_MIGRATE_COPY_TO_VRAM,
-	XE_MIGRATE_COPY_TO_SRAM,
-};
+static bool xe_migrate_vram_use_pde(struct drm_pagemap_addr *sram_addr,
+				    unsigned long size)
+{
+	u32 large_size = (0x1 << xe_pt_shift(1));
+	unsigned long i, incr = large_size / PAGE_SIZE;
+
+	for (i = 0; i < DIV_ROUND_UP(size, PAGE_SIZE); i += incr)
+		if (PAGE_SIZE << sram_addr[i].order != large_size)
+			return false;
+
+	return true;
+}
 
 #define XE_CACHELINE_BYTES	64ull
 #define XE_CACHELINE_MASK	(XE_CACHELINE_BYTES - 1)
+
+static u32 xe_migrate_copy_pitch(struct xe_device *xe, u32 len)
+{
+	u32 pitch;
+
+	if (IS_ALIGNED(len, PAGE_SIZE))
+		pitch = PAGE_SIZE;
+	else if (IS_ALIGNED(len, SZ_4K))
+		pitch = SZ_4K;
+	else if (IS_ALIGNED(len, SZ_256))
+		pitch = SZ_256;
+	else if (IS_ALIGNED(len, 4))
+		pitch = 4;
+	else
+		pitch = 1;
+
+	xe_assert(xe, pitch > 1 || xe->info.has_mem_copy_instr);
+	return pitch;
+}
 
 static struct dma_fence *xe_migrate_vram(struct xe_migrate *m,
 					 unsigned long len,
 					 unsigned long sram_offset,
 					 struct drm_pagemap_addr *sram_addr,
 					 u64 vram_addr,
+					 struct dma_fence *deps,
 					 const enum xe_migrate_copy_dir dir)
 {
 	struct xe_gt *gt = m->tile->primary_gt;
 	struct xe_device *xe = gt_to_xe(gt);
 	bool use_usm_batch = xe->info.has_usm;
 	struct dma_fence *fence = NULL;
-	u32 batch_size = 2;
+	u32 batch_size = 1;
 	u64 src_L0_ofs, dst_L0_ofs;
 	struct xe_sched_job *job;
 	struct xe_bb *bb;
 	u32 update_idx, pt_slot = 0;
 	unsigned long npages = DIV_ROUND_UP(len + sram_offset, PAGE_SIZE);
-	unsigned int pitch = len >= PAGE_SIZE && !(len & ~PAGE_MASK) ?
-		PAGE_SIZE : 4;
+	unsigned int pitch = xe_migrate_copy_pitch(xe, len);
 	int err;
 	unsigned long i, j;
+	bool use_pde = xe_migrate_vram_use_pde(sram_addr, len + sram_offset);
 
-	if (drm_WARN_ON(&xe->drm, (len & XE_CACHELINE_MASK) ||
-			(sram_offset | vram_addr) & XE_CACHELINE_MASK))
+	if (!xe->info.has_mem_copy_instr &&
+	    drm_WARN_ON(&xe->drm,
+			(!IS_ALIGNED(len, pitch)) || (sram_offset | vram_addr) & XE_CACHELINE_MASK))
 		return ERR_PTR(-EOPNOTSUPP);
 
 	xe_assert(xe, npages * PAGE_SIZE <= MAX_PREEMPTDISABLE_TRANSFER);
 
-	batch_size += pte_update_cmd_size(len);
-	batch_size += EMIT_COPY_DW;
+	batch_size += pte_update_cmd_size(npages << PAGE_SHIFT);
+	batch_size += emit_copy_cmd_len(xe);
 
 	bb = xe_bb_new(gt, batch_size, use_usm_batch);
 	if (IS_ERR(bb)) {
@@ -1853,7 +2253,7 @@ static struct dma_fence *xe_migrate_vram(struct xe_migrate *m,
 	 * struct drm_pagemap_addr. Ensure this is the case even with higher
 	 * orders.
 	 */
-	for (i = 0; i < npages;) {
+	for (i = 0; !use_pde && i < npages;) {
 		unsigned int order = sram_addr[i].order;
 
 		for (j = 1; j < NR_PAGES(order) && i + j < npages; j++)
@@ -1863,16 +2263,26 @@ static struct dma_fence *xe_migrate_vram(struct xe_migrate *m,
 		i += NR_PAGES(order);
 	}
 
-	build_pt_update_batch_sram(m, bb, pt_slot * XE_PAGE_SIZE,
-				   sram_addr, len + sram_offset);
+	if (use_pde)
+		build_pt_update_batch_sram(m, bb, m->large_page_copy_pdes,
+					   sram_addr, npages << PAGE_SHIFT, 1);
+	else
+		build_pt_update_batch_sram(m, bb, pt_slot * XE_PAGE_SIZE,
+					   sram_addr, npages << PAGE_SHIFT, 0);
 
 	if (dir == XE_MIGRATE_COPY_TO_VRAM) {
-		src_L0_ofs = xe_migrate_vm_addr(pt_slot, 0) + sram_offset;
+		if (use_pde)
+			src_L0_ofs = m->large_page_copy_ofs + sram_offset;
+		else
+			src_L0_ofs = xe_migrate_vm_addr(pt_slot, 0) + sram_offset;
 		dst_L0_ofs = xe_migrate_vram_ofs(xe, vram_addr, false);
 
 	} else {
 		src_L0_ofs = xe_migrate_vram_ofs(xe, vram_addr, false);
-		dst_L0_ofs = xe_migrate_vm_addr(pt_slot, 0) + sram_offset;
+		if (use_pde)
+			dst_L0_ofs = m->large_page_copy_ofs + sram_offset;
+		else
+			dst_L0_ofs = xe_migrate_vm_addr(pt_slot, 0) + sram_offset;
 	}
 
 	bb->cs[bb->len++] = MI_BATCH_BUFFER_END;
@@ -1890,10 +2300,16 @@ static struct dma_fence *xe_migrate_vram(struct xe_migrate *m,
 
 	xe_sched_job_add_migrate_flush(job, MI_INVALIDATE_TLB);
 
+	if (deps && !dma_fence_is_signaled(deps)) {
+		dma_fence_get(deps);
+		err = drm_sched_job_add_dependency(&job->drm, deps);
+		if (err)
+			dma_fence_wait(deps, false);
+		err = 0;
+	}
+
 	mutex_lock(&m->job_mutex);
-	xe_sched_job_arm(job);
-	fence = dma_fence_get(&job->drm.s_fence->finished);
-	xe_sched_job_push(job);
+	fence = xe_migrate_job_push(m, job);
 
 	dma_fence_put(m->fence);
 	m->fence = dma_fence_get(fence);
@@ -1915,19 +2331,22 @@ err:
  * @npages: Number of pages to migrate.
  * @src_addr: Array of DMA information (source of migrate)
  * @dst_addr: Device physical address of VRAM (destination of migrate)
+ * @deps: struct dma_fence representing the dependencies that need
+ * to be signaled before migration.
  *
  * Copy from an array dma addresses to a VRAM device physical address
  *
- * Return: dma fence for migrate to signal completion on succees, ERR_PTR on
+ * Return: dma fence for migrate to signal completion on success, ERR_PTR on
  * failure
  */
 struct dma_fence *xe_migrate_to_vram(struct xe_migrate *m,
 				     unsigned long npages,
 				     struct drm_pagemap_addr *src_addr,
-				     u64 dst_addr)
+				     u64 dst_addr,
+				     struct dma_fence *deps)
 {
 	return xe_migrate_vram(m, npages * PAGE_SIZE, 0, src_addr, dst_addr,
-			       XE_MIGRATE_COPY_TO_VRAM);
+			       deps, XE_MIGRATE_COPY_TO_VRAM);
 }
 
 /**
@@ -1936,19 +2355,22 @@ struct dma_fence *xe_migrate_to_vram(struct xe_migrate *m,
  * @npages: Number of pages to migrate.
  * @src_addr: Device physical address of VRAM (source of migrate)
  * @dst_addr: Array of DMA information (destination of migrate)
+ * @deps: struct dma_fence representing the dependencies that need
+ * to be signaled before migration.
  *
  * Copy from a VRAM device physical address to an array dma addresses
  *
- * Return: dma fence for migrate to signal completion on succees, ERR_PTR on
+ * Return: dma fence for migrate to signal completion on success, ERR_PTR on
  * failure
  */
 struct dma_fence *xe_migrate_from_vram(struct xe_migrate *m,
 				       unsigned long npages,
 				       u64 src_addr,
-				       struct drm_pagemap_addr *dst_addr)
+				       struct drm_pagemap_addr *dst_addr,
+				       struct dma_fence *deps)
 {
 	return xe_migrate_vram(m, npages * PAGE_SIZE, 0, dst_addr, src_addr,
-			       XE_MIGRATE_COPY_TO_SRAM);
+			       deps, XE_MIGRATE_COPY_TO_SRAM);
 }
 
 static void xe_migrate_dma_unmap(struct xe_device *xe,
@@ -1974,7 +2396,7 @@ static struct drm_pagemap_addr *xe_migrate_dma_map(struct xe_device *xe,
 	struct drm_pagemap_addr *pagemap_addr;
 	unsigned long i, npages = DIV_ROUND_UP(len, PAGE_SIZE);
 
-	pagemap_addr = kcalloc(npages, sizeof(*pagemap_addr), GFP_KERNEL);
+	pagemap_addr = kzalloc_objs(*pagemap_addr, npages);
 	if (!pagemap_addr)
 		return ERR_PTR(-ENOMEM);
 
@@ -2040,8 +2462,10 @@ int xe_migrate_access_memory(struct xe_migrate *m, struct xe_bo *bo,
 	xe_bo_assert_held(bo);
 
 	/* Use bounce buffer for small access and unaligned access */
-	if (!IS_ALIGNED(len, XE_CACHELINE_BYTES) ||
-	    !IS_ALIGNED((unsigned long)buf + offset, XE_CACHELINE_BYTES)) {
+	if (!xe->info.has_mem_copy_instr &&
+	    (!IS_ALIGNED(len, 4) ||
+	     !IS_ALIGNED(page_offset, XE_CACHELINE_BYTES) ||
+	     !IS_ALIGNED(offset, XE_CACHELINE_BYTES))) {
 		int buf_offset = 0;
 		void *bounce;
 		int err;
@@ -2103,6 +2527,7 @@ int xe_migrate_access_memory(struct xe_migrate *m, struct xe_bo *bo,
 		u64 vram_addr = vram_region_gpu_offset(bo->ttm.resource) +
 			cursor.start;
 		int current_bytes;
+		u32 pitch;
 
 		if (cursor.size > MAX_PREEMPTDISABLE_TRANSFER)
 			current_bytes = min_t(int, bytes_left,
@@ -2110,18 +2535,18 @@ int xe_migrate_access_memory(struct xe_migrate *m, struct xe_bo *bo,
 		else
 			current_bytes = min_t(int, bytes_left, cursor.size);
 
-		if (current_bytes & ~PAGE_MASK) {
-			int pitch = 4;
-
+		pitch = xe_migrate_copy_pitch(xe, current_bytes);
+		if (xe->info.has_mem_copy_instr)
+			current_bytes = min_t(int, current_bytes, U16_MAX * pitch);
+		else
 			current_bytes = min_t(int, current_bytes,
 					      round_down(S16_MAX * pitch,
 							 XE_CACHELINE_BYTES));
-		}
 
 		__fence = xe_migrate_vram(m, current_bytes,
 					  (unsigned long)buf & ~PAGE_MASK,
 					  &pagemap_addr[current_page],
-					  vram_addr, write ?
+					  vram_addr, NULL, write ?
 					  XE_MIGRATE_COPY_TO_VRAM :
 					  XE_MIGRATE_COPY_TO_SRAM);
 		if (IS_ERR(__fence)) {
@@ -2152,42 +2577,67 @@ out_err:
 	return IS_ERR(fence) ? PTR_ERR(fence) : 0;
 }
 
-/**
- * xe_migrate_job_lock() - Lock migrate job lock
- * @m: The migration context.
- * @q: Queue associated with the operation which requires a lock
- *
- * Lock the migrate job lock if the queue is a migration queue, otherwise
- * assert the VM's dma-resv is held (user queue's have own locking).
- */
-void xe_migrate_job_lock(struct xe_migrate *m, struct xe_exec_queue *q)
-{
-	bool is_migrate = q == m->q;
-
-	if (is_migrate)
-		mutex_lock(&m->job_mutex);
-	else
-		xe_vm_assert_held(q->vm);	/* User queues VM's should be locked */
-}
-
-/**
- * xe_migrate_job_unlock() - Unlock migrate job lock
- * @m: The migration context.
- * @q: Queue associated with the operation which requires a lock
- *
- * Unlock the migrate job lock if the queue is a migration queue, otherwise
- * assert the VM's dma-resv is held (user queue's have own locking).
- */
-void xe_migrate_job_unlock(struct xe_migrate *m, struct xe_exec_queue *q)
-{
-	bool is_migrate = q == m->q;
-
-	if (is_migrate)
-		mutex_unlock(&m->job_mutex);
-	else
-		xe_vm_assert_held(q->vm);	/* User queues VM's should be locked */
-}
-
 #if IS_ENABLED(CONFIG_DRM_XE_KUNIT_TEST)
 #include "tests/xe_migrate.c"
+#endif
+
+#if IS_ENABLED(CONFIG_DRM_XE_DEBUG_MEM)
+int xe_migrate_debug_ccs_overlap(struct xe_migrate *m,
+				 struct xe_bo *scratch_bo,
+				 bool write_to_ccs)
+{
+	struct xe_device *xe = tile_to_xe(m->tile);
+	struct xe_gt *gt = m->tile->primary_gt;
+	struct dma_fence *fence;
+	struct xe_bb *bb;
+	struct xe_sched_job *job;
+	u64 first_page_dpa, clear_L0_ofs, scratch_dpa, scratch_L0_ofs;
+
+	if (!xe_device_has_flat_ccs(xe))
+		return -EINVAL;
+
+	first_page_dpa = xe_vram_region_dpa_base(m->tile->mem.vram);
+	clear_L0_ofs = xe_migrate_vram_ofs(xe, first_page_dpa, true);
+
+	scratch_dpa = xe_bo_addr(scratch_bo, 0, XE_PAGE_SIZE);
+	scratch_L0_ofs = xe_migrate_vram_ofs(xe, scratch_dpa, false);
+
+	bb = xe_bb_new(gt, EMIT_COPY_CCS_DW + 1, xe->info.has_usm);
+	if (IS_ERR(bb)) {
+		drm_warn(&xe->drm, "Failed to create bb for VRAM overlap check\n");
+		return PTR_ERR(bb);
+	}
+
+	/* 4MB payload = 8KB CCS metadata */
+	if (write_to_ccs) {
+		emit_copy_ccs(gt, bb, clear_L0_ofs, true,
+			      scratch_L0_ofs, false, SZ_4M);
+	} else {
+		emit_copy_ccs(gt, bb, scratch_L0_ofs, false,
+			      clear_L0_ofs, true, SZ_4M);
+	}
+
+	bb->cs[bb->len++] = MI_BATCH_BUFFER_END;
+
+	job = xe_bb_create_migration_job(m->q, bb,
+					 xe_migrate_batch_base(m, xe->info.has_usm),
+					 0);
+	if (!IS_ERR(job)) {
+		xe_sched_job_add_migrate_flush(job, MI_FLUSH_DW_CCS);
+
+		mutex_lock(&m->job_mutex);
+		fence = xe_migrate_job_push(m, job);
+		mutex_unlock(&m->job_mutex);
+
+		dma_fence_wait(fence, false);
+		dma_fence_put(fence);
+	} else {
+		drm_warn(&xe->drm, "Failed to create job for VRAM overlap check\n");
+		xe_bb_free(bb, NULL);
+		return PTR_ERR(job);
+	}
+
+	xe_bb_free(bb, NULL);
+	return 0;
+}
 #endif

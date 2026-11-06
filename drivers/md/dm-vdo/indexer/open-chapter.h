@@ -40,7 +40,7 @@ struct open_chapter_zone {
 	/* The number of slots in the hash table */
 	unsigned int slot_count;
 	/* The hash table slots, referencing virtual record numbers */
-	struct open_chapter_zone_slot slots[];
+	struct open_chapter_zone_slot slots[] __counted_by(slot_count);
 };
 
 int __must_check uds_make_open_chapter(const struct index_geometry *geometry,
@@ -74,6 +74,6 @@ int __must_check uds_save_open_chapter(struct uds_index *index,
 int __must_check uds_load_open_chapter(struct uds_index *index,
 				       struct buffered_reader *reader);
 
-u64 uds_compute_saved_open_chapter_size(struct index_geometry *geometry);
+u64 uds_compute_saved_open_chapter_size(const struct index_geometry *geometry);
 
 #endif /* UDS_OPEN_CHAPTER_H */

@@ -74,11 +74,6 @@ static int loop_set_rx_carrier_range(struct rc_dev *dev, u32 min, u32 max)
 {
 	struct loopback_dev *lodev = dev->priv;
 
-	if (min < 1 || min > max) {
-		dev_dbg(&dev->dev, "invalid rx carrier range %u to %u\n", min, max);
-		return -EINVAL;
-	}
-
 	dev_dbg(&dev->dev, "setting rx carrier range %u to %u\n", min, max);
 	lodev->rxcarriermin = min;
 	lodev->rxcarriermax = max;
@@ -185,7 +180,7 @@ static int loop_set_wakeup_filter(struct rc_dev *dev,
 		return 0;
 
 	/* encode the specified filter and loop it back */
-	raw = kmalloc_array(max, sizeof(*raw), GFP_KERNEL);
+	raw = kmalloc_objs(*raw, max);
 	if (!raw)
 		return -ENOMEM;
 
@@ -263,6 +258,7 @@ static int __init loop_init(void)
 static void __exit loop_exit(void)
 {
 	rc_unregister_device(loopdev.dev);
+	rc_free_device(loopdev.dev);
 }
 
 module_init(loop_init);

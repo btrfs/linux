@@ -1218,7 +1218,6 @@ static int da7280_probe(struct i2c_client *client)
 	}
 
 	input_dev->name = "da7280-haptic";
-	input_dev->dev.parent = client->dev.parent;
 	input_dev->open = da7280_haptic_open;
 	input_dev->close = da7280_haptic_close;
 	input_set_drvdata(input_dev, haptics);
@@ -1305,7 +1304,7 @@ MODULE_DEVICE_TABLE(of, da7280_of_match);
 #endif
 
 static const struct i2c_device_id da7280_i2c_id[] = {
-	{ "da7280", },
+	{ .name = "da7280" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, da7280_i2c_id);

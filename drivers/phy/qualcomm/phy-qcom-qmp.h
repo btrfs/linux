@@ -6,8 +6,8 @@
 #ifndef QCOM_PHY_QMP_H_
 #define QCOM_PHY_QMP_H_
 
-#include "phy-qcom-qmp-qserdes-com.h"
-#include "phy-qcom-qmp-qserdes-txrx.h"
+#include "phy-qcom-qmp-qserdes-com-v2.h"
+#include "phy-qcom-qmp-qserdes-txrx-v2.h"
 
 #include "phy-qcom-qmp-qserdes-com-v3.h"
 #include "phy-qcom-qmp-qserdes-txrx-v3.h"
@@ -32,7 +32,15 @@
 #include "phy-qcom-qmp-qserdes-txrx-v7.h"
 
 #include "phy-qcom-qmp-qserdes-com-v8.h"
+#include "phy-qcom-qmp-usb43-qserdes-com-v8.h"
 #include "phy-qcom-qmp-qserdes-txrx-v8.h"
+#include "phy-qcom-qmp-qserdes-lalb-v8.h"
+
+#include "phy-qcom-qmp-qserdes-com-v10.h"
+#include "phy-qcom-qmp-qserdes-txrx-v10.h"
+
+#include "phy-qcom-qmp-qserdes-com-v10_60.h"
+#include "phy-qcom-qmp-qserdes-txrx-v10_60.h"
 
 #include "phy-qcom-qmp-qserdes-pll.h"
 
@@ -57,6 +65,12 @@
 #include "phy-qcom-qmp-pcs-v7.h"
 
 #include "phy-qcom-qmp-pcs-v8.h"
+
+#include "phy-qcom-qmp-pcs-v8_50.h"
+
+#include "phy-qcom-qmp-pcs-v10.h"
+
+#include "phy-qcom-qmp-pcs-v10_60.h"
 
 /* QPHY_SW_RESET bit */
 #define SW_RESET				BIT(0)
