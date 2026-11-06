@@ -5,7 +5,9 @@
 #include <linux/err.h>
 #include <linux/of_graph.h>
 #if IS_ENABLED(CONFIG_OF) && IS_ENABLED(CONFIG_DRM_PANEL_BRIDGE)
+#include <linux/of.h>
 #include <drm/drm_bridge.h>
+#include <drm/drm_panel.h>
 #endif
 
 struct component_master_ops;
@@ -13,11 +15,11 @@ struct component_match;
 struct device;
 struct drm_device;
 struct drm_encoder;
-struct drm_panel;
-struct drm_bridge;
 struct device_node;
 struct mipi_dsi_device_info;
 struct mipi_dsi_host;
+
+enum drm_panel_orientation;
 
 /**
  * enum drm_lvds_dual_link_pixels - Pixel order of an LVDS dual-link connection
@@ -46,10 +48,8 @@ int drm_of_component_probe(struct device *dev,
 int drm_of_encoder_active_endpoint(struct device_node *node,
 				   struct drm_encoder *encoder,
 				   struct of_endpoint *endpoint);
-int drm_of_find_panel_or_bridge(const struct device_node *np,
-				int port, int endpoint,
-				struct drm_panel **panel,
-				struct drm_bridge **bridge);
+int drm_of_get_panel_orientation(const struct device_node *np,
+				 enum drm_panel_orientation *orientation);
 int drm_of_lvds_get_dual_link_pixel_order(const struct device_node *port1,
 					  const struct device_node *port2);
 int drm_of_lvds_get_dual_link_pixel_order_sink(struct device_node *port1,
@@ -61,6 +61,10 @@ int drm_of_get_data_lanes_count_ep(const struct device_node *port,
 				   int port_reg, int reg,
 				   const unsigned int min,
 				   const unsigned int max);
+int drm_of_get_data_lanes_count_remote(const struct device_node *port,
+				       int port_reg, int reg,
+				       const unsigned int min,
+				       const unsigned int max);
 #else
 static inline uint32_t drm_of_crtc_port_mask(struct drm_device *dev,
 					  struct device_node *port)
@@ -96,10 +100,9 @@ static inline int drm_of_encoder_active_endpoint(struct device_node *node,
 {
 	return -EINVAL;
 }
-static inline int drm_of_find_panel_or_bridge(const struct device_node *np,
-					      int port, int endpoint,
-					      struct drm_panel **panel,
-					      struct drm_bridge **bridge)
+
+static inline int drm_of_get_panel_orientation(const struct device_node *np,
+					       enum drm_panel_orientation *orientation)
 {
 	return -EINVAL;
 }
@@ -139,6 +142,15 @@ drm_of_get_data_lanes_count_ep(const struct device_node *port,
 {
 	return -EINVAL;
 }
+
+static inline int
+drm_of_get_data_lanes_count_remote(const struct device_node *port,
+				   int port_reg, int reg,
+				   const unsigned int min,
+				   const unsigned int max)
+{
+	return -EINVAL;
+}
 #endif
 
 #if IS_ENABLED(CONFIG_OF) && IS_ENABLED(CONFIG_DRM_MIPI_DSI)
@@ -170,8 +182,11 @@ static inline int drm_of_panel_bridge_remove(const struct device_node *np,
 	if (!remote)
 		return -ENODEV;
 
-	bridge = of_drm_find_bridge(remote);
+	bridge = of_drm_find_and_get_bridge(remote);
 	drm_panel_bridge_remove(bridge);
+
+	drm_bridge_put(bridge);
+	of_node_put(remote);
 
 	return 0;
 #else

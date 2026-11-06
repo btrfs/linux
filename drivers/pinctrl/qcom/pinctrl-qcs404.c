@@ -43,7 +43,6 @@ enum {
 		.io_reg = 0x1000 * id + 0x4,		\
 		.intr_cfg_reg = 0x1000 * id + 0x8,	\
 		.intr_status_reg = 0x1000 * id + 0xc,	\
-		.intr_target_reg = 0x1000 * id + 0x8,	\
 		.tile = _tile,			\
 		.mux_bit = 2,			\
 		.pull_bit = 0,			\
@@ -70,7 +69,6 @@ enum {
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.tile = SOUTH,				\
 		.mux_bit = -1,				\
 		.pull_bit = pull,			\
@@ -1637,6 +1635,7 @@ static const struct of_device_id qcs404_pinctrl_of_match[] = {
 	{ .compatible = "qcom,qcs404-pinctrl", },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, qcs404_pinctrl_of_match);
 
 static struct platform_driver qcs404_pinctrl_driver = {
 	.driver = {
@@ -1660,4 +1659,3 @@ module_exit(qcs404_pinctrl_exit);
 
 MODULE_DESCRIPTION("Qualcomm QCS404 pinctrl driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, qcs404_pinctrl_of_match);

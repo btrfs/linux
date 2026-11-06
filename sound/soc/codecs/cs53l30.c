@@ -649,8 +649,9 @@ static int cs53l30_pcm_hw_params(struct snd_pcm_substream *substream,
 static int cs53l30_set_bias_level(struct snd_soc_component *component,
 				  enum snd_soc_bias_level level)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct cs53l30_private *priv = snd_soc_component_get_drvdata(component);
+	enum snd_soc_bias_level bias_level = snd_soc_dapm_get_bias_level(dapm);
 	unsigned int reg;
 	int i, inter_max_check, ret;
 
@@ -658,12 +659,12 @@ static int cs53l30_set_bias_level(struct snd_soc_component *component,
 	case SND_SOC_BIAS_ON:
 		break;
 	case SND_SOC_BIAS_PREPARE:
-		if (dapm->bias_level == SND_SOC_BIAS_STANDBY)
+		if (bias_level == SND_SOC_BIAS_STANDBY)
 			regmap_update_bits(priv->regmap, CS53L30_PWRCTL,
 					   CS53L30_PDN_LP_MASK, 0);
 		break;
 	case SND_SOC_BIAS_STANDBY:
-		if (dapm->bias_level == SND_SOC_BIAS_OFF) {
+		if (bias_level == SND_SOC_BIAS_OFF) {
 			ret = clk_prepare_enable(priv->mclk);
 			if (ret) {
 				dev_err(component->dev,
@@ -832,6 +833,12 @@ static int cs53l30_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
 #define CS53L30_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S20_3LE |\
 			SNDRV_PCM_FMTBIT_S24_LE)
 
+static const u64 cs53l30_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF;
+
 static const struct snd_soc_dai_ops cs53l30_ops = {
 	.hw_params = cs53l30_pcm_hw_params,
 	.set_fmt = cs53l30_set_dai_fmt,
@@ -839,6 +846,8 @@ static const struct snd_soc_dai_ops cs53l30_ops = {
 	.set_tristate = cs53l30_set_tristate,
 	.set_tdm_slot = cs53l30_set_dai_tdm_slot,
 	.mute_stream = cs53l30_mute_stream,
+	.auto_selectable_formats        = &cs53l30_selectable_formats,
+	.num_auto_selectable_formats    = 1,
 };
 
 static struct snd_soc_dai_driver cs53l30_dai = {
@@ -857,7 +866,7 @@ static struct snd_soc_dai_driver cs53l30_dai = {
 static int cs53l30_component_probe(struct snd_soc_component *component)
 {
 	struct cs53l30_private *priv = snd_soc_component_get_drvdata(component);
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 
 	if (priv->use_sdout2)
 		snd_soc_dapm_add_routes(dapm, cs53l30_dapm_routes_sdout2,
@@ -1082,8 +1091,8 @@ static const struct of_device_id cs53l30_of_match[] = {
 MODULE_DEVICE_TABLE(of, cs53l30_of_match);
 
 static const struct i2c_device_id cs53l30_id[] = {
-	{ "cs53l30" },
-	{}
+	{ .name = "cs53l30" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, cs53l30_id);

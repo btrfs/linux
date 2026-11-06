@@ -333,7 +333,7 @@ struct mhuv3_extension {
  * @rev: MHUv3 controller IIDR revision.
  * @var: MHUv3 controller IIDR variant.
  * @prod_id: MHUv3 controller IIDR product_id.
- * @num_chans: The total number of channnels discovered across all extensions.
+ * @num_chans: The total number of channels discovered across all extensions.
  * @cmb_irq: Combined IRQ number if any found defined.
  * @ctrl: A reference to the MHUv3 control page for this block.
  * @pbx: Base address of the PBX register mapping region.
@@ -980,10 +980,10 @@ static int mhuv3_setup_pbx(struct mhuv3 *mhu)
 
 		ret = devm_request_threaded_irq(dev, mhu->cmb_irq, NULL,
 						mhuv3_pbx_comb_interrupt,
-						IRQF_ONESHOT, "mhuv3-pbx", mhu);
+						IRQF_ONESHOT | IRQF_NO_SUSPEND,
+						"mhuv3-pbx", mhu);
 		if (ret)
-			return dev_err_probe(dev, ret,
-					     "Failed to request PBX IRQ\n");
+			return ret;
 
 		mhu->mbox.txdone_irq = true;
 		mhu->mbox.txdone_poll = false;
@@ -1017,10 +1017,11 @@ static int mhuv3_setup_mbx(struct mhuv3 *mhu)
 				     "MBX combined IRQ is missing !\n");
 
 	ret = devm_request_threaded_irq(dev, mhu->cmb_irq, NULL,
-					mhuv3_mbx_comb_interrupt, IRQF_ONESHOT,
+					mhuv3_mbx_comb_interrupt,
+					IRQF_ONESHOT | IRQF_NO_SUSPEND,
 					"mhuv3-mbx", mhu);
 	if (ret)
-		return dev_err_probe(dev, ret, "Failed to request MBX IRQ\n");
+		return ret;
 
 	for (i = 0; i < NUM_EXT; i++)
 		if (mhu->ext[i])

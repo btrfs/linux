@@ -227,8 +227,8 @@ struct sonicvibes {
 };
 
 static const struct pci_device_id snd_sonic_ids[] = {
-	{ PCI_VDEVICE(S3, 0xca00), 0, },
-        { 0, }
+	{ PCI_VDEVICE(S3, 0xca00) },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, snd_sonic_ids);
@@ -1362,11 +1362,11 @@ static int snd_sonicvibes_midi(struct sonicvibes *sonic,
 	return 0;
 }
 
-static int __snd_sonic_probe(struct pci_dev *pci,
-			     const struct pci_device_id *pci_id)
+static int snd_sonic_probe(struct pci_dev *pci,
+			   const struct pci_device_id *pci_id)
 {
 	static int dev;
-	struct snd_card *card;
+	struct snd_card *card __free(snd_card_free) = NULL;
 	struct sonicvibes *sonic;
 	struct snd_rawmidi *midi_uart;
 	struct snd_opl3 *opl3;
@@ -1430,14 +1430,9 @@ static int __snd_sonic_probe(struct pci_dev *pci,
 		return err;
 	
 	pci_set_drvdata(pci, card);
+	card = NULL; /* probe succeeded, don't release as error */
 	dev++;
 	return 0;
-}
-
-static int snd_sonic_probe(struct pci_dev *pci,
-			   const struct pci_device_id *pci_id)
-{
-	return snd_card_free_on_error(&pci->dev, __snd_sonic_probe(pci, pci_id));
 }
 
 static struct pci_driver sonicvibes_driver = {

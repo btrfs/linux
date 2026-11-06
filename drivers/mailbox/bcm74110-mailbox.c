@@ -97,6 +97,8 @@ struct bcm74110_mbox_chan {
 	int				type;
 };
 
+#define BCM74110_INIT_MSG_MAX		16
+
 struct bcm74110_mbox {
 	struct platform_device		*pdev;
 	void __iomem			*base;
@@ -105,6 +107,7 @@ struct bcm74110_mbox {
 	int				rx_chan;
 	int				rx_irq;
 	struct list_head		rx_svc_init_list;
+	unsigned int			rx_svc_init_count;
 	spinlock_t			rx_svc_list_lock;
 
 	struct mbox_controller		controller;
@@ -140,7 +143,7 @@ static void bcm74110_rx_push_init_msg(struct bcm74110_mbox *mbox, u32 val)
 {
 	struct bcm74110_mbox_msg *msg;
 
-	msg = kzalloc(sizeof(*msg), GFP_ATOMIC);
+	msg = kzalloc_obj(*msg, GFP_ATOMIC);
 	if (!msg)
 		return;
 
@@ -148,7 +151,15 @@ static void bcm74110_rx_push_init_msg(struct bcm74110_mbox *mbox, u32 val)
 	msg->msg = val;
 
 	spin_lock(&mbox->rx_svc_list_lock);
+	if (mbox->rx_svc_init_count >= BCM74110_INIT_MSG_MAX) {
+		spin_unlock(&mbox->rx_svc_list_lock);
+		kfree(msg);
+		dev_warn_ratelimited(&mbox->pdev->dev,
+				     "PMC INIT msg list full, dropping message\n");
+		return;
+	}
 	list_add_tail(&msg->list_entry, &mbox->rx_svc_init_list);
+	mbox->rx_svc_init_count++;
 	spin_unlock(&mbox->rx_svc_list_lock);
 }
 
@@ -225,6 +236,7 @@ static int bcm74110_rx_pop_init_msg(struct bcm74110_mbox *mbox, u32 func_type,
 				 list_entry) {
 		if (BCM_MSG_GET_FIELD(msg->msg, FUNC) == func_type) {
 			list_del(&msg->list_entry);
+			mbox->rx_svc_init_count--;
 			found = true;
 			break;
 		}
@@ -248,6 +260,7 @@ static void bcm74110_rx_flush_msg(struct bcm74110_mbox *mbox)
 
 	spin_lock_irqsave(&mbox->rx_svc_list_lock, flags);
 	list_splice_init(&mbox->rx_svc_init_list, &list_temp);
+	mbox->rx_svc_init_count = 0;
 	spin_unlock_irqrestore(&mbox->rx_svc_list_lock, flags);
 
 	list_for_each_entry_safe(msg, msg_tmp, &list_temp, list_entry) {
@@ -601,7 +614,7 @@ static int bcm74110_mbox_probe(struct platform_device *pdev)
 	ret = devm_request_irq(dev, mbox->rx_irq, bcm74110_mbox_isr,
 			       IRQF_NO_SUSPEND, pdev->name, mbox);
 	if (ret)
-		return dev_err_probe(dev, ret, "Failed to request irq\n");
+		return ret;
 
 	mbox->controller.ops = &bcm74110_mbox_chan_ops;
 	mbox->controller.dev = dev;

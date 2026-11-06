@@ -142,9 +142,8 @@ module_param_array(enable, bool, NULL, 0444);
 MODULE_PARM_DESC(enable, "Enable Audiowerk2 soundcard.");
 
 static const struct pci_device_id snd_aw2_ids[] = {
-	{PCI_VENDOR_ID_PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7146, 0, 0,
-	 0, 0, 0},
-	{0}
+	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7146, 0, 0) },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, snd_aw2_ids);
@@ -252,7 +251,7 @@ static int snd_aw2_probe(struct pci_dev *pci,
 			 const struct pci_device_id *pci_id)
 {
 	static int dev;
-	struct snd_card *card;
+	struct snd_card *card __free(snd_card_free) = NULL;
 	struct aw2 *chip;
 	int err;
 
@@ -274,7 +273,7 @@ static int snd_aw2_probe(struct pci_dev *pci,
 	/* (3) Create main component */
 	err = snd_aw2_create(card, pci);
 	if (err < 0)
-		goto error;
+		return err;
 
 	/* initialize mutex */
 	mutex_init(&chip->mtx);
@@ -293,17 +292,14 @@ static int snd_aw2_probe(struct pci_dev *pci,
 	/* (6) Register card instance */
 	err = snd_card_register(card);
 	if (err < 0)
-		goto error;
+		return err;
 
 	/* (7) Set PCI driver data */
 	pci_set_drvdata(pci, card);
+	card = NULL; /* probe succeeded, don't release as error */
 
 	dev++;
 	return 0;
-
- error:
-	snd_card_free(card);
-	return err;
 }
 
 /* open callback */

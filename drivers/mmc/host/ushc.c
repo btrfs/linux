@@ -388,10 +388,7 @@ static void ushc_enable_sdio_irq(struct mmc_host *mmc, int enable)
 {
 	struct ushc_data *ushc = mmc_priv(mmc);
 
-	if (enable)
-		set_bit(INT_EN, &ushc->flags);
-	else
-		clear_bit(INT_EN, &ushc->flags);
+	assign_bit(INT_EN, &ushc->flags, enable);
 }
 
 static void ushc_clean_up(struct ushc_data *ushc)
@@ -462,7 +459,7 @@ static int ushc_probe(struct usb_interface *intf, const struct usb_device_id *id
 		ret = -ENOMEM;
 		goto err;
 	}
-	ushc->int_data = kzalloc(sizeof(struct ushc_int_data), GFP_KERNEL);
+	ushc->int_data = kzalloc_obj(struct ushc_int_data);
 	if (ushc->int_data == NULL) {
 		ret = -ENOMEM;
 		goto err;
@@ -479,7 +476,7 @@ static int ushc_probe(struct usb_interface *intf, const struct usb_device_id *id
 		ret = -ENOMEM;
 		goto err;
 	}
-	ushc->cbw = kzalloc(sizeof(struct ushc_cbw), GFP_KERNEL);
+	ushc->cbw = kzalloc_obj(struct ushc_cbw);
 	if (ushc->cbw == NULL) {
 		ret = -ENOMEM;
 		goto err;
@@ -501,7 +498,7 @@ static int ushc_probe(struct usb_interface *intf, const struct usb_device_id *id
 		ret = -ENOMEM;
 		goto err;
 	}
-	ushc->csw = kzalloc(sizeof(struct ushc_csw), GFP_KERNEL);
+	ushc->csw = kzalloc_obj(struct ushc_csw);
 	if (ushc->csw == NULL) {
 		ret = -ENOMEM;
 		goto err;

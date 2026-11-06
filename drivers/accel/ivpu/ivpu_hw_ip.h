@@ -22,14 +22,12 @@ void ivpu_hw_ip_wdt_disable(struct ivpu_device *vdev);
 void ivpu_hw_ip_diagnose_failure(struct ivpu_device *vdev);
 u32 ivpu_hw_ip_ipc_rx_count_get(struct ivpu_device *vdev);
 void ivpu_hw_ip_irq_clear(struct ivpu_device *vdev);
-bool ivpu_hw_ip_irq_handler_37xx(struct ivpu_device *vdev, int irq);
-bool ivpu_hw_ip_irq_handler_40xx(struct ivpu_device *vdev, int irq);
+bool ivpu_hw_ip_irq_handler(struct ivpu_device *vdev, int irq);
 void ivpu_hw_ip_db_set(struct ivpu_device *vdev, u32 db_id);
 u32 ivpu_hw_ip_ipc_rx_addr_get(struct ivpu_device *vdev);
 void ivpu_hw_ip_ipc_tx_set(struct ivpu_device *vdev, u32 vpu_addr);
 void ivpu_hw_ip_irq_enable(struct ivpu_device *vdev);
 void ivpu_hw_ip_irq_disable(struct ivpu_device *vdev);
-void ivpu_hw_ip_diagnose_failure(struct ivpu_device *vdev);
 void ivpu_hw_ip_fabric_req_override_enable_50xx(struct ivpu_device *vdev);
 void ivpu_hw_ip_fabric_req_override_disable_50xx(struct ivpu_device *vdev);
 

@@ -371,7 +371,7 @@ static int alloc_dma_buf(struct ipu_image_convert_priv *priv,
 {
 	buf->len = PAGE_ALIGN(size);
 	buf->virt = dma_alloc_coherent(priv->ipu->dev, buf->len, &buf->phys,
-				       GFP_DMA | GFP_KERNEL);
+				       GFP_KERNEL);
 	if (!buf->virt) {
 		dev_err(priv->ipu->dev, "failed to alloc dma buffer\n");
 		return -ENOMEM;
@@ -2082,7 +2082,7 @@ ipu_image_convert_prepare(struct ipu_soc *ipu, enum ipu_ic_task ic_task,
 
 	chan = &priv->chan[ic_task];
 
-	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	ctx = kzalloc_obj(*ctx);
 	if (!ctx)
 		return ERR_PTR(-ENOMEM);
 
@@ -2402,7 +2402,7 @@ ipu_image_convert(struct ipu_soc *ipu, enum ipu_ic_task ic_task,
 	if (IS_ERR(ctx))
 		return ERR_CAST(ctx);
 
-	run = kzalloc(sizeof(*run), GFP_KERNEL);
+	run = kzalloc_obj(*run);
 	if (!run) {
 		ipu_image_convert_unprepare(ctx);
 		return ERR_PTR(-ENOMEM);

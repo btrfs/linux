@@ -18,6 +18,7 @@
 #include <linux/jiffies.h>
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/stringify.h>
 #include <linux/timer.h>
 #include <linux/watchdog.h>
 
@@ -56,12 +57,12 @@
 static int timeout = WDT_TIMEOUT;
 module_param(timeout, int, 0);
 MODULE_PARM_DESC(timeout, "Watchdog timeout in seconds, between 1 and 1023 "
-	"(default = " __MODULE_STRING(WDT_TIMEOUT) ")");
+	"(default = " __stringify(WDT_TIMEOUT) ")");
 
 static bool nowayout = WATCHDOG_NOWAYOUT;
 module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started "
-	"(default = " __MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
+	"(default = " __stringify(WATCHDOG_NOWAYOUT) ")");
 
 static struct watchdog_device wdt_dev;
 static struct resource wdt_res;
@@ -165,6 +166,7 @@ static int wdt_probe(struct pci_dev *pdev,
 		dev_err(&pdev->dev, "cannot enable PCI device\n");
 		return -ENODEV;
 	}
+	wdt_res.name = "via_wdt";
 
 	/*
 	 * Allocate a MMIO region which contains watchdog control register
@@ -246,6 +248,7 @@ static const struct pci_device_id wdt_pci_table[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_VX855) },
 	{ 0 }
 };
+MODULE_DEVICE_TABLE(pci, wdt_pci_table);
 
 static struct pci_driver wdt_driver = {
 	.name		= "via_wdt",

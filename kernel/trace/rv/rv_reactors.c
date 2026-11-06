@@ -61,6 +61,7 @@
  *      printk
  */
 
+#include <linux/lockdep.h>
 #include <linux/slab.h>
 
 #include "rv.h"
@@ -232,9 +233,7 @@ monitor_reactors_write(struct file *file, const char __user *user_buf,
 	seq_f = file->private_data;
 	mon = seq_f->private;
 
-	mutex_lock(&rv_interface_lock);
-
-	retval = -EINVAL;
+	guard(mutex)(&rv_interface_lock);
 
 	list_for_each_entry(reactor, &rv_reactors_list, list) {
 		if (strcmp(ptr, reactor->name) != 0)
@@ -242,13 +241,10 @@ monitor_reactors_write(struct file *file, const char __user *user_buf,
 
 		monitor_swap_reactors(mon, reactor);
 
-		retval = count;
-		break;
+		return count;
 	}
 
-	mutex_unlock(&rv_interface_lock);
-
-	return retval;
+	return -EINVAL;
 }
 
 /*
@@ -309,19 +305,16 @@ static int __rv_register_reactor(struct rv_reactor *reactor)
  */
 int rv_register_reactor(struct rv_reactor *reactor)
 {
-	int retval = 0;
-
 	if (strlen(reactor->name) >= MAX_RV_REACTOR_NAME_SIZE) {
 		pr_info("Reactor %s has a name longer than %d\n",
 			reactor->name, MAX_RV_MONITOR_NAME_SIZE);
 		return -EINVAL;
 	}
 
-	mutex_lock(&rv_interface_lock);
-	retval = __rv_register_reactor(reactor);
-	mutex_unlock(&rv_interface_lock);
-	return retval;
+	guard(mutex)(&rv_interface_lock);
+	return __rv_register_reactor(reactor);
 }
+EXPORT_SYMBOL_GPL(rv_register_reactor);
 
 /**
  * rv_unregister_reactor - unregister a rv reactor.
@@ -331,11 +324,11 @@ int rv_register_reactor(struct rv_reactor *reactor)
  */
 int rv_unregister_reactor(struct rv_reactor *reactor)
 {
-	mutex_lock(&rv_interface_lock);
+	guard(mutex)(&rv_interface_lock);
 	list_del(&reactor->list);
-	mutex_unlock(&rv_interface_lock);
 	return 0;
 }
+EXPORT_SYMBOL_GPL(rv_unregister_reactor);
 
 /*
  * reacting_on interface.
@@ -347,7 +340,7 @@ static bool __read_mostly reacting_on;
  *
  * Returns 1 if on, 0 otherwise.
  */
-bool rv_reacting_on(void)
+static bool rv_reacting_on(void)
 {
 	/* Ensures that concurrent monitors read consistent reacting_on */
 	smp_rmb();
@@ -389,7 +382,7 @@ static ssize_t reacting_on_write_data(struct file *filp, const char __user *user
 	if (retval)
 		return retval;
 
-	mutex_lock(&rv_interface_lock);
+	guard(mutex)(&rv_interface_lock);
 
 	if (val)
 		turn_reacting_on();
@@ -401,8 +394,6 @@ static ssize_t reacting_on_write_data(struct file *filp, const char __user *user
 	 * before returning to user-space.
 	 */
 	tracepoint_synchronize_unregister();
-
-	mutex_unlock(&rv_interface_lock);
 
 	return count;
 }
@@ -416,14 +407,15 @@ static const struct file_operations reacting_on_fops = {
 /**
  * reactor_populate_monitor - creates per monitor reactors file
  * @mon:	The monitor.
+ * @root:	The directory of the monitor.
  *
  * Returns 0 if successful, error otherwise.
  */
-int reactor_populate_monitor(struct rv_monitor *mon)
+int reactor_populate_monitor(struct rv_monitor *mon, struct dentry *root)
 {
 	struct dentry *tmp;
 
-	tmp = rv_create_file("reactors", RV_MODE_WRITE, mon->root_d, mon, &monitor_reactors_ops);
+	tmp = rv_create_file("reactors", RV_MODE_WRITE, root, mon, &monitor_reactors_ops);
 	if (!tmp)
 		return -ENOMEM;
 
@@ -438,7 +430,7 @@ int reactor_populate_monitor(struct rv_monitor *mon)
 /*
  * Nop reactor register
  */
-__printf(1, 2) static void rv_nop_reaction(const char *msg, ...)
+__printf(1, 0) static void rv_nop_reaction(const char *msg, va_list args)
 {
 }
 
@@ -450,30 +442,51 @@ static struct rv_reactor rv_nop = {
 
 int init_rv_reactors(struct dentry *root_dir)
 {
-	struct dentry *available, *reacting;
 	int retval;
 
-	available = rv_create_file("available_reactors", RV_MODE_READ, root_dir, NULL,
-				   &available_reactors_ops);
-	if (!available)
-		goto out_err;
+	struct dentry *available __free(rv_remove) =
+		rv_create_file("available_reactors", RV_MODE_READ, root_dir,
+				NULL, &available_reactors_ops);
 
-	reacting = rv_create_file("reacting_on", RV_MODE_WRITE, root_dir, NULL, &reacting_on_fops);
-	if (!reacting)
-		goto rm_available;
+	struct dentry *reacting __free(rv_remove) =
+		rv_create_file("reacting_on", RV_MODE_WRITE, root_dir, NULL, &reacting_on_fops);
+
+	if (!reacting || !available)
+		return -ENOMEM;
 
 	retval = __rv_register_reactor(&rv_nop);
 	if (retval)
-		goto rm_reacting;
+		return retval;
 
 	turn_reacting_on();
 
+	retain_and_null_ptr(available);
+	retain_and_null_ptr(reacting);
 	return 0;
-
-rm_reacting:
-	rv_remove(reacting);
-rm_available:
-	rv_remove(available);
-out_err:
-	return -ENOMEM;
 }
+
+void rv_react(struct rv_monitor *monitor, const char *msg, ...)
+{
+	/*
+	 * Reactors must not explicitly take locks, so they should be
+	 * LD_WAIT_FREE.  However, reactor callbacks can run with preemption
+	 * enabled, meaning the preempting code (e.g. the scheduler taking
+	 * rq->__lock at LD_WAIT_SPIN) may violate that constraint.  Use
+	 * LD_WAIT_SPIN to avoid false-positive lockdep reports.
+	 * But you should still NOT be using locks in reactors.
+	 */
+	static DEFINE_WAIT_OVERRIDE_MAP(rv_react_map, LD_WAIT_SPIN);
+	va_list args;
+
+	if (!rv_reacting_on() || !monitor->react)
+		return;
+
+	va_start(args, msg);
+
+	lock_map_acquire_try(&rv_react_map);
+	monitor->react(msg, args);
+	lock_map_release(&rv_react_map);
+
+	va_end(args);
+}
+EXPORT_SYMBOL_GPL(rv_react);

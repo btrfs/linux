@@ -318,7 +318,7 @@ static int acp63_sdw_dma_open(struct snd_soc_component *component,
 	runtime = substream->runtime;
 	cpu_dai = snd_soc_rtd_to_cpu(prtd, 0);
 	amd_manager = snd_soc_dai_get_drvdata(cpu_dai);
-	stream = kzalloc(sizeof(*stream), GFP_KERNEL);
+	stream = kzalloc_obj(*stream);
 	if (!stream)
 		return -ENOMEM;
 
@@ -337,7 +337,13 @@ static int acp63_sdw_dma_open(struct snd_soc_component *component,
 	stream->stream_id = cpu_dai->id;
 	stream->instance = amd_manager->instance;
 	runtime->private_data = stream;
-	return ret;
+
+	/*
+	 * ASoC only marks the component as opened when .open() returns 0.
+	 * Since snd_pcm_hw_constraint_integer() may return 1, explicitly
+	 * return 0 to ensure .close() is not skipped on rollback.
+	 */
+	return 0;
 }
 
 static int acp63_sdw_dma_hw_params(struct snd_soc_component *component,
@@ -634,7 +640,7 @@ static const struct snd_soc_component_driver acp63_sdw_component = {
 	.hw_params	= acp63_sdw_dma_hw_params,
 	.trigger	= acp63_sdw_dma_trigger,
 	.pointer	= acp63_sdw_dma_pointer,
-	.pcm_construct	= acp63_sdw_dma_new,
+	.pcm_new	= acp63_sdw_dma_new,
 	.use_dai_pcm_id = true,
 
 };

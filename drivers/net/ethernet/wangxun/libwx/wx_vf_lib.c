@@ -16,7 +16,18 @@ void wx_write_eitr_vf(struct wx_q_vector *q_vector)
 	int v_idx = q_vector->v_idx;
 	u32 itr_reg;
 
-	itr_reg = q_vector->itr & WX_VXITR_MASK;
+	switch (wx->mac.type) {
+	case wx_mac_sp:
+		itr_reg = q_vector->itr & WX_SP_MAX_EITR;
+		break;
+	case wx_mac_aml:
+	case wx_mac_aml40:
+		itr_reg = (q_vector->itr >> 3) & WX_AML_MAX_EITR;
+		break;
+	default:
+		itr_reg = q_vector->itr & WX_EM_MAX_EITR;
+		break;
+	}
 
 	/* set the WDIS bit to not clear the timer bits and cause an
 	 * immediate assertion of the interrupt
@@ -131,6 +142,15 @@ static void wx_configure_tx_ring_vf(struct wx *wx, struct wx_ring *ring)
 
 	txdctl |= WX_VXTXDCTL_BUFLEN(wx_buf_len(ring->count));
 	txdctl |= WX_VXTXDCTL_ENABLE;
+
+	if (ring->headwb_mem) {
+		wr32(wx, WX_VXTXD_HEAD_ADDRL(reg_idx),
+		     ring->headwb_dma & DMA_BIT_MASK(32));
+		wr32(wx, WX_VXTXD_HEAD_ADDRH(reg_idx),
+		     upper_32_bits(ring->headwb_dma));
+
+		txdctl |= WX_VXTXDCTL_HEAD_WB;
+	}
 
 	/* reinitialize tx_buffer_info */
 	memset(ring->tx_buffer_info, 0,
@@ -271,6 +291,9 @@ void wx_configure_rx_ring_vf(struct wx *wx, struct wx_ring *ring)
 	rxdctl &= ~WX_VXRXDCTL_RSCMAX_MASK;
 	rxdctl |= WX_VXRXDCTL_RSCMAX(0);
 	rxdctl |= WX_VXRXDCTL_RSCEN;
+
+	if (test_bit(WX_FLAG_RX_MERGE_ENABLED, wx->flags))
+		rxdctl |= WX_VXRXDCTL_DESC_MERGE;
 
 	wr32(wx, WX_VXRXDCTL(reg_idx), rxdctl);
 

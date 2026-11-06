@@ -154,7 +154,7 @@ others should not be larger than the returned value.
 ::
 
 	size_t
-	dma_opt_mapping_size(struct device *dev);
+	dma_max_opt_mapping_size(struct device *dev);
 
 Returns the maximum optimal size of a mapping for the device.
 
@@ -508,7 +508,7 @@ call to dma_iova_try_alloc.  This can be useful in the unmap path.
 
 Is used to link ranges to the IOVA previously allocated.  The start of all
 but the first call to dma_iova_link for a given state must be aligned
-to the DMA merge boundary returned by ``dma_get_merge_boundary())``, and
+to the DMA merge boundary returned by ``dma_get_merge_boundary()``, and
 the size of all but the last range must be aligned to the DMA merge boundary
 as well.
 

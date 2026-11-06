@@ -20,8 +20,10 @@
 #include <linux/fs.h>
 #include <linux/limits.h>
 #include <linux/mount.h>
+#include <linux/ns/ns_common_types.h>
 #include <linux/path.h>
 #include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/security.h>
 #include <linux/stddef.h>
 #include <linux/syscalls.h>
@@ -29,13 +31,18 @@
 #include <linux/uaccess.h>
 #include <uapi/linux/landlock.h>
 
+#include "cap.h"
 #include "cred.h"
 #include "domain.h"
 #include "fs.h"
 #include "limits.h"
 #include "net.h"
+#include "ns.h"
 #include "ruleset.h"
 #include "setup.h"
+#include "tsync.h"
+
+#include <trace/events/landlock.h>
 
 static bool is_initialized(void)
 {
@@ -59,6 +66,8 @@ static bool is_initialized(void)
  * @ksize_min: Minimal required size to be copied.
  * @src: User space pointer or NULL.
  * @usize: (Alleged) size of the data pointed to by @src.
+ *
+ * Return: 0 on success, -errno on failure.
  */
 static __always_inline int
 copy_min_struct_from_user(void *const dst, const size_t ksize,
@@ -92,7 +101,10 @@ static void build_check_abi(void)
 	struct landlock_ruleset_attr ruleset_attr;
 	struct landlock_path_beneath_attr path_beneath_attr;
 	struct landlock_net_port_attr net_port_attr;
+	struct landlock_namespace_attr namespace_attr;
+	struct landlock_capability_attr capability_attr;
 	size_t ruleset_size, path_beneath_size, net_port_size;
+	size_t namespace_size, capability_size;
 
 	/*
 	 * For each user space ABI structures, first checks that there is no
@@ -102,8 +114,12 @@ static void build_check_abi(void)
 	ruleset_size = sizeof(ruleset_attr.handled_access_fs);
 	ruleset_size += sizeof(ruleset_attr.handled_access_net);
 	ruleset_size += sizeof(ruleset_attr.scoped);
+	ruleset_size += sizeof(ruleset_attr.quiet_access_fs);
+	ruleset_size += sizeof(ruleset_attr.quiet_access_net);
+	ruleset_size += sizeof(ruleset_attr.quiet_scoped);
+	ruleset_size += sizeof(ruleset_attr.handled_permissions);
 	BUILD_BUG_ON(sizeof(ruleset_attr) != ruleset_size);
-	BUILD_BUG_ON(sizeof(ruleset_attr) != 24);
+	BUILD_BUG_ON(sizeof(ruleset_attr) != 56);
 
 	path_beneath_size = sizeof(path_beneath_attr.allowed_access);
 	path_beneath_size += sizeof(path_beneath_attr.parent_fd);
@@ -114,6 +130,18 @@ static void build_check_abi(void)
 	net_port_size += sizeof(net_port_attr.port);
 	BUILD_BUG_ON(sizeof(net_port_attr) != net_port_size);
 	BUILD_BUG_ON(sizeof(net_port_attr) != 16);
+
+	namespace_size = sizeof(namespace_attr.permissions);
+	namespace_size += sizeof(namespace_attr.allowed_namespace_types);
+	namespace_size += sizeof(namespace_attr.quiet_namespace_types);
+	BUILD_BUG_ON(sizeof(namespace_attr) != namespace_size);
+	BUILD_BUG_ON(sizeof(namespace_attr) != 24);
+
+	capability_size = sizeof(capability_attr.permissions);
+	capability_size += sizeof(capability_attr.allowed_capabilities);
+	capability_size += sizeof(capability_attr.quiet_capabilities);
+	BUILD_BUG_ON(sizeof(capability_attr) != capability_size);
+	BUILD_BUG_ON(sizeof(capability_attr) != 24);
 }
 
 /* Ruleset handling */
@@ -157,11 +185,13 @@ static const struct file_operations ruleset_fops = {
 /*
  * The Landlock ABI version should be incremented for each new Landlock-related
  * user space visible change (e.g. Landlock syscalls).  This version should
- * only be incremented once per Linux release, and the date in
+ * only be incremented once per Linux release.  When incrementing, the date in
  * Documentation/userspace-api/landlock.rst should be updated to reflect the
  * UAPI change.
+ * If the change involves a fix that requires userspace awareness, also update
+ * the errata documentation in Documentation/userspace-api/landlock.rst .
  */
-const int landlock_abi_version = 7;
+const int landlock_abi_version = 12;
 
 /**
  * sys_landlock_create_ruleset - Create a new ruleset
@@ -175,19 +205,24 @@ const int landlock_abi_version = 7;
  *         - %LANDLOCK_CREATE_RULESET_VERSION
  *         - %LANDLOCK_CREATE_RULESET_ERRATA
  *
- * This system call enables to create a new Landlock ruleset, and returns the
- * related file descriptor on success.
+ * This system call enables to create a new Landlock ruleset.
  *
  * If %LANDLOCK_CREATE_RULESET_VERSION or %LANDLOCK_CREATE_RULESET_ERRATA is
  * set, then @attr must be NULL and @size must be 0.
  *
- * Possible returned errors are:
+ * Return: The ruleset file descriptor on success, the Landlock ABI version if
+ * %LANDLOCK_CREATE_RULESET_VERSION is set, the errata value if
+ * %LANDLOCK_CREATE_RULESET_ERRATA is set, or -errno on failure.  Possible
+ * returned errors are:
  *
  * - %EOPNOTSUPP: Landlock is supported by the kernel but disabled at boot time;
- * - %EINVAL: unknown @flags, or unknown access, or unknown scope, or too small @size;
+ * - %EINVAL: unknown @flags, access, scope, or permission, or too small @size;
+ * - %EINVAL: quiet_access_fs, quiet_access_net, or quiet_scoped is not a
+ *   subset of the corresponding handled_access_fs, handled_access_net, or
+ *   scoped;
  * - %E2BIG: @attr or @size inconsistencies;
  * - %EFAULT: @attr or @size inconsistencies;
- * - %ENOMSG: empty &landlock_ruleset_attr.handled_access_fs.
+ * - %ENOMSG: all handled access, scope, and permission fields are empty.
  *
  * .. kernel-doc:: include/uapi/linux/landlock.h
  *     :identifiers: landlock_create_ruleset_flags
@@ -241,12 +276,46 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 	if ((ruleset_attr.scoped | LANDLOCK_MASK_SCOPE) != LANDLOCK_MASK_SCOPE)
 		return -EINVAL;
 
+	/*
+	 * Check that quiet masks are subsets of the respective handled masks.
+	 * Because of the checks above this is sufficient to also ensure that
+	 * the quiet masks are valid access masks.
+	 */
+	if ((ruleset_attr.quiet_access_fs | ruleset_attr.handled_access_fs) !=
+	    ruleset_attr.handled_access_fs)
+		return -EINVAL;
+	if ((ruleset_attr.quiet_access_net | ruleset_attr.handled_access_net) !=
+	    ruleset_attr.handled_access_net)
+		return -EINVAL;
+	if ((ruleset_attr.quiet_scoped | ruleset_attr.scoped) !=
+	    ruleset_attr.scoped)
+		return -EINVAL;
+
+	/* Checks permission content (and 32-bits cast). */
+	if ((ruleset_attr.handled_permissions | LANDLOCK_MASK_PERMISSION) !=
+	    LANDLOCK_MASK_PERMISSION)
+		return -EINVAL;
+
 	/* Checks arguments and transforms to kernel struct. */
 	ruleset = landlock_create_ruleset(ruleset_attr.handled_access_fs,
 					  ruleset_attr.handled_access_net,
-					  ruleset_attr.scoped);
+					  ruleset_attr.scoped,
+					  ruleset_attr.handled_permissions);
 	if (IS_ERR(ruleset))
 		return PTR_ERR(ruleset);
+
+	ruleset->quiet_access.fs = ruleset_attr.quiet_access_fs;
+	ruleset->quiet_access.net = ruleset_attr.quiet_access_net;
+	ruleset->quiet_access.scope = ruleset_attr.quiet_scoped;
+
+	/*
+	 * Emits before anon_inode_getfd() installs the file descriptor, while
+	 * the ruleset is still private to this thread: no lock is needed, and
+	 * the event cannot race a concurrent close() freeing the ruleset under
+	 * the tracepoint's BTF read.  This is the last point at which the
+	 * ruleset is guaranteed alive and unshared.
+	 */
+	trace_landlock_create_ruleset(ruleset);
 
 	/* Creates anonymous FD referring to the ruleset. */
 	ruleset_fd = anon_inode_getfd("[landlock-ruleset]", &ruleset_fops,
@@ -275,8 +344,6 @@ static struct landlock_ruleset *get_ruleset_from_fd(const int fd,
 	if (!(fd_file(ruleset_f)->f_mode & mode))
 		return ERR_PTR(-EPERM);
 	ruleset = fd_file(ruleset_f)->private_data;
-	if (WARN_ON_ONCE(ruleset->num_layers != 1))
-		return ERR_PTR(-EINVAL);
 	landlock_get_ruleset(ruleset);
 	return ruleset;
 }
@@ -312,7 +379,7 @@ static int get_path_from_fd(const s32 fd, struct path *const path)
 }
 
 static int add_rule_path_beneath(struct landlock_ruleset *const ruleset,
-				 const void __user *const rule_attr)
+				 const void __user *const rule_attr, u32 flags)
 {
 	struct landlock_path_beneath_attr path_beneath_attr;
 	struct path path;
@@ -327,14 +394,19 @@ static int add_rule_path_beneath(struct landlock_ruleset *const ruleset,
 
 	/*
 	 * Informs about useless rule: empty allowed_access (i.e. deny rules)
-	 * are ignored in path walks.
+	 * are ignored in path walks.  However, the rule is not useless if it is
+	 * there to hold a quiet flag.
 	 */
-	if (!path_beneath_attr.allowed_access)
+	if (!flags && !path_beneath_attr.allowed_access)
 		return -ENOMSG;
 
 	/* Checks that allowed_access matches the @ruleset constraints. */
-	mask = ruleset->access_masks[0].fs;
+	mask = ruleset->layer.handled.fs;
 	if ((path_beneath_attr.allowed_access | mask) != mask)
+		return -EINVAL;
+
+	/* Checks for useless quiet flag. */
+	if (flags & LANDLOCK_ADD_RULE_QUIET && !ruleset->quiet_access.fs)
 		return -EINVAL;
 
 	/* Gets and checks the new rule. */
@@ -344,13 +416,13 @@ static int add_rule_path_beneath(struct landlock_ruleset *const ruleset,
 
 	/* Imports the new rule. */
 	err = landlock_append_fs_rule(ruleset, &path,
-				      path_beneath_attr.allowed_access);
+				      path_beneath_attr.allowed_access, flags);
 	path_put(&path);
 	return err;
 }
 
 static int add_rule_net_port(struct landlock_ruleset *ruleset,
-			     const void __user *const rule_attr)
+			     const void __user *const rule_attr, u32 flags)
 {
 	struct landlock_net_port_attr net_port_attr;
 	int res;
@@ -363,14 +435,19 @@ static int add_rule_net_port(struct landlock_ruleset *ruleset,
 
 	/*
 	 * Informs about useless rule: empty allowed_access (i.e. deny rules)
-	 * are ignored by network actions.
+	 * are ignored by network actions.  However, the rule is not useless if
+	 * it is there to hold a quiet flag.
 	 */
-	if (!net_port_attr.allowed_access)
+	if (!flags && !net_port_attr.allowed_access)
 		return -ENOMSG;
 
 	/* Checks that allowed_access matches the @ruleset constraints. */
-	mask = landlock_get_net_access_mask(ruleset, 0);
+	mask = ruleset->layer.handled.net;
 	if ((net_port_attr.allowed_access | mask) != mask)
+		return -EINVAL;
+
+	/* Checks for useless quiet flag. */
+	if (flags & LANDLOCK_ADD_RULE_QUIET && !ruleset->quiet_access.net)
 		return -EINVAL;
 
 	/* Denies inserting a rule with port greater than 65535. */
@@ -379,7 +456,157 @@ static int add_rule_net_port(struct landlock_ruleset *ruleset,
 
 	/* Imports the new rule. */
 	return landlock_append_net_rule(ruleset, net_port_attr.port,
-					net_port_attr.allowed_access);
+					net_port_attr.allowed_access, flags);
+}
+
+static int add_rule_namespace(struct landlock_ruleset *const ruleset,
+			      const void __user *const rule_attr,
+			      const u32 flags)
+{
+	struct landlock_namespace_attr ns_attr;
+	access_mask_t mask;
+	u64 allowed_types, quiet_types;
+	int ret;
+
+	/*
+	 * Namespace rules support no add-rule flags.  In particular,
+	 * LANDLOCK_ADD_RULE_QUIET is filesystem/network only.
+	 */
+	if (flags)
+		return -EINVAL;
+
+	/* Copies raw user space buffer. */
+	ret = copy_from_user(&ns_attr, rule_attr, sizeof(ns_attr));
+	if (ret)
+		return -EFAULT;
+
+	/* Informs about useless rule: empty permissions. */
+	if (!ns_attr.permissions)
+		return -ENOMSG;
+
+	/*
+	 * The permissions selector must match
+	 * LANDLOCK_PERMISSION_NAMESPACE_USE.  The valid set is a single bit
+	 * today, so this is an exact match now; the check broadens to a subset
+	 * test once another supported permission is added.
+	 */
+	if (ns_attr.permissions != LANDLOCK_PERMISSION_NAMESPACE_USE)
+		return -EINVAL;
+
+	/*
+	 * Checks that permissions match the ruleset constraints.  This also
+	 * makes quieting require the category to be handled.
+	 */
+	mask = landlock_get_permission_mask(ruleset);
+	if (!(mask & LANDLOCK_PERMISSION_NAMESPACE_USE))
+		return -EINVAL;
+
+	/*
+	 * Informs about useless rule: neither allows nor quiets anything.  A
+	 * quiet-only rule (empty allowed set) is legal.
+	 */
+	if (!ns_attr.allowed_namespace_types && !ns_attr.quiet_namespace_types)
+		return -ENOMSG;
+
+	/*
+	 * Stores only the namespace types this kernel knows about.  Unknown
+	 * bits are silently accepted for forward compatibility: user space
+	 * compiled against newer headers can pass new CLONE_NEW* flags without
+	 * getting EINVAL on older kernels.  Unknown bits have no effect because
+	 * no hook checks them.  The quiet bitmask suppresses logging of denials
+	 * attributed to this layer; see landlock_log_denial().
+	 */
+	allowed_types = ns_attr.allowed_namespace_types & CLONE_NS_ALL;
+	quiet_types = ns_attr.quiet_namespace_types & CLONE_NS_ALL;
+
+	mutex_lock(&ruleset->lock);
+	ruleset->layer.allowed.ns_types |=
+		landlock_ns_types_to_bits(allowed_types);
+#ifdef CONFIG_SECURITY_LANDLOCK_LOG
+	ruleset->quiet_permission.ns_types |=
+		landlock_ns_types_to_bits(quiet_types);
+#endif /* CONFIG_SECURITY_LANDLOCK_LOG */
+#ifdef CONFIG_TRACEPOINTS
+	ruleset->version++;
+#endif /* CONFIG_TRACEPOINTS */
+	trace_landlock_add_rule_namespace(ruleset, flags, ns_attr.permissions,
+					  allowed_types, quiet_types);
+	mutex_unlock(&ruleset->lock);
+	return 0;
+}
+
+static int add_rule_capability(struct landlock_ruleset *const ruleset,
+			       const void __user *const rule_attr,
+			       const u32 flags)
+{
+	struct landlock_capability_attr cap_attr;
+	access_mask_t mask;
+	u64 allowed_caps, quiet_caps;
+	int ret;
+
+	/*
+	 * Capability rules support no add-rule flags.  In particular,
+	 * LANDLOCK_ADD_RULE_QUIET is filesystem/network only.
+	 */
+	if (flags)
+		return -EINVAL;
+
+	/* Copies raw user space buffer. */
+	ret = copy_from_user(&cap_attr, rule_attr, sizeof(cap_attr));
+	if (ret)
+		return -EFAULT;
+
+	/* Informs about useless rule: empty permissions. */
+	if (!cap_attr.permissions)
+		return -ENOMSG;
+
+	/*
+	 * The permissions selector must match
+	 * LANDLOCK_PERMISSION_CAPABILITY_USE.  The valid set is a single bit
+	 * today, so this is an exact match now; the check broadens to a subset
+	 * test once another supported permission is added.
+	 */
+	if (cap_attr.permissions != LANDLOCK_PERMISSION_CAPABILITY_USE)
+		return -EINVAL;
+
+	/*
+	 * Checks that permissions match the ruleset constraints.  This also
+	 * makes quieting require the category to be handled.
+	 */
+	mask = landlock_get_permission_mask(ruleset);
+	if (!(mask & LANDLOCK_PERMISSION_CAPABILITY_USE))
+		return -EINVAL;
+
+	/*
+	 * Informs about useless rule: neither allows nor quiets anything.  A
+	 * quiet-only rule (empty allowed set) is legal.
+	 */
+	if (!cap_attr.allowed_capabilities && !cap_attr.quiet_capabilities)
+		return -ENOMSG;
+
+	/*
+	 * Stores only the capabilities this kernel knows about.  Unknown bits
+	 * are silently accepted for forward compatibility: user space compiled
+	 * against newer headers can pass new CAP_* bits without getting EINVAL
+	 * on older kernels.  Unknown bits have no effect because no hook checks
+	 * them.  The quiet bitmask suppresses logging of denials attributed to
+	 * this layer; see landlock_log_denial().
+	 */
+	allowed_caps = cap_attr.allowed_capabilities & CAP_VALID_MASK;
+	quiet_caps = cap_attr.quiet_capabilities & CAP_VALID_MASK;
+
+	mutex_lock(&ruleset->lock);
+	ruleset->layer.allowed.caps |= landlock_caps_to_bits(allowed_caps);
+#ifdef CONFIG_SECURITY_LANDLOCK_LOG
+	ruleset->quiet_permission.caps |= landlock_caps_to_bits(quiet_caps);
+#endif /* CONFIG_SECURITY_LANDLOCK_LOG */
+#ifdef CONFIG_TRACEPOINTS
+	ruleset->version++;
+#endif /* CONFIG_TRACEPOINTS */
+	trace_landlock_add_rule_capability(ruleset, flags, cap_attr.permissions,
+					   allowed_caps, quiet_caps);
+	mutex_unlock(&ruleset->lock);
+	return 0;
 }
 
 /**
@@ -388,32 +615,48 @@ static int add_rule_net_port(struct landlock_ruleset *ruleset,
  * @ruleset_fd: File descriptor tied to the ruleset that should be extended
  *		with the new rule.
  * @rule_type: Identify the structure type pointed to by @rule_attr:
- *             %LANDLOCK_RULE_PATH_BENEATH or %LANDLOCK_RULE_NET_PORT.
+ *             %LANDLOCK_RULE_PATH_BENEATH, %LANDLOCK_RULE_NET_PORT,
+ *             %LANDLOCK_RULE_NAMESPACE, or %LANDLOCK_RULE_CAPABILITY.
  * @rule_attr: Pointer to a rule (matching the @rule_type).
- * @flags: Must be 0.
+ * @flags: Must be 0 or %LANDLOCK_ADD_RULE_QUIET.
  *
  * This system call enables to define a new rule and add it to an existing
  * ruleset.
  *
- * Possible returned errors are:
+ * Return: 0 on success, or -errno on failure.  Possible returned errors are:
  *
  * - %EOPNOTSUPP: Landlock is supported by the kernel but disabled at boot time;
  * - %EAFNOSUPPORT: @rule_type is %LANDLOCK_RULE_NET_PORT but TCP/IP is not
  *   supported by the running kernel;
- * - %EINVAL: @flags is not 0;
+ * - %EINVAL: @flags is not valid;
  * - %EINVAL: The rule accesses are inconsistent (i.e.
  *   &landlock_path_beneath_attr.allowed_access or
  *   &landlock_net_port_attr.allowed_access is not a subset of the ruleset
  *   handled accesses)
+ * - %EINVAL: A nonzero &landlock_namespace_attr.permissions is not
+ *   %LANDLOCK_PERMISSION_NAMESPACE_USE or is not handled by the ruleset;
+ * - %EINVAL: A nonzero &landlock_capability_attr.permissions is not
+ *   %LANDLOCK_PERMISSION_CAPABILITY_USE or is not handled by the ruleset;
  * - %EINVAL: &landlock_net_port_attr.port is greater than 65535;
+ * - %EINVAL: LANDLOCK_ADD_RULE_QUIET is passed but the ruleset has no
+ *   quiet access bits set for the corresponding rule type.
  * - %ENOMSG: Empty accesses (e.g. &landlock_path_beneath_attr.allowed_access is
- *   0);
+ *   0) and no flags;
+ * - %ENOMSG: &landlock_namespace_attr.permissions is 0, or both
+ *   &landlock_namespace_attr.allowed_namespace_types and
+ *   &landlock_namespace_attr.quiet_namespace_types are 0;
+ * - %ENOMSG: &landlock_capability_attr.permissions is 0, or both
+ *   &landlock_capability_attr.allowed_capabilities and
+ *   &landlock_capability_attr.quiet_capabilities are 0;
  * - %EBADF: @ruleset_fd is not a file descriptor for the current thread, or a
  *   member of @rule_attr is not a file descriptor as expected;
  * - %EBADFD: @ruleset_fd is not a ruleset file descriptor, or a member of
  *   @rule_attr is not the expected file descriptor type;
  * - %EPERM: @ruleset_fd has no write access to the underlying ruleset;
  * - %EFAULT: @rule_attr was not a valid address.
+ *
+ * .. kernel-doc:: include/uapi/linux/landlock.h
+ *     :identifiers: landlock_add_rule_flags
  */
 SYSCALL_DEFINE4(landlock_add_rule, const int, ruleset_fd,
 		const enum landlock_rule_type, rule_type,
@@ -424,8 +667,7 @@ SYSCALL_DEFINE4(landlock_add_rule, const int, ruleset_fd,
 	if (!is_initialized())
 		return -EOPNOTSUPP;
 
-	/* No flag for now. */
-	if (flags)
+	if (flags && flags != LANDLOCK_ADD_RULE_QUIET)
 		return -EINVAL;
 
 	/* Gets and checks the ruleset. */
@@ -435,9 +677,13 @@ SYSCALL_DEFINE4(landlock_add_rule, const int, ruleset_fd,
 
 	switch (rule_type) {
 	case LANDLOCK_RULE_PATH_BENEATH:
-		return add_rule_path_beneath(ruleset, rule_attr);
+		return add_rule_path_beneath(ruleset, rule_attr, flags);
 	case LANDLOCK_RULE_NET_PORT:
-		return add_rule_net_port(ruleset, rule_attr);
+		return add_rule_net_port(ruleset, rule_attr, flags);
+	case LANDLOCK_RULE_NAMESPACE:
+		return add_rule_namespace(ruleset, rule_attr, flags);
+	case LANDLOCK_RULE_CAPABILITY:
+		return add_rule_capability(ruleset, rule_attr, flags);
 	default:
 		return -EINVAL;
 	}
@@ -454,21 +700,29 @@ SYSCALL_DEFINE4(landlock_add_rule, const int, ruleset_fd,
  *         - %LANDLOCK_RESTRICT_SELF_LOG_SAME_EXEC_OFF
  *         - %LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON
  *         - %LANDLOCK_RESTRICT_SELF_LOG_SUBDOMAINS_OFF
+ *         - %LANDLOCK_RESTRICT_SELF_TSYNC
+ *         - %LANDLOCK_RESTRICT_SELF_NO_NEW_PRIVS
  *
- * This system call enables to enforce a Landlock ruleset on the current
- * thread.  Enforcing a ruleset requires that the task has %CAP_SYS_ADMIN in its
+ * This system call enforces a Landlock ruleset on the current thread.
+ * Enforcing a ruleset requires that the task has %CAP_SYS_ADMIN in its
  * namespace or is running with no_new_privs.  This avoids scenarios where
  * unprivileged tasks can affect the behavior of privileged children.
  *
- * Possible returned errors are:
+ * With %LANDLOCK_RESTRICT_SELF_NO_NEW_PRIVS, the no_new_privs attribute of the
+ * calling thread is set only once the enforcement of the ruleset succeeded,
+ * which fulfills the above requirement: no_new_privs is set if and only if the
+ * call succeeds.
+ *
+ * Return: 0 on success, or -errno on failure.  Possible returned errors are:
  *
  * - %EOPNOTSUPP: Landlock is supported by the kernel but disabled at boot time;
  * - %EINVAL: @flags contains an unknown bit.
  * - %EBADF: @ruleset_fd is not a file descriptor for the current thread;
  * - %EBADFD: @ruleset_fd is not a ruleset file descriptor;
- * - %EPERM: @ruleset_fd has no read access to the underlying ruleset, or the
- *   current thread is not running with no_new_privs, or it doesn't have
- *   %CAP_SYS_ADMIN in its namespace.
+ * - %EPERM: @ruleset_fd has no read access to the underlying ruleset, or
+ *   %LANDLOCK_RESTRICT_SELF_NO_NEW_PRIVS is not set while the current thread
+ *   is not running with no_new_privs and doesn't have %CAP_SYS_ADMIN in its
+ *   namespace.
  * - %E2BIG: The maximum number of stacked rulesets is reached for the current
  *   thread.
  *
@@ -478,27 +732,30 @@ SYSCALL_DEFINE4(landlock_add_rule, const int, ruleset_fd,
 SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 		flags)
 {
-	struct landlock_ruleset *new_dom,
-		*ruleset __free(landlock_put_ruleset) = NULL;
+	struct landlock_ruleset *ruleset __free(landlock_put_ruleset) = NULL;
+	struct landlock_domain *new_dom = NULL;
 	struct cred *new_cred;
 	struct landlock_cred_security *new_llcred;
+	bool process_wide;
 	bool __maybe_unused log_same_exec, log_new_exec, log_subdomains,
 		prev_log_subdomains;
 
 	if (!is_initialized())
 		return -EOPNOTSUPP;
 
-	/*
-	 * Similar checks as for seccomp(2), except that an -EPERM may be
-	 * returned.
-	 */
-	if (!task_no_new_privs(current) &&
-	    !ns_capable_noaudit(current_user_ns(), CAP_SYS_ADMIN))
-		return -EPERM;
-
 	if ((flags | LANDLOCK_MASK_RESTRICT_SELF) !=
 	    LANDLOCK_MASK_RESTRICT_SELF)
 		return -EINVAL;
+
+	/*
+	 * Similar checks as for seccomp(2), except that an -EPERM may be
+	 * returned.  LANDLOCK_RESTRICT_SELF_NO_NEW_PRIVS fulfills this
+	 * requirement.
+	 */
+	if (!(flags & LANDLOCK_RESTRICT_SELF_NO_NEW_PRIVS) &&
+	    !task_no_new_privs(current) &&
+	    !ns_capable_noaudit(current_user_ns(), CAP_SYS_ADMIN))
+		return -EPERM;
 
 	/* Translates "off" flag to boolean. */
 	log_same_exec = !(flags & LANDLOCK_RESTRICT_SELF_LOG_SAME_EXEC_OFF);
@@ -509,10 +766,13 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 
 	/*
 	 * It is allowed to set LANDLOCK_RESTRICT_SELF_LOG_SUBDOMAINS_OFF with
-	 * -1 as ruleset_fd, but no other flag must be set.
+	 * -1 as ruleset_fd, optionally combined with
+	 * LANDLOCK_RESTRICT_SELF_TSYNC to propagate this configuration to all
+	 * threads.  No other flag must be set.
 	 */
 	if (!(ruleset_fd == -1 &&
-	      flags == LANDLOCK_RESTRICT_SELF_LOG_SUBDOMAINS_OFF)) {
+	      (flags & ~LANDLOCK_RESTRICT_SELF_TSYNC) ==
+		      LANDLOCK_RESTRICT_SELF_LOG_SUBDOMAINS_OFF)) {
 		/* Gets and checks the ruleset. */
 		ruleset = get_ruleset_from_fd(ruleset_fd, FMODE_CAN_READ);
 		if (IS_ERR(ruleset))
@@ -526,45 +786,110 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 
 	new_llcred = landlock_cred(new_cred);
 
-#ifdef CONFIG_AUDIT
+#ifdef CONFIG_SECURITY_LANDLOCK_LOG
 	prev_log_subdomains = !new_llcred->log_subdomains_off;
 	new_llcred->log_subdomains_off = !prev_log_subdomains ||
 					 !log_subdomains;
-#endif /* CONFIG_AUDIT */
+#endif /* CONFIG_SECURITY_LANDLOCK_LOG */
 
 	/*
 	 * The only case when a ruleset may not be set is if
-	 * LANDLOCK_RESTRICT_SELF_LOG_SUBDOMAINS_OFF is set and ruleset_fd is -1.
-	 * We could optimize this case by not calling commit_creds() if this flag
-	 * was already set, but it is not worth the complexity.
+	 * LANDLOCK_RESTRICT_SELF_LOG_SUBDOMAINS_OFF is set (optionally with
+	 * LANDLOCK_RESTRICT_SELF_TSYNC) and ruleset_fd is -1.  We could
+	 * optimize this case by not calling commit_creds() if this flag was
+	 * already set, but it is not worth the complexity.
 	 */
-	if (!ruleset)
-		return commit_creds(new_cred);
+	if (ruleset) {
+		/*
+		 * There is no possible race condition while copying and
+		 * manipulating the current credentials because they are
+		 * dedicated per thread.
+		 */
+		mutex_lock(&ruleset->lock);
+		new_dom = landlock_merge_ruleset(new_llcred->domain, ruleset);
+		if (IS_ERR(new_dom)) {
+			mutex_unlock(&ruleset->lock);
+			abort_creds(new_cred);
+			return PTR_ERR(new_dom);
+		}
+		/*
+		 * Emits the domain-creation event while @ruleset->lock is still
+		 * held, right after the merge, so an eBPF program attached to
+		 * the tracepoint reads the exact ruleset that was merged into
+		 * the domain: a consistent snapshot that a concurrent
+		 * landlock_add_rule() (which holds the same lock) cannot
+		 * modify.
+		 *
+		 * This must come before the thread-sync wait below.  Holding
+		 * @ruleset->lock across landlock_restrict_sibling_threads()
+		 * would hang: a sibling thread blocked in landlock_add_rule()
+		 * on the same @ruleset->lock cannot run the task_work that
+		 * thread-sync waits for (the lock wait is uninterruptible).
+		 * Emitting here keeps the lock off the thread-sync path.
+		 *
+		 * The trade-off is that the event fires for a domain that a
+		 * later (rare) thread-sync failure aborts.  That path emits the
+		 * matching free_domain event so the create/free pair stays
+		 * balanced (see the thread-sync error path below).
+		 */
+		trace_landlock_create_domain(new_dom, ruleset);
+		mutex_unlock(&ruleset->lock);
 
-	/*
-	 * There is no possible race condition while copying and manipulating
-	 * the current credentials because they are dedicated per thread.
-	 */
-	new_dom = landlock_merge_ruleset(new_llcred->domain, ruleset);
-	if (IS_ERR(new_dom)) {
-		abort_creds(new_cred);
-		return PTR_ERR(new_dom);
+#ifdef CONFIG_SECURITY_LANDLOCK_LOG
+		new_dom->hierarchy->log_same_exec = log_same_exec;
+		new_dom->hierarchy->log_new_exec = log_new_exec;
+		/*
+		 * The creation event fired above, so move the domain out of
+		 * LANDLOCK_LOG_UNCOMMITTED: its free_domain event must fire
+		 * too, even if a thread-sync failure aborts it below.  Audit
+		 * logging may still be disabled (DISABLED); tracing observes it
+		 * anyway.
+		 */
+		if ((!log_same_exec && !log_new_exec) || !prev_log_subdomains)
+			new_dom->hierarchy->log_status = LANDLOCK_LOG_DISABLED;
+		else
+			new_dom->hierarchy->log_status = LANDLOCK_LOG_PENDING;
+#endif /* CONFIG_SECURITY_LANDLOCK_LOG */
+
+		/* Replaces the old (prepared) domain. */
+		landlock_put_domain(new_llcred->domain);
+		new_llcred->domain = new_dom;
+
+#ifdef CONFIG_SECURITY_LANDLOCK_LOG
+		new_llcred->domain_exec |= BIT(new_dom->num_layers - 1);
+#endif /* CONFIG_SECURITY_LANDLOCK_LOG */
 	}
 
-#ifdef CONFIG_AUDIT
-	new_dom->hierarchy->log_same_exec = log_same_exec;
-	new_dom->hierarchy->log_new_exec = log_new_exec;
-	if ((!log_same_exec && !log_new_exec) || !prev_log_subdomains)
-		new_dom->hierarchy->log_status = LANDLOCK_LOG_DISABLED;
-#endif /* CONFIG_AUDIT */
+	if (flags & LANDLOCK_RESTRICT_SELF_TSYNC) {
+		const int err = landlock_restrict_sibling_threads(
+			current_cred(), new_cred, flags);
+		if (err) {
+			/*
+			 * Thread-sync failed (rare), so the new domain is
+			 * aborted instead of committed.  Its creation event
+			 * already fired above, so the imminent free must emit
+			 * the matching free_domain event to keep the
+			 * create/free pair balanced; no special log_status is
+			 * set here.
+			 */
+			abort_creds(new_cred);
+			return err;
+		}
+	}
 
-	/* Replaces the old (prepared) domain. */
-	landlock_put_ruleset(new_llcred->domain);
-	new_llcred->domain = new_dom;
+	/* Sets no_new_privs past the last point of failure. */
+	if (flags & LANDLOCK_RESTRICT_SELF_NO_NEW_PRIVS)
+		task_set_no_new_privs(current);
 
-#ifdef CONFIG_AUDIT
-	new_llcred->domain_exec |= BIT(new_dom->num_layers - 1);
-#endif /* CONFIG_AUDIT */
+	/* Whole process: thread-sync swept siblings, or single-threaded. */
+	process_wide = (flags & LANDLOCK_RESTRICT_SELF_TSYNC) ||
+		       get_nr_threads(current) == 1;
+	commit_creds(new_cred);
 
-	return commit_creds(new_cred);
+	/* The caller commits last, so its event concludes the operation. */
+	if (ruleset)
+		trace_landlock_enforce_domain(new_dom, true, process_wide,
+					      task_no_new_privs(current));
+
+	return 0;
 }

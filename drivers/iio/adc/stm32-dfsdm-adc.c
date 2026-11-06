@@ -660,11 +660,8 @@ static int stm32_dfsdm_channel_parse_of(struct stm32_dfsdm *dfsdm,
 	}
 	df_ch->src = val;
 
-	ret = of_property_read_u32_index(indio_dev->dev.of_node,
-					 "st,adc-alt-channel", chan_idx,
-					 &df_ch->alt_si);
-	if (ret < 0)
-		df_ch->alt_si = 0;
+	df_ch->alt_si = of_property_present(indio_dev->dev.of_node,
+					    "st,adc-alt-channel");
 
 	return 0;
 }
@@ -1487,7 +1484,7 @@ static void stm32_dfsdm_dma_release(struct iio_dev *indio_dev)
 	struct stm32_dfsdm_adc *adc = iio_priv(indio_dev);
 
 	if (adc->dma_chan) {
-		dma_free_coherent(adc->dma_chan->device->dev,
+		dma_free_coherent(dmaengine_get_dma_device(adc->dma_chan),
 				  DFSDM_DMA_BUFFER_SIZE,
 				  adc->rx_buf, adc->dma_buf);
 		dma_release_channel(adc->dma_chan);
@@ -1507,7 +1504,7 @@ static int stm32_dfsdm_dma_request(struct device *dev,
 		return ret;
 	}
 
-	adc->rx_buf = dma_alloc_coherent(adc->dma_chan->device->dev,
+	adc->rx_buf = dma_alloc_coherent(dmaengine_get_dma_device(adc->dma_chan),
 					 DFSDM_DMA_BUFFER_SIZE,
 					 &adc->dma_buf, GFP_KERNEL);
 	if (!adc->rx_buf) {
@@ -1815,9 +1812,8 @@ static int stm32_dfsdm_adc_probe(struct platform_device *pdev)
 
 	adc->dfsdm->fl_list[adc->fl_id].ford = val;
 
-	ret = of_property_read_u32(dev->of_node, "st,filter0-sync", &val);
-	if (!ret)
-		adc->dfsdm->fl_list[adc->fl_id].sync_mode = val;
+	adc->dfsdm->fl_list[adc->fl_id].sync_mode =
+		of_property_read_bool(dev->of_node, "st,filter0-sync");
 
 	adc->dev_data = dev_data;
 	ret = dev_data->init(dev, iio);

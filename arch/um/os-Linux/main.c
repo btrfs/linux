@@ -21,8 +21,6 @@
 
 #define STACKSIZE (8 * 1024 * 1024)
 
-long elf_aux_hwcap;
-
 static void __init set_stklim(void)
 {
 	struct rlimit lim;
@@ -102,10 +100,11 @@ static void __init setup_env_path(void)
 	}
 }
 
+static char **new_argv;
+
 int __init main(int argc, char **argv, char **envp)
 {
-	char **new_argv;
-	int ret, i, err;
+	int ret, i;
 
 	/* Disable randomization and re-exec if it was changed successfully */
 	ret = personality(PER_LINUX | ADDR_NO_RANDOMIZE);
@@ -149,12 +148,15 @@ int __init main(int argc, char **argv, char **envp)
 	install_fatal_handler(SIGINT);
 	install_fatal_handler(SIGTERM);
 
-#ifdef CONFIG_ARCH_REUSE_HOST_VSYSCALL_AREA
 	scan_elf_aux(envp);
-#endif
 
 	change_sig(SIGPIPE, 0);
-	ret = linux_main(argc, argv, envp);
+	linux_main(argc, argv, envp);
+}
+
+void os_exit(bool reboot)
+{
+	int err;
 
 	/*
 	 * Disable SIGPROF - I have no idea why libc doesn't do this or turn
@@ -171,7 +173,7 @@ int __init main(int argc, char **argv, char **envp)
 	 */
 
 	/* stop timers and set timer signal to be ignored */
-	os_timer_disable();
+	os_timer_disable(0);
 
 	/* disable SIGIO for the fds and set SIGIO to be ignored */
 	err = deactivate_all_fds();
@@ -187,12 +189,11 @@ int __init main(int argc, char **argv, char **envp)
 
 	os_info("\n");
 	/* Reboot */
-	if (ret) {
+	if (reboot) {
 		execvp(new_argv[0], new_argv);
 		perror("Failed to exec kernel");
-		ret = 1;
 	}
-	return uml_exitcode;
+	exit(uml_exitcode);
 }
 
 extern void *__real_malloc(int);

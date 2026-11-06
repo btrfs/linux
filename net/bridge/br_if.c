@@ -19,6 +19,7 @@
 #include <linux/if_ether.h>
 #include <linux/slab.h>
 #include <net/dsa.h>
+#include <net/netdev_lock.h>
 #include <net/sock.h>
 #include <linux/if_vlan.h>
 #include <net/switchdev.h>
@@ -30,13 +31,13 @@
  * Determine initial path cost based on speed.
  * using recommendations from 802.1d standard
  *
- * Since driver might sleep need to not be holding any locks.
+ * Since driver might sleep, we need to not be holding any bridge spinlocks.
  */
 static int port_cost(struct net_device *dev)
 {
 	struct ethtool_link_ksettings ecmd;
 
-	if (!__ethtool_get_link_ksettings(dev, &ecmd)) {
+	if (!netif_get_link_ksettings(dev, &ecmd)) {
 		switch (ecmd.base.speed) {
 		case SPEED_10000:
 			return 2;
@@ -75,9 +76,9 @@ void br_port_carrier_check(struct net_bridge_port *p, bool *notified)
 	struct net_device *dev = p->dev;
 	struct net_bridge *br = p->br;
 
-	if (!(p->flags & BR_ADMIN_COST) &&
+	if (!test_bit(BR_ADMIN_COST_BIT, &p->flags) &&
 	    netif_running(dev) && netif_oper_up(dev))
-		p->path_cost = port_cost(dev);
+		WRITE_ONCE(p->path_cost, port_cost(dev));
 
 	*notified = false;
 	if (!netif_running(br->dev))
@@ -110,7 +111,7 @@ static void br_port_set_promisc(struct net_bridge_port *p)
 		return;
 
 	br_fdb_unsync_static(p->br, p);
-	p->flags |= BR_PROMISC;
+	set_bit(BR_PROMISC_BIT, &p->flags);
 }
 
 static void br_port_clear_promisc(struct net_bridge_port *p)
@@ -133,7 +134,7 @@ static void br_port_clear_promisc(struct net_bridge_port *p)
 		return;
 
 	dev_set_promiscuity(p->dev, -1);
-	p->flags &= ~BR_PROMISC;
+	clear_bit(BR_PROMISC_BIT, &p->flags);
 }
 
 /* When a port is added or removed or when certain port flags
@@ -332,8 +333,9 @@ static void update_headroom(struct net_bridge *br, int new_hr)
  */
 static void del_nbp(struct net_bridge_port *p)
 {
-	struct net_bridge *br = p->br;
+	struct net_bridge_vlan_group *vg;
 	struct net_device *dev = p->dev;
+	struct net_bridge *br = p->br;
 
 	sysfs_remove_link(br->ifobj, p->dev->name);
 
@@ -353,8 +355,10 @@ static void del_nbp(struct net_bridge_port *p)
 		update_headroom(br, get_max_headroom(br));
 	netdev_reset_rx_headroom(dev);
 
-	nbp_vlan_flush(p);
-	br_fdb_delete_by_port(br, p, 0, 1);
+	vg = nbp_vlan_group(p);
+	nbp_vlan_group_unpublish(p);
+	br_fdb_cleanup_by_dst(br, br_port_to_dst(p), 0, 1);
+	nbp_vlan_flush(p, vg);
 	switchdev_deferred_process();
 	nbp_backup_clear(p);
 
@@ -389,8 +393,11 @@ void br_dev_delete(struct net_device *dev, struct list_head *head)
 	br_mst_uninit(br);
 	br_recalculate_neigh_suppress_enabled(br);
 
-	br_fdb_delete_by_port(br, NULL, 0, 1);
+	br_fdb_cleanup_by_dst(br, br_port_to_dst(NULL), 0, 1);
 
+	timer_shutdown_sync(&br->hello_timer);
+	timer_shutdown_sync(&br->topology_change_timer);
+	timer_shutdown_sync(&br->tcn_timer);
 	cancel_delayed_work_sync(&br->gc_work);
 
 	br_sysfs_delbr(br->dev);
@@ -429,14 +436,16 @@ static struct net_bridge_port *new_nbp(struct net_bridge *br,
 	if (index < 0)
 		return ERR_PTR(index);
 
-	p = kzalloc(sizeof(*p), GFP_KERNEL);
+	p = kzalloc_obj(*p);
 	if (p == NULL)
 		return ERR_PTR(-ENOMEM);
 
 	p->br = br;
 	netdev_hold(dev, &p->dev_tracker, GFP_KERNEL);
 	p->dev = dev;
+	netdev_lock_ops(dev);
 	p->path_cost = port_cost(dev);
+	netdev_unlock_ops(dev);
 	p->priority = 0x8000 >> BR_PORT_BITS;
 	p->port_no = index;
 	p->flags = BR_LEARNING | BR_FLOOD | BR_MCAST_FLOOD | BR_BCAST_FLOOD;
@@ -524,20 +533,6 @@ void br_mtu_auto_adjust(struct net_bridge *br)
 	 */
 	dev_set_mtu(br->dev, br_mtu_min(br));
 	br_opt_toggle(br, BROPT_MTU_SET_BY_USER, false);
-}
-
-static void br_set_gso_limits(struct net_bridge *br)
-{
-	unsigned int tso_max_size = TSO_MAX_SIZE;
-	const struct net_bridge_port *p;
-	u16 tso_max_segs = TSO_MAX_SEGS;
-
-	list_for_each_entry(p, &br->port_list, list) {
-		tso_max_size = min(tso_max_size, p->dev->tso_max_size);
-		tso_max_segs = min(tso_max_segs, p->dev->tso_max_segs);
-	}
-	netif_set_tso_max_size(br->dev, tso_max_size);
-	netif_set_tso_max_segs(br->dev, tso_max_segs);
 }
 
 /*
@@ -653,8 +648,6 @@ int br_add_if(struct net_bridge *br, struct net_device *dev,
 			netdev_err(dev, "failed to sync bridge static fdb addresses to this port\n");
 	}
 
-	netdev_update_features(br->dev);
-
 	br_hr = br->dev->needed_headroom;
 	dev_hr = netdev_get_fwd_headroom(dev);
 	if (br_hr < dev_hr)
@@ -695,7 +688,8 @@ int br_add_if(struct net_bridge *br, struct net_device *dev,
 		call_netdevice_notifiers(NETDEV_CHANGEADDR, br->dev);
 
 	br_mtu_auto_adjust(br);
-	br_set_gso_limits(br);
+
+	netdev_compute_master_upper_features(br->dev, false);
 
 	kobject_uevent(&p->kobj, KOBJ_ADD);
 
@@ -705,7 +699,7 @@ err6:
 	if (fdb_synced)
 		br_fdb_unsync_static(br, p);
 	list_del_rcu(&p->list);
-	br_fdb_delete_by_port(br, p, 0, 1);
+	br_fdb_cleanup_by_dst(br, br_port_to_dst(p), 0, 1);
 	nbp_update_port_count(br);
 	netdev_upper_dev_unlink(dev, br->dev);
 err5:
@@ -741,7 +735,6 @@ int br_del_if(struct net_bridge *br, struct net_device *dev)
 	del_nbp(p);
 
 	br_mtu_auto_adjust(br);
-	br_set_gso_limits(br);
 
 	spin_lock_bh(&br->lock);
 	changed_addr = br_stp_recalculate_bridge_id(br);
@@ -750,7 +743,7 @@ int br_del_if(struct net_bridge *br, struct net_device *dev)
 	if (changed_addr)
 		call_netdevice_notifiers(NETDEV_CHANGEADDR, br->dev);
 
-	netdev_update_features(br->dev);
+	netdev_compute_master_upper_features(br->dev, false);
 
 	return 0;
 }
@@ -774,6 +767,6 @@ bool br_port_flag_is_set(const struct net_device *dev, unsigned long flag)
 	if (!p)
 		return false;
 
-	return p->flags & flag;
+	return READ_ONCE(p->flags) & flag;
 }
 EXPORT_SYMBOL_GPL(br_port_flag_is_set);

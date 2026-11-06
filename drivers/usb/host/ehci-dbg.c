@@ -629,7 +629,7 @@ static ssize_t fill_periodic_buffer(struct debug_buffer *buf)
 	unsigned		i;
 	__hc32			tag;
 
-	seen = kmalloc_array(DBG_SCHED_LIMIT, sizeof(*seen), GFP_ATOMIC);
+	seen = kmalloc_objs(*seen, DBG_SCHED_LIMIT, GFP_ATOMIC);
 	if (!seen)
 		return 0;
 	seen_count = 0;
@@ -869,8 +869,7 @@ static ssize_t fill_registers_buffer(struct debug_buffer *buf)
 
 	for (i = 1; i <= HCS_N_PORTS(ehci->hcs_params); i++) {
 		temp = dbg_port_buf(scratch, sizeof(scratch), label, i,
-				ehci_readl(ehci,
-					&ehci->regs->port_status[i - 1]));
+				ehci_readl(ehci, ehci_portsc(ehci, i - 1)));
 		temp = scnprintf(next, size, fmt, temp, scratch);
 		size -= temp;
 		next += temp;
@@ -917,7 +916,7 @@ static struct debug_buffer *alloc_buffer(struct usb_bus *bus,
 {
 	struct debug_buffer *buf;
 
-	buf = kzalloc(sizeof(*buf), GFP_KERNEL);
+	buf = kzalloc_obj(*buf);
 
 	if (buf) {
 		buf->bus = bus;

@@ -35,21 +35,10 @@ MODULE_ALIAS("ip_conntrack_ftp");
 MODULE_ALIAS_NFCT_HELPER(HELPER_NAME);
 static DEFINE_SPINLOCK(nf_ftp_lock);
 
-#define MAX_PORTS 8
-static u_int16_t ports[MAX_PORTS];
-static unsigned int ports_c;
-module_param_array(ports, ushort, &ports_c, 0400);
-
 static bool loose;
 module_param(loose, bool, 0600);
 
-unsigned int (*nf_nat_ftp_hook)(struct sk_buff *skb,
-				enum ip_conntrack_info ctinfo,
-				enum nf_ct_ftp_type type,
-				unsigned int protoff,
-				unsigned int matchoff,
-				unsigned int matchlen,
-				struct nf_conntrack_expect *exp);
+nf_nat_ftp_hook_fn __rcu *nf_nat_ftp_hook;
 EXPORT_SYMBOL_GPL(nf_nat_ftp_hook);
 
 static int try_rfc959(const char *, size_t, struct nf_conntrack_man *,
@@ -126,6 +115,8 @@ static int try_number(const char *data, size_t dlen, u_int32_t array[],
 	for (i = 0, len = 0; len < dlen && i < array_size; len++, data++) {
 		if (*data >= '0' && *data <= '9') {
 			array[i] = array[i]*10 + *data - '0';
+			if (array[i] > 255)
+				return 0;
 		}
 		else if (*data == sep)
 			i++;
@@ -195,7 +186,7 @@ static int try_rfc1123(const char *data, size_t dlen,
 static int get_port(const char *data, int start, size_t dlen, char delim,
 		    __be16 *port)
 {
-	u_int16_t tmp_port = 0;
+	u32 tmp_port = 0;
 	int i;
 
 	for (i = start; i < dlen; i++) {
@@ -206,10 +197,11 @@ static int get_port(const char *data, int start, size_t dlen, char delim,
 			*port = htons(tmp_port);
 			pr_debug("get_port: return %d\n", tmp_port);
 			return i + 1;
-		}
-		else if (data[i] >= '0' && data[i] <= '9')
+		} else if (data[i] >= '0' && data[i] <= '9') {
 			tmp_port = tmp_port*10 + data[i] - '0';
-		else { /* Some other crap */
+			if (tmp_port > 65535)
+				break;
+		} else { /* Some other crap */
 			pr_debug("get_port: invalid char.\n");
 			break;
 		}
@@ -385,7 +377,10 @@ static int help(struct sk_buff *skb,
 	struct nf_conntrack_man cmd = {};
 	unsigned int i;
 	int found = 0, ends_in_nl;
-	typeof(nf_nat_ftp_hook) nf_nat_ftp;
+	nf_nat_ftp_hook_fn *nf_nat_ftp;
+
+	if (!ct_ftp_info)
+		return NF_DROP;
 
 	/* Until there's been traffic both ways, don't look in packets. */
 	if (ctinfo != IP_CT_ESTABLISHED &&
@@ -520,7 +515,7 @@ skip_nl_seq:
 	 * (possibly changed) expectation itself. */
 	nf_nat_ftp = rcu_dereference(nf_nat_ftp_hook);
 	if (nf_nat_ftp && ct->status & IPS_NAT_MASK)
-		ret = nf_nat_ftp(skb, ctinfo, search[dir][i].ftptype,
+		ret = nf_nat_ftp(skb, ct, ctinfo, search[dir][i].ftptype,
 				 protoff, matchoff, matchlen, exp);
 	else {
 		/* Can't expect this?  Best to drop packet now. */
@@ -548,6 +543,9 @@ static int nf_ct_ftp_from_nlattr(struct nlattr *attr, struct nf_conn *ct)
 {
 	struct nf_ct_ftp_master *ftp = nfct_help_data(ct);
 
+	if (!ftp)
+		return -ENOENT;
+
 	/* This conntrack has been injected from user-space, always pick up
 	 * sequence tracking. Otherwise, the first FTP command after the
 	 * failover breaks.
@@ -557,7 +555,8 @@ static int nf_ct_ftp_from_nlattr(struct nlattr *attr, struct nf_conn *ct)
 	return 0;
 }
 
-static struct nf_conntrack_helper ftp[MAX_PORTS * 2] __read_mostly;
+static struct nf_conntrack_helper ftp __read_mostly;
+static struct nf_conntrack_helper *ftp_ptr __read_mostly;
 
 static const struct nf_conntrack_expect_policy ftp_exp_policy = {
 	.max_expected	= 1,
@@ -566,32 +565,23 @@ static const struct nf_conntrack_expect_policy ftp_exp_policy = {
 
 static void __exit nf_conntrack_ftp_fini(void)
 {
-	nf_conntrack_helpers_unregister(ftp, ports_c * 2);
+	nf_conntrack_helper_unregister(ftp_ptr);
 }
 
 static int __init nf_conntrack_ftp_init(void)
 {
-	int i, ret = 0;
+	int ret = 0;
 
 	NF_CT_HELPER_BUILD_BUG_ON(sizeof(struct nf_ct_ftp_master));
 
-	if (ports_c == 0)
-		ports[ports_c++] = FTP_PORT;
-
 	/* FIXME should be configurable whether IPv4 and IPv6 FTP connections
 		 are tracked or not - YK */
-	for (i = 0; i < ports_c; i++) {
-		nf_ct_helper_init(&ftp[2 * i], AF_INET, IPPROTO_TCP,
-				  HELPER_NAME, FTP_PORT, ports[i], ports[i],
-				  &ftp_exp_policy, 0, help,
-				  nf_ct_ftp_from_nlattr, THIS_MODULE);
-		nf_ct_helper_init(&ftp[2 * i + 1], AF_INET6, IPPROTO_TCP,
-				  HELPER_NAME, FTP_PORT, ports[i], ports[i],
-				  &ftp_exp_policy, 0, help,
-				  nf_ct_ftp_from_nlattr, THIS_MODULE);
-	}
+	nf_ct_helper_init(&ftp, NFPROTO_UNSPEC, IPPROTO_TCP,
+			  HELPER_NAME,
+			  &ftp_exp_policy, 0, help,
+			  nf_ct_ftp_from_nlattr, THIS_MODULE);
 
-	ret = nf_conntrack_helpers_register(ftp, ports_c * 2);
+	ret = nf_conntrack_helper_register(&ftp, &ftp_ptr);
 	if (ret < 0) {
 		pr_err("failed to register helpers\n");
 		return ret;

@@ -7,6 +7,7 @@
  */
 
 #include <linux/acpi.h>
+#include <linux/arm-rsi-cmds.h>
 #include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/stddef.h>
@@ -43,7 +44,6 @@
 #include <asm/cpu_ops.h>
 #include <asm/kasan.h>
 #include <asm/numa.h>
-#include <asm/rsi.h>
 #include <asm/scs.h>
 #include <asm/sections.h>
 #include <asm/setup.h>
@@ -346,8 +346,6 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 	kasan_init();
 
 	request_standard_resources();
-
-	early_ioremap_reset();
 
 	if (acpi_disabled)
 		psci_dt_init();

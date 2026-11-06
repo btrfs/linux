@@ -39,6 +39,8 @@
 	fprintf(stderr, "EXIT: %s", __uei->reason);				\
 	if (__uei->msg[0] != '\0')						\
 		fprintf(stderr, " (%s)", __uei->msg);				\
+	if (__uei->exit_cpu >= 0)						\
+		fprintf(stderr, " on CPU %d", __uei->exit_cpu);			\
 	fputs("\n", stderr);							\
 	__uei->exit_code;							\
 })
@@ -50,6 +52,7 @@
 enum scx_exit_code {
 	/* Reasons */
 	SCX_ECODE_RSN_HOTPLUG		= 1LLU << 32,
+	SCX_ECODE_RSN_CGROUP_OFFLINE	= 2LLU << 32,
 
 	/* Actions */
 	SCX_ECODE_ACT_RESTART		= 1LLU << 48,

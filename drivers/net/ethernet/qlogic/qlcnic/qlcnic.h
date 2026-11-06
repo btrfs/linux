@@ -354,7 +354,7 @@ struct qlcnic_skb_frag {
 
 /*
  * There will be one qlcnic_buffer per skb packet.    These will be
- * used to save the dma info for pci_unmap_page()
+ * used to save the dma info for dma_unmap_page()
  */
 struct qlcnic_cmd_buffer {
 	struct sk_buff *skb;
@@ -909,7 +909,7 @@ struct qlcnic_mac_vlan_list {
 
 #define QLCNIC_LRO_REQUEST_CLEANUP	4
 
-/* Capabilites received */
+/* Capabilities received */
 #define QLCNIC_FW_CAPABILITY_TSO		BIT_1
 #define QLCNIC_FW_CAPABILITY_BDG		BIT_8
 #define QLCNIC_FW_CAPABILITY_FVLANTX		BIT_9

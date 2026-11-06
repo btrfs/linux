@@ -30,16 +30,19 @@ config VIDEO_TI_CAL
 	  In TI Technical Reference Manual this module is referred as
 	  Camera Interface Subsystem (CAMSS).
 
-config VIDEO_TI_CAL_MC
-	bool "Media Controller centric mode by default"
-	depends on VIDEO_TI_CAL
-	default n
-	help
-	  Enables Media Controller centric mode by default.
-
-	  If set, CAL driver will start in Media Controller mode by
-	  default. Note that this behavior can be overridden via
-	  module parameter 'mc_api'.
+config VIDEO_TI_VIP
+        tristate "TI Video Input Port"
+        depends on VIDEO_DEV
+        depends on SOC_DRA7XX || COMPILE_TEST
+        depends on HAS_DMA
+        select VIDEOBUF2_DMA_CONTIG
+        select VIDEO_TI_VPDMA
+        select VIDEO_TI_SC
+        select VIDEO_TI_CSC
+        select V4L2_FWNODE
+        help
+        Driver support for VIP module on certain TI SoC's
+        VIP = Video Input Port.
 
 # Mem2mem drivers
 
@@ -70,6 +73,7 @@ config VIDEO_TI_J721E_CSI2RX
 	depends on VIDEO_CADENCE_CSI2RX
 	depends on PHY_CADENCE_DPHY_RX || COMPILE_TEST
 	depends on ARCH_K3 || COMPILE_TEST
+	depends on PM
 	select VIDEOBUF2_DMA_CONTIG
 	select V4L2_FWNODE
 	help

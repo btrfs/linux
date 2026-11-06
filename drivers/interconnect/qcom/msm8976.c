@@ -6,7 +6,6 @@
 
 #include <linux/device.h>
 #include <linux/interconnect-provider.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -455,7 +454,8 @@ static struct qcom_icc_node mas_oxili = {
 	.qos.qos_mode = NOC_QOS_MODE_BYPASS,
 	.qos.areq_prio = 0,
 	.qos.prio_level = 0,
-	.qos.qos_port = 16, /* [16, 17] */
+	.qos.qos_port = 16,
+	.qos.aux_qos_port = 17,
 	.num_links = ARRAY_SIZE(mas_oxili_links),
 	.links = mas_oxili_links,
 };

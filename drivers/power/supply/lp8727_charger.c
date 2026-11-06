@@ -280,10 +280,10 @@ static int lp8727_setup_irq(struct lp8727_chg *pchg)
 
 static void lp8727_release_irq(struct lp8727_chg *pchg)
 {
-	cancel_delayed_work_sync(&pchg->work);
-
 	if (pchg->irq)
 		free_irq(pchg->irq, pchg);
+
+	cancel_delayed_work_sync(&pchg->work);
 }
 
 static enum power_supply_property lp8727_charger_prop[] = {
@@ -584,7 +584,7 @@ static const struct of_device_id lp8727_dt_ids[] __maybe_unused = {
 MODULE_DEVICE_TABLE(of, lp8727_dt_ids);
 
 static const struct i2c_device_id lp8727_ids[] = {
-	{ "lp8727" },
+	{ .name = "lp8727" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, lp8727_ids);

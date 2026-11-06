@@ -14,12 +14,45 @@
 #include <linux/workqueue.h>
 #include <linux/module.h>
 #include <linux/if_bridge.h>
-#include <linux/dsa/loop.h>
+#include <linux/if_vlan.h>
+#include <linux/types.h>
 #include <net/dsa.h>
 
 #define DSA_LOOP_NUM_PORTS	6
 #define DSA_LOOP_CPU_PORT	(DSA_LOOP_NUM_PORTS - 1)
 #define NUM_FIXED_PHYS		(DSA_LOOP_NUM_PORTS - 2)
+
+struct dsa_loop_vlan {
+	u16 members;
+	u16 untagged;
+};
+
+struct dsa_loop_mib_entry {
+	char name[ETH_GSTRING_LEN];
+	unsigned long val;
+};
+
+enum dsa_loop_mib_counters {
+	DSA_LOOP_PHY_READ_OK,
+	DSA_LOOP_PHY_READ_ERR,
+	DSA_LOOP_PHY_WRITE_OK,
+	DSA_LOOP_PHY_WRITE_ERR,
+	__DSA_LOOP_CNT_MAX,
+};
+
+struct dsa_loop_port {
+	struct dsa_loop_mib_entry mib[__DSA_LOOP_CNT_MAX];
+	u16 pvid;
+	int mtu;
+};
+
+struct dsa_loop_priv {
+	struct mii_bus	*bus;
+	unsigned int	port_base;
+	struct dsa_loop_vlan vlans[VLAN_N_VID];
+	struct net_device *netdev;
+	struct dsa_loop_port ports[DSA_MAX_PORTS];
+};
 
 struct dsa_loop_pdata {
 	/* Must be first, such that dsa_register_switch() can access this
@@ -42,6 +75,7 @@ static struct phy_device *phydevs[PHY_MAX_ADDR];
 static struct mdio_device *switch_mdiodev;
 
 enum dsa_loop_devlink_resource_id {
+	DSA_LOOP_DEVLINK_PARAM_ID_NONE,  /* DEVLINK_RESOURCE_ID_PARENT_TOP */
 	DSA_LOOP_DEVLINK_PARAM_ID_VTU,
 };
 
@@ -395,6 +429,12 @@ static struct mdio_driver dsa_loop_drv = {
 	.shutdown = dsa_loop_drv_shutdown,
 };
 
+static int dsa_loop_bus_match(struct device *dev,
+			      const struct device_driver *drv)
+{
+	return drv == &dsa_loop_drv.mdiodrv.driver;
+}
+
 static void dsa_loop_phydevs_unregister(void)
 {
 	for (int i = 0; i < NUM_FIXED_PHYS; i++) {
@@ -428,7 +468,7 @@ static int __init dsa_loop_create_switch_mdiodev(void)
 	if (IS_ERR(switch_mdiodev))
 		goto out;
 
-	strscpy(switch_mdiodev->modalias, "dsa-loop");
+	switch_mdiodev->bus_match = dsa_loop_bus_match;
 	switch_mdiodev->dev.platform_data = &dsa_loop_pdata;
 
 	ret = mdio_device_register(switch_mdiodev);
@@ -441,11 +481,6 @@ out:
 
 static int __init dsa_loop_init(void)
 {
-	struct fixed_phy_status status = {
-		.link = 1,
-		.speed = SPEED_100,
-		.duplex = DUPLEX_FULL,
-	};
 	unsigned int i;
 	int ret;
 
@@ -454,7 +489,7 @@ static int __init dsa_loop_init(void)
 		return ret;
 
 	for (i = 0; i < NUM_FIXED_PHYS; i++)
-		phydevs[i] = fixed_phy_register(&status, NULL);
+		phydevs[i] = fixed_phy_register_100fd();
 
 	ret = mdio_driver_register(&dsa_loop_drv);
 	if (ret) {

@@ -30,6 +30,12 @@
 #define DP83TD510E_INT1_LINK			BIT(13)
 #define DP83TD510E_INT1_LINK_EN			BIT(5)
 
+#define DP83TD510E_RCSR				0x17
+#define DP83TD510E_RMII_MODE_EN			BIT(5)
+#define DP83TD510E_RGMII_MODE_EN		BIT(9)
+#define DP83TD510E_TX_CLK_SHIFT			BIT(11)
+#define DP83TD510E_RX_CLK_SHIFT			BIT(12)
+
 #define DP83TD510E_CTRL				0x1f
 #define DP83TD510E_CTRL_HW_RESET		BIT(15)
 #define DP83TD510E_CTRL_SW_RESET		BIT(14)
@@ -61,6 +67,7 @@
 #define DP83TD510E_MASTER_SLAVE_RESOL_FAIL	BIT(15)
 
 #define DP83TD510E_MSE_DETECT			0xa85
+#define DP83TD510E_MSE_MAX			U16_MAX
 
 #define DP83TD510_SQI_MAX	7
 
@@ -249,6 +256,64 @@ struct dp83td510_priv {
 #define DP83TD510E_ALCD_COMPLETE			BIT(15)
 #define DP83TD510E_ALCD_CABLE_LENGTH			GENMASK(10, 0)
 
+static int dp83td510_get_mse_capability(struct phy_device *phydev,
+					struct phy_mse_capability *cap)
+{
+	/* DP83TD510E documents only a single (average) MSE register
+	 * (used to derive SQI); no peak or worst-peak counters are
+	 * described. Advertise only PHY_MSE_CAP_AVG.
+	 */
+	cap->supported_caps = PHY_MSE_CAP_AVG;
+	/* 10BASE-T1L is a single-pair medium, so there are no B/C/D channels.
+	 * We still advertise PHY_MSE_CAP_CHANNEL_A to indicate that the PHY
+	 * can attribute the measurement to a specific pair (the only one),
+	 * rather than exposing it only as a link-aggregate.
+	 *
+	 * Rationale:
+	 *  - Keeps the ethtool MSE_GET selection logic consistent: per-channel
+	 *    (A/B/C/D) is preferred over WORST/LINK, so userspace receives a
+	 *    CHANNEL_A nest instead of LINK.
+	 *  - Signals to tools that "per-pair" data is available (even if there's
+	 *    just one pair), avoiding the impression that only aggregate values
+	 *    are supported.
+	 *  - Remains compatible with multi-pair PHYs and uniform UI handling.
+	 *
+	 * Note: WORST and other channels are not advertised on 10BASE-T1L.
+	 */
+	cap->supported_caps |= PHY_MSE_CHANNEL_A | PHY_MSE_CAP_LINK;
+	cap->max_average_mse = DP83TD510E_MSE_MAX;
+
+	/* The datasheet does not specify the refresh rate or symbol count,
+	 * but based on similar PHYs and standards, we can assume a common
+	 * value. For 10BASE-T1L, the symbol rate is 7.5 MBd. A common
+	 * diagnostic interval is around 1ms.
+	 * 7.5e6 symbols/sec * 0.001 sec = 7500 symbols.
+	 */
+	cap->refresh_rate_ps = 1000000000; /* 1 ms */
+	cap->num_symbols = 7500;
+
+	return 0;
+}
+
+static int dp83td510_get_mse_snapshot(struct phy_device *phydev,
+				      enum phy_mse_channel channel,
+				      struct phy_mse_snapshot *snapshot)
+{
+	int ret;
+
+	if (channel != PHY_MSE_CHANNEL_LINK &&
+	    channel != PHY_MSE_CHANNEL_A)
+		return -EOPNOTSUPP;
+
+	ret = phy_read_mmd(phydev, MDIO_MMD_VEND2, DP83TD510E_MSE_DETECT);
+	if (ret < 0)
+		return ret;
+
+	snapshot->average_mse = ret;
+
+	return 0;
+}
+
 static int dp83td510_led_brightness_set(struct phy_device *phydev, u8 index,
 					enum led_brightness brightness)
 {
@@ -379,6 +444,9 @@ static int dp83td510_led_polarity_set(struct phy_device *phydev, int index,
 		switch (mode) {
 		case PHY_LED_ACTIVE_LOW:
 			polarity = 0;
+			break;
+		case PHY_LED_ACTIVE_HIGH:
+			polarity = DP83TD510E_LED_POLARITY(index);
 			break;
 		default:
 			return -EINVAL;
@@ -585,6 +653,71 @@ static int dp83td510_config_aneg(struct phy_device *phydev)
 		changed = true;
 
 	return genphy_c45_check_and_restart_aneg(phydev, changed);
+}
+
+static bool dp83td510_config_rgmii_rx_delay(struct phy_device *phydev)
+{
+	return phydev->interface == PHY_INTERFACE_MODE_RGMII_ID ||
+	       phydev->interface == PHY_INTERFACE_MODE_RGMII_RXID;
+}
+
+static bool dp83td510_config_rgmii_tx_delay(struct phy_device *phydev)
+{
+	return phydev->interface == PHY_INTERFACE_MODE_RGMII_ID ||
+	       phydev->interface == PHY_INTERFACE_MODE_RGMII_TXID;
+}
+
+static int dp83td510_config_init(struct phy_device *phydev)
+{
+	int rgmii_delay = 0;
+	bool rx_int_delay;
+	bool tx_int_delay;
+	int ret;
+
+	if (phy_interface_is_rgmii(phydev)) {
+		rx_int_delay = dp83td510_config_rgmii_rx_delay(phydev);
+		if (rx_int_delay)
+			rgmii_delay |= DP83TD510E_RX_CLK_SHIFT;
+
+		tx_int_delay = dp83td510_config_rgmii_tx_delay(phydev);
+
+		if (tx_int_delay)
+			rgmii_delay |= DP83TD510E_TX_CLK_SHIFT;
+
+		ret = phy_modify_mmd(phydev, MDIO_MMD_VEND2, DP83TD510E_RCSR,
+				     DP83TD510E_RX_CLK_SHIFT |
+				     DP83TD510E_TX_CLK_SHIFT,
+				     rgmii_delay);
+		if (ret)
+			return ret;
+
+		ret = phy_set_bits_mmd(phydev, MDIO_MMD_VEND2,
+				       DP83TD510E_RCSR, DP83TD510E_RGMII_MODE_EN);
+
+		if (ret)
+			return ret;
+
+	} else if (phydev->interface == PHY_INTERFACE_MODE_RMII) {
+		/* set RMII_MODE_EN, clear RGMII_MODE_EN. We need to clear RGMII
+		 * here because otherwise, RMII/MII configuration would be
+		 * ignored as RGMII would be selected.
+		 */
+		ret = phy_modify_mmd(phydev, MDIO_MMD_VEND2, DP83TD510E_RCSR,
+				     DP83TD510E_RMII_MODE_EN |
+				     DP83TD510E_RGMII_MODE_EN,
+				     DP83TD510E_RMII_MODE_EN);
+		if (ret)
+			return ret;
+	} else {
+		/* may be MII, which is supported, or something else. Just
+		 * return success to keep the old behavior and not break
+		 * anything. Configuration may have been done by straps so
+		 * it's better to not touch it.
+		 */
+		ret = 0;
+	}
+
+	return ret;
 }
 
 static int dp83td510_get_sqi(struct phy_device *phydev)
@@ -880,6 +1013,7 @@ static struct phy_driver dp83td510_driver[] = {
 	.name		= "TI DP83TD510E",
 
 	.flags          = PHY_POLL_CABLE_TEST,
+	.config_init	= dp83td510_config_init,
 	.probe		= dp83td510_probe,
 	.config_aneg	= dp83td510_config_aneg,
 	.read_status	= dp83td510_read_status,
@@ -892,6 +1026,9 @@ static struct phy_driver dp83td510_driver[] = {
 	.cable_test_get_status = dp83td510_cable_test_get_status,
 	.get_phy_stats	= dp83td510_get_phy_stats,
 	.update_stats	= dp83td510_update_stats,
+
+	.get_mse_capability = dp83td510_get_mse_capability,
+	.get_mse_snapshot = dp83td510_get_mse_snapshot,
 
 	.led_brightness_set = dp83td510_led_brightness_set,
 	.led_hw_is_supported = dp83td510_led_hw_is_supported,

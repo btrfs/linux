@@ -294,7 +294,7 @@ static struct dma_async_tx_descriptor *mdc_prep_dma_memcpy(
 	if (!len)
 		return NULL;
 
-	mdesc = kzalloc(sizeof(*mdesc), GFP_NOWAIT);
+	mdesc = kzalloc_obj(*mdesc, GFP_NOWAIT);
 	if (!mdesc)
 		return NULL;
 	mdesc->chan = mchan;
@@ -382,7 +382,7 @@ static struct dma_async_tx_descriptor *mdc_prep_dma_cyclic(
 	if (mdc_check_slave_width(mchan, dir) < 0)
 		return NULL;
 
-	mdesc = kzalloc(sizeof(*mdesc), GFP_NOWAIT);
+	mdesc = kzalloc_obj(*mdesc, GFP_NOWAIT);
 	if (!mdesc)
 		return NULL;
 	mdesc->chan = mchan;
@@ -465,7 +465,7 @@ static struct dma_async_tx_descriptor *mdc_prep_slave_sg(
 	if (mdc_check_slave_width(mchan, dir) < 0)
 		return NULL;
 
-	mdesc = kzalloc(sizeof(*mdesc), GFP_NOWAIT);
+	mdesc = kzalloc_obj(*mdesc, GFP_NOWAIT);
 	if (!mdesc)
 		return NULL;
 	mdesc->chan = mchan;
@@ -738,7 +738,7 @@ static int mdc_alloc_chan_resources(struct dma_chan *chan)
 	struct mdc_chan *mchan = to_mdc_chan(chan);
 	struct device *dev = mdma2dev(mchan->mdma);
 
-	return pm_runtime_get_sync(dev);
+	return pm_runtime_resume_and_get(dev);
 }
 
 static void mdc_free_chan_resources(struct dma_chan *chan)

@@ -799,7 +799,7 @@ static int aic31xx_add_controls(struct snd_soc_component *component)
 
 static int aic31xx_add_widgets(struct snd_soc_component *component)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct aic31xx_priv *aic31xx = snd_soc_component_get_drvdata(component);
 	int ret = 0;
 
@@ -1030,7 +1030,7 @@ static int aic31xx_dac_mute(struct snd_soc_dai *codec_dai, int mute,
 static int aic31xx_clock_master_routes(struct snd_soc_component *component,
 				       unsigned int fmt)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct aic31xx_priv *aic31xx = snd_soc_component_get_drvdata(component);
 	int ret;
 
@@ -1316,18 +1316,20 @@ static void aic31xx_power_off(struct snd_soc_component *component)
 static int aic31xx_set_bias_level(struct snd_soc_component *component,
 				  enum snd_soc_bias_level level)
 {
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
+
 	dev_dbg(component->dev, "## %s: %d -> %d\n", __func__,
-		snd_soc_component_get_bias_level(component), level);
+		snd_soc_dapm_get_bias_level(dapm), level);
 
 	switch (level) {
 	case SND_SOC_BIAS_ON:
 		break;
 	case SND_SOC_BIAS_PREPARE:
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_STANDBY)
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_STANDBY)
 			aic31xx_clk_on(component);
 		break;
 	case SND_SOC_BIAS_STANDBY:
-		switch (snd_soc_component_get_bias_level(component)) {
+		switch (snd_soc_dapm_get_bias_level(dapm)) {
 		case SND_SOC_BIAS_OFF:
 			aic31xx_power_on(component);
 			break;
@@ -1339,7 +1341,7 @@ static int aic31xx_set_bias_level(struct snd_soc_component *component,
 		}
 		break;
 	case SND_SOC_BIAS_OFF:
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_STANDBY)
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_STANDBY)
 			aic31xx_power_off(component);
 		break;
 	}
@@ -1364,26 +1366,11 @@ static int aic31xx_set_jack(struct snd_soc_component *component,
 static int aic31xx_codec_probe(struct snd_soc_component *component)
 {
 	struct aic31xx_priv *aic31xx = snd_soc_component_get_drvdata(component);
-	int i, ret;
+	int ret;
 
 	dev_dbg(aic31xx->dev, "## %s\n", __func__);
 
 	aic31xx->component = component;
-
-	for (i = 0; i < ARRAY_SIZE(aic31xx->supplies); i++) {
-		aic31xx->disable_nb[i].nb.notifier_call =
-			aic31xx_regulator_event;
-		aic31xx->disable_nb[i].aic31xx = aic31xx;
-		ret = devm_regulator_register_notifier(
-						aic31xx->supplies[i].consumer,
-						&aic31xx->disable_nb[i].nb);
-		if (ret) {
-			dev_err(component->dev,
-				"Failed to request regulator notifier: %d\n",
-				ret);
-			return ret;
-		}
-	}
 
 	regcache_cache_only(aic31xx->regmap, true);
 	regcache_mark_dirty(aic31xx->regmap);
@@ -1420,11 +1407,22 @@ static const struct snd_soc_component_driver soc_codec_driver_aic31xx = {
 	.endianness		= 1,
 };
 
+static const u64 aic31xx_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF;
+
 static const struct snd_soc_dai_ops aic31xx_dai_ops = {
 	.hw_params	= aic31xx_hw_params,
 	.set_sysclk	= aic31xx_set_dai_sysclk,
 	.set_fmt	= aic31xx_set_dai_fmt,
 	.mute_stream	= aic31xx_dac_mute,
+	.auto_selectable_formats	= &aic31xx_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 	.no_capture_mute = 1,
 };
 
@@ -1628,14 +1626,14 @@ static void aic31xx_configure_ocmv(struct aic31xx_priv *priv)
 }
 
 static const struct i2c_device_id aic31xx_i2c_id[] = {
-	{ "tlv320aic310x", AIC3100 },
-	{ "tlv320aic311x", AIC3110 },
-	{ "tlv320aic3100", AIC3100 },
-	{ "tlv320aic3110", AIC3110 },
-	{ "tlv320aic3120", AIC3120 },
-	{ "tlv320aic3111", AIC3111 },
-	{ "tlv320dac3100", DAC3100 },
-	{ "tlv320dac3101", DAC3101 },
+	{ .name = "tlv320aic310x", .driver_data = AIC3100 },
+	{ .name = "tlv320aic311x", .driver_data = AIC3110 },
+	{ .name = "tlv320aic3100", .driver_data = AIC3100 },
+	{ .name = "tlv320aic3110", .driver_data = AIC3110 },
+	{ .name = "tlv320aic3120", .driver_data = AIC3120 },
+	{ .name = "tlv320aic3111", .driver_data = AIC3111 },
+	{ .name = "tlv320dac3100", .driver_data = DAC3100 },
+	{ .name = "tlv320dac3101", .driver_data = DAC3101 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, aic31xx_i2c_id);
@@ -1718,18 +1716,14 @@ static int tlv320dac3100_fw_load(struct aic31xx_priv *aic31xx,
 static int tlv320dac3100_load_coeffs(struct aic31xx_priv *aic31xx,
 				     const char *fw_name)
 {
-	const struct firmware *fw;
+	const struct firmware *fw __free(firmware) = NULL;
 	int ret;
 
 	ret = request_firmware(&fw, fw_name, aic31xx->dev);
 	if (ret)
 		return ret;
 
-	ret = tlv320dac3100_fw_load(aic31xx, fw->data, fw->size);
-
-	release_firmware(fw);
-
-	return ret;
+	return tlv320dac3100_fw_load(aic31xx, fw->data, fw->size);
 }
 
 static int aic31xx_i2c_probe(struct i2c_client *i2c)
@@ -1792,6 +1786,19 @@ static int aic31xx_i2c_probe(struct i2c_client *i2c)
 				      aic31xx->supplies);
 	if (ret)
 		return dev_err_probe(aic31xx->dev, ret, "Failed to request supplies\n");
+
+	for (i = 0; i < ARRAY_SIZE(aic31xx->supplies); i++) {
+		aic31xx->disable_nb[i].nb.notifier_call = aic31xx_regulator_event;
+		aic31xx->disable_nb[i].aic31xx = aic31xx;
+		ret = devm_regulator_register_notifier(aic31xx->supplies[i].consumer,
+						       &aic31xx->disable_nb[i].nb);
+		if (ret) {
+			dev_err(aic31xx->dev,
+				"Failed to request regulator notifier: %d\n",
+				ret);
+			return ret;
+		}
+	}
 
 	aic31xx_configure_ocmv(aic31xx);
 

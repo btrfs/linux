@@ -240,7 +240,7 @@ static int vlandev_seq_show(struct seq_file *seq, void *offset)
 	seq_printf(seq,
 		   "%s  VID: %d	 REORDER_HDR: %i  dev->priv_flags: %x\n",
 		   vlandev->name, vlan->vlan_id,
-		   (int)(vlan->flags & 1), (u32)vlandev->priv_flags);
+		   (int)(READ_ONCE(vlan->flags) & 1), (u32)vlandev->priv_flags);
 
 	seq_printf(seq, fmt64, "total frames received", stats->rx_packets);
 	seq_printf(seq, fmt64, "total bytes received", stats->rx_bytes);
@@ -252,25 +252,29 @@ static int vlandev_seq_show(struct seq_file *seq, void *offset)
 	/* now show all PRIORITY mappings relating to this VLAN */
 	seq_printf(seq, "\nINGRESS priority mappings: "
 			"0:%u  1:%u  2:%u  3:%u  4:%u  5:%u  6:%u 7:%u\n",
-		   vlan->ingress_priority_map[0],
-		   vlan->ingress_priority_map[1],
-		   vlan->ingress_priority_map[2],
-		   vlan->ingress_priority_map[3],
-		   vlan->ingress_priority_map[4],
-		   vlan->ingress_priority_map[5],
-		   vlan->ingress_priority_map[6],
-		   vlan->ingress_priority_map[7]);
+		   READ_ONCE(vlan->ingress_priority_map[0]),
+		   READ_ONCE(vlan->ingress_priority_map[1]),
+		   READ_ONCE(vlan->ingress_priority_map[2]),
+		   READ_ONCE(vlan->ingress_priority_map[3]),
+		   READ_ONCE(vlan->ingress_priority_map[4]),
+		   READ_ONCE(vlan->ingress_priority_map[5]),
+		   READ_ONCE(vlan->ingress_priority_map[6]),
+		   READ_ONCE(vlan->ingress_priority_map[7]));
 
 	seq_printf(seq, " EGRESS priority mappings: ");
+	rcu_read_lock();
 	for (i = 0; i < 16; i++) {
-		const struct vlan_priority_tci_mapping *mp
-			= vlan->egress_priority_map[i];
+		const struct vlan_priority_tci_mapping *mp =
+			rcu_dereference(vlan->egress_priority_map[i]);
 		while (mp) {
+			u16 vlan_qos = READ_ONCE(mp->vlan_qos);
+
 			seq_printf(seq, "%u:%d ",
-				   mp->priority, ((mp->vlan_qos >> 13) & 0x7));
-			mp = mp->next;
+				   mp->priority, ((vlan_qos >> 13) & 0x7));
+			mp = rcu_dereference(mp->next);
 		}
 	}
+	rcu_read_unlock();
 	seq_puts(seq, "\n");
 
 	return 0;

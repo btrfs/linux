@@ -26,7 +26,7 @@
 #include "dccg.h"
 #include "clk_mgr_internal.h"
 
-#include "dce100/dce_clk_mgr.h"
+#include "dcn10/dcn10_clk_mgr.h"
 #include "dcn20_clk_mgr.h"
 #include "reg_helper.h"
 #include "core_types.h"
@@ -104,7 +104,7 @@ uint32_t dentist_get_did_from_divider(int divider)
 void dcn20_update_clocks_update_dpp_dto(struct clk_mgr_internal *clk_mgr,
 		struct dc_state *context, bool safe_to_lower)
 {
-	int i;
+	uint32_t i;
 
 	clk_mgr->dccg->ref_dppclk = clk_mgr->base.clks.dppclk_khz;
 	for (i = 0; i < clk_mgr->base.ctx->dc->res_pool->pipe_count; i++) {
@@ -255,9 +255,12 @@ void dcn2_update_clocks(struct clk_mgr *clk_mgr_base,
 			pp_smu->set_display_count(&pp_smu->pp_smu, display_count);
 	}
 
-	if (dc->debug.force_min_dcfclk_mhz > 0)
-		new_clocks->dcfclk_khz = (new_clocks->dcfclk_khz > (dc->debug.force_min_dcfclk_mhz * 1000)) ?
-				new_clocks->dcfclk_khz : (dc->debug.force_min_dcfclk_mhz * 1000);
+	if (dc->debug.force_min_dcfclk_mhz > 0) {
+		int force_min_dcfclk_khz = dc->debug.force_min_dcfclk_mhz * 1000;
+
+		new_clocks->dcfclk_khz = (new_clocks->dcfclk_khz > force_min_dcfclk_khz) ?
+				new_clocks->dcfclk_khz : force_min_dcfclk_khz;
+	}
 
 	if (should_set_clock(safe_to_lower, new_clocks->dcfclk_khz, clk_mgr_base->clks.dcfclk_khz)) {
 		clk_mgr_base->clks.dcfclk_khz = new_clocks->dcfclk_khz;
@@ -427,14 +430,14 @@ void dcn2_read_clocks_from_hw_dentist(struct clk_mgr *clk_mgr_base)
 	struct clk_mgr_internal *clk_mgr = TO_CLK_MGR_INTERNAL(clk_mgr_base);
 	uint32_t dispclk_wdivider;
 	uint32_t dppclk_wdivider;
-	int disp_divider;
-	int dpp_divider;
+	unsigned int disp_divider;
+	unsigned int dpp_divider;
 
 	REG_GET(DENTIST_DISPCLK_CNTL, DENTIST_DISPCLK_WDIVIDER, &dispclk_wdivider);
 	REG_GET(DENTIST_DISPCLK_CNTL, DENTIST_DPPCLK_WDIVIDER, &dppclk_wdivider);
 
-	disp_divider = dentist_get_divider_from_did(dispclk_wdivider);
-	dpp_divider = dentist_get_divider_from_did(dppclk_wdivider);
+	disp_divider = dcn10_dentist_get_divider_from_did(dispclk_wdivider);
+	dpp_divider = dcn10_dentist_get_divider_from_did(dppclk_wdivider);
 
 	if (disp_divider && dpp_divider) {
 		/* Calculate the current DFS clock, in kHz.*/
@@ -515,7 +518,7 @@ static void dcn2_notify_link_rate_change(struct clk_mgr *clk_mgr_base, struct dc
 }
 
 static struct clk_mgr_funcs dcn2_funcs = {
-	.get_dp_ref_clk_frequency = dce12_get_dp_ref_freq_khz,
+	.get_dp_ref_clk_frequency = dcn10_get_dp_ref_freq_khz,
 	.update_clocks = dcn2_update_clocks,
 	.init_clocks = dcn2_init_clocks,
 	.enable_pme_wa = dcn2_enable_pme_wa,
@@ -531,8 +534,8 @@ void dcn20_clk_mgr_construct(
 		struct pp_smu_funcs *pp_smu,
 		struct dccg *dccg)
 {
-	int dprefclk_did;
-	int target_div;
+	unsigned int dprefclk_did;
+	unsigned int target_div;
 	uint32_t pll_req_reg;
 	struct fixed31_32 pll_req;
 
@@ -555,7 +558,7 @@ void dcn20_clk_mgr_construct(
 	/* DFS Slice 2 should be used for DPREFCLK */
 	dprefclk_did = REG_READ(CLK3_CLK2_DFS_CNTL);
 	/* Convert DPREFCLK DFS Slice DID to actual divider */
-	target_div = dentist_get_divider_from_did(dprefclk_did);
+	target_div = dcn10_dentist_get_divider_from_did(dprefclk_did);
 	/* get FbMult value */
 	pll_req_reg = REG_READ(CLK3_CLK_PLL_REQ);
 
@@ -585,5 +588,5 @@ void dcn20_clk_mgr_construct(
 	//Also there is no plan for now that DFS BYPASS will be used on NV10/12/14.
 	clk_mgr->dfs_bypass_enabled = false;
 
-	dce_clock_read_ss_info(clk_mgr);
+	dcn10_clock_read_ss_info(clk_mgr);
 }

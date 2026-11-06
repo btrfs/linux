@@ -21,9 +21,6 @@
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/mailbox_controller.h>
-#include <linux/mailbox_client.h>
-
-#include "mailbox.h"
 
 #define MAILBOX_REVISION		0x000
 #define MAILBOX_MESSAGE(m)		(0x040 + 4 * (m))
@@ -241,7 +238,7 @@ static int omap_mbox_startup(struct omap_mbox *mbox)
 	}
 
 	if (mbox->send_no_irq)
-		mbox->chan->txdone_method = TXDONE_BY_ACK;
+		mbox->chan->txdone_method = MBOX_TXDONE_BY_ACK;
 
 	omap_mbox_enable_irq(mbox, IRQ_RX);
 

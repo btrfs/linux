@@ -193,7 +193,6 @@ struct efx_ptp_event_rx {
  * @wait: Number of NIC clock ticks between hardware timestamp being read and
  *          host end time being seen
  * @window: Difference of host_end and host_start
- * @valid: Whether this timeset is valid
  */
 struct efx_ptp_timeset {
 	u32 host_start;
@@ -1263,7 +1262,7 @@ static int efx_ptp_insert_filter(struct efx_nic *efx,
 		return 0;
 	}
 
-	rxfilter = kzalloc(sizeof(*rxfilter), GFP_KERNEL);
+	rxfilter = kzalloc_obj(*rxfilter);
 	if (!rxfilter)
 		return -ENOMEM;
 
@@ -1565,7 +1564,7 @@ int efx_ptp_probe(struct efx_nic *efx, struct efx_channel *channel)
 		return 0;
 	}
 
-	ptp = kzalloc(sizeof(struct efx_ptp_data), GFP_KERNEL);
+	ptp = kzalloc_obj(struct efx_ptp_data);
 	efx->ptp_data = ptp;
 	if (!efx->ptp_data)
 		return -ENOMEM;

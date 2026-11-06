@@ -175,7 +175,7 @@ static int sof_ipc4_load_library(struct snd_sof_dev *sdev, unsigned long lib_id,
 	struct sof_ipc4_fw_data *ipc4_data = sdev->private;
 	struct sof_ipc4_fw_library *fw_lib;
 	ssize_t payload_offset;
-	int ret, i, err;
+	int ret, i;
 
 	if (!ipc4_data->load_library) {
 		dev_err(sdev->dev, "Library loading is not supported on this platform\n");
@@ -223,24 +223,7 @@ static int sof_ipc4_load_library(struct snd_sof_dev *sdev, unsigned long lib_id,
 	for (i = 0; i < fw_lib->num_modules; i++)
 		fw_lib->modules[i].man4_module_entry.id |= (lib_id << SOF_IPC4_MOD_LIB_ID_SHIFT);
 
-	/*
-	 * Make sure that the DSP is booted and stays up while attempting the
-	 * loading the library for the first time
-	 */
-	ret = pm_runtime_resume_and_get(sdev->dev);
-	if (ret < 0 && ret != -EACCES) {
-		dev_err_ratelimited(sdev->dev, "%s: pm_runtime resume failed: %d\n",
-				    __func__, ret);
-		goto release;
-	}
-
 	ret = ipc4_data->load_library(sdev, fw_lib, false);
-
-	err = pm_runtime_put_autosuspend(sdev->dev);
-	if (err < 0)
-		dev_err_ratelimited(sdev->dev, "%s: pm_runtime idle failed: %d\n",
-				    __func__, err);
-
 	if (ret)
 		goto release;
 
@@ -425,6 +408,38 @@ static int sof_ipc4_validate_firmware(struct snd_sof_dev *sdev)
 	return 0;
 }
 
+static int sof_ipc4_query_sof_info(struct snd_sof_dev *sdev,
+				   void *sof_info_data, u32 sof_info_size)
+{
+	struct sof_ipc4_fw_data *ipc4_data = sdev->private;
+	struct sof_ipc4_tuple *tuple;
+	size_t offset = 0;
+
+	/*
+	 * No size validation is needed as the sof_info data is coming from
+	 * firmware as part of the firmware config, it is guarantied to be
+	 * correct.
+	 */
+	while (offset < sof_info_size) {
+		tuple = (struct sof_ipc4_tuple *)((u8 *)sof_info_data + offset);
+
+		switch (tuple->type) {
+		case SOF_IPC4_SOF_CODEC_INFO:
+			ipc4_data->codec_info = devm_kmemdup(sdev->dev, tuple->value,
+							     tuple->size, GFP_KERNEL);
+			if (!ipc4_data->codec_info)
+				return -ENOMEM;
+			break;
+		default:
+			break;
+		}
+
+		offset += sizeof(*tuple) + tuple->size;
+	}
+
+	return 0;
+}
+
 int sof_ipc4_query_fw_configuration(struct snd_sof_dev *sdev)
 {
 	struct sof_ipc4_fw_data *ipc4_data = sdev->private;
@@ -499,6 +514,11 @@ int sof_ipc4_query_fw_configuration(struct snd_sof_dev *sdev)
 			 * libraries are restored
 			 */
 			ipc4_data->libraries_restored = ipc4_data->fw_context_save;
+			break;
+		case SOF_IPC4_FW_CFG_SOF_INFO:
+			ret = sof_ipc4_query_sof_info(sdev, tuple->value, tuple->size);
+			if (ret)
+				goto out;
 			break;
 		default:
 			break;

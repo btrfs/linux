@@ -48,7 +48,7 @@ static void dc_mouse_callback(struct mapleq *mq)
 
 static int dc_mouse_open(struct input_dev *dev)
 {
-	struct dc_mouse *mse = maple_get_drvdata(to_maple_dev(&dev->dev));
+	struct dc_mouse *mse = input_get_drvdata(dev);
 
 	maple_getcond_callback(mse->mdev, dc_mouse_callback, HZ/50,
 		MAPLE_FUNC_MOUSE);
@@ -58,22 +58,20 @@ static int dc_mouse_open(struct input_dev *dev)
 
 static void dc_mouse_close(struct input_dev *dev)
 {
-	struct dc_mouse *mse = maple_get_drvdata(to_maple_dev(&dev->dev));
+	struct dc_mouse *mse = input_get_drvdata(dev);
 
-	maple_getcond_callback(mse->mdev, dc_mouse_callback, 0,
-		MAPLE_FUNC_MOUSE);
+	maple_getcond_callback(mse->mdev, NULL, 0, MAPLE_FUNC_MOUSE);
 }
 
 /* allow the mouse to be used */
 static int probe_maple_mouse(struct device *dev)
 {
 	struct maple_device *mdev = to_maple_dev(dev);
-	struct maple_driver *mdrv = to_maple_driver(dev->driver);
 	int error;
 	struct input_dev *input_dev;
 	struct dc_mouse *mse;
 
-	mse = kzalloc(sizeof(*mse), GFP_KERNEL);
+	mse = kzalloc_obj(*mse);
 	if (!mse) {
 		error = -ENOMEM;
 		goto fail;
@@ -88,6 +86,9 @@ static int probe_maple_mouse(struct device *dev)
 	mse->dev = input_dev;
 	mse->mdev = mdev;
 
+	maple_set_drvdata(mdev, mse);
+
+	input_set_drvdata(input_dev, mse);
 	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_REL);
 	input_dev->keybit[BIT_WORD(BTN_MOUSE)] = BIT_MASK(BTN_LEFT) |
 		BIT_MASK(BTN_RIGHT) | BIT_MASK(BTN_MIDDLE);
@@ -100,10 +101,6 @@ static int probe_maple_mouse(struct device *dev)
 	error =	input_register_device(input_dev);
 	if (error)
 		goto fail_register;
-
-	mdev->driver = mdrv;
-	maple_set_drvdata(mdev, mse);
-
 	return error;
 
 fail_register:
@@ -119,9 +116,7 @@ static int remove_maple_mouse(struct device *dev)
 	struct maple_device *mdev = to_maple_dev(dev);
 	struct dc_mouse *mse = maple_get_drvdata(mdev);
 
-	mdev->callback = NULL;
 	input_unregister_device(mse->dev);
-	maple_set_drvdata(mdev, NULL);
 	kfree(mse);
 
 	return 0;

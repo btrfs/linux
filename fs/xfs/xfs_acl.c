@@ -3,7 +3,7 @@
  * Copyright (c) 2008, Christoph Hellwig
  * All Rights Reserved.
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
 #include "xfs_log_format.h"
@@ -243,7 +243,7 @@ xfs_acl_set_mode(
 }
 
 int
-xfs_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
+xfs_set_acl(const struct mnt_idmap *idmap, struct dentry *dentry,
 	    struct posix_acl *acl, int type)
 {
 	umode_t mode;

@@ -95,6 +95,9 @@ include::itrace.txt[]
 
 --gtk:: Use the GTK interface.
 
+--weights:: Show or hide (with `--no-weights`) weight columns in annotation output.
+	    By default, weight columns are shown when samples contain non-zero weights.
+
 -C::
 --cpu=<cpu>:: Only report samples for the list of CPUs provided. Multiple CPUs can
 	be provided as a comma-separated list with no space: 0,1. Ranges of
@@ -110,8 +113,11 @@ include::itrace.txt[]
 	Interleave source code with assembly code. Enabled by default,
 	disable with --no-source.
 
---symfs=<directory>::
-        Look for files with symbols relative to this directory.
+--symfs=<directory[,layout]>::
+        Look for files with symbols relative to this directory. The optional
+        layout can be 'hierarchy' (default, matches full path) or 'flat'
+        (only matches base name). This is useful when debug files are stored
+        in a flat directory structure.
 
 -M::
 --disassembler-style=:: Set disassembler style for objdump.

@@ -171,6 +171,27 @@ $BOOTCONF $INITRD > $OUTFILE
 xfail grep -q 'val[[:space:]]' $OUTFILE
 xpass grep -q 'val2[[:space:]]' $OUTFILE
 
+echo "Showing correct line:column of no closing brace"
+cat > $TEMPCONF << EOF
+foo {
+bar {
+}
+EOF
+$BOOTCONF -a $TEMPCONF $INITRD 2> $OUTFILE
+xpass grep -q "1:1" $OUTFILE
+
+echo "Intermediate null character test"
+printf "key = value\n\0extra = data\n" > $TEMPCONF
+xfail $BOOTCONF -a $TEMPCONF $INITRD
+$BOOTCONF -a $TEMPCONF $INITRD 2> $OUTFILE
+xpass grep -q "Unexpected" $OUTFILE
+
+echo "Trailing null character test"
+printf "key = value\n\0" > $TEMPCONF
+xpass $BOOTCONF -a $TEMPCONF $INITRD
+$BOOTCONF $INITRD > $OUTFILE
+xpass grep -q "value" $OUTFILE
+
 echo "=== expected failure cases ==="
 for i in samples/bad-* ; do
   xfail $BOOTCONF -a $i $INITRD
@@ -179,6 +200,9 @@ done
 echo "=== expected success cases ==="
 for i in samples/good-* ; do
   xpass $BOOTCONF -a $i $INITRD
+  x="samples/exp-"`basename $i`
+  $BOOTCONF $i > $TEMPCONF
+  xpass diff $x $TEMPCONF
 done
 
 

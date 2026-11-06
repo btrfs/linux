@@ -10,8 +10,8 @@
 #include <sound/soc-dapm.h>
 #include <sound/jack.h>
 #include <sound/soc-acpi.h>
+#include <acpi/acpi_bus.h>
 #include <linux/clk.h>
-#include <linux/gpio.h>
 #include <linux/gpio/consumer.h>
 #include <linux/module.h>
 #include <linux/i2c.h>
@@ -41,6 +41,11 @@ struct acp3x_es83xx_private {
 	struct acpi_gpio_mapping gpio_mapping[3];
 	struct snd_soc_dapm_route mic_map[2];
 };
+
+static void acp3x_es83xx_put_codec_device(void *data)
+{
+	put_device(data);
+}
 
 static const unsigned int channels[] = {
 	DUAL_CHANNEL,
@@ -159,7 +164,8 @@ static int acp3x_es83xx_configure_widgets(struct snd_soc_card *card)
 static int acp3x_es83xx_headphone_power_event(struct snd_soc_dapm_widget *w,
 					      struct snd_kcontrol *kcontrol, int event)
 {
-	struct acp3x_es83xx_private *priv = get_mach_priv(w->dapm->card);
+	struct snd_soc_card *card = snd_soc_dapm_to_card(w->dapm);
+	struct acp3x_es83xx_private *priv = get_mach_priv(card);
 
 	dev_dbg(priv->codec_dev, "headphone power event = %d\n", event);
 	if (SND_SOC_DAPM_EVENT_ON(event))
@@ -176,7 +182,8 @@ static int acp3x_es83xx_headphone_power_event(struct snd_soc_dapm_widget *w,
 static int acp3x_es83xx_speaker_power_event(struct snd_soc_dapm_widget *w,
 					    struct snd_kcontrol *kcontrol, int event)
 {
-	struct acp3x_es83xx_private *priv = get_mach_priv(w->dapm->card);
+	struct snd_soc_card *card = snd_soc_dapm_to_card(w->dapm);
+	struct acp3x_es83xx_private *priv = get_mach_priv(card);
 
 	dev_dbg(priv->codec_dev, "speaker power event: %d\n", event);
 	if (SND_SOC_DAPM_EVENT_ON(event))
@@ -314,7 +321,9 @@ static int acp3x_es83xx_init(struct snd_soc_pcm_runtime *runtime)
 
 	num_routes = acp3x_es83xx_configure_mics(priv);
 	if (num_routes > 0) {
-		ret = snd_soc_dapm_add_routes(&card->dapm, priv->mic_map, num_routes);
+		struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(card);
+
+		ret = snd_soc_dapm_add_routes(dapm, priv->mic_map, num_routes);
 		if (ret != 0)
 			device_remove_software_node(priv->codec_dev);
 	}
@@ -379,6 +388,14 @@ static const struct dmi_system_id acp3x_es83xx_dmi_table[] = {
 		},
 		.driver_data = (void *)(ES83XX_ENABLE_DMIC),
 	},
+	{
+		.matches = {
+			DMI_EXACT_MATCH(DMI_BOARD_VENDOR, "HUAWEI"),
+			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "HVY-WXX9"),
+			DMI_EXACT_MATCH(DMI_PRODUCT_VERSION, "M1060"),
+		},
+		.driver_data = (void *)(ES83XX_ENABLE_DMIC),
+	},
 	{}
 };
 
@@ -417,7 +434,7 @@ static int acp3x_es83xx_probe(struct snd_soc_card *card)
 			return -ENXIO;
 		}
 
-		codec_dev = acpi_get_first_physical_node(adev);
+		codec_dev = acpi_bus_get_primary_device(adev);
 		acpi_dev_put(adev);
 		if (!codec_dev) {
 			dev_warn(dev, "Error cannot find codec device, will defer probe\n");
@@ -429,6 +446,12 @@ static int acp3x_es83xx_probe(struct snd_soc_card *card)
 			put_device(codec_dev);
 			return -ENOMEM;
 		}
+
+		ret = devm_add_action_or_reset(dev,
+					       acp3x_es83xx_put_codec_device,
+					       codec_dev);
+		if (ret)
+			return ret;
 
 		priv->codec_dev = codec_dev;
 		priv->quirk = (unsigned long)dmi_id->driver_data;

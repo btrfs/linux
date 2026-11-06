@@ -518,6 +518,18 @@ int cgx_set_pkind(void *cgxd, u8 lmac_id, int pkind)
 	return 0;
 }
 
+int cgx_get_pkind(void *cgxd, u8 lmac_id, int *pkind)
+{
+	struct cgx *cgx = cgxd;
+
+	if (!is_lmac_valid(cgx, lmac_id))
+		return -ENODEV;
+
+	*pkind = cgx_read(cgx, lmac_id, cgx->mac_ops->rxid_map_offset);
+	*pkind = *pkind & 0x3F;
+	return 0;
+}
+
 static u8 cgx_get_lmac_type(void *cgxd, int lmac_id)
 {
 	struct cgx *cgx = cgxd;
@@ -740,6 +752,16 @@ u64 cgx_features_get(void *cgxd)
 	return ((struct cgx *)cgxd)->hw_features;
 }
 
+u64 cgx_get_dmacflt_dropped_pktcnt(void *cgxd, int lmac_id)
+{
+	struct cgx *cgx = cgxd;
+
+	if (!is_lmac_valid(cgx, lmac_id))
+		return 0;
+
+	return cgx_read(cgx, lmac_id, CGXX_CMRX_RX_STAT4);
+}
+
 int cgx_stats_reset(void *cgxd, int lmac_id)
 {
 	struct cgx *cgx = cgxd;
@@ -959,15 +981,9 @@ int verify_lmac_fc_cfg(void *cgxd, int lmac_id, u8 tx_pause, u8 rx_pause,
 	if (!lmac)
 		return -ENODEV;
 
-	if (!rx_pause)
-		clear_bit(pfvf_idx, lmac->rx_fc_pfvf_bmap.bmap);
-	else
-		set_bit(pfvf_idx, lmac->rx_fc_pfvf_bmap.bmap);
+	assign_bit(pfvf_idx, lmac->rx_fc_pfvf_bmap.bmap, rx_pause);
 
-	if (!tx_pause)
-		clear_bit(pfvf_idx, lmac->tx_fc_pfvf_bmap.bmap);
-	else
-		set_bit(pfvf_idx, lmac->tx_fc_pfvf_bmap.bmap);
+	assign_bit(pfvf_idx, lmac->tx_fc_pfvf_bmap.bmap, tx_pause);
 
 	/* check if other pfvfs are using flow control */
 	if (!rx_pause && bitmap_weight(lmac->rx_fc_pfvf_bmap.bmap, lmac->rx_fc_pfvf_bmap.max)) {
@@ -1294,12 +1310,17 @@ static inline void link_status_user_format(u64 lstat,
 					   struct cgx_link_user_info *linfo,
 					   struct cgx *cgx, u8 lmac_id)
 {
+	unsigned int speed;
+
 	linfo->link_up = FIELD_GET(RESP_LINKSTAT_UP, lstat);
 	linfo->full_duplex = FIELD_GET(RESP_LINKSTAT_FDUPLEX, lstat);
-	linfo->speed = cgx_speed_mbps[FIELD_GET(RESP_LINKSTAT_SPEED, lstat)];
 	linfo->an = FIELD_GET(RESP_LINKSTAT_AN, lstat);
 	linfo->fec = FIELD_GET(RESP_LINKSTAT_FEC, lstat);
 	linfo->lmac_type_id = FIELD_GET(RESP_LINKSTAT_LMAC_TYPE, lstat);
+
+	speed = FIELD_GET(RESP_LINKSTAT_SPEED, lstat);
+	linfo->speed = speed < ARRAY_SIZE(cgx_speed_mbps) ?
+		       cgx_speed_mbps[speed] : 0;
 
 	if (linfo->lmac_type_id >= LMAC_MODE_MAX) {
 		dev_err(&cgx->pdev->dev, "Unknown lmac_type_id %d reported by firmware on cgx port%d:%d",
@@ -1725,7 +1746,7 @@ static int cgx_lmac_init(struct cgx *cgx)
 		cgx->lmac_count = cgx->max_lmac_per_mac;
 
 	for (i = 0; i < cgx->lmac_count; i++) {
-		lmac = kzalloc(sizeof(struct lmac), GFP_KERNEL);
+		lmac = kzalloc_obj(struct lmac);
 		if (!lmac)
 			return -ENOMEM;
 		lmac->name = kcalloc(1, sizeof("cgx_fwi_xxx_yyy"), GFP_KERNEL);
@@ -1822,7 +1843,9 @@ static int cgx_lmac_exit(struct cgx *cgx)
 			continue;
 		cgx->mac_ops->mac_pause_frm_config(cgx, lmac->lmac_id, false);
 		cgx_configure_interrupt(cgx, lmac, lmac->lmac_id, true);
-		kfree(lmac->mac_to_index_bmap.bmap);
+		rvu_free_bitmap(&lmac->mac_to_index_bmap);
+		rvu_free_bitmap(&lmac->rx_fc_pfvf_bmap);
+		rvu_free_bitmap(&lmac->tx_fc_pfvf_bmap);
 		kfree(lmac->name);
 		kfree(lmac);
 	}
@@ -1924,7 +1947,8 @@ static struct mac_ops	cgx_mac_ops    = {
 	.pfc_config =                   cgx_lmac_pfc_config,
 	.mac_get_pfc_frm_cfg   =        cgx_lmac_get_pfc_frm_cfg,
 	.mac_reset   =			cgx_lmac_reset,
-	.mac_stats_reset       =	cgx_stats_reset,
+	.get_dmacflt_dropped_pktcnt      =      cgx_get_dmacflt_dropped_pktcnt,
+	.mac_stats_reset		 =	cgx_stats_reset,
 	.mac_x2p_reset                   =      cgx_x2p_reset,
 	.mac_enadis_rx			 =      cgx_enadis_rx,
 };
@@ -1994,7 +2018,7 @@ static int cgx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	nvec = pci_msix_vec_count(cgx->pdev);
 	err = pci_alloc_irq_vectors(pdev, nvec, nvec, PCI_IRQ_MSIX);
-	if (err < 0 || err != nvec) {
+	if (err < 0) {
 		dev_err(dev, "Request for %d msix vectors failed, err %d\n",
 			nvec, err);
 		goto err_release_regions;
@@ -2013,8 +2037,6 @@ static int cgx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	}
 
 	list_add(&cgx->cgx_list, &cgx_list);
-
-
 	cgx_populate_features(cgx);
 
 	mutex_init(&cgx->lock);

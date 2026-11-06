@@ -25,11 +25,12 @@ extern void (*pm_power_off)(void);
 
 struct device; /* we have a circular dep with device.h */
 #ifdef CONFIG_VT_CONSOLE_SLEEP
-extern void pm_vt_switch_required(struct device *dev, bool required);
+extern int pm_vt_switch_required(struct device *dev, bool required);
 extern void pm_vt_switch_unregister(struct device *dev);
 #else
-static inline void pm_vt_switch_required(struct device *dev, bool required)
+static inline int pm_vt_switch_required(struct device *dev, bool required)
 {
+	return 0;
 }
 static inline void pm_vt_switch_unregister(struct device *dev)
 {
@@ -507,6 +508,7 @@ const struct dev_pm_ops name = { \
  * RECOVER	Creation of a hibernation image or restoration of the main
  *		memory contents from a hibernation image has failed, call
  *		->thaw() and ->complete() for all devices.
+ * POWEROFF	System will poweroff, call ->poweroff() for all devices.
  *
  * The following PM_EVENT_ messages are defined for internal use by
  * kernel subsystems.  They are never issued by the PM core.
@@ -537,6 +539,7 @@ const struct dev_pm_ops name = { \
 #define PM_EVENT_USER		0x0100
 #define PM_EVENT_REMOTE		0x0200
 #define PM_EVENT_AUTO		0x0400
+#define PM_EVENT_POWEROFF	0x0800
 
 #define PM_EVENT_SLEEP		(PM_EVENT_SUSPEND | PM_EVENT_HIBERNATE)
 #define PM_EVENT_USER_SUSPEND	(PM_EVENT_USER | PM_EVENT_SUSPEND)
@@ -551,6 +554,7 @@ const struct dev_pm_ops name = { \
 #define PMSG_QUIESCE	((struct pm_message){ .event = PM_EVENT_QUIESCE, })
 #define PMSG_SUSPEND	((struct pm_message){ .event = PM_EVENT_SUSPEND, })
 #define PMSG_HIBERNATE	((struct pm_message){ .event = PM_EVENT_HIBERNATE, })
+#define PMSG_POWEROFF	((struct pm_message){ .event = PM_EVENT_POWEROFF, })
 #define PMSG_RESUME	((struct pm_message){ .event = PM_EVENT_RESUME, })
 #define PMSG_THAW	((struct pm_message){ .event = PM_EVENT_THAW, })
 #define PMSG_RESTORE	((struct pm_message){ .event = PM_EVENT_RESTORE, })
@@ -659,6 +663,99 @@ struct pm_subsys_data {
 #define DPM_FLAG_SMART_SUSPEND		BIT(2)
 #define DPM_FLAG_MAY_SKIP_RESUME	BIT(3)
 
+/**
+ * struct dev_pm_info - Device power management information.
+ *
+ * @power_state: Legacy power state (mostly unused in modern kernels).
+ * @can_wakeup: Device is capable of generating wakeup signals.
+ * @async_suspend: Device can be suspended and resumed asynchronously.
+ * @in_dpm_list: Device is on the dpm_list.
+ * @is_prepared: Device's ->prepare() callback has run successfully.
+ * @is_suspended: Device is suspended during a system sleep transition.
+ * @is_noirq_suspended: Device's noirq suspend callback has run successfully.
+ * @is_late_suspended: Device's late suspend callback has run successfully.
+ * @no_pm: Device does not participate in power management transitions.
+ * @early_init: Device was initialized before standard PM initialization.
+ * @direct_complete: Device can skip suspend/resume callbacks and remain
+ *   runtime-suspended during system sleep.
+ * @driver_flags: Driver flags (e.g. %DPM_FLAG_SMART_SUSPEND) set at probe time.
+ * @lock: Spinlock used for synchronizing PM state transitions and runtime PM
+ *   operations.
+ * @entry: List head for device power management lists.
+ * @completion: Completion for synchronization during asynchronous system
+ *   suspend/resume.
+ * @wakeup: Wakeup source object associated with the device.
+ * @work_in_progress: Asynchronous PM operation in progress.
+ * @wakeup_path: Device is in the wakeup path or can wake the system up.
+ * @syscore: Device participates in syscore power management operations.
+ * @no_pm_callbacks: Device has no PM callbacks; handled by parent or subsystem.
+ * @smart_suspend: Driver requested smart-suspend behavior.
+ * @must_resume: Device must be resumed during system resume.
+ * @may_skip_resume: Set by subsystems to indicate driver resume callbacks may
+ *   be skipped.
+ * @out_band_wakeup: Out-of-band wakeup is supported.
+ * @strict_midlayer: Middle layer code does not want callbacks invoked via
+ *   pm_runtime_force_suspend() / pm_runtime_force_resume().
+ * @should_wakeup: Wakeup flag when system sleep is not enabled.
+ * @suspend_timer: High-resolution timer used for scheduling delayed runtime
+ *   suspend and autosuspend requests.
+ * @timer_expires: Timer expiration time in nanoseconds monotonic time
+ *   (runtime PM).
+ * @work: Work structure used for queuing up requests into pm_wq (runtime PM).
+ * @wait_queue: Wait queue used if any helper functions need to wait for another
+ *   state change to complete (runtime PM).
+ * @wakeirq: Dedicated wakeup interrupt for the device.
+ * @usage_count: Device runtime PM usage counter.
+ * @child_count: Count of active children of the device (runtime PM).
+ * @disable_depth: Disable counter for runtime PM (runtime PM is enabled when
+ *   this is 0; initial value is 1).
+ * @idle_notification: Set if ->runtime_idle() is being executed.
+ * @request_pending: Set if a work item is queued into pm_wq (runtime PM).
+ * @deferred_resume: Set if ->runtime_resume() should run as soon as
+ *   ->runtime_suspend() completes.
+ * @needs_force_resume: Indicates the device was forced into suspend by
+ *   pm_runtime_force_suspend() and must be resumed by
+ *   pm_runtime_force_resume().
+ * @runtime_auto: User space has allowed the driver to power manage the device
+ *   at runtime via sysfs control attribute; also can be set by
+ *   pm_runtime_allow() or pm_runtime_forbid().
+ * @ignore_children: If set, the value of child_count is ignored for runtime
+ *   suspend and idle decisions.
+ * @no_callbacks: Indicates the device does not use runtime PM callbacks.
+ * @irq_safe: Indicates runtime PM callbacks will be invoked with the spinlock
+ *   held and interrupts disabled.
+ * @use_autosuspend: Indicates the device driver supports delayed runtime
+ *   autosuspend.
+ * @timer_autosuspends: Indicates the runtime PM core should attempt an
+ *   autosuspend rather than a normal suspend when the timer expires.
+ * @memalloc_noio: Indicates memory allocation during runtime PM transitions
+ *   must avoid I/O (GFP_NOIO).
+ * @links_count: Number of device links that require runtime PM coordination.
+ * @request: Type of pending runtime PM request (valid if request_pending is
+ *   set).
+ * @runtime_status: Runtime PM status of the device.
+ * @last_status: Last status captured before disabling runtime PM, or
+ *   %RPM_BLOCKED / %RPM_INVALID.
+ * @runtime_error: Fatal error code returned by a failing callback, blocking
+ *   helpers until cleared.
+ * @autosuspend_delay: Delay time in milliseconds to be used for runtime
+ *   autosuspend.
+ * @last_busy: Timestamp in nanoseconds when pm_runtime_mark_last_busy() was
+ *   last called. Used in calculating inactivity periods for autosuspend.
+ * @active_time: Accumulated time in nanoseconds spent in %RPM_ACTIVE state.
+ * @suspended_time: Accumulated time in nanoseconds spent in %RPM_SUSPENDED
+ *   state.
+ * @accounting_timestamp: Timestamp in nanoseconds of the last runtime PM state
+ *   accounting update.
+ * @subsys_data: Subsystem-specific power management data.
+ * @set_latency_tolerance: Callback for setting latency tolerance.
+ * @qos: Per-device PM Quality of Service (QoS) constraints.
+ * @detach_power_off: Indicates device should be detached from PM domain on
+ *   power off.
+ *
+ * Device power management information stored in the "power" member of struct
+ * device.
+ */
 struct dev_pm_info {
 	pm_message_t		power_state;
 	bool			can_wakeup:1;
@@ -677,13 +774,14 @@ struct dev_pm_info {
 	struct list_head	entry;
 	struct completion	completion;
 	struct wakeup_source	*wakeup;
+	bool			work_in_progress;	/* Owned by the PM core */
 	bool			wakeup_path:1;
 	bool			syscore:1;
 	bool			no_pm_callbacks:1;	/* Owned by the PM core */
-	bool			work_in_progress:1;	/* Owned by the PM core */
 	bool			smart_suspend:1;	/* Owned by the PM core */
 	bool			must_resume:1;		/* Owned by the PM core */
 	bool			may_skip_resume:1;	/* Set by subsystems */
+	bool			out_band_wakeup:1;
 	bool			strict_midlayer:1;
 #else
 	bool			should_wakeup:1;

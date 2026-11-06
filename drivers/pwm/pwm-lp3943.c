@@ -38,6 +38,9 @@ lp3943_pwm_request_map(struct lp3943_pwm *lp3943_pwm, int hwpwm)
 	struct lp3943_pwm_map *pwm_map = &lp3943_pwm->pwm_map[hwpwm];
 	int i, offset;
 
+	if (!pdata->pwms[hwpwm])
+		return ERR_PTR(-ENODEV);
+
 	pwm_map->output = pdata->pwms[hwpwm]->output;
 	pwm_map->num_outputs = pdata->pwms[hwpwm]->num_outputs;
 
@@ -296,7 +299,7 @@ static int lp3943_pwm_probe(struct platform_device *pdev)
 
 #ifdef CONFIG_OF
 static const struct of_device_id lp3943_pwm_of_match[] = {
-	{ .compatible = "ti,lp3943-pwm", },
+	{ .compatible = "ti,lp3943-pwm" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, lp3943_pwm_of_match);

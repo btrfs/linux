@@ -6,17 +6,12 @@
  *	Suman Anna <s-anna@ti.com>
  */
 
-#include <linux/dma-mapping.h>
 #include <linux/err.h>
 #include <linux/interrupt.h>
-#include <linux/kernel.h>
-#include <linux/mailbox_client.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
-#include <linux/of_reserved_mem.h>
 #include <linux/of_platform.h>
-#include <linux/omap-mailbox.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/remoteproc.h>
@@ -1047,6 +1042,10 @@ static int k3_r5_cluster_rproc_init(struct platform_device *pdev)
 			goto out;
 		}
 
+		ret = dma_coerce_mask_and_coherent(&rproc->dev, DMA_BIT_MASK(48));
+		if (ret)
+			dev_warn(dev, "Failed to set DMA mask (%d)\n", ret);
+
 		/* K3 R5s have a Region Address Translator (RAT) but no MMU */
 		rproc->has_iommu = false;
 		/* error recovery is not supported at present */
@@ -1074,11 +1073,9 @@ static int k3_r5_cluster_rproc_init(struct platform_device *pdev)
 		}
 
 		kproc->reset = devm_reset_control_get_exclusive(cdev, NULL);
-		if (IS_ERR_OR_NULL(kproc->reset)) {
-			ret = PTR_ERR_OR_ZERO(kproc->reset);
-			if (!ret)
-				ret = -ENODEV;
-			dev_err_probe(cdev, ret, "failed to get reset handle\n");
+		if (IS_ERR(kproc->reset)) {
+			ret = dev_err_probe(cdev, PTR_ERR(kproc->reset),
+					    "failed to get reset handle\n");
 			goto out;
 		}
 

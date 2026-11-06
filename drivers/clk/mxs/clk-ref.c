@@ -113,11 +113,11 @@ static const struct clk_ops clk_ref_ops = {
 struct clk *mxs_clk_ref(const char *name, const char *parent_name,
 			void __iomem *reg, u8 idx)
 {
+	struct clk_init_data init = {};
 	struct clk_ref *ref;
 	struct clk *clk;
-	struct clk_init_data init;
 
-	ref = kzalloc(sizeof(*ref), GFP_KERNEL);
+	ref = kzalloc_obj(*ref);
 	if (!ref)
 		return ERR_PTR(-ENOMEM);
 

@@ -103,18 +103,19 @@ static void efx_tc_counter_work(struct work_struct *work)
 			continue;
 		if (time_after_eq(encap->neigh->used, touched))
 			continue;
+
 		encap->neigh->used = touched;
+
 		/* We have passed traffic using this ARP entry, so
 		 * indicate to the ARP cache that it's still active
 		 */
 		if (encap->neigh->dst_ip)
-			n = neigh_lookup(&arp_tbl, &encap->neigh->dst_ip,
-					 encap->neigh->egdev);
+			n = ipv4_neigh_lookup(encap->neigh->egdev,
+					      &encap->neigh->dst_ip);
 		else
 #if IS_ENABLED(CONFIG_IPV6)
-			n = neigh_lookup(ipv6_stub->nd_tbl,
-					 &encap->neigh->dst_ip6,
-					 encap->neigh->egdev);
+			n = ipv6_neigh_lookup(encap->neigh->egdev,
+					      &encap->neigh->dst_ip6);
 #else
 			n = NULL;
 #endif
@@ -135,7 +136,7 @@ struct efx_tc_counter *efx_tc_flower_allocate_counter(struct efx_nic *efx,
 	struct efx_tc_counter *cnt;
 	int rc, rc2;
 
-	cnt = kzalloc(sizeof(*cnt), GFP_USER);
+	cnt = kzalloc_obj(*cnt, GFP_USER);
 	if (!cnt)
 		return ERR_PTR(-ENOMEM);
 
@@ -226,7 +227,7 @@ struct efx_tc_counter_index *efx_tc_flower_get_counter_index(
 	struct efx_tc_counter_index *ctr, *old;
 	struct efx_tc_counter *cnt;
 
-	ctr = kzalloc(sizeof(*ctr), GFP_USER);
+	ctr = kzalloc_obj(*ctr, GFP_USER);
 	if (!ctr)
 		return ERR_PTR(-ENOMEM);
 	ctr->cookie = cookie;

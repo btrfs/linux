@@ -43,48 +43,110 @@ void __mmap_lock_do_trace_released(struct mm_struct *mm, bool write)
 EXPORT_SYMBOL(__mmap_lock_do_trace_released);
 #endif /* CONFIG_TRACING */
 
-#ifdef CONFIG_MMU
-#ifdef CONFIG_PER_VMA_LOCK
-static inline bool __vma_enter_locked(struct vm_area_struct *vma, bool detaching)
-{
-	unsigned int tgt_refcnt = VMA_LOCK_OFFSET;
+/* State shared across __vma_[start, end]_exclude_readers. */
+struct vma_exclude_readers_state {
+	/* Input parameters. */
+	struct vm_area_struct *vma;
+	int state; /* TASK_KILLABLE or TASK_UNINTERRUPTIBLE. */
+	bool detaching;
 
-	/* Additional refcnt if the vma is attached. */
-	if (!detaching)
-		tgt_refcnt++;
+	/* Output parameters. */
+	bool detached;
+	bool exclusive; /* Are we exclusively locked? */
+};
+
+/*
+ * Now that all readers have been evicted, mark the VMA as being out of the
+ * 'exclude readers' state.
+ */
+static void __vma_end_exclude_readers(struct vma_exclude_readers_state *ves)
+{
+	struct vm_area_struct *vma = ves->vma;
+
+	VM_WARN_ON_ONCE(ves->detached);
+
+	ves->detached = refcount_sub_and_test(VM_REFCNT_EXCLUDE_READERS_FLAG,
+					      &vma->vm_refcnt);
+	__vma_lockdep_release_exclusive(vma);
+}
+
+static unsigned int get_target_refcnt(struct vma_exclude_readers_state *ves)
+{
+	const unsigned int tgt = ves->detaching ? 0 : 1;
+
+	return tgt | VM_REFCNT_EXCLUDE_READERS_FLAG;
+}
+
+/*
+ * Mark the VMA as being in a state of excluding readers, check to see if any
+ * VMA read locks are indeed held, and if so wait for them to be released.
+ *
+ * Note that this function pairs with vma_refcount_put() which will wake up this
+ * thread when it detects that the last reader has released its lock.
+ *
+ * The ves->state parameter ought to be set to TASK_UNINTERRUPTIBLE in cases
+ * where we wish the thread to sleep uninterruptibly or TASK_KILLABLE if a fatal
+ * signal is permitted to kill it.
+ *
+ * The function sets the ves->exclusive parameter to true if readers were
+ * excluded, or false if the VMA was detached or an error arose on wait.
+ *
+ * If the function indicates an exclusive lock was acquired via ves->exclusive
+ * the caller is required to invoke __vma_end_exclude_readers() once the
+ * exclusive state is no longer required.
+ *
+ * If ves->state is set to something other than TASK_UNINTERRUPTIBLE, the
+ * function may also return -EINTR to indicate a fatal signal was received while
+ * waiting.  Otherwise, the function returns 0.
+ */
+static int __vma_start_exclude_readers(struct vma_exclude_readers_state *ves)
+{
+	struct vm_area_struct *vma = ves->vma;
+	unsigned int tgt_refcnt = get_target_refcnt(ves);
+	int err = 0;
+
+	mmap_assert_write_locked(vma->vm_mm);
 
 	/*
 	 * If vma is detached then only vma_mark_attached() can raise the
 	 * vm_refcnt. mmap_write_lock prevents racing with vma_mark_attached().
+	 *
+	 * See the comment describing the vm_area_struct->vm_refcnt field for
+	 * details of possible refcnt values.
 	 */
-	if (!refcount_add_not_zero(VMA_LOCK_OFFSET, &vma->vm_refcnt))
-		return false;
+	if (!refcount_add_not_zero(VM_REFCNT_EXCLUDE_READERS_FLAG, &vma->vm_refcnt)) {
+		ves->detached = true;
+		return 0;
+	}
 
-	rwsem_acquire(&vma->vmlock_dep_map, 0, 0, _RET_IP_);
-	rcuwait_wait_event(&vma->vm_mm->vma_writer_wait,
+	__vma_lockdep_acquire_exclusive(vma);
+	err = rcuwait_wait_event(&vma->vm_mm->vma_writer_wait,
 		   refcount_read(&vma->vm_refcnt) == tgt_refcnt,
-		   TASK_UNINTERRUPTIBLE);
-	lock_acquired(&vma->vmlock_dep_map, _RET_IP_);
+		   ves->state);
+	if (err) {
+		__vma_end_exclude_readers(ves);
+		return err;
+	}
 
-	return true;
+	__vma_lockdep_stat_mark_acquired(vma);
+	ves->exclusive = true;
+	return 0;
 }
 
-static inline void __vma_exit_locked(struct vm_area_struct *vma, bool *detached)
+int __vma_start_write(struct vm_area_struct *vma, int state)
 {
-	*detached = refcount_sub_and_test(VMA_LOCK_OFFSET, &vma->vm_refcnt);
-	rwsem_release(&vma->vmlock_dep_map, _RET_IP_);
-}
+	const unsigned int mm_lock_seq = __vma_raw_mm_seqnum(vma);
+	struct vma_exclude_readers_state ves = {
+		.vma = vma,
+		.state = state,
+	};
+	int err;
 
-void __vma_start_write(struct vm_area_struct *vma, unsigned int mm_lock_seq)
-{
-	bool locked;
-
-	/*
-	 * __vma_enter_locked() returns false immediately if the vma is not
-	 * attached, otherwise it waits until refcnt is indicating that vma
-	 * is attached with no readers.
-	 */
-	locked = __vma_enter_locked(vma, false);
+	err = __vma_start_exclude_readers(&ves);
+	if (err) {
+		WARN_ON_ONCE(ves.detached);
+		return err;
+	}
 
 	/*
 	 * We should use WRITE_ONCE() here because we can have concurrent reads
@@ -94,54 +156,76 @@ void __vma_start_write(struct vm_area_struct *vma, unsigned int mm_lock_seq)
 	 */
 	WRITE_ONCE(vma->vm_lock_seq, mm_lock_seq);
 
-	if (locked) {
-		bool detached;
-
-		__vma_exit_locked(vma, &detached);
-		WARN_ON_ONCE(detached); /* vma should remain attached */
+	if (ves.exclusive) {
+		__vma_end_exclude_readers(&ves);
+		/* VMA should remain attached. */
+		WARN_ON_ONCE(ves.detached);
 	}
+
+	return 0;
 }
 EXPORT_SYMBOL_GPL(__vma_start_write);
 
-void vma_mark_detached(struct vm_area_struct *vma)
+void __vma_exclude_readers_for_detach(struct vm_area_struct *vma)
 {
-	vma_assert_write_locked(vma);
-	vma_assert_attached(vma);
+	struct vma_exclude_readers_state ves = {
+		.vma = vma,
+		.state = TASK_UNINTERRUPTIBLE,
+		.detaching = true,
+	};
+	int err;
 
 	/*
-	 * We are the only writer, so no need to use vma_refcount_put().
-	 * The condition below is unlikely because the vma has been already
-	 * write-locked and readers can increment vm_refcnt only temporarily
-	 * before they check vm_lock_seq, realize the vma is locked and drop
-	 * back the vm_refcnt. That is a narrow window for observing a raised
-	 * vm_refcnt.
+	 * Wait until the VMA is detached with no readers. Since we hold the VMA
+	 * write lock, the only read locks that might be present are those from
+	 * threads trying to acquire the read lock and incrementing the
+	 * reference count before realising the write lock is held and
+	 * decrementing it.
 	 */
-	if (unlikely(!refcount_dec_and_test(&vma->vm_refcnt))) {
-		/* Wait until vma is detached with no readers. */
-		if (__vma_enter_locked(vma, true)) {
-			bool detached;
-
-			__vma_exit_locked(vma, &detached);
-			WARN_ON_ONCE(!detached);
-		}
+	err = __vma_start_exclude_readers(&ves);
+	if (!err && ves.exclusive) {
+		/*
+		 * Once this is complete, no readers can increment the
+		 * reference count, and the VMA is marked detached.
+		 */
+		__vma_end_exclude_readers(&ves);
 	}
+	/* If an error arose but we were detached anyway, we don't care. */
+	WARN_ON_ONCE(!ves.detached);
+}
+
+/* Do the VMA, mm seqcounts indicate the VMA is write locked? */
+static bool vma_seqcount_is_write_locked(unsigned int vma_seq, unsigned int mm_seq)
+{
+	/* VMA and mm sequence numbers must match for a write lock. */
+	if (vma_seq != mm_seq)
+		return false;
+
+	/*
+	 * The VMA seqcount is always odd if locked. For an attached VMA an even
+	 * value can only be the zero stored by __mm_reset_vma_seqcounts(),
+	 * never a write lock.
+	 */
+	return vma_seq & 1;
 }
 
 /*
  * Try to read-lock a vma. The function is allowed to occasionally yield false
  * locked result to avoid performance overhead, in which case we fall back to
  * using mmap_lock. The function should never yield false unlocked result.
- * False locked result is possible if mm_lock_seq overflows or if vma gets
- * reused and attached to a different mm before we lock it.
+ * False locked result is possible if vma gets reused and attached to a
+ * different mm before we lock it.
  * Returns the vma on success, NULL on failure to lock and EAGAIN if vma got
  * detached.
  *
  * IMPORTANT: RCU lock must be held upon entering the function, but upon error
  *            IT IS RELEASED. The caller must handle this correctly.
  */
-static inline struct vm_area_struct *vma_start_read(struct mm_struct *mm,
-						    struct vm_area_struct *vma)
+static struct vm_area_struct *vma_start_read(struct mm_struct *mm,
+					     struct vm_area_struct *vma)
 {
+	unsigned int vma_seq;
+	unsigned int mm_seq;
 	struct mm_struct *other_mm;
 	int oldcnt;
 
@@ -153,41 +237,54 @@ static inline struct vm_area_struct *vma_start_read(struct mm_struct *mm,
 	 * we don't rely on for anything - the mm_lock_seq read against which we
 	 * need ordering is below.
 	 */
-	if (READ_ONCE(vma->vm_lock_seq) == READ_ONCE(mm->mm_lock_seq.sequence)) {
+	vma_seq = READ_ONCE(vma->vm_lock_seq);
+	mm_seq = READ_ONCE(mm->mm_lock_seq.sequence);
+	if (vma_seqcount_is_write_locked(vma_seq, mm_seq)) {
 		vma = NULL;
 		goto err;
 	}
 
 	/*
-	 * If VMA_LOCK_OFFSET is set, __refcount_inc_not_zero_limited_acquire()
-	 * will fail because VMA_REF_LIMIT is less than VMA_LOCK_OFFSET.
+	 * If VM_REFCNT_EXCLUDE_READERS_FLAG is set,
+	 * __refcount_inc_not_zero_limited_acquire() will fail because
+	 * VM_REFCNT_LIMIT is less than VM_REFCNT_EXCLUDE_READERS_FLAG.
+	 *
 	 * Acquire fence is required here to avoid reordering against later
 	 * vm_lock_seq check and checks inside lock_vma_under_rcu().
 	 */
 	if (unlikely(!__refcount_inc_not_zero_limited_acquire(&vma->vm_refcnt, &oldcnt,
-							      VMA_REF_LIMIT))) {
+							      VM_REFCNT_LIMIT))) {
 		/* return EAGAIN if vma got detached from under us */
 		vma = oldcnt ? NULL : ERR_PTR(-EAGAIN);
 		goto err;
 	}
 
-	rwsem_acquire_read(&vma->vmlock_dep_map, 0, 1, _RET_IP_);
+	__vma_lockdep_acquire_read(vma);
 
 	if (unlikely(vma->vm_mm != mm))
 		goto err_unstable;
 
 	/*
-	 * Overflow of vm_lock_seq/mm_lock_seq might produce false locked result.
-	 * False unlocked result is impossible because we modify and check
+	 * False unlocked result is impossible because a write lock sets
 	 * vma->vm_lock_seq under vma->vm_refcnt protection and mm->mm_lock_seq
 	 * modification invalidates all existing locks.
 	 *
-	 * We must use ACQUIRE semantics for the mm_lock_seq so that if we are
-	 * racing with vma_end_write_all(), we only start reading from the VMA
-	 * after it has been unlocked.
-	 * This pairs with RELEASE semantics in vma_end_write_all().
+	 * ACQUIRE semantics are required for both reads.
+	 *
+	 * __mm_reset_vma_seqcounts() might reset vma->vm_lock_seq to zero
+	 * after an overflow. A reader observing that zero must also observe
+	 * the VMA modifications made under the write lock which just ended, so
+	 * the ACQUIRE pairs with the smp_wmb() in do_raw_write_seqcount_end()
+	 * that precedes the reset stores.
+	 *
+	 * The ACQUIRE semantics for the mm_lock_seq read is required so that,
+	 * if we are racing with vma_end_write_all(), we only start reading from
+	 * the VMA after it has been unlocked. This pairs with the RELEASE
+	 * semantics in vma_end_write_all().
 	 */
-	if (unlikely(vma->vm_lock_seq == raw_read_seqcount(&mm->mm_lock_seq))) {
+	vma_seq = smp_load_acquire(&vma->vm_lock_seq);
+	mm_seq = raw_read_seqcount(&mm->mm_lock_seq);
+	if (unlikely(vma_seqcount_is_write_locked(vma_seq, mm_seq))) {
 		vma_refcount_put(vma);
 		vma = NULL;
 		goto err;
@@ -227,6 +324,8 @@ struct vm_area_struct *lock_vma_under_rcu(struct mm_struct *mm,
 	MA_STATE(mas, &mm->mm_mt, address, address);
 	struct vm_area_struct *vma;
 
+	if (!IS_ENABLED(CONFIG_MMU))
+		return NULL;
 retry:
 	rcu_read_lock();
 	vma = mas_walk(&mas);
@@ -267,6 +366,41 @@ retry:
 inval:
 	count_vm_vma_lock_event(VMA_LOCK_ABORT);
 	return NULL;
+}
+
+/**
+ * vma_start_read_unlocked() - Find the VMA covering 'address' and read-lock it.
+ * @mm: the mm_struct of the address space to search
+ * @address: address that the vma should contain
+ *
+ * The fast path does not take mmap_lock. Waits for writers to finish if the
+ * VMA is being modified by taking mmap_lock.
+ * Use when mmap_lock is not held, otherwise use vma_start_read_locked().
+ * Nothing prevents VMAs being unmapped/mapped before or after the VMA is
+ * looked up, if a stronger guarantee is required, take an mmap_lock.
+ *
+ * Return: If a VMA exists which spans @address, return that VMA, read-locked.
+ * If no VMA is mapped there or, very unlikely, a reference count overflow
+ * occurred, return NULL.
+ */
+struct vm_area_struct *vma_start_read_unlocked(struct mm_struct *mm,
+					       unsigned long address)
+{
+	struct vm_area_struct *vma;
+
+	/* Fast path: return stable VMA covering 'address': */
+	vma = lock_vma_under_rcu(mm, address);
+	if (vma)
+		return vma;
+
+	/* Slow path: preclude VMA writers by temporarily getting mmap read lock. */
+	mmap_read_lock(mm);
+	vma = vma_lookup(mm, address);
+	if (vma && !vma_start_read_locked(vma))
+		vma = NULL;
+	mmap_read_unlock(mm);
+
+	return vma;
 }
 
 static struct vm_area_struct *lock_next_vma_under_mmap_lock(struct mm_struct *mm,
@@ -359,7 +493,43 @@ fallback:
 
 	return vma;
 }
-#endif /* CONFIG_PER_VMA_LOCK */
+
+/*
+ * Called with mmap write lock held after mm->mm_lock_seq just overflowed (and
+ * therefore zero), with all VMA write locks now released.
+ *
+ * The stores below follow the smp_wmb() in do_raw_write_seqcount_end(), so
+ * a reader that observes a reset value also observes this cycle's VMA
+ * modifications (ordered by the ACQUIRE on vma->vm_lock_seq in
+ * vma_start_read()).
+ */
+void __mm_reset_vma_seqcounts(struct mm_struct *mm)
+{
+	struct vm_area_struct *vma;
+	VMA_ITERATOR(vmi, mm, 0);
+
+	mmap_assert_write_locked(mm);
+	VM_WARN_ON_ONCE(mm->mm_lock_seq.sequence);
+
+	/*
+	 * Failing to reset means stale vma->vm_lock_seq values could result in
+	 * those VMAs becoming spuriously write locked when mm->mm_lock_seq
+	 * happens to match their values.
+	 *
+	 * This is problematic, as it causes the VMA write lock to not exclude
+	 * readers, which can result in concurrent readers while a VMA write
+	 * lock is held.
+	 *
+	 * Avoid this by resetting to an even value (indicates no write lock
+	 * held).
+	 *
+	 * Readers will either observe zero (not write locked) or the previous
+	 * value, so this is safe.
+	 */
+	for_each_vma(vmi, vma)
+		WRITE_ONCE(vma->vm_lock_seq, 0);
+}
+EXPORT_SYMBOL(__mm_reset_vma_seqcounts);
 
 #ifdef CONFIG_LOCK_MM_AND_FIND_VMA
 #include <linux/extable.h>
@@ -476,23 +646,3 @@ fail:
 	return NULL;
 }
 #endif /* CONFIG_LOCK_MM_AND_FIND_VMA */
-
-#else /* CONFIG_MMU */
-
-/*
- * At least xtensa ends up having protection faults even with no
- * MMU.. No stack expansion, at least.
- */
-struct vm_area_struct *lock_mm_and_find_vma(struct mm_struct *mm,
-			unsigned long addr, struct pt_regs *regs)
-{
-	struct vm_area_struct *vma;
-
-	mmap_read_lock(mm);
-	vma = vma_lookup(mm, addr);
-	if (!vma)
-		mmap_read_unlock(mm);
-	return vma;
-}
-
-#endif /* CONFIG_MMU */

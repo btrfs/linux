@@ -236,8 +236,8 @@ static void bcm63138_leds_create_led(struct bcm63138_leds *leds,
 
 	pinctrl = devm_pinctrl_get_select_default(led->cdev.dev);
 	if (IS_ERR(pinctrl) && PTR_ERR(pinctrl) != -ENODEV) {
-		dev_warn(led->cdev.dev, "Failed to select %pOF pinctrl: %ld\n",
-			 np, PTR_ERR(pinctrl));
+		dev_warn(led->cdev.dev, "Failed to select %pOF pinctrl: %pe\n",
+			 np, pinctrl);
 	}
 
 	bit = BIT(led->pin);
@@ -296,6 +296,7 @@ static const struct of_device_id bcm63138_leds_of_match_table[] = {
 	{ .compatible = "brcm,bcm63138-leds", },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, bcm63138_leds_of_match_table);
 
 static struct platform_driver bcm63138_leds_driver = {
 	.probe = bcm63138_leds_probe,
@@ -310,4 +311,3 @@ module_platform_driver(bcm63138_leds_driver);
 MODULE_AUTHOR("Rafał Miłecki");
 MODULE_DESCRIPTION("Broadcom BCM63138 SoC LED driver");
 MODULE_LICENSE("GPL");
-MODULE_DEVICE_TABLE(of, bcm63138_leds_of_match_table);

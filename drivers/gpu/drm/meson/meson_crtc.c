@@ -74,7 +74,7 @@ static const struct drm_crtc_funcs meson_crtc_funcs = {
 	.atomic_duplicate_state = drm_atomic_helper_crtc_duplicate_state,
 	.destroy		= drm_crtc_cleanup,
 	.page_flip		= drm_atomic_helper_page_flip,
-	.reset			= drm_atomic_helper_crtc_reset,
+	.atomic_create_state = drm_atomic_helper_crtc_create_state,
 	.set_config             = drm_atomic_helper_set_config,
 	.enable_vblank		= meson_crtc_enable_vblank,
 	.disable_vblank		= meson_crtc_disable_vblank,
@@ -82,7 +82,7 @@ static const struct drm_crtc_funcs meson_crtc_funcs = {
 };
 
 static void meson_g12a_crtc_atomic_enable(struct drm_crtc *crtc,
-					  struct drm_atomic_state *state)
+					  struct drm_atomic_commit *state)
 {
 	struct meson_crtc *meson_crtc = to_meson_crtc(crtc);
 	struct drm_crtc_state *crtc_state = crtc->state;
@@ -118,7 +118,7 @@ static void meson_g12a_crtc_atomic_enable(struct drm_crtc *crtc,
 }
 
 static void meson_crtc_atomic_enable(struct drm_crtc *crtc,
-				     struct drm_atomic_state *state)
+				     struct drm_atomic_commit *state)
 {
 	struct meson_crtc *meson_crtc = to_meson_crtc(crtc);
 	struct drm_crtc_state *crtc_state = crtc->state;
@@ -146,7 +146,7 @@ static void meson_crtc_atomic_enable(struct drm_crtc *crtc,
 }
 
 static void meson_g12a_crtc_atomic_disable(struct drm_crtc *crtc,
-					   struct drm_atomic_state *state)
+					   struct drm_atomic_commit *state)
 {
 	struct meson_crtc *meson_crtc = to_meson_crtc(crtc);
 	struct meson_drm *priv = meson_crtc->priv;
@@ -171,7 +171,7 @@ static void meson_g12a_crtc_atomic_disable(struct drm_crtc *crtc,
 }
 
 static void meson_crtc_atomic_disable(struct drm_crtc *crtc,
-				      struct drm_atomic_state *state)
+				      struct drm_atomic_commit *state)
 {
 	struct meson_crtc *meson_crtc = to_meson_crtc(crtc);
 	struct meson_drm *priv = meson_crtc->priv;
@@ -201,7 +201,7 @@ static void meson_crtc_atomic_disable(struct drm_crtc *crtc,
 }
 
 static void meson_crtc_atomic_begin(struct drm_crtc *crtc,
-				    struct drm_atomic_state *state)
+				    struct drm_atomic_commit *state)
 {
 	struct meson_crtc *meson_crtc = to_meson_crtc(crtc);
 	unsigned long flags;
@@ -217,7 +217,7 @@ static void meson_crtc_atomic_begin(struct drm_crtc *crtc,
 }
 
 static void meson_crtc_atomic_flush(struct drm_crtc *crtc,
-				    struct drm_atomic_state *state)
+				    struct drm_atomic_commit *state)
 {
 	struct meson_crtc *meson_crtc = to_meson_crtc(crtc);
 	struct meson_drm *priv = meson_crtc->priv;

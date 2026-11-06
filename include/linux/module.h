@@ -24,11 +24,11 @@
 #include <linux/jump_label.h>
 #include <linux/export.h>
 #include <linux/rbtree_latch.h>
-#include <linux/error-injection.h>
 #include <linux/tracepoint-defs.h>
 #include <linux/srcu.h>
 #include <linux/static_call_types.h>
 #include <linux/dynamic_debug.h>
+#include <linux/panic.h>
 
 #include <linux/percpu.h>
 #include <asm/module.h>
@@ -151,16 +151,10 @@ extern void cleanup_module(void);
 #define __init_or_module
 #define __initdata_or_module
 #define __initconst_or_module
-#define __INIT_OR_MODULE	.text
-#define __INITDATA_OR_MODULE	.data
-#define __INITRODATA_OR_MODULE	.section ".rodata","a",%progbits
 #else
 #define __init_or_module __init
 #define __initdata_or_module __initdata
 #define __initconst_or_module __initconst
-#define __INIT_OR_MODULE __INIT
-#define __INITDATA_OR_MODULE __INITDATA
-#define __INITRODATA_OR_MODULE __INITRODATA
 #endif /*CONFIG_MODULES*/
 
 struct module_kobject *lookup_or_create_module_kobject(const char *name);
@@ -251,10 +245,11 @@ struct module_kobject *lookup_or_create_module_kobject(const char *name);
  */
 #define __mod_device_table(type, name)	\
 	__PASTE(__mod_device_table__,	\
+	__PASTE(kmod_,			\
 	__PASTE(__KBUILD_MODNAME,	\
 	__PASTE(__,			\
 	__PASTE(type,			\
-	__PASTE(__, name)))))
+	__PASTE(__, name))))))
 
 /* Creates an alias so file2alias.c can find device table. */
 #define MODULE_DEVICE_TABLE(type, name)					\
@@ -418,11 +413,13 @@ struct module {
 	struct module_attribute *modinfo_attrs;
 	const char *version;
 	const char *srcversion;
+	const char *imported_namespaces;
 	struct kobject *holders_dir;
 
 	/* Exported symbols */
 	const struct kernel_symbol *syms;
 	const u32 *crcs;
+	const u8 *flagstab;
 	unsigned int num_syms;
 
 #ifdef CONFIG_ARCH_USES_CFI_TRAPS
@@ -438,9 +435,6 @@ struct module {
 	unsigned int num_kp;
 
 	/* GPL-only exported symbols. */
-	unsigned int num_gpl_syms;
-	const struct kernel_symbol *gpl_syms;
-	const u32 *gpl_crcs;
 	bool using_gplonly_symbols;
 
 #ifdef CONFIG_MODULE_SIG
@@ -483,10 +477,6 @@ struct module {
 	struct module_notes_attrs *notes_attrs;
 #endif
 
-	/* The command line arguments (may be mangled).  People like
-	   keeping pointers to this stuff */
-	char *args;
-
 #ifdef CONFIG_SMP
 	/* Per-cpu data. */
 	void __percpu *percpu;
@@ -512,6 +502,10 @@ struct module {
 	unsigned int btf_base_data_size;
 	void *btf_data;
 	void *btf_base_data;
+#endif
+#if IS_ENABLED(CONFIG_DEBUG_INFO_BTF_INLINE)
+	unsigned int btf_inline_data_size;
+	void *btf_inline_data;
 #endif
 #ifdef CONFIG_JUMP_LABEL
 	struct jump_entry *jump_entries;
@@ -747,6 +741,15 @@ static inline void __module_get(struct module *module)
 	__mod ? __mod->name : "kernel";		\
 })
 
+static inline const unsigned char *module_buildid(struct module *mod)
+{
+#ifdef CONFIG_STACKTRACE_BUILD_ID
+	return mod->build_id;
+#else
+	return NULL;
+#endif
+}
+
 /* Dereference module function descriptor */
 void *dereference_module_function_descriptor(struct module *mod, void *ptr);
 
@@ -769,9 +772,10 @@ static inline bool is_livepatch_module(struct module *mod)
 #endif
 }
 
-void set_module_sig_enforced(void);
-
 void module_for_each_mod(int(*func)(struct module *mod, void *data), void *data);
+
+void add_taint_module(struct module *mod, unsigned flag,
+		      enum lockdep_ok lockdep_ok);
 
 #else /* !CONFIG_MODULES... */
 
@@ -865,10 +869,6 @@ static inline bool module_requested_async_probing(struct module *module)
 }
 
 
-static inline void set_module_sig_enforced(void)
-{
-}
-
 /* Dereference module function descriptor */
 static inline
 void *dereference_module_function_descriptor(struct module *mod, void *ptr)
@@ -883,6 +883,12 @@ static inline bool module_is_coming(struct module *mod)
 
 static inline void module_for_each_mod(int(*func)(struct module *mod, void *data), void *data)
 {
+}
+
+static inline void add_taint_module(struct module *mod, unsigned flag,
+				    enum lockdep_ok lockdep_ok)
+{
+	add_taint(flag, lockdep_ok);
 }
 #endif /* CONFIG_MODULES */
 
@@ -924,6 +930,8 @@ static inline bool retpoline_module_ok(bool has_retpoline)
 #ifdef CONFIG_MODULE_SIG
 bool is_module_sig_enforced(void);
 
+void set_module_sig_enforced(void);
+
 static inline bool module_sig_ok(struct module *module)
 {
 	return module->sig_ok;
@@ -932,6 +940,10 @@ static inline bool module_sig_ok(struct module *module)
 static inline bool is_module_sig_enforced(void)
 {
 	return false;
+}
+
+static inline void set_module_sig_enforced(void)
+{
 }
 
 static inline bool module_sig_ok(struct module *module)

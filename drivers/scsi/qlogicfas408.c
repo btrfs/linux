@@ -454,9 +454,9 @@ irqreturn_t qlogicfas408_ihandl(int irq, void *dev_id)
 	unsigned long flags;
 	struct Scsi_Host *host = dev_id;
 
-	spin_lock_irqsave(host->host_lock, flags);
+	spin_lock_irqsave(&host->host_lock, flags);
 	ql_ihandl(dev_id);
-	spin_unlock_irqrestore(host->host_lock, flags);
+	spin_unlock_irqrestore(&host->host_lock, flags);
 	return IRQ_HANDLED;
 }
 
@@ -464,7 +464,7 @@ irqreturn_t qlogicfas408_ihandl(int irq, void *dev_id)
  *	Queued command
  */
 
-static int qlogicfas408_queuecommand_lck(struct scsi_cmnd *cmd)
+static enum scsi_qc_status qlogicfas408_queuecommand_lck(struct scsi_cmnd *cmd)
 {
 	void (*done)(struct scsi_cmnd *) = scsi_done;
 	struct qlogicfas408_priv *priv = get_priv_by_cmd(cmd);
@@ -536,9 +536,9 @@ int qlogicfas408_host_reset(struct scsi_cmnd *cmd)
 
 	priv->qabort = 2;
 
-	spin_lock_irqsave(cmd->device->host->host_lock, flags);
+	spin_lock_irqsave(&cmd->device->host->host_lock, flags);
 	ql_zap(priv);
-	spin_unlock_irqrestore(cmd->device->host->host_lock, flags);
+	spin_unlock_irqrestore(&cmd->device->host->host_lock, flags);
 
 	return SUCCESS;
 }

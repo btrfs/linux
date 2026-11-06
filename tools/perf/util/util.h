@@ -11,13 +11,11 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <linux/compiler.h>
+#include <linux/bitmap.h>
 #include <sys/types.h>
 #ifndef __cplusplus
 #include <internal/cpumap.h>
 #endif
-
-extern const char perf_usage_string[];
-extern const char perf_more_info_string[];
 
 extern const char *input_name;
 
@@ -28,8 +26,6 @@ extern bool perf_host;
 extern bool perf_guest;
 
 /* General helper functions */
-void usage(const char *err) __noreturn;
-void die(const char *err, ...) __noreturn __printf(1, 2);
 
 struct dirent;
 struct strlist;
@@ -47,6 +43,10 @@ int sysctl__max_stack(void);
 bool sysctl__nmi_watchdog_enabled(void);
 
 int perf_tip(char **strp, const char *dirpath);
+
+void cpumask_to_cpulist(char *cpumask, char *cpulist);
+
+void print_separator2(int pre_dash_cnt, const char *s, int post_dash_cnt);
 
 #ifndef HAVE_SCHED_GETCPU_SUPPORT
 int sched_getcpu(void);
@@ -81,6 +81,8 @@ struct perf_debuginfod {
 	bool		 set;
 };
 void perf_debuginfod_setup(struct perf_debuginfod *di);
+
+const char *perf_basename(const char *path);
 
 char *filename_with_chroot(int pid, const char *filename);
 

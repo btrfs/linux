@@ -17,7 +17,6 @@
 #include <linux/kstrtox.h>
 #include <linux/linear_range.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/power_supply.h>
@@ -376,7 +375,7 @@ static int rt9467_set_value_from_ranges(struct rt9467_chg_data *data,
 	if (rsel == RT9467_RANGE_VMIVR) {
 		ret = linear_range_get_selector_high(range, value, &sel, &found);
 		if (ret)
-			value = range->max_sel;
+			sel = range->max_sel;
 	} else {
 		linear_range_get_selector_within(range, value, &sel);
 	}
@@ -588,6 +587,10 @@ static int rt9467_run_aicl(struct rt9467_chg_data *data)
 	aicl_vth = mivr_vth + RT9467_AICLVTH_GAP_uV;
 	ret = rt9467_set_value_from_ranges(data, F_AICL_VTH,
 					   RT9467_RANGE_AICL_VTH, aicl_vth);
+	if (ret) {
+		dev_err(data->dev, "Failed to set AICL VTH\n");
+		return ret;
+	}
 
 	/* Trigger AICL function */
 	ret = regmap_field_write(data->rm_field[F_AICL_MEAS], 1);
@@ -630,6 +633,39 @@ out:
 	return ret;
 }
 
+static int rt9467_set_batfet(struct rt9467_chg_data *data, int val)
+{
+	unsigned int regval;
+
+	switch (val) {
+	case POWER_SUPPLY_LOAD_SWITCH_ON:
+		regval = 0;
+		break;
+	case POWER_SUPPLY_LOAD_SWITCH_OFF:
+		regval = 1;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return regmap_field_write(data->rm_field[F_SHIP_MODE], regval);
+}
+
+static int rt9467_get_batfet(struct rt9467_chg_data *data, int *val)
+{
+	unsigned int regval;
+	int ret;
+
+	ret = regmap_field_read(data->rm_field[F_SHIP_MODE], &regval);
+	if (ret < 0)
+		return ret;
+
+	*val = regval ? POWER_SUPPLY_LOAD_SWITCH_OFF :
+			POWER_SUPPLY_LOAD_SWITCH_ON;
+
+	return 0;
+}
+
 static const enum power_supply_property rt9467_chg_properties[] = {
 	POWER_SUPPLY_PROP_STATUS,
 	POWER_SUPPLY_PROP_ONLINE,
@@ -645,6 +681,7 @@ static const enum power_supply_property rt9467_chg_properties[] = {
 	POWER_SUPPLY_PROP_USB_TYPE,
 	POWER_SUPPLY_PROP_PRECHARGE_CURRENT,
 	POWER_SUPPLY_PROP_CHARGE_TERM_CURRENT,
+	POWER_SUPPLY_PROP_LOAD_SWITCH,
 };
 
 static int rt9467_psy_get_property(struct power_supply *psy,
@@ -708,6 +745,8 @@ static int rt9467_psy_get_property(struct power_supply *psy,
 		val->intval = data->ieoc_ua;
 		mutex_unlock(&data->ichg_ieoc_lock);
 		return 0;
+	case POWER_SUPPLY_PROP_LOAD_SWITCH:
+		return rt9467_get_batfet(data, &val->intval);
 	default:
 		return -ENODATA;
 	}
@@ -744,6 +783,8 @@ static int rt9467_psy_set_property(struct power_supply *psy,
 						    RT9467_RANGE_IPREC, val->intval);
 	case POWER_SUPPLY_PROP_CHARGE_TERM_CURRENT:
 		return rt9467_psy_set_ieoc(data, val->intval);
+	case POWER_SUPPLY_PROP_LOAD_SWITCH:
+		return rt9467_set_batfet(data, val->intval);
 	default:
 		return -EINVAL;
 	}
@@ -761,6 +802,7 @@ static int rt9467_chg_prop_is_writeable(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_INPUT_VOLTAGE_LIMIT:
 	case POWER_SUPPLY_PROP_CHARGE_TERM_CURRENT:
 	case POWER_SUPPLY_PROP_PRECHARGE_CURRENT:
+	case POWER_SUPPLY_PROP_LOAD_SWITCH:
 		return 1;
 	default:
 		return 0;
@@ -774,6 +816,8 @@ static const struct power_supply_desc rt9467_chg_psy_desc = {
 		     BIT(POWER_SUPPLY_USB_TYPE_CDP) |
 		     BIT(POWER_SUPPLY_USB_TYPE_DCP) |
 		     BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN),
+	.load_switches = BIT(POWER_SUPPLY_LOAD_SWITCH_ON) |
+			 BIT(POWER_SUPPLY_LOAD_SWITCH_OFF),
 	.properties = rt9467_chg_properties,
 	.num_properties = ARRAY_SIZE(rt9467_chg_properties),
 	.property_is_writeable = rt9467_chg_prop_is_writeable,
@@ -790,14 +834,14 @@ static ssize_t sysoff_enable_show(struct device *dev,
 				  struct device_attribute *attr, char *buf)
 {
 	struct rt9467_chg_data *data = psy_device_to_chip(dev);
-	unsigned int sysoff_enable;
+	int val;
 	int ret;
 
-	ret = regmap_field_read(data->rm_field[F_SHIP_MODE], &sysoff_enable);
-	if (ret)
+	ret = rt9467_get_batfet(data, &val);
+	if (ret < 0)
 		return ret;
 
-	return sysfs_emit(buf, "%d\n", sysoff_enable);
+	return sysfs_emit(buf, "%d\n", val == POWER_SUPPLY_LOAD_SWITCH_OFF);
 }
 
 static ssize_t sysoff_enable_store(struct device *dev,
@@ -812,8 +856,9 @@ static ssize_t sysoff_enable_store(struct device *dev,
 	if (ret)
 		return ret;
 
-	ret = regmap_field_write(data->rm_field[F_SHIP_MODE], !!tmp);
-	if (ret)
+	ret = rt9467_set_batfet(data, tmp ? POWER_SUPPLY_LOAD_SWITCH_OFF :
+					    POWER_SUPPLY_LOAD_SWITCH_ON);
+	if (ret < 0)
 		return ret;
 
 	return count;
@@ -1027,8 +1072,7 @@ static int rt9467_request_interrupt(struct rt9467_chg_data *data)
 		ret = devm_request_threaded_irq(dev, virq, NULL, chg_irqs[i].handler,
 						IRQF_ONESHOT, chg_irqs[i].name, data);
 		if (ret)
-			return dev_err_probe(dev, ret, "Failed to request (%s) irq\n",
-					     chg_irqs[i].name);
+			return ret;
 	}
 
 	return 0;

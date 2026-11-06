@@ -19,6 +19,8 @@
 #include <linux/pm.h>
 #include <linux/device/bus.h>
 #include <linux/module.h>
+#include <linux/device-id/acpi.h>
+#include <linux/device-id/of.h>
 
 /**
  * enum probe_type - device driver probe type to try
@@ -85,6 +87,8 @@ enum probe_type {
  *		uevent.
  * @p:		Driver core's private data, no one other than the driver
  *		core can touch this.
+ * @p_cb:	Callbacks private to the driver core; no one other than the
+ *		driver core is allowed to touch this.
  *
  * The device driver-model tracks all of the drivers known to the system.
  * The main reason for this tracking is to enable the driver core to match
@@ -112,13 +116,20 @@ struct device_driver {
 	void (*shutdown) (struct device *dev);
 	int (*suspend) (struct device *dev, pm_message_t state);
 	int (*resume) (struct device *dev);
-	const struct attribute_group **groups;
-	const struct attribute_group **dev_groups;
+	const struct attribute_group *const *groups;
+	const struct attribute_group *const *dev_groups;
 
 	const struct dev_pm_ops *pm;
 	void (*coredump) (struct device *dev);
 
 	struct driver_private *p;
+	struct {
+		/*
+		 * Called after remove() but before devres entries are released.
+		 * This is a Rust only callback.
+		 */
+		void (*post_unbind_rust)(struct device *dev);
+	} p_cb;
 };
 
 
@@ -151,8 +162,6 @@ int __must_check driver_create_file(const struct device_driver *driver,
 void driver_remove_file(const struct device_driver *driver,
 			const struct driver_attribute *attr);
 
-int driver_set_override(struct device *dev, const char **override,
-			const char *s, size_t len);
 int __must_check driver_for_each_device(struct device_driver *drv, struct device *start,
 					void *data, device_iter_t fn);
 struct device *driver_find_device(const struct device_driver *drv,
@@ -287,5 +296,36 @@ static int __init __driver##_init(void) \
 	return __register(&(__driver) , ##__VA_ARGS__); \
 } \
 device_initcall(__driver##_init);
+
+/**
+ * subsys_driver() - Helper macro for drivers that don't do anything special
+ * in init/exit but have to register earlier, at subsys_initcall level, when
+ * built in. This eliminates a lot of boilerplate. Each driver may only use
+ * this macro once, and calling it replaces the init/exit boilerplate.
+ *
+ * @__driver: driver name
+ * @__register: register function for this driver type
+ * @__unregister: unregister function for this driver type
+ * @...: Additional arguments to be passed to __register and __unregister.
+ *
+ * This is meant to be a direct parallel of module_driver() above, but with
+ * the init call promoted to subsys_initcall() for built-in drivers so they
+ * are available earlier during boot. When built as a module subsys_initcall()
+ * collapses to module_init() and the normal module init/exit paths are used.
+ *
+ * Use this macro to construct bus specific macros for registering drivers,
+ * and do not use it on its own.
+ */
+#define subsys_driver(__driver, __register, __unregister, ...) \
+static int __init __driver##_init(void) \
+{ \
+	return __register(&(__driver), ##__VA_ARGS__); \
+} \
+subsys_initcall(__driver##_init) \
+static void __exit __driver##_exit(void) \
+{ \
+	__unregister(&(__driver), ##__VA_ARGS__); \
+} \
+module_exit(__driver##_exit)
 
 #endif	/* _DEVICE_DRIVER_H_ */

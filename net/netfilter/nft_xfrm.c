@@ -12,14 +12,15 @@
 #include <linux/netfilter/nf_tables.h>
 #include <net/netfilter/nf_tables_core.h>
 #include <net/netfilter/nf_tables.h>
+#include <net/dst_metadata.h>
 #include <linux/in.h>
 #include <net/xfrm.h>
 
 static const struct nla_policy nft_xfrm_policy[NFTA_XFRM_MAX + 1] = {
 	[NFTA_XFRM_KEY]		= NLA_POLICY_MAX(NLA_BE32, 255),
-	[NFTA_XFRM_DIR]		= { .type = NLA_U8 },
-	[NFTA_XFRM_SPNUM]	= NLA_POLICY_MAX(NLA_BE32, 255),
-	[NFTA_XFRM_DREG]	= { .type = NLA_U32 },
+	[NFTA_XFRM_DIR]		= NLA_POLICY_MAX(NLA_U8, XFRM_POLICY_OUT),
+	[NFTA_XFRM_SPNUM]	= NLA_POLICY_MAX(NLA_BE32, XFRM_MAX_DEPTH - 1),
+	[NFTA_XFRM_DREG]	= NLA_POLICY_MAX(NLA_BE32, NFT_REG32_MAX),
 };
 
 struct nft_xfrm {
@@ -132,7 +133,7 @@ static void nft_xfrm_state_get_key(const struct nft_xfrm *priv,
 	switch (priv->key) {
 	case NFT_XFRM_KEY_UNSPEC:
 	case __NFT_XFRM_KEY_MAX:
-		WARN_ON_ONCE(1);
+		DEBUG_NET_WARN_ON_ONCE(1);
 		break;
 	case NFT_XFRM_KEY_DADDR_IP4:
 		*dest = (__force __u32)state->id.daddr.a4;
@@ -177,9 +178,15 @@ static void nft_xfrm_get_eval_out(const struct nft_xfrm *priv,
 				  struct nft_regs *regs,
 				  const struct nft_pktinfo *pkt)
 {
-	const struct dst_entry *dst = skb_dst(pkt->skb);
+	const struct dst_entry *dst;
 	int i;
 
+	if (!skb_valid_dst(pkt->skb)) {
+		regs->verdict.code = NFT_BREAK;
+		return;
+	}
+
+	dst = skb_dst(pkt->skb);
 	for (i = 0; dst && dst->xfrm;
 	     dst = ((const struct xfrm_dst *)dst)->child, i++) {
 		if (i < priv->spnum)
@@ -206,7 +213,7 @@ static void nft_xfrm_get_eval(const struct nft_expr *expr,
 		nft_xfrm_get_eval_out(priv, regs, pkt);
 		break;
 	default:
-		WARN_ON_ONCE(1);
+		DEBUG_NET_WARN_ON_ONCE(1);
 		regs->verdict.code = NFT_BREAK;
 		break;
 	}
@@ -252,37 +259,11 @@ static int nft_xfrm_validate(const struct nft_ctx *ctx, const struct nft_expr *e
 			(1 << NF_INET_POST_ROUTING);
 		break;
 	default:
-		WARN_ON_ONCE(1);
+		DEBUG_NET_WARN_ON_ONCE(1);
 		return -EINVAL;
 	}
 
 	return nft_chain_validate_hooks(ctx->chain, hooks);
-}
-
-static bool nft_xfrm_reduce(struct nft_regs_track *track,
-			    const struct nft_expr *expr)
-{
-	const struct nft_xfrm *priv = nft_expr_priv(expr);
-	const struct nft_xfrm *xfrm;
-
-	if (!nft_reg_track_cmp(track, expr, priv->dreg)) {
-		nft_reg_track_update(track, expr, priv->dreg, priv->len);
-		return false;
-	}
-
-	xfrm = nft_expr_priv(track->regs[priv->dreg].selector);
-	if (priv->key != xfrm->key ||
-	    priv->dreg != xfrm->dreg ||
-	    priv->dir != xfrm->dir ||
-	    priv->spnum != xfrm->spnum) {
-		nft_reg_track_update(track, expr, priv->dreg, priv->len);
-		return false;
-	}
-
-	if (!track->regs[priv->dreg].bitwise)
-		return true;
-
-	return nft_expr_reduce_bitwise(track, expr);
 }
 
 static struct nft_expr_type nft_xfrm_type;
@@ -293,7 +274,6 @@ static const struct nft_expr_ops nft_xfrm_get_ops = {
 	.init		= nft_xfrm_get_init,
 	.dump		= nft_xfrm_get_dump,
 	.validate	= nft_xfrm_validate,
-	.reduce		= nft_xfrm_reduce,
 };
 
 static struct nft_expr_type nft_xfrm_type __read_mostly = {

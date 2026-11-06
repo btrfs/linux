@@ -54,6 +54,7 @@ detailed description):
 	- Setting keyboard language
 	- WWAN Antenna type
 	- Auxmac
+	- Hardware damage detection capability
 
 A compatibility table by model and feature is maintained on the web
 site, http://ibm-acpi.sf.net/. I appreciate any success or failure
@@ -582,7 +583,8 @@ Events that are propagated by the driver to userspace:
 0x6030		System thermal table changed
 0x6032		Thermal Control command set completion  (DYTC, Windows)
 0x6040		Nvidia Optimus/AC adapter related (TO BE VERIFIED)
-0x60C0		X1 Yoga 2016, Tablet mode status changed
+0x60C0		X1 Yoga 2016 tablet mode or X1 Fold 16 Gen 1 keyboard
+		attachment state changed
 0x60F0		Thermal Transformation changed (GMTS, Windows)
 ======		=====================================================
 
@@ -1521,6 +1523,51 @@ Currently 2 antenna types are supported as mentioned below:
 The property is read-only. If the platform doesn't have support the sysfs
 class is not created.
 
+doubletap_enable
+----------------
+
+sysfs: doubletap_enable
+
+Controls whether TrackPoint doubletap events are filtered out. Doubletap is a
+feature where quickly tapping the TrackPoint twice triggers a special function key event.
+
+The available commands are::
+
+                cat /sys/devices/platform/thinkpad_acpi/doubletap_enable
+                echo 1 | sudo tee /sys/devices/platform/thinkpad_acpi/doubletap_enable
+                echo 0 | sudo tee /sys/devices/platform/thinkpad_acpi/doubletap_enable
+
+Values:
+
+	* 1 - doubletap events are processed (default)
+	* 0 - doubletap events are filtered out (ignored)
+
+	This setting can also be toggled via the Fn+doubletap hotkey.
+
+USB-C Security
+--------------
+
+sysfs: usb_c_security
+
+Reports the current state of the USB-C Security (Restricted Mode) feature
+on supported ThinkPad systems. When enabled, USB-C data connections are
+disabled while power delivery is preserved.
+
+The available command is::
+
+        cat /sys/devices/platform/thinkpad_acpi/usb_c_security
+
+Values:
+
+	* ``enabled``  - USB-C data connections are currently blocked
+	* ``disabled`` - USB-C data connections are currently allowed
+
+The attribute is read-only. The USB-C Security state can only be toggled
+via the Fn+U followed by Fn+S hotkey chord.
+
+The sysfs attribute is not created on platforms that do not support this
+feature.
+
 Auxmac
 ------
 
@@ -1575,6 +1622,65 @@ percentage level, above which charging will stop.
 
 The exact semantics of the attributes may be found in
 Documentation/ABI/testing/sysfs-class-power.
+
+Hardware damage detection capability
+------------------------------------
+
+sysfs attributes: hwdd_status, hwdd_detail
+
+Thinkpads are adding the ability to detect and report hardware damage.
+Add new sysfs interface to identify the damaged device status.
+Initial support is available for the USB-C replaceable connector.
+
+The command to check device damaged status is::
+
+        cat /sys/devices/platform/thinkpad_acpi/hwdd_status
+
+This value displays status of device damaged.
+
+- 0 = Not Damaged
+- 1 = Damaged
+
+The command to check location of damaged device is::
+
+        cat /sys/devices/platform/thinkpad_acpi/hwdd_detail
+
+This value displays location of damaged device having 1 line per damaged "item".
+For example:
+
+if no damage is detected:
+
+- No damage detected
+
+if damage detected:
+
+- TYPE-C: Base, Right side, Center port
+
+The property is read-only. If feature is not supported then sysfs
+attribute is not created.
+
+X1 Fold keyboard attachment
+---------------------------
+
+sysfs attribute: keyboard_attached_on_screen
+
+ThinkPad X1 Fold 16 Gen 1 systems can report whether the keyboard is
+currently attached on-screen.
+
+This attribute is currently supported on ThinkPad X1 Fold 16 Gen 1
+systems only.
+
+The command to check the keyboard attachment state is::
+
+	cat /sys/devices/platform/thinkpad_acpi/keyboard_attached_on_screen
+
+The values are:
+
+- 0 if the keyboard is not attached on-screen
+- 1 if the keyboard is attached on-screen
+
+The property is read-only. If feature is not supported then the sysfs
+attribute is not created.
 
 Multiple Commands, Module Parameters
 ------------------------------------

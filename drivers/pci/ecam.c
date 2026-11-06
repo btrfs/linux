@@ -37,7 +37,7 @@ struct pci_config_window *pci_ecam_create(struct device *dev,
 	if (busr->start > busr->end)
 		return ERR_PTR(-EINVAL);
 
-	cfg = kzalloc(sizeof(*cfg), GFP_KERNEL);
+	cfg = kzalloc_obj(*cfg);
 	if (!cfg)
 		return ERR_PTR(-ENOMEM);
 
@@ -75,7 +75,7 @@ struct pci_config_window *pci_ecam_create(struct device *dev,
 	}
 
 	if (per_bus_mapping) {
-		cfg->winp = kcalloc(bus_range, sizeof(*cfg->winp), GFP_KERNEL);
+		cfg->winp = kzalloc_objs(*cfg->winp, bus_range);
 		if (!cfg->winp)
 			goto err_exit_malloc;
 	} else {
@@ -207,6 +207,19 @@ const struct pci_ecam_ops pci_generic_ecam_ops = {
 	}
 };
 EXPORT_SYMBOL_GPL(pci_generic_ecam_ops);
+
+/* CAM ops */
+const struct pci_ecam_ops pci_generic_cam_ops = {
+	.bus_shift	= 16,
+	.pci_ops	= {
+		.add_bus	= pci_ecam_add_bus,
+		.remove_bus	= pci_ecam_remove_bus,
+		.map_bus	= pci_ecam_map_bus,
+		.read		= pci_generic_config_read,
+		.write		= pci_generic_config_write,
+	}
+};
+EXPORT_SYMBOL_GPL(pci_generic_cam_ops);
 
 #if defined(CONFIG_ACPI) && defined(CONFIG_PCI_QUIRKS)
 /* ECAM ops for 32-bit access only (non-compliant) */

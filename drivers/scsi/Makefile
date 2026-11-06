@@ -14,6 +14,8 @@
 # satisfy certain initialization assumptions in the SCSI layer.
 # *!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!
 
+CONTEXT_ANALYSIS := y
+CONTEXT_ANALYSIS_BusLogic.o := n
 
 CFLAGS_aha152x.o =   -DAHA152X_STAT -DAUTOCONF
 
@@ -91,6 +93,7 @@ obj-$(CONFIG_SCSI_BFA_FC)	+= bfa/
 obj-$(CONFIG_SCSI_CHELSIO_FCOE)	+= csiostor/
 obj-$(CONFIG_SCSI_DMX3191D)	+= dmx3191d.o
 obj-$(CONFIG_SCSI_HPSA)		+= hpsa.o
+obj-$(CONFIG_SCSI_LEAPRAID) += leapraid/
 obj-$(CONFIG_SCSI_SMARTPQI)	+= smartpqi/
 obj-$(CONFIG_SCSI_SYM53C8XX_2)	+= sym53c8xx_2/
 obj-$(CONFIG_SCSI_ZALON)	+= zalon7xx.o
@@ -177,8 +180,8 @@ sd_mod-$(CONFIG_BLK_DEV_ZONED) += sd_zbc.o
 
 sr_mod-objs	:= sr.o sr_ioctl.o sr_vendor.o
 ncr53c8xx-flags-$(CONFIG_SCSI_ZALON) \
-		:= -DCONFIG_NCR53C8XX_PREFETCH -DSCSI_NCR_BIG_ENDIAN \
-			-DCONFIG_SCSI_NCR53C8XX_NO_WORD_TRANSFERS
+		:= -DNCR53C8XX_PREFETCH -DSCSI_NCR_BIG_ENDIAN \
+			-DSCSI_NCR53C8XX_NO_WORD_TRANSFERS
 CFLAGS_ncr53c8xx.o	:= $(ncr53c8xx-flags-y) $(ncr53c8xx-flags-m)
 zalon7xx-objs	:= zalon.o ncr53c8xx.o
 

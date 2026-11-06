@@ -231,9 +231,9 @@ static const struct iio_event_spec ads1015_events[] = {
 }
 
 struct ads1015_channel_data {
-	bool enabled;
 	unsigned int pga;
 	unsigned int data_rate;
+	const char *label;
 };
 
 struct ads1015_thresh_data {
@@ -587,6 +587,15 @@ static int ads1015_read_raw(struct iio_dev *indio_dev,
 	}
 }
 
+static int ads1015_read_label(struct iio_dev *indio_dev,
+			      struct iio_chan_spec const *chan, char *label)
+{
+	struct ads1015_data *data = iio_priv(indio_dev);
+
+	return sysfs_emit(label, "%s\n",
+			  data->channel_data[chan->address].label);
+}
+
 static int ads1015_write_raw(struct iio_dev *indio_dev,
 			     struct iio_chan_spec const *chan, int val,
 			     int val2, long mask)
@@ -844,6 +853,7 @@ static const struct iio_buffer_setup_ops ads1015_buffer_setup_ops = {
 static const struct iio_info ads1015_info = {
 	.read_avail	= ads1015_read_avail,
 	.read_raw	= ads1015_read_raw,
+	.read_label	= ads1015_read_label,
 	.write_raw	= ads1015_write_raw,
 	.read_event_value = ads1015_read_event,
 	.write_event_value = ads1015_write_event,
@@ -854,6 +864,7 @@ static const struct iio_info ads1015_info = {
 static const struct iio_info tla2024_info = {
 	.read_avail	= ads1015_read_avail,
 	.read_raw	= ads1015_read_raw,
+	.read_label	= ads1015_read_label,
 	.write_raw	= ads1015_write_raw,
 };
 
@@ -862,7 +873,9 @@ static int ads1015_client_get_channels_config(struct i2c_client *client)
 	struct iio_dev *indio_dev = i2c_get_clientdata(client);
 	struct ads1015_data *data = iio_priv(indio_dev);
 	struct device *dev = &client->dev;
+	const char *label;
 	int i = -1;
+	int ret;
 
 	device_for_each_child_node_scoped(dev, node) {
 		u32 pval;
@@ -898,6 +911,15 @@ static int ads1015_client_get_channels_config(struct i2c_client *client)
 			}
 		}
 
+		if (fwnode_property_present(node, "label")) {
+			ret = fwnode_property_read_string(node, "label", &label);
+			if (ret) {
+				dev_err(dev, "invalid label on %pfw\n", node);
+				return ret;
+			}
+			data->channel_data[channel].label = label;
+		}
+
 		data->channel_data[channel].pga = pga;
 		data->channel_data[channel].data_rate = data_rate;
 
@@ -929,6 +951,17 @@ static int ads1015_set_conv_mode(struct ads1015_data *data, int mode)
 	return regmap_update_bits(data->regmap, ADS1015_CFG_REG,
 				  ADS1015_CFG_MOD_MASK,
 				  mode << ADS1015_CFG_MOD_SHIFT);
+}
+
+static void ads1015_power_down(void *p)
+{
+	struct ads1015_data *data = p;
+	int ret;
+
+	ret = ads1015_set_conv_mode(data, ADS1015_SINGLESHOT);
+	if (ret)
+		dev_warn(regmap_get_device(data->regmap),
+			 "Failed to power down (%pe)\n", ERR_PTR(ret));
 }
 
 static int ads1015_probe(struct i2c_client *client)
@@ -974,6 +1007,13 @@ static int ads1015_probe(struct i2c_client *client)
 
 	/* we need to keep this ABI the same as used by hwmon ADS1015 driver */
 	ads1015_get_channels_config(client);
+
+	/* Channels without a label property fall back to the datasheet name */
+	for (i = 0; i < ADS1015_CHANNELS; i++) {
+		if (!data->channel_data[i].label)
+			data->channel_data[i].label =
+				indio_dev->channels[i].datasheet_name;
+	}
 
 	data->regmap = devm_regmap_init_i2c(client, chip->has_comparator ?
 					    &ads1015_regmap_config :
@@ -1031,6 +1071,10 @@ static int ads1015_probe(struct i2c_client *client)
 	if (ret)
 		return ret;
 
+	ret = devm_add_action_or_reset(&client->dev, ads1015_power_down, data);
+	if (ret)
+		return ret;
+
 	data->conv_invalid = true;
 
 	ret = pm_runtime_set_active(&client->dev);
@@ -1038,33 +1082,11 @@ static int ads1015_probe(struct i2c_client *client)
 		return ret;
 	pm_runtime_set_autosuspend_delay(&client->dev, ADS1015_SLEEP_DELAY_MS);
 	pm_runtime_use_autosuspend(&client->dev);
-	pm_runtime_enable(&client->dev);
-
-	ret = iio_device_register(indio_dev);
-	if (ret < 0) {
-		dev_err(&client->dev, "Failed to register IIO device\n");
-		return ret;
-	}
-
-	return 0;
-}
-
-static void ads1015_remove(struct i2c_client *client)
-{
-	struct iio_dev *indio_dev = i2c_get_clientdata(client);
-	struct ads1015_data *data = iio_priv(indio_dev);
-	int ret;
-
-	iio_device_unregister(indio_dev);
-
-	pm_runtime_disable(&client->dev);
-	pm_runtime_set_suspended(&client->dev);
-
-	/* power down single shot mode */
-	ret = ads1015_set_conv_mode(data, ADS1015_SINGLESHOT);
+	ret = devm_pm_runtime_enable(&client->dev);
 	if (ret)
-		dev_warn(&client->dev, "Failed to power down (%pe)\n",
-			 ERR_PTR(ret));
+		return ret;
+
+	return devm_iio_device_register(&client->dev, indio_dev);
 }
 
 #ifdef CONFIG_PM
@@ -1129,9 +1151,9 @@ static const struct ads1015_chip_data tla2024_data = {
 };
 
 static const struct i2c_device_id ads1015_id[] = {
-	{ "ads1015", (kernel_ulong_t)&ads1015_data },
-	{ "ads1115", (kernel_ulong_t)&ads1115_data },
-	{ "tla2024", (kernel_ulong_t)&tla2024_data },
+	{ .name = "ads1015", .driver_data = (kernel_ulong_t)&ads1015_data },
+	{ .name = "ads1115", .driver_data = (kernel_ulong_t)&ads1115_data },
+	{ .name = "tla2024", .driver_data = (kernel_ulong_t)&tla2024_data },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ads1015_id);
@@ -1151,7 +1173,6 @@ static struct i2c_driver ads1015_driver = {
 		.pm = &ads1015_pm_ops,
 	},
 	.probe		= ads1015_probe,
-	.remove		= ads1015_remove,
 	.id_table	= ads1015_id,
 };
 

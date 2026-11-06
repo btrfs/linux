@@ -89,7 +89,11 @@ static int rds_loop_xmit(struct rds_connection *conn, struct rds_message *rm,
 
 	BUG_ON(hdr_off || sg || off);
 
-	rds_inc_init(&rm->m_inc, conn, &conn->c_laddr);
+	/* rds_send_queue_rm() stored the connection path in this embedded
+	 * inc; use the path init so the re-initialization keeps the field
+	 * valid instead of discarding it.
+	 */
+	rds_inc_path_init(&rm->m_inc, &conn->c_path[0], &conn->c_laddr);
 	/* For the embedded inc. Matching put is in loop_inc_free() */
 	rds_message_addref(rm);
 
@@ -137,7 +141,7 @@ static int rds_loop_conn_alloc(struct rds_connection *conn, gfp_t gfp)
 	struct rds_loop_connection *lc;
 	unsigned long flags;
 
-	lc = kzalloc(sizeof(struct rds_loop_connection), gfp);
+	lc = kzalloc_obj(struct rds_loop_connection, gfp);
 	if (!lc)
 		return -ENOMEM;
 

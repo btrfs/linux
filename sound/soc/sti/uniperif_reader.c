@@ -46,15 +46,16 @@ static irqreturn_t uni_reader_irq_handler(int irq, void *dev_id)
 	struct uniperif *reader = dev_id;
 	unsigned int status;
 
-	spin_lock(&reader->irq_lock);
+	guard(spinlock)(&reader->irq_lock);
 	if (!reader->substream)
-		goto irq_spin_unlock;
+		return ret;
 
 	snd_pcm_stream_lock(reader->substream);
 	if (reader->state == UNIPERIF_STATE_STOPPED) {
 		/* Unexpected IRQ: do nothing */
 		dev_warn(reader->dev, "unexpected IRQ\n");
-		goto stream_unlock;
+		snd_pcm_stream_unlock(reader->substream);
+		return ret;
 	}
 
 	/* Get interrupt status & clear them immediately */
@@ -70,10 +71,7 @@ static irqreturn_t uni_reader_irq_handler(int irq, void *dev_id)
 		ret = IRQ_HANDLED;
 	}
 
-stream_unlock:
 	snd_pcm_stream_unlock(reader->substream);
-irq_spin_unlock:
-	spin_unlock(&reader->irq_lock);
 
 	return ret;
 }
@@ -355,12 +353,10 @@ static int uni_reader_startup(struct snd_pcm_substream *substream,
 {
 	struct sti_uniperiph_data *priv = snd_soc_dai_get_drvdata(dai);
 	struct uniperif *reader = priv->dai_data.uni;
-	unsigned long flags;
 	int ret;
 
-	spin_lock_irqsave(&reader->irq_lock, flags);
-	reader->substream = substream;
-	spin_unlock_irqrestore(&reader->irq_lock, flags);
+	scoped_guard(spinlock_irqsave, &reader->irq_lock)
+		reader->substream = substream;
 
 	if (!UNIPERIF_TYPE_IS_TDM(reader))
 		return 0;
@@ -386,26 +382,35 @@ static void uni_reader_shutdown(struct snd_pcm_substream *substream,
 {
 	struct sti_uniperiph_data *priv = snd_soc_dai_get_drvdata(dai);
 	struct uniperif *reader = priv->dai_data.uni;
-	unsigned long flags;
 
-	spin_lock_irqsave(&reader->irq_lock, flags);
+	guard(spinlock_irqsave)(&reader->irq_lock);
 	if (reader->state != UNIPERIF_STATE_STOPPED) {
 		/* Stop the reader */
 		uni_reader_stop(reader);
 	}
 	reader->substream = NULL;
-	spin_unlock_irqrestore(&reader->irq_lock, flags);
 }
 
+static const u64 uni_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF;
+
 static const struct snd_soc_dai_ops uni_reader_dai_ops = {
-		.startup = uni_reader_startup,
-		.shutdown = uni_reader_shutdown,
-		.prepare = uni_reader_prepare,
-		.probe = sti_uniperiph_dai_probe,
-		.trigger = uni_reader_trigger,
-		.hw_params = sti_uniperiph_dai_hw_params,
-		.set_fmt = sti_uniperiph_dai_set_fmt,
-		.set_tdm_slot = sti_uniperiph_set_tdm_slot
+	.startup			= uni_reader_startup,
+	.shutdown			= uni_reader_shutdown,
+	.prepare			= uni_reader_prepare,
+	.probe				= sti_uniperiph_dai_probe,
+	.trigger			= uni_reader_trigger,
+	.hw_params			= sti_uniperiph_dai_hw_params,
+	.set_fmt			= sti_uniperiph_dai_set_fmt,
+	.set_tdm_slot			= sti_uniperiph_set_tdm_slot,
+	.auto_selectable_formats	= &uni_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 int uni_reader_init(struct platform_device *pdev,
@@ -422,6 +427,8 @@ int uni_reader_init(struct platform_device *pdev,
 	else
 		reader->hw = &uni_reader_pcm_hw;
 
+	spin_lock_init(&reader->irq_lock);
+
 	ret = devm_request_irq(&pdev->dev, reader->irq,
 			       uni_reader_irq_handler, IRQF_SHARED,
 			       dev_name(&pdev->dev), reader);
@@ -429,8 +436,6 @@ int uni_reader_init(struct platform_device *pdev,
 		dev_err(&pdev->dev, "Failed to request IRQ\n");
 		return -EBUSY;
 	}
-
-	spin_lock_init(&reader->irq_lock);
 
 	return 0;
 }

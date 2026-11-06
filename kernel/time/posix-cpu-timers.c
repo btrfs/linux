@@ -19,7 +19,7 @@
 
 #include "posix-timers.h"
 
-static void posix_cpu_timer_rearm(struct k_itimer *timer);
+static bool posix_cpu_timer_rearm(struct k_itimer *timer);
 
 void posix_cputimers_group_init(struct posix_cputimers *pct, u64 cpu_limit)
 {
@@ -41,7 +41,7 @@ void posix_cputimers_group_init(struct posix_cputimers *pct, u64 cpu_limit)
  */
 int update_rlimit_cpu(struct task_struct *task, unsigned long rlim_new)
 {
-	u64 nsecs = rlim_new * NSEC_PER_SEC;
+	u64 nsecs = (u64)rlim_new * NSEC_PER_SEC;
 	unsigned long irq_fl;
 
 	if (!lock_task_sighand(task, &irq_fl))
@@ -408,6 +408,7 @@ static int posix_cpu_timer_create(struct k_itimer *new_timer)
 
 	new_timer->kclock = &clock_posix_cpu;
 	timerqueue_init(&new_timer->it.cpu.node);
+	INIT_LIST_HEAD(&new_timer->it.cpu.elist);
 	new_timer->it.cpu.pid = get_pid(pid);
 	rcu_read_unlock();
 	return 0;
@@ -438,6 +439,38 @@ static void trigger_base_recalc_expires(struct k_itimer *timer,
 	base->nextevt = 0;
 }
 
+static inline bool cpu_timer_enqueue(struct timerqueue_head *head,
+				     struct cpu_timer *ctmr)
+{
+	ctmr->head = head;
+	return timerqueue_add(head, &ctmr->node);
+}
+
+static inline bool cpu_timer_queued(struct cpu_timer *ctmr)
+{
+	return !!ctmr->head;
+}
+
+static inline bool cpu_timer_dequeue(struct cpu_timer *ctmr)
+{
+	if (cpu_timer_queued(ctmr)) {
+		timerqueue_del(ctmr->head, &ctmr->node);
+		ctmr->head = NULL;
+		return true;
+	}
+	return false;
+}
+
+static inline u64 cpu_timer_getexpires(struct cpu_timer *ctmr)
+{
+	return ctmr->node.expires;
+}
+
+static inline void cpu_timer_setexpires(struct cpu_timer *ctmr, u64 exp)
+{
+	ctmr->node.expires = exp;
+}
+
 /*
  * Dequeue the timer and reset the base if it was its earliest expiration.
  * It makes sure the next tick recalculates the base next expiration so we
@@ -461,6 +494,127 @@ static void disarm_timer(struct k_itimer *timer, struct task_struct *p)
 		trigger_base_recalc_expires(timer, p);
 }
 
+/*
+ * Lookup the task via timer->it.cpu.pid and attempt to lock the task's sighand.
+ *
+ * This can race with the reaping of the task:
+ *
+ * CPU0					CPU1
+ *
+ * // Finds task
+ * p = pid_task(pid, pid_type);		__exit_signal(p)
+ *					  lock(p, sighand);
+ *					  posix_cpu_timers*_exit();
+ * sighand = lock_task_sighand(p);	  unhash_task(p);
+ *					  p->sighand = NULL;
+ *					  unlock(sighand);
+ *
+ * In this case sighand is NULL, which means the task and the associated timer
+ * queue cannot be longer accessed safely.
+ *
+ * __exit_signal() invokes posix_cpu_timers_exit() and if the thread group is
+ * dead it also invokes posix_cpu_timers_group_exit(). These functions delete
+ * all pending timers from the related timer queues. The POSIX timers (k_itimer)
+ * themself are still accessible, but not longer connected to the task.
+ *
+ * exec() works slightly differently. The task which exec()'s terminates all
+ * other threads in the thread group and runs __exit_signal() on them. As the
+ * thread group is not dead they only clean up the per task timers via
+ * posix_cpu_timers_exit().
+ *
+ * As the TGID on exec() stays the same per process timers stay queued, if they
+ * are armed. This works without a problem when exec() is done by the thread
+ * group leader. If a non-leader thread exec()'s this can end up in the
+ * following scenario:
+ *
+ * CPU0					CPU1
+ * // Returns old leader
+ * p = pid_task(pid, pid_type);		de_thread()
+ *					switch_leader()
+ *					release_task(old leader)
+ *					  __exit_signal()
+ *					  old_leader->sighand = NULL;
+ * // Returns NULL
+ * sighand = lock_task_sighand(p)
+ *
+ * That's problematic for several functions:
+ *
+ *  - posix_cpu_timer_del(): If the timer is still enqueued on the task the
+ *    underlying k_itimer will be freed which results in a UAF in
+ *    run_posix_cpu_timers() or on timerqueue related add/delete operations.
+ *    If the timer is not enqueued, the failure is harmless
+ *
+ *  - posix_cpu_timer_set(): Independent of the enqueued state that results in a
+ *    transient failure which is user space visible (-ESRCH) for regular posix
+ *    timers. But for the use case in do_cpu_nanosleep() it's the same UAF
+ *    problem just that the timer is allocated on the stack.
+ *
+ *  - posix_cpu_timer_rearm(): Timer is not enqueued at that point, but this
+ *    silently ignores the rearm request, which is a functional problem as the
+ *    timer wont expire anymore.
+ */
+static struct task_struct *timer_lock_sighand(struct k_itimer *timer, unsigned long *flags)
+{
+	enum pid_type type = clock_pid_type(timer->it_clock);
+	struct cpu_timer *ctmr = &timer->it.cpu;
+
+	guard(rcu)();
+
+	for (;;) {
+		struct task_struct *t = pid_task(timer->it.cpu.pid, type);
+
+		/* Fail if the task cannot be found. */
+		if (!t)
+			break;
+
+		/* Try to lock the task's sighand */
+		if (lock_task_sighand(t, flags))
+			return t;
+
+		/*
+		 * The next PID lookup might either fail or return the new
+		 * leader. This is correct for both exit() and exec().
+		 */
+	}
+
+	/*
+	 * If the timer is still enqueued, warn. There is nothing safe to do
+	 * here as there might be two timers in there which are removed in
+	 * parallel and that will cause more damage than good. This should never
+	 * happen!
+	 *
+	 * Ensure that the stores to the timer and timerqueue are visible:
+	 *
+	 * __exit_signal()
+	 *   posix_cpu_timers*_exit()
+	 *   write_seqlock(seqlock)
+	 *	smp_wmb(); <-------
+	 *   __unhash_process()	  |	!pid_task()
+	 *			  ---->	smp_rmb();
+	 *				WARN_ON_ONCE(...)
+	 */
+	smp_rmb();
+	WARN_ON_ONCE(ctmr->head || timerqueue_node_queued(&ctmr->node));
+	return NULL;
+}
+
+/*
+ * If the timer is queued on the expiry list, then it cannot be dequeued because
+ * the firing list is not protected by sighand->lock. The delivery path is
+ * waiting for the timer lock. So go back, unlock and retry.
+ */
+static bool posix_cpu_timer_on_expiry_list(struct k_itimer *timer)
+{
+	if (list_empty(&timer->it.cpu.elist))
+		return false;
+
+	/*
+	 * Prevent signal delivery as there is no point in delivering a signal
+	 * which is made obsolete right away.
+	 */
+	timer->it.cpu.firing = false;
+	return true;
+}
 
 /*
  * Clean up a CPU-clock timer that is about to be destroyed.
@@ -470,49 +624,23 @@ static void disarm_timer(struct k_itimer *timer, struct task_struct *p)
  */
 static int posix_cpu_timer_del(struct k_itimer *timer)
 {
-	struct cpu_timer *ctmr = &timer->it.cpu;
-	struct sighand_struct *sighand;
 	struct task_struct *p;
 	unsigned long flags;
 	int ret = 0;
 
-	rcu_read_lock();
-	p = cpu_timer_task_rcu(timer);
-	if (!p)
-		goto out;
+	p = timer_lock_sighand(timer, &flags);
 
-	/*
-	 * Protect against sighand release/switch in exit/exec and process/
-	 * thread timer list entry concurrent read/writes.
-	 */
-	sighand = lock_task_sighand(p, &flags);
-	if (unlikely(sighand == NULL)) {
-		/*
-		 * This raced with the reaping of the task. The exit cleanup
-		 * should have removed this timer from the timer queue.
-		 */
-		WARN_ON_ONCE(ctmr->head || timerqueue_node_queued(&ctmr->node));
-	} else {
-		if (timer->it.cpu.firing) {
-			/*
-			 * Prevent signal delivery. The timer cannot be dequeued
-			 * because it is on the firing list which is not protected
-			 * by sighand->lock. The delivery path is waiting for
-			 * the timer lock. So go back, unlock and retry.
-			 */
-			timer->it.cpu.firing = false;
+	if (likely(p)) {
+		if (posix_cpu_timer_on_expiry_list(timer))
 			ret = TIMER_RETRY;
-		} else {
+		else
 			disarm_timer(timer, p);
-		}
 		unlock_task_sighand(p, &flags);
 	}
 
-out:
-	rcu_read_unlock();
-
 	if (!ret) {
-		put_pid(ctmr->pid);
+		WARN_ON_ONCE(cpu_timer_queued(&timer->it.cpu));
+		put_pid(timer->it.cpu.pid);
 		timer->it_status = POSIX_TIMER_DISARMED;
 	}
 	return ret;
@@ -544,18 +672,50 @@ static void cleanup_timers(struct posix_cputimers *pct)
 	cleanup_timerqueue(&pct->bases[CPUCLOCK_SCHED].tqhead);
 }
 
+static inline void posix_cpu_timers_exit_work(void);
+
 /*
- * These are both called with the siglock held, when the current thread
- * is being reaped.  When the final (leader) thread in the group is reaped,
- * posix_cpu_timers_exit_group will be called after posix_cpu_timers_exit.
+ * Invoked from posixtimer_exit_task() after PF_EXITING was set in tsk::flags or
+ * from posixtimer_exec_cleanup().
  */
-void posix_cpu_timers_exit(struct task_struct *tsk)
+void posix_cpu_timers_exit_task(void)
 {
-	cleanup_timers(&tsk->posix_cputimers);
+	posix_cpu_timers_exit_work();
+
+	guard(spinlock_irq)(&current->sighand->siglock);
+	cleanup_timers(&current->posix_cputimers);
 }
-void posix_cpu_timers_exit_group(struct task_struct *tsk)
+
+/*
+ * Invoked from posixtimer_exit_group() after PF_EXITING was set in tsk::flags.
+ */
+void posix_cpu_timers_exit_group(void)
 {
-	cleanup_timers(&tsk->signal->posix_cputimers);
+	posix_cpu_timers_exit_task();
+
+	guard(spinlock_irq)(&current->sighand->siglock);
+	cleanup_timers(&current->signal->posix_cputimers);
+}
+
+/*
+ * This function validates that POSIX CPU timers can be safely enqueued on the
+ * target task.
+ *
+ * Enqueue is allowed when PF_EXITING is not set. If set then it is only allowed
+ * for process shared timers (type = PIDTYPE_TGID) as long as tsk::signal::flags
+ * does not have SIGNAL_GROUP_EXIT set. PIDTYPE_PID targets are not allowed at
+ * all when the task has PF_EXITING set.
+ *
+ * This guarantees that after the POSIX timer cleanup in posixtimer_exit() no
+ * POSIX CPU timers are queued on the task or in case of a group exit on the
+ * process.
+ */
+static inline bool task_can_enqueue_timer(struct task_struct *tsk, enum pid_type type)
+{
+	if (likely(!(tsk->flags & PF_EXITING)))
+		return true;
+
+	return type == PIDTYPE_TGID && !(tsk->signal->flags & SIGNAL_GROUP_EXIT);
 }
 
 /*
@@ -568,7 +728,13 @@ static void arm_timer(struct k_itimer *timer, struct task_struct *p)
 	struct cpu_timer *ctmr = &timer->it.cpu;
 	u64 newexp = cpu_timer_getexpires(ctmr);
 
+	lockdep_assert_held(&p->sighand->siglock);
+
 	timer->it_status = POSIX_TIMER_ARMED;
+
+	if (unlikely(!task_can_enqueue_timer(p, clock_pid_type(timer->it_clock))))
+		return;
+
 	if (!cpu_timer_enqueue(&base->tqhead, ctmr))
 		return;
 
@@ -626,21 +792,17 @@ static int posix_cpu_timer_set(struct k_itimer *timer, int timer_flags,
 	clockid_t clkid = CPUCLOCK_WHICH(timer->it_clock);
 	struct cpu_timer *ctmr = &timer->it.cpu;
 	u64 old_expires, new_expires, now;
-	struct sighand_struct *sighand;
 	struct task_struct *p;
 	unsigned long flags;
 	int ret = 0;
 
-	rcu_read_lock();
-	p = cpu_timer_task_rcu(timer);
-	if (!p) {
-		/*
-		 * If p has just been reaped, we can no
-		 * longer get any information about it at all.
-		 */
-		rcu_read_unlock();
+	p = timer_lock_sighand(timer, &flags);
+	/*
+	 * If p has just been reaped, we can no longer get any information about
+	 * it at all.
+	 */
+	if (!p)
 		return -ESRCH;
-	}
 
 	/*
 	 * Use the to_ktime conversion because that clamps the maximum
@@ -648,31 +810,10 @@ static int posix_cpu_timer_set(struct k_itimer *timer, int timer_flags,
 	 */
 	new_expires = ktime_to_ns(timespec64_to_ktime(new->it_value));
 
-	/*
-	 * Protect against sighand release/switch in exit/exec and p->cpu_timers
-	 * and p->signal->cpu_timers read/write in arm_timer()
-	 */
-	sighand = lock_task_sighand(p, &flags);
-	/*
-	 * If p has just been reaped, we can no
-	 * longer get any information about it at all.
-	 */
-	if (unlikely(sighand == NULL)) {
-		rcu_read_unlock();
-		return -ESRCH;
-	}
-
 	/* Retrieve the current expiry time before disarming the timer */
 	old_expires = cpu_timer_getexpires(ctmr);
 
-	if (unlikely(timer->it.cpu.firing)) {
-		/*
-		 * Prevent signal delivery. The timer cannot be dequeued
-		 * because it is on the firing list which is not protected
-		 * by sighand->lock. The delivery path is waiting for
-		 * the timer lock. So go back, unlock and retry.
-		 */
-		timer->it.cpu.firing = false;
+	if (posix_cpu_timer_on_expiry_list(timer)) {
 		ret = TIMER_RETRY;
 	} else {
 		cpu_timer_dequeue(ctmr);
@@ -698,7 +839,7 @@ static int posix_cpu_timer_set(struct k_itimer *timer, int timer_flags,
 	/* Retry if the timer expiry is running concurrently */
 	if (unlikely(ret)) {
 		unlock_task_sighand(p, &flags);
-		goto out;
+		return ret;
 	}
 
 	/* Convert relative expiry time to absolute */
@@ -733,8 +874,6 @@ static int posix_cpu_timer_set(struct k_itimer *timer, int timer_flags,
 	 */
 	if (!sigev_none && new_expires && now >= new_expires)
 		cpu_timer_fire(timer);
-out:
-	rcu_read_unlock();
 	return ret;
 }
 
@@ -1011,24 +1150,20 @@ static void check_process_timers(struct task_struct *tsk,
 /*
  * This is called from the signal code (via posixtimer_rearm)
  * when the last timer signal was delivered and we have to reload the timer.
+ *
+ * Return true unconditionally so the core code assumes the timer to be
+ * armed. Otherwise it would requeue the signal.
  */
-static void posix_cpu_timer_rearm(struct k_itimer *timer)
+static bool posix_cpu_timer_rearm(struct k_itimer *timer)
 {
 	clockid_t clkid = CPUCLOCK_WHICH(timer->it_clock);
 	struct task_struct *p;
-	struct sighand_struct *sighand;
 	unsigned long flags;
 	u64 now;
 
-	rcu_read_lock();
-	p = cpu_timer_task_rcu(timer);
-	if (!p)
-		goto out;
-
-	/* Protect timer list r/w in arm_timer() */
-	sighand = lock_task_sighand(p, &flags);
-	if (unlikely(sighand == NULL))
-		goto out;
+	p = timer_lock_sighand(timer, &flags);
+	if (unlikely(!p))
+		return true;
 
 	/*
 	 * Fetch the current sample and update the timer's expiry time.
@@ -1045,8 +1180,7 @@ static void posix_cpu_timer_rearm(struct k_itimer *timer)
 	 */
 	arm_timer(timer, p);
 	unlock_task_sighand(p, &flags);
-out:
-	rcu_read_unlock();
+	return true;
 }
 
 /**
@@ -1136,6 +1270,20 @@ static void posix_cpu_timers_work(struct callback_head *work)
 	mutex_lock(&cw->mutex);
 	handle_posix_cpu_timers(current);
 	mutex_unlock(&cw->mutex);
+}
+
+static inline void posix_cpu_timers_exit_work(void)
+{
+	/* Canceling the work is only valid for exit() but not for exec() */
+	if (!(current->flags & PF_EXITING))
+		return;
+	/*
+	 * current->flags has PF_EXITING set so this can be done lockless and
+	 * with interrupts enabled as PF_EXITING prevents the interrupt from
+	 * scheduling the work.
+	 */
+	if (current->posix_cputimers_work.scheduled)
+		task_work_cancel(current, &current->posix_cputimers_work.work);
 }
 
 /*
@@ -1268,6 +1416,8 @@ static inline void __run_posix_cpu_timers(struct task_struct *tsk)
 	lockdep_posixtimer_exit();
 }
 
+static inline void posix_cpu_timers_exit_work(void) { }
+
 static void posix_cpu_timer_wait_running(struct k_itimer *timr)
 {
 	cpu_relax();
@@ -1298,8 +1448,11 @@ static void handle_posix_cpu_timers(struct task_struct *tsk)
 	unsigned long flags, start;
 	LIST_HEAD(firing);
 
-	if (!lock_task_sighand(tsk, &flags))
-		return;
+	/*
+	 * tsk is current and ->sighand is stable, see the
+	 * tsk->exit_state check in run_posix_cpu_timers()
+	 */
+	spin_lock_irqsave(&tsk->sighand->siglock, flags);
 
 	do {
 		/*
@@ -1359,7 +1512,7 @@ static void handle_posix_cpu_timers(struct task_struct *tsk)
 	 * that gets the timer lock before we do will give it up and
 	 * spin until we've taken care of that timer below.
 	 */
-	unlock_task_sighand(tsk, &flags);
+	spin_unlock_irqrestore(&tsk->sighand->siglock, flags);
 
 	/*
 	 * Now that all the timers on our list have the firing flag,
@@ -1411,7 +1564,7 @@ void run_posix_cpu_timers(void)
 	 * posix_cpu_timer_del() may fail to lock_task_sighand(tsk) and
 	 * miss timer->it.cpu.firing != 0.
 	 */
-	if (tsk->exit_state)
+	if (tsk->flags & PF_EXITING)
 		return;
 
 	/*
@@ -1504,6 +1657,7 @@ static int do_cpu_nanosleep(const clockid_t which_clock, int flags,
 		spin_lock_irq(&timer.it_lock);
 		error = posix_cpu_timer_set(&timer, flags, &it, NULL);
 		if (error) {
+			posix_cpu_timer_del(&timer);
 			spin_unlock_irq(&timer.it_lock);
 			return error;
 		}
@@ -1533,8 +1687,8 @@ static int do_cpu_nanosleep(const clockid_t which_clock, int flags,
 		 */
 		expires = cpu_timer_getexpires(&timer.it.cpu);
 		error = posix_cpu_timer_set(&timer, 0, &zero_it, &it);
-		if (!error) {
-			/* Timer is now unarmed, deletion can not fail. */
+		if (error != TIMER_RETRY) {
+			/* Unarmed or target gone (-ESRCH), deletion can not fail. */
 			posix_cpu_timer_del(&timer);
 		} else {
 			while (error == TIMER_RETRY) {
@@ -1557,7 +1711,7 @@ static int do_cpu_nanosleep(const clockid_t which_clock, int flags,
 		 * Report back to the user the time still remaining.
 		 */
 		restart = &current->restart_block;
-		restart->nanosleep.expires = expires;
+		restart->nanosleep.expires = ns_to_ktime(expires);
 		if (restart->nanosleep.type != TT_NONE)
 			error = nanosleep_copyout(restart, &it.it_value);
 	}
@@ -1599,7 +1753,7 @@ static long posix_cpu_nsleep_restart(struct restart_block *restart_block)
 	clockid_t which_clock = restart_block->nanosleep.clockid;
 	struct timespec64 t;
 
-	t = ns_to_timespec64(restart_block->nanosleep.expires);
+	t = ktime_to_timespec64(restart_block->nanosleep.expires);
 
 	return do_cpu_nanosleep(which_clock, TIMER_ABSTIME, &t);
 }

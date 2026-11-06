@@ -239,6 +239,18 @@ enum irdma_queue_type {
 	IRDMA_QUEUE_TYPE_SRQ,
 };
 
+enum irdma_rsvd_cq_id {
+	IRDMA_RSVD_CQ_ID_CQP,
+	IRDMA_RSVD_CQ_ID_ILQ,
+	IRDMA_RSVD_CQ_ID_IEQ,
+};
+
+enum irdma_rsvd_qp_id {
+	IRDMA_RSVD_QP_ID_0,
+	IRDMA_RSVD_QP_ID_GSI_ILQ,
+	IRDMA_RSVD_QP_ID_IEQ,
+};
+
 struct irdma_sc_dev;
 struct irdma_vsi_pestat;
 
@@ -492,9 +504,6 @@ struct irdma_sc_ceq {
 	u32 first_pm_pbl_idx;
 	u8 polarity;
 	u16 vsi_idx;
-	struct irdma_sc_cq **reg_cq;
-	u32 reg_cq_size;
-	spinlock_t req_cq_lock; /* protect access to reg_cq array */
 	bool virtual_map:1;
 	bool tph_en:1;
 	bool itr_no_expire:1;
@@ -613,6 +622,8 @@ struct irdma_hmc_fpm_misc {
 	u32 timer_bucket;
 	u32 rrf_block_size;
 	u32 ooiscf_block_size;
+	struct irdma_dma_mem fw_scratch_buf0;
+	struct irdma_dma_mem fw_scratch_buf1;
 };
 
 #define IRDMA_VCHNL_MAX_MSG_SIZE 512
@@ -698,6 +709,9 @@ struct irdma_sc_dev {
 	struct irdma_sc_aeq *aeq;
 	struct irdma_sc_ceq *ceq[IRDMA_CEQ_MAX_COUNT];
 	struct irdma_sc_cq *ccq;
+	spinlock_t puda_cq_lock;
+	struct irdma_sc_cq *ilq_cq;
+	struct irdma_sc_cq *ieq_cq;
 	const struct irdma_irq_ops *irq_ops;
 	struct irdma_qos qos[IRDMA_MAX_USER_PRIORITY];
 	struct irdma_hmc_fpm_misc hmc_fpm_misc;
@@ -894,8 +908,6 @@ struct irdma_ceq_init_info {
 	u8 tph_val;
 	u16 vsi_idx;
 	u32 first_pm_pbl_idx;
-	struct irdma_sc_cq **reg_cq;
-	u32 reg_cq_idx;
 };
 
 struct irdma_aeq_init_info {
@@ -1161,13 +1173,11 @@ struct irdma_reg_ns_stag_info {
 struct irdma_fast_reg_stag_info {
 	u64 wr_id;
 	u64 reg_addr_pa;
-	u64 fbo;
-	void *va;
+	u64 va;
 	u64 total_len;
 	u32 page_size;
 	u32 chunk_size;
 	u32 first_pm_pbl_index;
-	enum irdma_addressing_type addr_type;
 	irdma_stag_index stag_idx;
 	u16 access_rights;
 	u32 pd_id;
@@ -1337,7 +1347,8 @@ int irdma_sc_ceq_destroy(struct irdma_sc_ceq *ceq, u64 scratch, bool post_sq);
 int irdma_sc_ceq_init(struct irdma_sc_ceq *ceq,
 		      struct irdma_ceq_init_info *info);
 void irdma_sc_cleanup_ceqes(struct irdma_sc_cq *cq, struct irdma_sc_ceq *ceq);
-void *irdma_sc_process_ceq(struct irdma_sc_dev *dev, struct irdma_sc_ceq *ceq);
+bool irdma_sc_process_ceq(struct irdma_sc_dev *dev, struct irdma_sc_ceq *ceq,
+			  u32 *cq_idx);
 
 int irdma_sc_aeq_init(struct irdma_sc_aeq *aeq,
 		      struct irdma_aeq_init_info *info);
@@ -1370,8 +1381,7 @@ int irdma_sc_qp_create(struct irdma_sc_qp *qp,
 int irdma_sc_qp_destroy(struct irdma_sc_qp *qp, u64 scratch,
 			bool remove_hash_idx, bool ignore_mw_bnd, bool post_sq);
 int irdma_sc_qp_flush_wqes(struct irdma_sc_qp *qp,
-			   struct irdma_qp_flush_info *info, u64 scratch,
-			   bool post_sq);
+			   struct irdma_qp_flush_info *info, u64 scratch);
 int irdma_sc_qp_init(struct irdma_sc_qp *qp, struct irdma_qp_init_info *info);
 int irdma_sc_qp_modify(struct irdma_sc_qp *qp,
 		       struct irdma_modify_qp_info *info, u64 scratch,

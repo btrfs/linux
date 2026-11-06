@@ -23,12 +23,7 @@ Scheduler
     sched-stats
     sched-ext
     sched-debug
+    sched-paravirt
+    sched-preemption
 
     text_files
-
-.. only::  subproject and html
-
-   Indices
-   =======
-
-   * :ref:`genindex`

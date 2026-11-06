@@ -8,7 +8,6 @@
 #include <linux/device.h>
 #include <linux/leds.h>
 #include <linux/led-class-multicolor.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/platform_data/cros_ec_commands.h>
@@ -86,12 +85,18 @@ static int cros_ec_led_trigger_activate(struct led_classdev *led_cdev)
 	return cros_ec_led_send_cmd(priv->cros_ec, &arg);
 }
 
+static bool cros_ec_led_trigger_hw_offloaded(struct led_classdev *led_cdev)
+{
+	return true;
+}
+
 static struct led_hw_trigger_type cros_ec_led_trigger_type;
 
 static struct led_trigger cros_ec_led_trigger = {
 	.name = "chromeos-auto",
 	.trigger_type = &cros_ec_led_trigger_type,
 	.activate = cros_ec_led_trigger_activate,
+	.hw_offloaded = cros_ec_led_trigger_hw_offloaded,
 };
 
 static int cros_ec_led_brightness_set_blocking(struct led_classdev *led_cdev,
@@ -142,9 +147,6 @@ static int cros_ec_led_count_subleds(struct device *dev,
 		}
 	}
 
-	if (!num_subleds)
-		return -EINVAL;
-
 	*max_brightness = common_range;
 	return num_subleds;
 }
@@ -189,6 +191,8 @@ static int cros_ec_led_probe_one(struct device *dev, struct cros_ec_device *cros
 						&priv->led_mc_cdev.led_cdev.max_brightness);
 	if (num_subleds < 0)
 		return num_subleds;
+	if (num_subleds == 0)
+		return 0; /* LED without any colors, skip */
 
 	priv->cros_ec = cros_ec;
 	priv->led_id = id;
@@ -250,6 +254,7 @@ static const struct platform_device_id cros_ec_led_id[] = {
 	{ "cros-ec-led", 0 },
 	{}
 };
+MODULE_DEVICE_TABLE(platform, cros_ec_led_id);
 
 static struct platform_driver cros_ec_led_driver = {
 	.driver.name	= "cros-ec-led",
@@ -258,7 +263,6 @@ static struct platform_driver cros_ec_led_driver = {
 };
 module_platform_driver(cros_ec_led_driver);
 
-MODULE_DEVICE_TABLE(platform, cros_ec_led_id);
 MODULE_DESCRIPTION("ChromeOS EC LED Driver");
 MODULE_AUTHOR("Thomas Weißschuh <linux@weissschuh.net");
 MODULE_LICENSE("GPL");

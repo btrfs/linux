@@ -71,7 +71,7 @@ bmips_cpufreq_get_freq_table(const struct cpufreq_policy *policy)
 
 	cpu_freq = htp_freq_to_cpu_freq(priv->clk_mult);
 
-	table = kmalloc_array(priv->max_freqs + 1, sizeof(*table), GFP_KERNEL);
+	table = kmalloc_objs(*table, priv->max_freqs + 1);
 	if (!table)
 		return ERR_PTR(-ENOMEM);
 
@@ -132,8 +132,8 @@ static int bmips_cpufreq_init(struct cpufreq_policy *policy)
 
 	freq_table = bmips_cpufreq_get_freq_table(policy);
 	if (IS_ERR(freq_table)) {
-		pr_err("%s: couldn't determine frequency table (%ld).\n",
-			BMIPS_CPUFREQ_NAME, PTR_ERR(freq_table));
+		pr_err("%s: couldn't determine frequency table (%pe).\n",
+			BMIPS_CPUFREQ_NAME, freq_table);
 		return PTR_ERR(freq_table);
 	}
 

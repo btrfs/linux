@@ -223,6 +223,11 @@ static const struct snd_soc_dapm_route uda1342_dapm_routes[] = {
 	{ "VOUTR", NULL, "DAC" },
 };
 
+static const u64 uda1342_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J;
+
 static const struct snd_soc_dai_ops uda1342_dai_ops = {
 	.startup	= uda1342_startup,
 	.shutdown	= uda1342_shutdown,
@@ -230,6 +235,8 @@ static const struct snd_soc_dai_ops uda1342_dai_ops = {
 	.mute_stream	= uda1342_mute,
 	.set_sysclk	= uda1342_set_dai_sysclk,
 	.set_fmt	= uda1342_set_dai_fmt,
+	.auto_selectable_formats	= &uda1342_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 static struct snd_soc_dai_driver uda1342_dai = {
@@ -308,9 +315,16 @@ static int uda1342_suspend(struct device *dev)
 static int uda1342_resume(struct device *dev)
 {
 	struct uda1342_priv *uda1342 = dev_get_drvdata(dev);
+	int ret;
 
+	regcache_cache_only(uda1342->regmap, false);
 	regcache_mark_dirty(uda1342->regmap);
-	regcache_sync(uda1342->regmap);
+	ret = regcache_sync(uda1342->regmap);
+	if (ret) {
+		regcache_cache_only(uda1342->regmap, true);
+		regcache_mark_dirty(uda1342->regmap);
+		return ret;
+	}
 
 	return 0;
 }
@@ -319,7 +333,7 @@ static DEFINE_RUNTIME_DEV_PM_OPS(uda1342_pm_ops,
 				 uda1342_suspend, uda1342_resume, NULL);
 
 static const struct i2c_device_id uda1342_i2c_id[] = {
-	 { "uda1342" },
+	 { .name = "uda1342" },
 	 { }
 };
 MODULE_DEVICE_TABLE(i2c, uda1342_i2c_id);

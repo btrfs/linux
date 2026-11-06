@@ -113,17 +113,17 @@ static void tiadc_step_config(struct iio_dev *indio_dev)
 	 * There are 16 configurable steps and 8 analog input
 	 * lines available which are shared between Touchscreen and ADC.
 	 *
-	 * Steps forwards i.e. from 0 towards 16 are used by ADC
-	 * depending on number of input lines needed.
+	 * Steps forward, i.e. from 0 towards 16, are used by ADC
+	 * depending on the number of input lines needed.
 	 * Channel would represent which analog input
-	 * needs to be given to ADC to digitalize data.
+	 * needs to be given to ADC to digitize data.
 	 */
 	for (i = 0; i < adc_dev->channels; i++) {
 		int chan;
 
 		chan = adc_dev->channel_line[i];
 
-		if (adc_dev->step_avg[i])
+		if (adc_dev->step_avg[i] && adc_dev->step_avg[i] <= STEPCONFIG_AVG_16)
 			stepconfig = STEPCONFIG_AVG(ffs(adc_dev->step_avg[i]) - 1) |
 				     STEPCONFIG_FIFO1;
 		else
@@ -548,7 +548,7 @@ static int tiadc_request_dma(struct platform_device *pdev,
 	}
 
 	/* RX buffer */
-	dma->buf = dma_alloc_coherent(dma->chan->device->dev, DMA_BUFFER_SIZE,
+	dma->buf = dma_alloc_coherent(dmaengine_get_dma_device(dma->chan), DMA_BUFFER_SIZE,
 				      &dma->addr, GFP_KERNEL);
 	if (!dma->buf)
 		goto err;
@@ -688,7 +688,7 @@ static void tiadc_remove(struct platform_device *pdev)
 	u32 step_en;
 
 	if (dma->chan) {
-		dma_free_coherent(dma->chan->device->dev, DMA_BUFFER_SIZE,
+		dma_free_coherent(dmaengine_get_dma_device(dma->chan), DMA_BUFFER_SIZE,
 				  dma->buf, dma->addr);
 		dma_release_channel(dma->chan);
 	}

@@ -8,11 +8,15 @@
  */
 
 #include <linux/namei.h>
+#include <linux/nfs3.h>
 #include <linux/sunrpc/svc_xprt.h>
+
+#include "nfsd.h"
 #include "xdr3.h"
 #include "auth.h"
 #include "netns.h"
 #include "vfs.h"
+#include "nfserr.h"
 
 /*
  * Force construction of an empty post-op attr
@@ -556,6 +560,8 @@ nfs3svc_decode_writeargs(struct svc_rqst *rqstp, struct xdr_stream *xdr)
 		return false;
 	if (xdr_stream_decode_u32(xdr, &args->stable) < 0)
 		return false;
+	if (args->stable > NFS_FILE_SYNC)
+		return false;
 
 	/* opaque data */
 	if (xdr_stream_decode_u32(xdr, &args->len) < 0)
@@ -987,7 +993,7 @@ compose_entry_fh(struct nfsd3_readdirres *cd, struct svc_fh *fhp,
 	dparent = cd->fh.fh_dentry;
 	exp  = cd->fh.fh_export;
 
-	if (isdotent(name, namlen)) {
+	if (name_is_dot_dotdot(name, namlen)) {
 		if (namlen == 2) {
 			dchild = dget_parent(dparent);
 			/*
@@ -1069,7 +1075,7 @@ svcxdr_encode_entry3_common(struct nfsd3_readdirres *resp, const char *name,
  *
  * Return values:
  *   %0: Entry was successfully encoded.
- *   %-EINVAL: An encoding problem occured, secondary status code in resp->common.err
+ *   %-EINVAL: An encoding problem occurred, secondary status code in resp->common.err
  *
  * On exit, the following fields are updated:
  *   - resp->xdr
@@ -1144,7 +1150,7 @@ out_noattrs:
  *
  * Return values:
  *   %0: Entry was successfully encoded.
- *   %-EINVAL: An encoding problem occured, secondary status code in resp->common.err
+ *   %-EINVAL: An encoding problem occurred, secondary status code in resp->common.err
  *
  * On exit, the following fields are updated:
  *   - resp->xdr

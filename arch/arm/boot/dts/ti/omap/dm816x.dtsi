@@ -94,13 +94,13 @@
 				#address-cells = <1>;
 				#size-cells = <0>;
 				#pinctrl-cells = <1>;
-				pinctrl-single,register-width = <16>;
-				pinctrl-single,function-mask = <0xf>;
+				pinctrl-single,register-width = <32>;
+				pinctrl-single,function-mask = <0x1f>;
 			};
 
 			/* Device Configuration Registers */
 			scm_conf: syscon@600 {
-				compatible = "syscon", "simple-bus";
+				compatible = "ti,dm8168-scm-conf", "syscon", "simple-bus";
 				reg = <0x600 0x110>;
 				#address-cells = <1>;
 				#size-cells = <1>;

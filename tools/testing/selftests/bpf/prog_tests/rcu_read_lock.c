@@ -28,11 +28,14 @@ static void test_success(void)
 	bpf_program__set_autoload(skel->progs.two_regions, true);
 	bpf_program__set_autoload(skel->progs.non_sleepable_1, true);
 	bpf_program__set_autoload(skel->progs.non_sleepable_2, true);
+	bpf_program__set_autoload(skel->progs.nested_rcu_region, true);
 	bpf_program__set_autoload(skel->progs.task_trusted_non_rcuptr, true);
 	bpf_program__set_autoload(skel->progs.rcu_read_lock_subprog, true);
 	bpf_program__set_autoload(skel->progs.rcu_read_lock_global_subprog, true);
 	bpf_program__set_autoload(skel->progs.rcu_read_lock_subprog_lock, true);
 	bpf_program__set_autoload(skel->progs.rcu_read_lock_subprog_unlock, true);
+	bpf_program__set_autoload(skel->progs.non_own_ref_untrusted_ld, true);
+	bpf_program__set_autoload(skel->progs.rcu_untrusted_union_ld, true);
 	err = rcu_read_lock__load(skel);
 	if (!ASSERT_OK(err, "skel_load"))
 		goto out;
@@ -78,7 +81,8 @@ static const char * const inproper_region_tests[] = {
 	"non_sleepable_rcu_mismatch",
 	"inproper_sleepable_helper",
 	"inproper_sleepable_kfunc",
-	"nested_rcu_region",
+	"nested_rcu_region_unbalanced_1",
+	"nested_rcu_region_unbalanced_2",
 	"rcu_read_lock_global_subprog_lock",
 	"rcu_read_lock_global_subprog_unlock",
 	"rcu_read_lock_sleepable_helper_global_subprog",

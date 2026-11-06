@@ -143,11 +143,11 @@ void __init socfpga_gate_init(struct device_node *node)
 	struct socfpga_gate_clk *socfpga_clk;
 	const char *clk_name = node->name;
 	const char *parent_name[SOCFPGA_MAX_PARENTS];
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	struct clk_ops *ops;
 	int rc;
 
-	socfpga_clk = kzalloc(sizeof(*socfpga_clk), GFP_KERNEL);
+	socfpga_clk = kzalloc_obj(*socfpga_clk);
 	if (WARN_ON(!socfpga_clk))
 		return;
 

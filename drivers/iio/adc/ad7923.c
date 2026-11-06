@@ -30,7 +30,7 @@
 #define AD7923_PM_MODE_AS	(1)		/* auto shutdown */
 #define AD7923_PM_MODE_FS	(2)		/* full shutdown */
 #define AD7923_PM_MODE_OPS	(3)		/* normal operation */
-#define AD7923_SEQUENCE_OFF	(0)		/* no sequence fonction */
+#define AD7923_SEQUENCE_OFF	(0)		/* no sequence function */
 #define AD7923_SEQUENCE_PROTECT	(2)		/* no interrupt write cycle */
 #define AD7923_SEQUENCE_ON	(3)		/* continuous sequence */
 
@@ -39,7 +39,7 @@
 #define AD7923_CHANNEL_WRITE(channel)	((channel) << 6) /* write channel */
 #define AD7923_SEQUENCE_WRITE(sequence)	((((sequence) & 1) << 3) \
 					+ (((sequence) & 2) << 9))
-						/* write sequence fonction */
+						/* write sequence function */
 /* left shift for CR : bit 11 transmit in first */
 #define AD7923_SHIFT_REGISTER	4
 
@@ -360,13 +360,13 @@ static int ad7923_probe(struct spi_device *spi)
 }
 
 static const struct spi_device_id ad7923_id[] = {
-	{ "ad7904", AD7904 },
-	{ "ad7914", AD7914 },
-	{ "ad7923", AD7924 },
-	{ "ad7924", AD7924 },
-	{ "ad7908", AD7908 },
-	{ "ad7918", AD7918 },
-	{ "ad7928", AD7928 },
+	{ .name = "ad7904", .driver_data = AD7904 },
+	{ .name = "ad7914", .driver_data = AD7914 },
+	{ .name = "ad7923", .driver_data = AD7924 },
+	{ .name = "ad7924", .driver_data = AD7924 },
+	{ .name = "ad7908", .driver_data = AD7908 },
+	{ .name = "ad7918", .driver_data = AD7918 },
+	{ .name = "ad7928", .driver_data = AD7928 },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad7923_id);

@@ -17,7 +17,7 @@
 #include <asm/xen/hypercall.h>
 #include <asm/xen/hypervisor.h>
 #include <asm/cpu.h>
-#include <asm/e820/api.h> 
+#include <asm/e820/api.h>
 #include <asm/setup.h>
 
 #include "xen-ops.h"
@@ -76,6 +76,7 @@ unsigned long xen_released_pages;
 static __ref void xen_get_vendor(void)
 {
 	init_cpu_devs();
+	cpuid_scan_cpu(&boot_cpu_data);
 	cpu_detect(&boot_cpu_data);
 	get_cpu_vendor(&boot_cpu_data);
 }
@@ -470,7 +471,7 @@ int __init arch_xen_unpopulated_init(struct resource **res)
 		 * driver to know how much of the physmap is unpopulated and
 		 * set an accurate initial memory target.
 		 */
-		xen_released_pages += xen_extra_mem[i].n_pfns;
+		xen_unpopulated_pages += xen_extra_mem[i].n_pfns;
 		/* Zero so region is not also added to the balloon driver. */
 		xen_extra_mem[i].n_pfns = 0;
 	}

@@ -302,7 +302,7 @@ ice_arfs_build_entry(struct ice_vsi *vsi, const struct flow_keys *fk,
 		     u16 rxq_idx, u32 flow_id)
 {
 	struct ice_arfs_entry *arfs_entry;
-	struct ice_fdir_fltr *fltr_info;
+	struct ice_ntuple_fltr *fltr_info;
 	u8 ip_proto;
 
 	arfs_entry = devm_kzalloc(ice_pf_to_dev(vsi->back),
@@ -392,8 +392,8 @@ ice_arfs_is_perfect_flow_set(struct ice_hw *hw, __be16 l3_proto, u8 l4_proto)
  * * false	- fltr_info and fk refer to different flows.
  */
 static bool
-ice_arfs_cmp(const struct ice_fdir_fltr *fltr_info, const struct flow_keys *fk,
-	     __be16 n_proto, u8 ip_proto)
+ice_arfs_cmp(const struct ice_ntuple_fltr *fltr_info,
+	     const struct flow_keys *fk, __be16 n_proto, u8 ip_proto)
 {
 	/* Determine if the filter is for IPv4 or IPv6 based on flow_type,
 	 * which is one of ICE_FLTR_PTYPE_NONF_IPV{4,6}_{TCP,UDP}.
@@ -485,7 +485,7 @@ ice_rx_flow_steer(struct net_device *netdev, const struct sk_buff *skb,
 	spin_lock_bh(&vsi->arfs_lock);
 	hlist_for_each_entry(arfs_entry, &vsi->arfs_fltr_list[idx],
 			     list_entry) {
-		struct ice_fdir_fltr *fltr_info;
+		struct ice_ntuple_fltr *fltr_info;
 
 		/* keep searching for the already existing arfs_entry flow */
 		if (arfs_entry->flow_id != flow_id)
@@ -534,13 +534,11 @@ static int ice_init_arfs_cntrs(struct ice_vsi *vsi)
 	if (!vsi || vsi->type != ICE_VSI_PF)
 		return -EINVAL;
 
-	vsi->arfs_fltr_cntrs = kzalloc(sizeof(*vsi->arfs_fltr_cntrs),
-				       GFP_KERNEL);
+	vsi->arfs_fltr_cntrs = kzalloc_obj(*vsi->arfs_fltr_cntrs);
 	if (!vsi->arfs_fltr_cntrs)
 		return -ENOMEM;
 
-	vsi->arfs_last_fltr_id = kzalloc(sizeof(*vsi->arfs_last_fltr_id),
-					 GFP_KERNEL);
+	vsi->arfs_last_fltr_id = kzalloc_obj(*vsi->arfs_last_fltr_id);
 	if (!vsi->arfs_last_fltr_id) {
 		kfree(vsi->arfs_fltr_cntrs);
 		vsi->arfs_fltr_cntrs = NULL;
@@ -562,8 +560,7 @@ void ice_init_arfs(struct ice_vsi *vsi)
 	if (!vsi || vsi->type != ICE_VSI_PF || ice_is_arfs_active(vsi))
 		return;
 
-	arfs_fltr_list = kcalloc(ICE_MAX_ARFS_LIST, sizeof(*arfs_fltr_list),
-				 GFP_KERNEL);
+	arfs_fltr_list = kzalloc_objs(*arfs_fltr_list, ICE_MAX_ARFS_LIST);
 	if (!arfs_fltr_list)
 		return;
 

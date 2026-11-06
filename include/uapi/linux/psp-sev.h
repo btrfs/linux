@@ -15,7 +15,7 @@
 
 #include <linux/types.h>
 
-/**
+/*
  * SEV platform commands
  */
 enum {
@@ -36,7 +36,7 @@ enum {
 	SEV_MAX,
 };
 
-/**
+/*
  * SEV Firmware status code
  */
 typedef enum {
@@ -47,32 +47,32 @@ typedef enum {
 	 * with possible values from the specification.
 	 */
 	SEV_RET_NO_FW_CALL = -1,
-	SEV_RET_SUCCESS = 0,
-	SEV_RET_INVALID_PLATFORM_STATE,
-	SEV_RET_INVALID_GUEST_STATE,
-	SEV_RET_INAVLID_CONFIG,
+	SEV_RET_SUCCESS                    = 0,
+	SEV_RET_INVALID_PLATFORM_STATE     = 0x0001,
+	SEV_RET_INVALID_GUEST_STATE        = 0x0002,
+	SEV_RET_INAVLID_CONFIG             = 0x0003,
 	SEV_RET_INVALID_CONFIG = SEV_RET_INAVLID_CONFIG,
-	SEV_RET_INVALID_LEN,
-	SEV_RET_ALREADY_OWNED,
-	SEV_RET_INVALID_CERTIFICATE,
-	SEV_RET_POLICY_FAILURE,
-	SEV_RET_INACTIVE,
-	SEV_RET_INVALID_ADDRESS,
-	SEV_RET_BAD_SIGNATURE,
-	SEV_RET_BAD_MEASUREMENT,
-	SEV_RET_ASID_OWNED,
-	SEV_RET_INVALID_ASID,
-	SEV_RET_WBINVD_REQUIRED,
-	SEV_RET_DFFLUSH_REQUIRED,
-	SEV_RET_INVALID_GUEST,
-	SEV_RET_INVALID_COMMAND,
-	SEV_RET_ACTIVE,
-	SEV_RET_HWSEV_RET_PLATFORM,
-	SEV_RET_HWSEV_RET_UNSAFE,
-	SEV_RET_UNSUPPORTED,
-	SEV_RET_INVALID_PARAM,
-	SEV_RET_RESOURCE_LIMIT,
-	SEV_RET_SECURE_DATA_INVALID,
+	SEV_RET_INVALID_LEN                = 0x0004,
+	SEV_RET_ALREADY_OWNED              = 0x0005,
+	SEV_RET_INVALID_CERTIFICATE        = 0x0006,
+	SEV_RET_POLICY_FAILURE             = 0x0007,
+	SEV_RET_INACTIVE                   = 0x0008,
+	SEV_RET_INVALID_ADDRESS            = 0x0009,
+	SEV_RET_BAD_SIGNATURE              = 0x000A,
+	SEV_RET_BAD_MEASUREMENT            = 0x000B,
+	SEV_RET_ASID_OWNED                 = 0x000C,
+	SEV_RET_INVALID_ASID               = 0x000D,
+	SEV_RET_WBINVD_REQUIRED            = 0x000E,
+	SEV_RET_DFFLUSH_REQUIRED           = 0x000F,
+	SEV_RET_INVALID_GUEST              = 0x0010,
+	SEV_RET_INVALID_COMMAND            = 0x0011,
+	SEV_RET_ACTIVE                     = 0x0012,
+	SEV_RET_HWSEV_RET_PLATFORM         = 0x0013,
+	SEV_RET_HWSEV_RET_UNSAFE           = 0x0014,
+	SEV_RET_UNSUPPORTED                = 0x0015,
+	SEV_RET_INVALID_PARAM              = 0x0016,
+	SEV_RET_RESOURCE_LIMIT             = 0x0017,
+	SEV_RET_SECURE_DATA_INVALID        = 0x0018,
 	SEV_RET_INVALID_PAGE_SIZE          = 0x0019,
 	SEV_RET_INVALID_PAGE_STATE         = 0x001A,
 	SEV_RET_INVALID_MDATA_ENTRY        = 0x001B,
@@ -87,14 +87,30 @@ typedef enum {
 	SEV_RET_RESTORE_REQUIRED           = 0x0025,
 	SEV_RET_RMP_INITIALIZATION_FAILED  = 0x0026,
 	SEV_RET_INVALID_KEY                = 0x0027,
+	SEV_RET_SHUTDOWN_INCOMPLETE        = 0x0028,
+	SEV_RET_INCORRECT_BUFFER_LENGTH	   = 0x0030,
+	SEV_RET_EXPAND_BUFFER_LENGTH_REQUEST = 0x0031,
+	SEV_RET_SPDM_REQUEST               = 0x0032,
+	SEV_RET_SPDM_ERROR                 = 0x0033,
+	SEV_RET_SEV_STATUS_ERR_IN_DEV_CONN = 0x0035,
+	SEV_RET_SEV_STATUS_INVALID_DEV_CTX = 0x0036,
+	SEV_RET_SEV_STATUS_INVALID_TDI_CTX = 0x0037,
+	SEV_RET_SEV_STATUS_INVALID_TDI     = 0x0038,
+	SEV_RET_SEV_STATUS_RECLAIM_REQUIRED = 0x0039,
+	SEV_RET_IN_USE                     = 0x003A,
+	SEV_RET_SEV_STATUS_INVALID_DEV_STATE = 0x003B,
+	SEV_RET_SEV_STATUS_INVALID_TDI_STATE = 0x003C,
+	SEV_RET_SEV_STATUS_DEV_CERT_CHANGED = 0x003D,
+	SEV_RET_SEV_STATUS_RESYNC_REQ      = 0x003E,
+	SEV_RET_SEV_STATUS_RESPONSE_TOO_LARGE = 0x003F,
 	SEV_RET_MAX,
 } sev_ret_code;
 
 /**
  * struct sev_user_data_status - PLATFORM_STATUS command parameters
  *
- * @major: major API version
- * @minor: minor API version
+ * @api_major: major API version
+ * @api_minor: minor API version
  * @state: platform state
  * @flags: platform config flags
  * @build: firmware build id for API version
@@ -123,12 +139,12 @@ struct sev_user_data_pek_csr {
 } __packed;
 
 /**
- * struct sev_user_data_cert_import - PEK_CERT_IMPORT command parameters
+ * struct sev_user_data_pek_cert_import - PEK_CERT_IMPORT command parameters
  *
- * @pek_address: PEK certificate chain
- * @pek_len: length of PEK certificate
- * @oca_address: OCA certificate chain
- * @oca_len: length of OCA certificate
+ * @pek_cert_address: PEK certificate chain
+ * @pek_cert_len: length of PEK certificate
+ * @oca_cert_address: OCA certificate chain
+ * @oca_cert_len: length of OCA certificate
  */
 struct sev_user_data_pek_cert_import {
 	__u64 pek_cert_address;			/* In */
@@ -140,8 +156,8 @@ struct sev_user_data_pek_cert_import {
 /**
  * struct sev_user_data_pdh_cert_export - PDH_CERT_EXPORT command parameters
  *
- * @pdh_address: PDH certificate address
- * @pdh_len: length of PDH certificate
+ * @pdh_cert_address: PDH certificate address
+ * @pdh_cert_len: length of PDH certificate
  * @cert_chain_address: PDH certificate chain
  * @cert_chain_len: length of PDH certificate chain
  */
@@ -232,7 +248,7 @@ struct sev_user_data_snp_config {
 } __packed;
 
 /**
- * struct sev_data_snp_vlek_load - SNP_VLEK_LOAD structure
+ * struct sev_user_data_snp_vlek_load - SNP_VLEK_LOAD structure
  *
  * @len: length of the command buffer read by the PSP
  * @vlek_wrapped_version: version of wrapped VLEK hashstick (Must be 0h)
@@ -248,7 +264,7 @@ struct sev_user_data_snp_vlek_load {
 } __packed;
 
 /**
- * struct sev_user_data_snp_vlek_wrapped_vlek_hashstick - Wrapped VLEK data
+ * struct sev_user_data_snp_wrapped_vlek_hashstick - Wrapped VLEK data
  *
  * @data: Opaque data provided by AMD KDS (as described in SEV-SNP Firmware ABI
  *        1.54, SNP_VLEK_LOAD)
@@ -261,7 +277,7 @@ struct sev_user_data_snp_wrapped_vlek_hashstick {
  * struct sev_issue_cmd - SEV ioctl parameters
  *
  * @cmd: SEV commands to execute
- * @opaque: pointer to the command structure
+ * @data: pointer to the command structure
  * @error: SEV FW return code on failure
  */
 struct sev_issue_cmd {

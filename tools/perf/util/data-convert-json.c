@@ -16,6 +16,7 @@
 #include "linux/err.h"
 #include "util/auxtrace.h"
 #include "util/debug.h"
+#include "util/env.h"
 #include "util/dso.h"
 #include "util/event.h"
 #include "util/evsel.h"
@@ -25,6 +26,7 @@
 #include "util/session.h"
 #include "util/symbol.h"
 #include "util/thread.h"
+#include "util/time-utils.h"
 #include "util/tool.h"
 
 #ifdef HAVE_LIBTRACEEVENT
@@ -35,13 +37,21 @@ struct convert_json {
 	struct perf_tool tool;
 	FILE *out;
 	bool first;
+	struct perf_time_interval *ptime_range;
+	int range_size;
+	int range_num;
+
 	u64 events_count;
+	u64 skipped;
 };
 
 // Outputs a JSON-encoded string surrounded by quotes with characters escaped.
 static void output_json_string(FILE *out, const char *s)
 {
 	fputc('"', out);
+	if (!s)
+		goto out;
+
 	while (*s) {
 		switch (*s) {
 
@@ -65,6 +75,7 @@ static void output_json_string(FILE *out, const char *s)
 
 		++s;
 	}
+out:
 	fputc('"', out);
 }
 
@@ -149,13 +160,12 @@ static void output_sample_callchain_entry(const struct perf_tool *tool,
 static int process_sample_event(const struct perf_tool *tool,
 				union perf_event *event __maybe_unused,
 				struct perf_sample *sample,
-				struct evsel *evsel __maybe_unused,
 				struct machine *machine)
 {
 	struct convert_json *c = container_of(tool, struct convert_json, tool);
 	FILE *out = c->out;
 	struct addr_location al;
-	u64 sample_type = __evlist__combined_sample_type(evsel->evlist);
+	u64 sample_type = __evlist__combined_sample_type(sample->evsel->evlist);
 	u8 cpumode = PERF_RECORD_MISC_USER;
 
 	addr_location__init(&al);
@@ -163,6 +173,12 @@ static int process_sample_event(const struct perf_tool *tool,
 		pr_err("Sample resolution failed!\n");
 		addr_location__exit(&al);
 		return -1;
+	}
+
+	if (perf_time__ranges_skip_sample(c->ptime_range, c->range_num, sample->time)) {
+		++c->skipped;
+		addr_location__exit(&al);
+		return 0;
 	}
 
 	++c->events_count;
@@ -230,7 +246,7 @@ static int process_sample_event(const struct perf_tool *tool,
 
 #ifdef HAVE_LIBTRACEEVENT
 	if (sample->raw_data) {
-		struct tep_event *tp_format = evsel__tp_format(evsel);
+		struct tep_event *tp_format = evsel__tp_format(sample->evsel);
 		struct tep_format_field **fields = tp_format ? tep_event_fields(tp_format) : NULL;
 
 		if (fields) {
@@ -242,6 +258,7 @@ static int process_sample_event(const struct perf_tool *tool,
 				trace_seq_init(&s);
 				tep_print_field(&s, sample->raw_data, fields[i]);
 				output_json_key_string(out, true, 3, fields[i]->name, s.buffer);
+				trace_seq_destroy(&s);
 
 				i++;
 			}
@@ -258,7 +275,7 @@ static void output_headers(struct perf_session *session, struct convert_json *c)
 {
 	struct stat st;
 	const struct perf_header *header = &session->header;
-	const struct perf_env *env = perf_session__env(session);
+	struct perf_env *env = perf_session__env(session);
 	int ret;
 	int fd = perf_data__fd(session->data);
 	int i;
@@ -282,7 +299,8 @@ static void output_headers(struct perf_session *session, struct convert_json *c)
 	output_json_key_format(out, true, 2, "feat-offset", "%" PRIu64, header->feat_offset);
 
 	output_json_key_string(out, true, 2, "hostname", env->hostname);
-	output_json_key_string(out, true, 2, "os-release", env->os_release);
+	output_json_key_string(out, true, 2, "os-release",
+			       perf_env__os_release(env));
 	output_json_key_string(out, true, 2, "arch", env->arch);
 
 	if (env->cpu_desc)
@@ -311,7 +329,7 @@ static void output_headers(struct perf_session *session, struct convert_json *c)
 	output_json_format(out, false, 2, "]");
 }
 
-int bt_convert__perf2json(const char *input_name, const char *output_name,
+int bt_convert__perf2json(const char *_input_name, const char *output_name,
 		struct perf_data_convert_opts *opts __maybe_unused)
 {
 	struct perf_session *session;
@@ -320,10 +338,14 @@ int bt_convert__perf2json(const char *input_name, const char *output_name,
 	struct convert_json c = {
 		.first = true,
 		.events_count = 0,
+		.ptime_range = NULL,
+		.range_size = 0,
+		.range_num = 0,
+		.skipped = 0,
 	};
 	struct perf_data data = {
 		.mode = PERF_DATA_MODE_READ,
-		.path = input_name,
+		.path = _input_name,
 		.force = opts->force,
 	};
 
@@ -345,6 +367,8 @@ int bt_convert__perf2json(const char *input_name, const char *output_name,
 	c.tool.auxtrace_info  = perf_event__process_auxtrace_info;
 	c.tool.auxtrace       = perf_event__process_auxtrace;
 	c.tool.event_update   = perf_event__process_event_update;
+	c.tool.attr           = perf_event__process_attr;
+	c.tool.feature        = perf_event__process_feature;
 	c.tool.ordering_requires_timestamps = true;
 
 	if (opts->all) {
@@ -382,6 +406,15 @@ int bt_convert__perf2json(const char *input_name, const char *output_name,
 		goto err_session_delete;
 	}
 
+	if (opts->time_str) {
+		ret = perf_time__parse_for_ranges(opts->time_str, session,
+						  &c.ptime_range,
+						  &c.range_size,
+						  &c.range_num);
+		if (ret < 0)
+			goto err_session_delete;
+	}
+
 	// The opening brace is printed manually because it isn't delimited from a
 	// previous value (i.e. we don't want a leading newline)
 	fputc('{', c.out);
@@ -403,15 +436,23 @@ int bt_convert__perf2json(const char *input_name, const char *output_name,
 	output_json_format(c.out, false, 0, "}");
 	fputc('\n', c.out);
 
-	fprintf(stderr,
-			"[ perf data convert: Converted '%s' into JSON data '%s' ]\n",
-			data.path, output_name);
+	fprintf(stderr,	"[ perf data convert: Converted '%s' into JSON data '%s' ]\n",
+		data.path, output_name);
 
 	fprintf(stderr,
-			"[ perf data convert: Converted and wrote %.3f MB (%" PRIu64 " samples) ]\n",
-			(ftell(c.out)) / 1024.0 / 1024.0, c.events_count);
+		"[ perf data convert: Converted and wrote %.3f MB (%" PRIu64 " samples) ]\n",
+		(ftell(c.out)) / 1024.0 / 1024.0, c.events_count);
+
+	if (c.skipped) {
+		fprintf(stderr,	"[ perf data convert: Skipped %" PRIu64 " samples ]\n",
+			c.skipped);
+	}
 
 	ret = 0;
+
+	if (c.ptime_range)
+		zfree(&c.ptime_range);
+
 err_session_delete:
 	perf_session__delete(session);
 err_fclose:

@@ -32,7 +32,7 @@ static const u8 REG_TEMP_MAX[4] = { 0x34, 0x30, 0x31, 0x32 };
 #define REG_PRODUCT_ID		0xfd
 #define REG_MFG_ID		0xfe
 
-/* equation 4 from datasheet: rpm = (3932160 * multipler) / count */
+/* equation 4 from datasheet: rpm = (3932160 * multiplier) / count */
 #define FAN_RPM_FACTOR		3932160
 
 /*
@@ -277,8 +277,10 @@ fan1_input_show(struct device *dev, struct device_attribute *da, char *buf)
 {
 	struct emc2103_data *data = emc2103_update_device(dev);
 	int rpm = 0;
+	mutex_lock(&data->update_lock);
 	if (data->fan_tach != 0)
 		rpm = (FAN_RPM_FACTOR * data->fan_multiplier) / data->fan_tach;
+	mutex_unlock(&data->update_lock);
 	return sprintf(buf, "%d\n", rpm);
 }
 
@@ -363,10 +365,12 @@ fan1_target_show(struct device *dev, struct device_attribute *da, char *buf)
 	struct emc2103_data *data = emc2103_update_device(dev);
 	int rpm = 0;
 
+	mutex_lock(&data->update_lock);
 	/* high byte of 0xff indicates disabled so return 0 */
 	if ((data->fan_target != 0) && ((data->fan_target & 0x1fe0) != 0x1fe0))
 		rpm = (FAN_RPM_FACTOR * data->fan_multiplier)
 			/ data->fan_target;
+	mutex_unlock(&data->update_lock);
 
 	return sprintf(buf, "%d\n", rpm);
 }
@@ -620,7 +624,7 @@ emc2103_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id emc2103_ids[] = {
-	{ "emc2103" },
+	{ .name = "emc2103" },
 	{ /* LIST END */ }
 };
 MODULE_DEVICE_TABLE(i2c, emc2103_ids);

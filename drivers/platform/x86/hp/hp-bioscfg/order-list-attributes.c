@@ -98,9 +98,13 @@ int hp_alloc_ordered_list_data(void)
 {
 	bioscfg_drv.ordered_list_instances_count =
 		hp_get_instance_count(HP_WMI_BIOS_ORDERED_LIST_GUID);
-	bioscfg_drv.ordered_list_data = kcalloc(bioscfg_drv.ordered_list_instances_count,
-						sizeof(*bioscfg_drv.ordered_list_data),
-						GFP_KERNEL);
+
+	if (!bioscfg_drv.ordered_list_instances_count)
+		return -EINVAL;
+	bioscfg_drv.ordered_list_data =
+			kvzalloc_objs(*bioscfg_drv.ordered_list_data,
+						bioscfg_drv.ordered_list_instances_count);
+
 	if (!bioscfg_drv.ordered_list_data) {
 		bioscfg_drv.ordered_list_instances_count = 0;
 		return -ENOMEM;
@@ -131,11 +135,9 @@ static int hp_populate_ordered_list_elements_from_package(union acpi_object *ord
 	char *str_value = NULL;
 	int value_len = 0;
 	int ret;
-	u32 size;
 	u32 int_value = 0;
 	int elem;
 	int olist_elem;
-	int reqs;
 	int eloc;
 	char *tmpstr = NULL;
 	char *part_tmp = NULL;
@@ -146,7 +148,7 @@ static int hp_populate_ordered_list_elements_from_package(union acpi_object *ord
 	if (!order_obj)
 		return -EINVAL;
 
-	for (elem = 1, eloc = 1; eloc < ORD_ELEM_CNT; elem++, eloc++) {
+	for (elem = 1, eloc = 1; eloc < ORD_ELEM_CNT && elem < order_obj_count; elem++, eloc++) {
 
 		switch (order_obj[elem].type) {
 		case ACPI_TYPE_STRING:
@@ -181,57 +183,18 @@ static int hp_populate_ordered_list_elements_from_package(union acpi_object *ord
 			replace_char_str(ordered_list_data->current_value, COMMA_SEP, SEMICOLON_SEP);
 			break;
 		case PATH:
-			strscpy(ordered_list_data->common.path, str_value);
-			break;
 		case IS_READONLY:
-			ordered_list_data->common.is_readonly = int_value;
-			break;
 		case DISPLAY_IN_UI:
-			ordered_list_data->common.display_in_ui = int_value;
-			break;
 		case REQUIRES_PHYSICAL_PRESENCE:
-			ordered_list_data->common.requires_physical_presence = int_value;
-			break;
 		case SEQUENCE:
-			ordered_list_data->common.sequence = int_value;
-			break;
 		case PREREQUISITES_SIZE:
-			if (int_value > MAX_PREREQUISITES_SIZE) {
-				pr_warn("Prerequisites size value exceeded the maximum number of elements supported or data may be malformed\n");
-				int_value = MAX_PREREQUISITES_SIZE;
-			}
-			ordered_list_data->common.prerequisites_size = int_value;
-
-			/*
-			 * This step is needed to keep the expected
-			 * element list pointing to the right obj[elem].type
-			 * when the size is zero. PREREQUISITES
-			 * object is omitted by BIOS when the size is
-			 * zero.
-			 */
-			if (int_value == 0)
-				eloc++;
-			break;
 		case PREREQUISITES:
-			size = min_t(u32, ordered_list_data->common.prerequisites_size,
-				     MAX_PREREQUISITES_SIZE);
-			for (reqs = 0; reqs < size; reqs++) {
-				ret = hp_convert_hexstr_to_str(order_obj[elem + reqs].string.pointer,
-							       order_obj[elem + reqs].string.length,
-							       &str_value, &value_len);
-
-				if (ret)
-					continue;
-
-				strscpy(ordered_list_data->common.prerequisites[reqs], str_value);
-
-				kfree(str_value);
-				str_value = NULL;
-			}
-			break;
-
 		case SECURITY_LEVEL:
-			ordered_list_data->common.security_level = int_value;
+			ret = hp_get_common_data_from_package(order_obj, order_obj_count,
+							      &elem, &eloc, int_value, &str_value,
+							      &ordered_list_data->common);
+			if (ret)
+				return ret;
 			break;
 
 		case ORD_LIST_SIZE:
@@ -257,7 +220,9 @@ static int hp_populate_ordered_list_elements_from_package(union acpi_object *ord
 			 * Ordered list data is stored in hex and comma separated format
 			 * Convert the data and split it to show each element
 			 */
-			ret = hp_convert_hexstr_to_str(str_value, value_len, &tmpstr, &tmp_len);
+			ret = hp_convert_hexstr_to_str(order_obj[elem].string.pointer,
+						       order_obj[elem].string.length,
+						       &tmpstr, &tmp_len);
 			if (ret)
 				goto exit_list;
 
@@ -294,10 +259,12 @@ exit_list:
  * Populate all properties of an instance under ordered_list attribute
  *
  * @order_obj: ACPI object with ordered_list data
+ * @order_obj_count: Number of elements in @order_obj
  * @instance_id: The instance to enumerate
  * @attr_name_kobj: The parent kernel object
  */
-int hp_populate_ordered_list_package_data(union acpi_object *order_obj, int instance_id,
+int hp_populate_ordered_list_package_data(union acpi_object *order_obj, int order_obj_count,
+					  int instance_id,
 					  struct kobject *attr_name_kobj)
 {
 	struct ordered_list_data *ordered_list_data = &bioscfg_drv.ordered_list_data[instance_id];
@@ -305,7 +272,7 @@ int hp_populate_ordered_list_package_data(union acpi_object *order_obj, int inst
 	ordered_list_data->attr_name_kobj = attr_name_kobj;
 
 	hp_populate_ordered_list_elements_from_package(order_obj,
-						       order_obj->package.count,
+						       order_obj_count,
 						       instance_id);
 	hp_update_attribute_permissions(ordered_list_data->common.is_readonly,
 					&ordered_list_current_val);
@@ -428,6 +395,6 @@ void hp_exit_ordered_list_attributes(void)
 	}
 	bioscfg_drv.ordered_list_instances_count = 0;
 
-	kfree(bioscfg_drv.ordered_list_data);
+	kvfree(bioscfg_drv.ordered_list_data);
 	bioscfg_drv.ordered_list_data = NULL;
 }

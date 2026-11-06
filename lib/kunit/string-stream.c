@@ -9,6 +9,7 @@
 #include <kunit/static_stub.h>
 #include <kunit/test.h>
 #include <linux/list.h>
+#include <linux/seq_buf.h>
 #include <linux/slab.h>
 
 #include "string-stream.h"
@@ -18,7 +19,7 @@ static struct string_stream_fragment *alloc_string_stream_fragment(int len, gfp_
 {
 	struct string_stream_fragment *frag;
 
-	frag = kzalloc(sizeof(*frag), gfp);
+	frag = kzalloc_obj(*frag, gfp);
 	if (!frag)
 		return ERR_PTR(-ENOMEM);
 
@@ -74,7 +75,8 @@ int string_stream_vadd(struct string_stream *stream,
 
 		/* Append newline if necessary. */
 		if (frag_container->fragment[result_len - 1] != '\n')
-			result_len = strlcat(frag_container->fragment, "\n", buf_len);
+			result_len += strscpy(frag_container->fragment + result_len,
+					      "\n", buf_len - result_len);
 	} else {
 		result_len = vsnprintf(frag_container->fragment, buf_len, fmt, args);
 	}
@@ -118,15 +120,18 @@ char *string_stream_get_string(struct string_stream *stream)
 {
 	struct string_stream_fragment *frag_container;
 	size_t buf_len = stream->length + 1; /* +1 for null byte. */
+	struct seq_buf sb;
 	char *buf;
 
 	buf = kzalloc(buf_len, stream->gfp);
 	if (!buf)
 		return NULL;
 
+	seq_buf_init(&sb, buf, buf_len);
+
 	spin_lock(&stream->lock);
 	list_for_each_entry(frag_container, &stream->fragments, node)
-		strlcat(buf, frag_container->fragment, buf_len);
+		seq_buf_puts(&sb, frag_container->fragment);
 	spin_unlock(&stream->lock);
 
 	return buf;
@@ -158,7 +163,7 @@ struct string_stream *alloc_string_stream(gfp_t gfp)
 {
 	struct string_stream *stream;
 
-	stream = kzalloc(sizeof(*stream), gfp);
+	stream = kzalloc_obj(*stream, gfp);
 	if (!stream)
 		return ERR_PTR(-ENOMEM);
 

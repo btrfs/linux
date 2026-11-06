@@ -27,8 +27,12 @@
 
 #include "dce/dce_11_2_d.h"
 #include "dce/dce_11_2_sh_mask.h"
-#include "gmc/gmc_8_1_sh_mask.h"
-#include "gmc/gmc_8_1_d.h"
+
+#ifndef mmGMCON_LPT_TARGET
+#define mmGMCON_LPT_TARGET 0x0D53
+#define GMCON_LPT_TARGET__STCTRL_LPT_TARGET__SHIFT 0x00000000
+#define GMCON_LPT_TARGET__STCTRL_LPT_TARGET_MASK 0xffffffffL
+#endif
 
 #include "include/logger_interface.h"
 
@@ -284,6 +288,7 @@ static uint32_t align_to_chunks_number_per_line(
 	struct dce112_compressor *cp110,
 	uint32_t pixels)
 {
+	(void)cp110;
 	return 256 * ((pixels + 255) / 256);
 }
 
@@ -831,7 +836,7 @@ void dce112_compressor_construct(struct dce112_compressor *compressor,
 struct compressor *dce112_compressor_create(struct dc_context *ctx)
 {
 	struct dce112_compressor *cp110 =
-		kzalloc(sizeof(struct dce112_compressor), GFP_KERNEL);
+		kzalloc_obj(struct dce112_compressor);
 
 	if (!cp110)
 		return NULL;

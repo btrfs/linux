@@ -14,7 +14,6 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/mfd/syscon.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm_opp.h>
@@ -467,8 +466,7 @@ static int __init armada37xx_cpufreq_driver_init(void)
 		return -EINVAL;
 	}
 
-	armada37xx_cpufreq_state = kmalloc(sizeof(*armada37xx_cpufreq_state),
-					   GFP_KERNEL);
+	armada37xx_cpufreq_state = kmalloc_obj(*armada37xx_cpufreq_state);
 	if (!armada37xx_cpufreq_state) {
 		clk_put(clk);
 		return -ENOMEM;

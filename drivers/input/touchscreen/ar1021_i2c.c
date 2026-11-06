@@ -111,7 +111,6 @@ static int ar1021_i2c_probe(struct i2c_client *client)
 
 	input->name = "ar1021 I2C Touchscreen";
 	input->id.bustype = BUS_I2C;
-	input->dev.parent = &client->dev;
 	input->open = ar1021_i2c_open;
 	input->close = ar1021_i2c_close;
 
@@ -164,7 +163,7 @@ static DEFINE_SIMPLE_DEV_PM_OPS(ar1021_i2c_pm,
 				ar1021_i2c_suspend, ar1021_i2c_resume);
 
 static const struct i2c_device_id ar1021_i2c_id[] = {
-	{ "ar1021" },
+	{ .name = "ar1021" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ar1021_i2c_id);

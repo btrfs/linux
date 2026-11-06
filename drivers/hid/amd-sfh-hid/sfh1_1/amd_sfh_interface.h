@@ -130,6 +130,7 @@ struct sfh_accel_data {
 	struct sfh_common_data commondata;
 	struct sfh_float32 acceldata;
 	u32 accelstatus;
+	u32 c2p3_data;
 };
 
 struct sfh_gyro_data {
@@ -165,6 +166,12 @@ struct hpd_status {
 	};
 };
 
+struct sfh_hpd_data {
+	struct sfh_common_data commondata;
+	u32 reserved;
+	struct hpd_status status;
+};
+
 struct sfh_op_mode {
 	union {
 		u32 val;
@@ -185,7 +192,6 @@ struct sfh_op_mode {
 };
 
 void sfh_interface_init(struct amd_mp2_dev *mp2);
-void sfh_deinit_emp2(void);
 void amd_sfh1_1_set_desc_ops(struct amd_mp2_ops *mp2_ops);
 int amd_sfh_float_to_int(u32 flt32_val);
 #endif

@@ -9,9 +9,14 @@
  */
 
 #include <linux/exportfs.h>
+#include <linux/nfs3.h>
 
 #include <linux/sunrpc/svcauth_gss.h>
+#include <crypto/utils.h>
 #include "nfsd.h"
+#include "nfserr.h"
+#include "netns.h"
+#include "stats.h"
 #include "vfs.h"
 #include "auth.h"
 #include "trace.h"
@@ -69,10 +74,8 @@ nfsd_mode_check(struct dentry *dentry, umode_t requested)
 	if (requested == 0) /* the caller doesn't care */
 		return nfs_ok;
 	if (mode == requested) {
-		if (mode == S_IFDIR && !d_can_lookup(dentry)) {
-			WARN_ON_ONCE(1);
+		if (mode == S_IFDIR && !d_can_lookup(dentry))
 			return nfserr_notdir;
-		}
 		return nfs_ok;
 	}
 	if (mode == S_IFLNK) {
@@ -105,9 +108,12 @@ static __be32 nfsd_setuser_and_check_port(struct svc_rqst *rqstp,
 {
 	/* Check if the request originated from a secure port. */
 	if (rqstp && !nfsd_originating_port_ok(rqstp, cred, exp)) {
-		RPC_IFDEBUG(char buf[RPC_MAX_ADDRBUFLEN]);
-		dprintk("nfsd: request from insecure port %s!\n",
-		        svc_print_addr(rqstp, buf, sizeof(buf)));
+		if (IS_ENABLED(CONFIG_SUNRPC_DEBUG)) {
+			char buf[RPC_MAX_ADDRBUFLEN];
+
+			dprintk("nfsd: request from insecure port %s!\n",
+			        svc_print_addr(rqstp, buf, sizeof(buf)));
+		}
 		return nfserr_perm;
 	}
 
@@ -135,6 +141,56 @@ static inline __be32 check_pseudo_root(struct dentry *dentry,
 	if (unlikely(dentry != exp->ex_path.dentry))
 		return nfserr_stale;
 	return nfs_ok;
+}
+
+/* Size of a file handle MAC, in 4-octet words */
+#define FH_MAC_WORDS (sizeof(__le64) / 4)
+
+bool fh_append_mac(struct knfsd_fh *fh, int fh_maxsize, struct net *net)
+{
+	struct nfsd_net *nn = net_generic(net, nfsd_net_id);
+	siphash_key_t *fh_key = nn->fh_key;
+	__le64 hash;
+
+	if (!fh_key)
+		goto out_no_key;
+	if (fh->fh_size + sizeof(hash) > fh_maxsize)
+		goto out_no_space;
+
+	hash = cpu_to_le64(siphash(&fh->fh_raw, fh->fh_size, fh_key));
+	memcpy(&fh->fh_raw[fh->fh_size], &hash, sizeof(hash));
+	fh->fh_size += sizeof(hash);
+	return true;
+
+out_no_key:
+	pr_warn_ratelimited("NFSD: unable to sign filehandles, fh_key not set.\n");
+	return false;
+
+out_no_space:
+	pr_warn_ratelimited("NFSD: unable to sign filehandles, fh_size %zu would be greater than fh_maxsize %d.\n",
+			    fh->fh_size + sizeof(hash), fh_maxsize);
+	return false;
+}
+
+/*
+ * Verify that the filehandle's MAC was hashed from this filehandle
+ * given the server's fh_key:
+ */
+static bool fh_verify_mac(struct svc_fh *fhp, struct net *net)
+{
+	struct nfsd_net *nn = net_generic(net, nfsd_net_id);
+	struct knfsd_fh *fh = &fhp->fh_handle;
+	siphash_key_t *fh_key = nn->fh_key;
+	__le64 hash;
+
+	if (!fh_key) {
+		pr_warn_ratelimited("NFSD: unable to verify signed filehandles, fh_key not set.\n");
+		return false;
+	}
+
+	hash = cpu_to_le64(siphash(&fh->fh_raw, fh->fh_size - sizeof(hash),  fh_key));
+	return crypto_memneq(&fh->fh_raw[fh->fh_size - sizeof(hash)],
+					&hash, sizeof(hash)) == 0;
 }
 
 /*
@@ -233,13 +289,21 @@ static __be32 nfsd_set_fh_dentry(struct svc_rqst *rqstp, struct net *net,
 	/*
 	 * Look up the dentry using the NFS file handle.
 	 */
-	error = nfserr_badhandle;
-
 	fileid_type = fh->fh_fileid_type;
+	error = nfserr_stale;
 
-	if (fileid_type == FILEID_ROOT)
+	if (fileid_type == FILEID_ROOT) {
+		/* We don't sign or verify the root, no per-file identity */
 		dentry = dget(exp->ex_path.dentry);
-	else {
+	} else {
+		if (exp->ex_flags & NFSEXP_SIGN_FH) {
+			if (!fh_verify_mac(fhp, net)) {
+				trace_nfsd_set_fh_dentry_badmac(rqstp, fhp, -ESTALE);
+				goto out;
+			}
+			data_left -= FH_MAC_WORDS;
+		}
+
 		dentry = exportfs_decode_fh_raw(exp->ex_path.mnt, fid,
 						data_left, fileid_type, 0,
 						nfsd_acceptable, exp);
@@ -255,6 +319,8 @@ static __be32 nfsd_set_fh_dentry(struct svc_rqst *rqstp, struct net *net,
 			}
 		}
 	}
+
+	error = nfserr_badhandle;
 	if (dentry == NULL)
 		goto out;
 	if (IS_ERR(dentry)) {
@@ -270,6 +336,8 @@ static __be32 nfsd_set_fh_dentry(struct svc_rqst *rqstp, struct net *net,
 	}
 
 	switch (fhp->fh_maxsize) {
+	case NFSD_FHSIZE_UNSPEC:
+		break;
 	case NFS4_FHSIZE:
 		if (dentry->d_sb->s_export_op->flags & EXPORT_OP_NOATOMIC_ATTR)
 			fhp->fh_no_atomic_attr = true;
@@ -279,15 +347,19 @@ static __be32 nfsd_set_fh_dentry(struct svc_rqst *rqstp, struct net *net,
 		if (dentry->d_sb->s_export_op->flags & EXPORT_OP_NOWCC)
 			fhp->fh_no_wcc = true;
 		fhp->fh_64bit_cookies = true;
-		if (exp->ex_flags & NFSEXP_V4ROOT)
+		if (exp->ex_flags & NFSEXP_V4ROOT) {
+			dput(dentry);
 			goto out;
+		}
 		break;
 	case NFS_FHSIZE:
 		fhp->fh_no_wcc = true;
 		if (EX_WGATHER(exp))
 			fhp->fh_use_wgather = true;
-		if (exp->ex_flags & NFSEXP_V4ROOT)
+		if (exp->ex_flags & NFSEXP_V4ROOT) {
+			dput(dentry);
 			goto out;
+		}
 	}
 
 	fhp->fh_dentry = dentry;
@@ -495,6 +567,11 @@ static void _fh_update(struct svc_fh *fhp, struct svc_export *exp,
 		fhp->fh_handle.fh_fileid_type =
 			fileid_type > 0 ? fileid_type : FILEID_INVALID;
 		fhp->fh_handle.fh_size += maxsize * 4;
+
+		if (exp->ex_flags & NFSEXP_SIGN_FH)
+			if (!fh_append_mac(&fhp->fh_handle, fhp->fh_maxsize,
+					   exp->cd->net))
+				fhp->fh_handle.fh_fileid_type = FILEID_INVALID;
 	} else {
 		fhp->fh_handle.fh_fileid_type = FILEID_ROOT;
 	}
@@ -601,9 +678,9 @@ fh_compose(struct svc_fh *fhp, struct svc_export *exp, struct dentry *dentry,
 	struct inode * inode = d_inode(dentry);
 	dev_t ex_dev = exp_sb(exp)->s_dev;
 
-	dprintk("nfsd: fh_compose(exp %02x:%02x/%ld %pd2, ino=%ld)\n",
+	dprintk("nfsd: fh_compose(exp %02x:%02x/%llu %pd2, ino=%llu)\n",
 		MAJOR(ex_dev), MINOR(ex_dev),
-		(long) d_inode(exp->ex_path.dentry)->i_ino,
+		d_inode(exp->ex_path.dentry)->i_ino,
 		dentry,
 		(inode ? inode->i_ino : 0));
 
@@ -709,32 +786,51 @@ __be32 fh_getattr(const struct svc_fh *fhp, struct kstat *stat)
 				    AT_STATX_SYNC_AS_STAT));
 }
 
-/**
- * fh_fill_pre_attrs - Fill in pre-op attributes
- * @fhp: file handle to be updated
- *
- */
-__be32 __must_check fh_fill_pre_attrs(struct svc_fh *fhp)
+static __be32 __must_check __fh_fill_pre_attrs(struct svc_fh *fhp)
 {
 	bool v4 = (fhp->fh_maxsize == NFS4_FHSIZE);
-	struct kstat stat;
 	__be32 err;
 
 	if (fhp->fh_no_wcc || fhp->fh_pre_saved)
 		return nfs_ok;
 
-	err = fh_getattr(fhp, &stat);
+	err = fh_getattr(fhp, &fhp->fh_post_attr);
 	if (err)
 		return err;
 
 	if (v4)
-		fhp->fh_pre_change = nfsd4_change_attribute(&stat);
+		fhp->fh_pre_change = fhp->fh_post_change =
+			nfsd4_change_attribute(&fhp->fh_post_attr);
 
-	fhp->fh_pre_mtime = stat.mtime;
-	fhp->fh_pre_ctime = stat.ctime;
-	fhp->fh_pre_size  = stat.size;
+	fhp->fh_pre_mtime = fhp->fh_post_attr.mtime;
+	fhp->fh_pre_ctime = fhp->fh_post_attr.ctime;
+	fhp->fh_pre_size  = fhp->fh_post_attr.size;
 	fhp->fh_pre_saved = true;
 	return nfs_ok;
+}
+
+/**
+ * fh_fill_pre_attrs - Fill in pre-op attributes
+ * @fhp: file handle to be updated
+ *
+ * Post-op attrs are filled and pre-op attrs are copied
+ * from there.  The post-op attrs can later be replaced by
+ * fh_fill_post_attrs() or activated by fh_fill_post_noop().
+ *
+ * The inode must be locked.
+ *
+ * Returns: error from vfs_getattr() which must be checked.
+ */
+__be32 __must_check fh_fill_pre_attrs(struct svc_fh *fhp)
+{
+	lockdep_assert_held_write(&fhp->fh_dentry->d_inode->i_rwsem);
+	return __fh_fill_pre_attrs(fhp);
+}
+
+__be32 __must_check fh_fill_pre_attrs_unlocked(struct svc_fh *fhp)
+{
+	fhp->fh_no_atomic_attr = true;
+	return __fh_fill_pre_attrs(fhp);
 }
 
 /**
@@ -753,6 +849,9 @@ __be32 fh_fill_post_attrs(struct svc_fh *fhp)
 	if (fhp->fh_post_saved)
 		printk("nfsd: inode locked twice during operation.\n");
 
+	if (!fhp->fh_no_atomic_attr)
+		lockdep_assert_held_write(&fhp->fh_dentry->d_inode->i_rwsem);
+
 	err = fh_getattr(fhp, &fhp->fh_post_attr);
 	if (err)
 		return err;
@@ -761,29 +860,6 @@ __be32 fh_fill_post_attrs(struct svc_fh *fhp)
 	if (v4)
 		fhp->fh_post_change =
 			nfsd4_change_attribute(&fhp->fh_post_attr);
-	return nfs_ok;
-}
-
-/**
- * fh_fill_both_attrs - Fill pre-op and post-op attributes
- * @fhp: file handle to be updated
- *
- * This is used when the directory wasn't changed, but wcc attributes
- * are needed anyway.
- */
-__be32 __must_check fh_fill_both_attrs(struct svc_fh *fhp)
-{
-	__be32 err;
-
-	err = fh_fill_post_attrs(fhp);
-	if (err)
-		return err;
-
-	fhp->fh_pre_change = fhp->fh_post_change;
-	fhp->fh_pre_mtime = fhp->fh_post_attr.mtime;
-	fhp->fh_pre_ctime = fhp->fh_post_attr.ctime;
-	fhp->fh_pre_size = fhp->fh_post_attr.size;
-	fhp->fh_pre_saved = true;
 	return nfs_ok;
 }
 
@@ -823,19 +899,20 @@ char * SVCFH_fmt(struct svc_fh *fhp)
 	return buf;
 }
 
-enum fsid_source fsid_source(const struct svc_fh *fhp)
+enum fsid_source fsid_source_fh(const struct knfsd_fh *fh,
+				struct svc_export *exp)
 {
-	if (fhp->fh_handle.fh_version != 1)
+	if (fh->fh_version != 1)
 		return FSIDSOURCE_DEV;
-	switch(fhp->fh_handle.fh_fsid_type) {
+	switch (fh->fh_fsid_type) {
 	case FSID_DEV:
 	case FSID_ENCODE_DEV:
 	case FSID_MAJOR_MINOR:
-		if (exp_sb(fhp->fh_export)->s_type->fs_flags & FS_REQUIRES_DEV)
+		if (exp_sb(exp)->s_type->fs_flags & FS_REQUIRES_DEV)
 			return FSIDSOURCE_DEV;
 		break;
 	case FSID_NUM:
-		if (fhp->fh_export->ex_flags & NFSEXP_FSID)
+		if (exp->ex_flags & NFSEXP_FSID)
 			return FSIDSOURCE_FSID;
 		break;
 	default:
@@ -844,11 +921,16 @@ enum fsid_source fsid_source(const struct svc_fh *fhp)
 	/* either a UUID type filehandle, or the filehandle doesn't
 	 * match the export.
 	 */
-	if (fhp->fh_export->ex_flags & NFSEXP_FSID)
+	if (exp->ex_flags & NFSEXP_FSID)
 		return FSIDSOURCE_FSID;
-	if (fhp->fh_export->ex_uuid)
+	if (exp->ex_uuid)
 		return FSIDSOURCE_UUID;
 	return FSIDSOURCE_DEV;
+}
+
+enum fsid_source fsid_source(const struct svc_fh *fhp)
+{
+	return fsid_source_fh(&fhp->fh_handle, fhp->fh_export);
 }
 
 /**

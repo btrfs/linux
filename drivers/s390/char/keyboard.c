@@ -78,10 +78,11 @@ kbd_alloc(void) {
 	struct kbd_data *kbd;
 	int i;
 
-	kbd = kzalloc(sizeof(struct kbd_data), GFP_KERNEL);
+	kbd = kzalloc_obj(struct kbd_data);
 	if (!kbd)
 		goto out;
-	kbd->key_maps = kzalloc(sizeof(ebc_key_maps), GFP_KERNEL);
+	kbd->key_maps = kcalloc(ARRAY_SIZE(ebc_key_maps),
+				sizeof(*kbd->key_maps), GFP_KERNEL);
 	if (!kbd->key_maps)
 		goto out_kbd;
 	for (i = 0; i < ARRAY_SIZE(ebc_key_maps); i++) {
@@ -93,7 +94,8 @@ kbd_alloc(void) {
 				goto out_maps;
 		}
 	}
-	kbd->func_table = kzalloc(sizeof(ebc_func_table), GFP_KERNEL);
+	kbd->func_table = kcalloc(ARRAY_SIZE(ebc_func_table),
+				  sizeof(*kbd->func_table), GFP_KERNEL);
 	if (!kbd->func_table)
 		goto out_maps;
 	for (i = 0; i < ARRAY_SIZE(ebc_func_table); i++) {
@@ -105,7 +107,7 @@ kbd_alloc(void) {
 		}
 	}
 	kbd->fn_handler =
-		kcalloc(NR_FN_HANDLER, sizeof(fn_handler_fn *), GFP_KERNEL);
+		kzalloc_objs(fn_handler_fn *, NR_FN_HANDLER);
 	if (!kbd->fn_handler)
 		goto out_func;
 	kbd->accent_table = kmemdup(ebc_accent_table,

@@ -13,6 +13,7 @@
 #include <linux/memblock.h>
 #include <linux/etherdevice.h>
 #include <linux/ethtool.h>
+#include <linux/hex.h>
 #include <linux/inetdevice.h>
 #include <linux/init.h>
 #include <linux/list.h>
@@ -110,19 +111,26 @@ static void vector_reset_stats(struct vector_private *vp)
 	 * in vector_poll.
 	 */
 
-	spin_lock(&vp->rx_queue->head_lock);
+	if (vp->rx_queue)
+		spin_lock(&vp->rx_queue->head_lock);
+
 	vp->estats.rx_queue_max = 0;
 	vp->estats.rx_queue_running_average = 0;
 	vp->estats.rx_encaps_errors = 0;
 	vp->estats.sg_ok = 0;
 	vp->estats.sg_linearized = 0;
-	spin_unlock(&vp->rx_queue->head_lock);
+
+	if (vp->rx_queue)
+		spin_unlock(&vp->rx_queue->head_lock);
+
 
 	/* TX stats are modified with TX head_lock held
 	 * in vector_send.
 	 */
 
-	spin_lock(&vp->tx_queue->head_lock);
+	if (vp->tx_queue)
+		spin_lock(&vp->tx_queue->head_lock);
+
 	vp->estats.tx_timeout_count = 0;
 	vp->estats.tx_restart_queue = 0;
 	vp->estats.tx_kicks = 0;
@@ -130,7 +138,10 @@ static void vector_reset_stats(struct vector_private *vp)
 	vp->estats.tx_flow_control_xoff = 0;
 	vp->estats.tx_queue_max = 0;
 	vp->estats.tx_queue_running_average = 0;
-	spin_unlock(&vp->tx_queue->head_lock);
+
+	if (vp->tx_queue)
+		spin_unlock(&vp->tx_queue->head_lock);
+
 }
 
 static int get_mtu(struct arglist *def)
@@ -470,8 +481,6 @@ static void destroy_queue(struct vector_queue *qi)
 	struct vector_private *vp = netdev_priv(qi->dev);
 	struct mmsghdr *mmsg_vector;
 
-	if (qi == NULL)
-		return;
 	/* deallocate any skbuffs - we rely on any unused to be
 	 * set to NULL.
 	 */
@@ -514,7 +523,7 @@ static struct vector_queue *create_queue(
 	struct iovec *iov;
 	struct mmsghdr *mmsg_vector;
 
-	result = kmalloc(sizeof(struct vector_queue), GFP_KERNEL);
+	result = kmalloc_obj(struct vector_queue);
 	if (result == NULL)
 		return NULL;
 	result->max_depth = max_size;
@@ -543,15 +552,9 @@ static struct vector_queue *create_queue(
 	result->max_iov_frags = num_extra_frags;
 	for (i = 0; i < max_size; i++) {
 		if (vp->header_size > 0)
-			iov = kmalloc_array(3 + num_extra_frags,
-					    sizeof(struct iovec),
-					    GFP_KERNEL
-			);
+			iov = kmalloc_objs(struct iovec, 3 + num_extra_frags);
 		else
-			iov = kmalloc_array(2 + num_extra_frags,
-					    sizeof(struct iovec),
-					    GFP_KERNEL
-			);
+			iov = kmalloc_objs(struct iovec, 2 + num_extra_frags);
 		if (iov == NULL)
 			goto out_fail;
 		mmsg_vector->msg_hdr.msg_iov = iov;
@@ -1000,6 +1003,9 @@ static int vector_mmsg_rx(struct vector_private *vp, int budget)
 				 */
 					dev_kfree_skb_irq(skb);
 					vp->estats.rx_encaps_errors++;
+					(*skbuff_vector) = NULL;
+					mmsg_vector++;
+					skbuff_vector++;
 					continue;
 				}
 				if (header_check > 0) {
@@ -1168,15 +1174,15 @@ static int vector_poll(struct napi_struct *napi, int budget)
 
 	if ((vp->options & VECTOR_TX) != 0)
 		tx_enqueued = (vector_send(vp->tx_queue) > 0);
-	spin_lock(&vp->rx_queue->head_lock);
-	if ((vp->options & VECTOR_RX) > 0)
+	if ((vp->options & VECTOR_RX) > 0) {
+		spin_lock(&vp->rx_queue->head_lock);
 		err = vector_mmsg_rx(vp, budget);
-	else {
+		spin_unlock(&vp->rx_queue->head_lock);
+	} else {
 		err = vector_legacy_rx(vp);
 		if (err > 0)
 			err = 1;
 	}
-	spin_unlock(&vp->rx_queue->head_lock);
 	if (err > 0)
 		work_done += err;
 
@@ -1384,7 +1390,7 @@ static int vector_net_load_bpf_flash(struct net_device *dev,
 		kfree(vp->bpf->filter);
 		vp->bpf->filter = NULL;
 	} else {
-		vp->bpf = kmalloc(sizeof(struct sock_fprog), GFP_ATOMIC);
+		vp->bpf = kmalloc_obj(struct sock_fprog, GFP_ATOMIC);
 		if (vp->bpf == NULL) {
 			netdev_err(dev, "failed to allocate memory for firmware\n");
 			goto flash_fail;
@@ -1562,13 +1568,16 @@ static void vector_setup_etheraddr(struct net_device *dev, char *str)
 			"Attempt to assign an invalid ethernet address to a device disallowed\n");
 		goto random;
 	}
+
+	eth_hw_addr_set(dev, addr);
+
 	if (!is_local_ether_addr(addr)) {
+		addr[0] |= 0x02;
 		netdev_warn(dev, "Warning: Assigning a globally valid ethernet address to a device\n");
 		netdev_warn(dev, "You should set the 2nd rightmost bit in the first byte of the MAC,\n");
-		netdev_warn(dev, "i.e. %02x:%02x:%02x:%02x:%02x:%02x\n",
-			addr[0] | 0x02, addr[1], addr[2], addr[3], addr[4], addr[5]);
+		netdev_warn(dev, "i.e. %pM\n", addr);
 	}
-	eth_hw_addr_set(dev, addr);
+
 	return;
 
 random:
@@ -1586,7 +1595,7 @@ static void vector_eth_configure(
 	struct vector_private *vp;
 	int err;
 
-	device = kzalloc(sizeof(*device), GFP_KERNEL);
+	device = kzalloc_obj(*device);
 	if (device == NULL) {
 		pr_err("Failed to allocate struct vector_device for vec%d\n", n);
 		return;

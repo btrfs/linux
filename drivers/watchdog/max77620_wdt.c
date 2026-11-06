@@ -13,12 +13,12 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/mfd/max77620.h>
 #include <linux/mfd/max77714.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
+#include <linux/stringify.h>
 #include <linux/watchdog.h>
 
 static bool nowayout = WATCHDOG_NOWAYOUT;
@@ -236,9 +236,9 @@ static int max77620_wdt_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id max77620_wdt_devtype[] = {
-	{ "max77620-watchdog", (kernel_ulong_t)&max77620_wdt_data },
-	{ "max77714-watchdog", (kernel_ulong_t)&max77714_wdt_data },
-	{ },
+	{ .name = "max77620-watchdog", .driver_data = (kernel_ulong_t)&max77620_wdt_data },
+	{ .name = "max77714-watchdog", .driver_data = (kernel_ulong_t)&max77714_wdt_data },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, max77620_wdt_devtype);
 
@@ -256,7 +256,7 @@ MODULE_DESCRIPTION("Max77620 watchdog timer driver");
 
 module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started "
-	"(default=" __MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
+	"(default=" __stringify(WATCHDOG_NOWAYOUT) ")");
 
 MODULE_AUTHOR("Laxman Dewangan <ldewangan@nvidia.com>");
 MODULE_AUTHOR("Luca Ceresoli <luca.ceresoli@bootlin.com>");

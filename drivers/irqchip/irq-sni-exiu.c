@@ -199,7 +199,7 @@ static struct exiu_irq_data *exiu_init(const struct fwnode_handle *fwnode,
 	struct exiu_irq_data *data;
 	int err;
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data)
 		return ERR_PTR(-ENOMEM);
 
@@ -307,8 +307,8 @@ out_unmap:
 }
 
 static const struct acpi_device_id exiu_acpi_ids[] = {
-	{ "SCX0008" },
-	{ /* sentinel */ }
+	{ .id = "SCX0008" },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, exiu_acpi_ids);
 

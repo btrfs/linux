@@ -62,14 +62,14 @@ static atomic_t tw68_instance = ATOMIC_INIT(0);
  * added under vendor 0x1797 (Techwell Inc.) as subsystem IDs.
  */
 static const struct pci_device_id tw68_pci_tbl[] = {
-	{PCI_DEVICE(PCI_VENDOR_ID_TECHWELL, PCI_DEVICE_ID_TECHWELL_6800)},
-	{PCI_DEVICE(PCI_VENDOR_ID_TECHWELL, PCI_DEVICE_ID_TECHWELL_6801)},
-	{PCI_DEVICE(PCI_VENDOR_ID_TECHWELL, PCI_DEVICE_ID_TECHWELL_6804)},
-	{PCI_DEVICE(PCI_VENDOR_ID_TECHWELL, PCI_DEVICE_ID_TECHWELL_6816_1)},
-	{PCI_DEVICE(PCI_VENDOR_ID_TECHWELL, PCI_DEVICE_ID_TECHWELL_6816_2)},
-	{PCI_DEVICE(PCI_VENDOR_ID_TECHWELL, PCI_DEVICE_ID_TECHWELL_6816_3)},
-	{PCI_DEVICE(PCI_VENDOR_ID_TECHWELL, PCI_DEVICE_ID_TECHWELL_6816_4)},
-	{0,}
+	{ PCI_VDEVICE(TECHWELL, PCI_DEVICE_ID_TECHWELL_6800) },
+	{ PCI_VDEVICE(TECHWELL, PCI_DEVICE_ID_TECHWELL_6801) },
+	{ PCI_VDEVICE(TECHWELL, PCI_DEVICE_ID_TECHWELL_6804) },
+	{ PCI_VDEVICE(TECHWELL, PCI_DEVICE_ID_TECHWELL_6816_1) },
+	{ PCI_VDEVICE(TECHWELL, PCI_DEVICE_ID_TECHWELL_6816_2) },
+	{ PCI_VDEVICE(TECHWELL, PCI_DEVICE_ID_TECHWELL_6816_3) },
+	{ PCI_VDEVICE(TECHWELL, PCI_DEVICE_ID_TECHWELL_6816_4) },
+	{ }
 };
 
 /* ------------------------------------------------------------------ */
@@ -228,7 +228,7 @@ static int tw68_initdev(struct pci_dev *pci_dev,
 
 	/* pci init */
 	dev->pci = pci_dev;
-	if (pci_enable_device(pci_dev)) {
+	if (pcim_enable_device(pci_dev)) {
 		err = -EIO;
 		goto fail1;
 	}
@@ -359,7 +359,7 @@ static void tw68_finidev(struct pci_dev *pci_dev)
 	v4l2_device_unregister(&dev->v4l2_dev);
 }
 
-static int __maybe_unused tw68_suspend(struct device *dev_d)
+static int tw68_suspend(struct device *dev_d)
 {
 	struct pci_dev *pci_dev = to_pci_dev(dev_d);
 	struct v4l2_device *v4l2_dev = pci_get_drvdata(pci_dev);
@@ -377,7 +377,7 @@ static int __maybe_unused tw68_suspend(struct device *dev_d)
 	return 0;
 }
 
-static int __maybe_unused tw68_resume(struct device *dev_d)
+static int tw68_resume(struct device *dev_d)
 {
 	struct v4l2_device *v4l2_dev = dev_get_drvdata(dev_d);
 	struct tw68_dev *dev = container_of(v4l2_dev,
@@ -405,14 +405,14 @@ static int __maybe_unused tw68_resume(struct device *dev_d)
 
 /* ----------------------------------------------------------- */
 
-static SIMPLE_DEV_PM_OPS(tw68_pm_ops, tw68_suspend, tw68_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(tw68_pm_ops, tw68_suspend, tw68_resume);
 
 static struct pci_driver tw68_pci_driver = {
 	.name	   = "tw68",
 	.id_table  = tw68_pci_tbl,
 	.probe	   = tw68_initdev,
 	.remove	   = tw68_finidev,
-	.driver.pm = &tw68_pm_ops,
+	.driver.pm = pm_sleep_ptr(&tw68_pm_ops),
 };
 
 module_pci_driver(tw68_pci_driver);

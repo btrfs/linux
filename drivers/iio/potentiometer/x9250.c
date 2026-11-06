@@ -155,9 +155,14 @@ static const char *const x9250_regulator_names[] = {
 
 static int x9250_probe(struct spi_device *spi)
 {
+	const struct x9250_cfg *cfg;
 	struct iio_dev *indio_dev;
 	struct x9250 *x9250;
 	int ret;
+
+	cfg = spi_get_device_match_data(spi);
+	if (!cfg)
+		return -ENODATA;
 
 	ret = devm_regulator_bulk_get_enable(&spi->dev, ARRAY_SIZE(x9250_regulator_names),
 					     x9250_regulator_names);
@@ -176,7 +181,7 @@ static int x9250_probe(struct spi_device *spi)
 
 	x9250 = iio_priv(indio_dev);
 	x9250->spi = spi;
-	x9250->cfg = spi_get_device_match_data(spi);
+	x9250->cfg = cfg;
 	x9250->wp_gpio = devm_gpiod_get_optional(&spi->dev, "wp", GPIOD_OUT_LOW);
 	if (IS_ERR(x9250->wp_gpio))
 		return dev_err_probe(&spi->dev, PTR_ERR(x9250->wp_gpio),
@@ -198,8 +203,8 @@ static const struct of_device_id x9250_of_match[] = {
 MODULE_DEVICE_TABLE(of, x9250_of_match);
 
 static const struct spi_device_id x9250_id_table[] = {
-	{ "x9250t", (kernel_ulong_t)&x9250_cfg[X9250T] },
-	{ "x9250u", (kernel_ulong_t)&x9250_cfg[X9250U] },
+	{ .name = "x9250t", .driver_data = (kernel_ulong_t)&x9250_cfg[X9250T] },
+	{ .name = "x9250u", .driver_data = (kernel_ulong_t)&x9250_cfg[X9250U] },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, x9250_id_table);
