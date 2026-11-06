@@ -168,7 +168,7 @@ static ssize_t hih6130_temperature_show(struct device *dev,
 	ret = hih6130_update_measurements(dev);
 	if (ret < 0)
 		return ret;
-	return sprintf(buf, "%d\n", hih6130->temperature);
+	return sysfs_emit(buf, "%d\n", hih6130->temperature);
 }
 
 /**
@@ -189,7 +189,7 @@ static ssize_t hih6130_humidity_show(struct device *dev,
 	ret = hih6130_update_measurements(dev);
 	if (ret < 0)
 		return ret;
-	return sprintf(buf, "%d\n", hih6130->humidity);
+	return sysfs_emit(buf, "%d\n", hih6130->humidity);
 }
 
 /* sysfs attributes */
@@ -233,7 +233,7 @@ static int hih6130_probe(struct i2c_client *client)
 
 /* Device ID table */
 static const struct i2c_device_id hih6130_id[] = {
-	{ "hih6130" },
+	{ .name = "hih6130" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, hih6130_id);

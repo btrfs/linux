@@ -20,10 +20,12 @@
  *
  * Based on Virtio MMIO driver by Pawel Moll, copyright 2011-2014, ARM Ltd.
  */
+#include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
+#include <linux/string_choices.h>
 #include <linux/virtio.h>
 #include <linux/virtio_config.h>
 #include <linux/virtio_ring.h>
@@ -33,6 +35,7 @@
 #include <irq_kern.h>
 #include <init.h>
 #include <os.h>
+#include "mconsole_kern.h"
 #include "vhost_user.h"
 
 #define MAX_SUPPORTED_QUEUE_SIZE	256
@@ -566,7 +569,7 @@ static void vhost_user_get_config(struct virtio_uml_device *vu_dev,
 		goto free;
 	}
 
-	rc = vhost_user_recv_resp(vu_dev, msg, msg_size);
+	rc = vhost_user_recv_resp(vu_dev, msg, payload_size);
 	if (rc) {
 		vu_err(vu_dev,
 		       "receiving VHOST_USER_GET_CONFIG response failed: %d\n",
@@ -867,6 +870,14 @@ static void vu_reset(struct virtio_device *vdev)
 	vu_dev->status = 0;
 }
 
+static void vu_synchronize_cbs(struct virtio_device *vdev)
+{
+	struct virtio_uml_device *vu_dev = to_virtio_uml_device(vdev);
+
+	if (vu_dev->irq != UM_IRQ_ALLOC)
+		synchronize_irq(vu_dev->irq);
+}
+
 static void vu_del_vq(struct virtqueue *vq)
 {
 	struct virtio_uml_vq_info *info = vq->priv;
@@ -963,7 +974,7 @@ static struct virtqueue *vu_setup_vq(struct virtio_device *vdev,
 	int num = MAX_SUPPORTED_QUEUE_SIZE;
 	int rc;
 
-	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	info = kzalloc_obj(*info);
 	if (!info) {
 		rc = -ENOMEM;
 		goto error_kzalloc;
@@ -1119,6 +1130,7 @@ static const struct virtio_config_ops virtio_uml_config_ops = {
 	.reset = vu_reset,
 	.find_vqs = vu_find_vqs,
 	.del_vqs = vu_del_vqs,
+	.synchronize_cbs = vu_synchronize_cbs,
 	.get_features = vu_get_features,
 	.finalize_features = vu_finalize_features,
 	.bus_name = vu_bus_name,
@@ -1151,8 +1163,7 @@ void virtio_uml_set_no_vq_suspend(struct virtio_device *vdev,
 		return;
 
 	vu_dev->no_vq_suspend = no_vq_suspend;
-	dev_info(&vdev->dev, "%sabled VQ suspend\n",
-		 no_vq_suspend ? "dis" : "en");
+	dev_info(&vdev->dev, "%s VQ suspend\n", str_disabled_enabled(no_vq_suspend));
 }
 
 static void vu_of_conn_broken(struct work_struct *wk)
@@ -1216,7 +1227,7 @@ static int virtio_uml_probe(struct platform_device *pdev)
 			return PTR_ERR(pdata);
 	}
 
-	vu_dev = kzalloc(sizeof(*vu_dev), GFP_KERNEL);
+	vu_dev = kzalloc_obj(*vu_dev);
 	if (!vu_dev)
 		return -ENOMEM;
 
@@ -1273,15 +1284,9 @@ static void virtio_uml_remove(struct platform_device *pdev)
 
 /* Command line device list */
 
-static void vu_cmdline_release_dev(struct device *d)
-{
-}
+static struct device *vu_cmdline_parent;
 
-static struct device vu_cmdline_parent = {
-	.init_name = "virtio-uml-cmdline",
-	.release = vu_cmdline_release_dev,
-};
-
+static DEFINE_MUTEX(vu_cmdline_lock);
 static bool vu_cmdline_parent_registered;
 static int vu_cmdline_id;
 
@@ -1309,7 +1314,7 @@ static void vu_conn_broken(struct work_struct *wk)
 	vu_unregister_cmdline_device(&pdata->pdev->dev, NULL);
 }
 
-static int vu_cmdline_set(const char *device, const struct kernel_param *kp)
+static int vu_cmdline_set_device(const char *device)
 {
 	const char *ids = strchr(device, ':');
 	unsigned int virtio_device_id;
@@ -1321,6 +1326,8 @@ static int vu_cmdline_set(const char *device, const struct kernel_param *kp)
 	if (!ids || ids == device)
 		return -EINVAL;
 
+	guard(mutex)(&vu_cmdline_lock);
+
 	processed = sscanf(ids, ":%u%n:%d%n",
 			   &virtio_device_id, &consumed,
 			   &vu_cmdline_id, &consumed);
@@ -1329,11 +1336,10 @@ static int vu_cmdline_set(const char *device, const struct kernel_param *kp)
 		return -EINVAL;
 
 	if (!vu_cmdline_parent_registered) {
-		err = device_register(&vu_cmdline_parent);
-		if (err) {
+		vu_cmdline_parent = __root_device_register("virtio-uml-cmdline", NULL);
+		if (IS_ERR(vu_cmdline_parent)) {
 			pr_err("Failed to register parent device!\n");
-			put_device(&vu_cmdline_parent);
-			return err;
+			return PTR_ERR(vu_cmdline_parent);
 		}
 		vu_cmdline_parent_registered = true;
 	}
@@ -1348,7 +1354,7 @@ static int vu_cmdline_set(const char *device, const struct kernel_param *kp)
 	pr_info("Registering device virtio-uml.%d id=%d at %s\n",
 		vu_cmdline_id, virtio_device_id, socket_path);
 
-	pdev = platform_device_register_data(&vu_cmdline_parent, "virtio-uml",
+	pdev = platform_device_register_data(vu_cmdline_parent, "virtio-uml",
 					     vu_cmdline_id++, &pdata,
 					     sizeof(pdata));
 	err = PTR_ERR_OR_ZERO(pdev);
@@ -1366,6 +1372,11 @@ free:
 	return err;
 }
 
+static int vu_cmdline_set(const char *device, const struct kernel_param *kp)
+{
+	return vu_cmdline_set_device(device);
+}
+
 static int vu_cmdline_get_device(struct device *dev, void *data)
 {
 	struct platform_device *pdev = to_platform_device(dev);
@@ -1380,9 +1391,11 @@ static int vu_cmdline_get_device(struct device *dev, void *data)
 
 static int vu_cmdline_get(char *buffer, const struct kernel_param *kp)
 {
+	guard(mutex)(&vu_cmdline_lock);
+
 	buffer[0] = '\0';
 	if (vu_cmdline_parent_registered)
-		device_for_each_child(&vu_cmdline_parent, buffer,
+		device_for_each_child(vu_cmdline_parent, buffer,
 				      vu_cmdline_get_device);
 	return strlen(buffer) + 1;
 }
@@ -1403,13 +1416,51 @@ __uml_help(vu_cmdline_param_ops,
 
 static void vu_unregister_cmdline_devices(void)
 {
+	guard(mutex)(&vu_cmdline_lock);
+
 	if (vu_cmdline_parent_registered) {
-		device_for_each_child(&vu_cmdline_parent, NULL,
+		device_for_each_child(vu_cmdline_parent, NULL,
 				      vu_unregister_cmdline_device);
-		device_unregister(&vu_cmdline_parent);
+		root_device_unregister(vu_cmdline_parent);
 		vu_cmdline_parent_registered = false;
 	}
 }
+
+static int vu_mc_config(char *str, char **error_out)
+{
+	if (*str != '=') {
+		*error_out = "Invalid config";
+		return -EINVAL;
+	}
+	str += 1;
+	return vu_cmdline_set_device(str);
+}
+
+static int vu_mc_id(char **str, int *start_out, int *end_out)
+{
+	return -EOPNOTSUPP;
+}
+
+static int vu_mc_remove(int n, char **error_out)
+{
+	return -EOPNOTSUPP;
+}
+
+static struct mc_device virtio_uml_mc = {
+	.list		= LIST_HEAD_INIT(virtio_uml_mc.list),
+	.name		= "virtio_uml.device",
+	.config		= vu_mc_config,
+	.get_config	= NULL,
+	.id		= vu_mc_id,
+	.remove		= vu_mc_remove,
+};
+
+static int __init virtio_uml_mc_init(void)
+{
+	mconsole_register_dev(&virtio_uml_mc);
+	return 0;
+}
+late_initcall(virtio_uml_mc_init);
 
 /* Platform driver */
 

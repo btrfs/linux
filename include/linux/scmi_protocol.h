@@ -9,16 +9,16 @@
 #define _LINUX_SCMI_PROTOCOL_H
 
 #include <linux/bitfield.h>
+#include <linux/device-id/scmi.h>
 #include <linux/device.h>
 #include <linux/notifier.h>
 #include <linux/types.h>
 
 #define SCMI_MAX_STR_SIZE		64
 #define SCMI_SHORT_NAME_MAX_SIZE	16
-#define SCMI_MAX_NUM_RATES		16
 
 /**
- * struct scmi_revision_info - version information structure
+ * struct scmi_base_info - version information structure
  *
  * @major_ver: Major ABI version. Change here implies risk of backward
  *	compatibility break.
@@ -31,7 +31,7 @@
  * @vendor_id: A vendor identifier(Null terminated ASCII string)
  * @sub_vendor_id: A sub-vendor identifier(Null terminated ASCII string)
  */
-struct scmi_revision_info {
+struct scmi_base_info {
 	u16 major_ver;
 	u16 minor_ver;
 	u8 num_protocols;
@@ -41,27 +41,23 @@ struct scmi_revision_info {
 	char sub_vendor_id[SCMI_SHORT_NAME_MAX_SIZE];
 };
 
+struct scmi_clock_rates {
+	bool rate_discrete;
+	unsigned int num_rates;
+	u64 *rates;
+};
+
 struct scmi_clock_info {
 	char name[SCMI_MAX_STR_SIZE];
 	unsigned int enable_latency;
-	bool rate_discrete;
 	bool rate_changed_notifications;
 	bool rate_change_requested_notifications;
 	bool state_ctrl_forbidden;
 	bool rate_ctrl_forbidden;
 	bool parent_ctrl_forbidden;
 	bool extended_config;
-	union {
-		struct {
-			int num_rates;
-			u64 rates[SCMI_MAX_NUM_RATES];
-		} list;
-		struct {
-			u64 min_rate;
-			u64 max_rate;
-			u64 step_size;
-		} range;
-	};
+	u64 min_rate;
+	u64 max_rate;
 	int num_parents;
 	u32 *parents;
 };
@@ -91,6 +87,11 @@ enum scmi_clock_oem_config {
  * @info_get: get the information of the specified clock
  * @rate_get: request the current clock rate of a clock
  * @rate_set: set the clock rate of a clock
+ * @determine_rate: determine the effective rate that can be supported by a
+ *		    clock calculating the closest allowed rate.
+ *		    Note that @rate is an input/output parameter used both to
+ *		    describe the requested rate and report the closest match
+ * @all_rates_get: get the list of all available rates for the specified clock.
  * @enable: enables the specified clock
  * @disable: disables the specified clock
  * @state_get: get the status of the specified clock
@@ -108,6 +109,10 @@ struct scmi_clk_proto_ops {
 			u64 *rate);
 	int (*rate_set)(const struct scmi_protocol_handle *ph, u32 clk_id,
 			u64 rate);
+	int (*determine_rate)(const struct scmi_protocol_handle *ph, u32 clk_id,
+			      unsigned long *rate);
+	const struct scmi_clock_rates __must_check *(*all_rates_get)
+		(const struct scmi_protocol_handle *ph, u32 clk_id);
 	int (*enable)(const struct scmi_protocol_handle *ph, u32 clk_id,
 		      bool atomic);
 	int (*disable)(const struct scmi_protocol_handle *ph, u32 clk_id,
@@ -524,22 +529,25 @@ struct scmi_sensor_proto_ops {
 			  u32 sensor_id, u32 sensor_config);
 };
 
+struct scmi_reset_domain_info {
+	char name[SCMI_MAX_STR_SIZE];
+	u32 latency_us;
+};
+
 /**
  * struct scmi_reset_proto_ops - represents the various operations provided
  *	by SCMI Reset Protocol
  *
  * @num_domains_get: get the count of reset domains provided by SCMI
- * @name_get: gets the name of a reset domain
- * @latency_get: gets the reset latency for the specified reset domain
+ * @info_get: gets the information of the specified reset domain
  * @reset: resets the specified reset domain
  * @assert: explicitly assert reset signal of the specified reset domain
  * @deassert: explicitly deassert reset signal of the specified reset domain
  */
 struct scmi_reset_proto_ops {
 	int (*num_domains_get)(const struct scmi_protocol_handle *ph);
-	const char *(*name_get)(const struct scmi_protocol_handle *ph,
-				u32 domain);
-	int (*latency_get)(const struct scmi_protocol_handle *ph, u32 domain);
+	const struct scmi_reset_domain_info __must_check *(*info_get)
+		(const struct scmi_protocol_handle *ph, u32 domain);
 	int (*reset)(const struct scmi_protocol_handle *ph, u32 domain);
 	int (*assert)(const struct scmi_protocol_handle *ph, u32 domain);
 	int (*deassert)(const struct scmi_protocol_handle *ph, u32 domain);
@@ -901,7 +909,7 @@ struct scmi_notify_ops {
  */
 struct scmi_handle {
 	struct device *dev;
-	struct scmi_revision_info *version;
+	struct scmi_base_info *version;
 
 	int __must_check (*devm_protocol_acquire)(struct scmi_device *sdev,
 						  u8 proto);
@@ -926,6 +934,7 @@ enum scmi_std_protocol {
 	SCMI_PROTOCOL_VOLTAGE = 0x17,
 	SCMI_PROTOCOL_POWERCAP = 0x18,
 	SCMI_PROTOCOL_PINCTRL = 0x19,
+	SCMI_PROTOCOL_TELEMETRY = 0x1B,
 };
 
 enum scmi_system_events {
@@ -946,11 +955,6 @@ struct scmi_device {
 };
 
 #define to_scmi_dev(d) container_of_const(d, struct scmi_device, dev)
-
-struct scmi_device_id {
-	u8 protocol_id;
-	const char *name;
-};
 
 struct scmi_driver {
 	const char *name;

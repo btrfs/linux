@@ -8,6 +8,7 @@
 
 #include <drm/drm_gpusvm.h>
 #include <drm/drm_gpuvm.h>
+#include <drm/drm_pagemap_util.h>
 
 #include <linux/dma-resv.h>
 #include <linux/kref.h>
@@ -17,9 +18,13 @@
 #include "xe_device_types.h"
 #include "xe_pt_types.h"
 #include "xe_range_fence.h"
+#include "xe_tlb_inval_types.h"
 #include "xe_userptr.h"
 
+struct drm_pagemap;
+
 struct xe_bo;
+struct xe_pagefault;
 struct xe_svm_range;
 struct xe_sync_entry;
 struct xe_user_fence;
@@ -52,8 +57,8 @@ struct xe_vm_pgtable_update_op;
  * struct xe_vma_mem_attr - memory attributes associated with vma
  */
 struct xe_vma_mem_attr {
-	/** @preferred_loc: perferred memory_location */
-	struct {
+	/** @preferred_loc: preferred memory_location */
+	struct xe_vma_preferred_loc {
 		/** @preferred_loc.migration_policy: Pages migration policy */
 		u32 migration_policy;
 
@@ -64,6 +69,13 @@ struct xe_vma_mem_attr {
 		 * closest device memory respectively.
 		 */
 		u32 devmem_fd;
+		/**
+		 * @preferred_loc.dpagemap: Reference-counted pointer to the drm_pagemap preferred
+		 * for migration on a SVM page-fault. The pointer is protected by the
+		 * vm lock, and is %NULL if @devmem_fd should be consulted for special
+		 * values.
+		 */
+		struct drm_pagemap *dpagemap;
 	} preferred_loc;
 
 	/**
@@ -84,6 +96,17 @@ struct xe_vma_mem_attr {
 	 * same as default_pat_index unless overwritten by madvise.
 	 */
 	u16 pat_index;
+
+	/**
+	 * @purgeable_state: Purgeable hint for this VMA mapping
+	 *
+	 * Per-VMA purgeable state from madvise. Valid states are WILLNEED (0)
+	 * or DONTNEED (1). Shared BOs require all VMAs to be DONTNEED before
+	 * the BO can be purged. PURGED state exists only at BO level.
+	 *
+	 * Protected by BO dma-resv lock. Set via DRM_IOCTL_XE_MADVISE.
+	 */
+	u32 purgeable_state;
 };
 
 struct xe_vma {
@@ -108,6 +131,12 @@ struct xe_vma {
 		/** @destroy_work: worker to destroy this BO */
 		struct work_struct destroy_work;
 	};
+
+	/**
+	 * @fault_lock: Synchronizes fault processing. Locking order: inside
+	 * vm->lock, outside dma-resv.
+	 */
+	struct mutex fault_lock;
 
 	/**
 	 * @tile_invalidated: Tile mask of binding are invalidated for this VMA.
@@ -165,6 +194,26 @@ struct xe_userptr_vma {
 
 struct xe_device;
 
+/**
+ * struct xe_vm_fault_entry - Elements of vm->faults.list
+ * @list: link into @xe_vm.faults.list
+ * @address: address of the fault
+ * @address_precision: precision of faulted address
+ * @access_type: type of address access that resulted in fault
+ * @fault_type: type of fault reported
+ * @fault_level: fault level of the fault
+ * @srcid: ID of the faulting hardware unit
+ */
+struct xe_vm_fault_entry {
+	struct list_head list;
+	u64 address;
+	u32 address_precision;
+	u8 access_type;
+	u8 fault_type;
+	u8 fault_level;
+	u8 srcid;
+};
+
 struct xe_vm {
 	/** @gpuvm: base GPUVM used to track VMAs */
 	struct drm_gpuvm gpuvm;
@@ -174,12 +223,26 @@ struct xe_vm {
 		/** @svm.gpusvm: base GPUSVM used to track fault allocations */
 		struct drm_gpusvm gpusvm;
 		/**
+		 * @svm.range_lock: Protects insertion and removal of ranges
+		 * from GPU SVM tree.
+		 */
+		struct mutex range_lock;
+		/**
 		 * @svm.garbage_collector: Garbage collector which is used unmap
 		 * SVM range's GPU bindings and destroy the ranges.
 		 */
 		struct {
-			/** @svm.garbage_collector.lock: Protect's range list */
-			spinlock_t lock;
+			/**
+			 * @svm.garbage_collector.lock: Ensures only one thread
+			 * runs the garbage collector at a time. Locking order:
+			 * inside vm->lock, outside range->lock and dma-resv.
+			 */
+			struct mutex lock;
+			/**
+			 * @svm.garbage_collector.list_lock: Protect's range
+			 * list
+			 */
+			spinlock_t list_lock;
 			/**
 			 * @svm.garbage_collector.range_list: List of SVM ranges
 			 * in the garbage collector.
@@ -191,12 +254,15 @@ struct xe_vm {
 			 */
 			struct work_struct work;
 		} garbage_collector;
+		struct xe_pagemap *pagemaps[XE_MAX_TILES_PER_DEVICE];
+		/** @svm.peer: Used for pagemap connectivity computations. */
+		struct drm_pagemap_peer peer;
 	} svm;
 
 	struct xe_device *xe;
 
 	/* exec queue used for (un)binding vma's */
-	struct xe_exec_queue *q[XE_MAX_TILES_PER_DEVICE];
+	struct xe_exec_queue *q;
 
 	/** @lru_bulk_move: Bulk LRU move list for this VM's BOs */
 	struct ttm_lru_bulk_move lru_bulk_move;
@@ -219,12 +285,8 @@ struct xe_vm {
 #define XE_VM_FLAG_TILE_ID(flags)	FIELD_GET(GENMASK(7, 6), flags)
 #define XE_VM_FLAG_SET_TILE_ID(tile)	FIELD_PREP(GENMASK(7, 6), (tile)->id)
 #define XE_VM_FLAG_GSC			BIT(8)
+#define XE_VM_FLAG_NO_VM_OVERCOMMIT     BIT(9)
 	unsigned long flags;
-
-	/** @composite_fence_ctx: context composite fence */
-	u64 composite_fence_ctx;
-	/** @composite_fence_seqno: seqno for composite fence */
-	u32 composite_fence_seqno;
 
 	/**
 	 * @lock: outer most lock, protects objects of anything attached to this
@@ -255,7 +317,7 @@ struct xe_vm {
 	 * @rftree: range fence tree to track updates to page table structure.
 	 * Used to implement conflict tracking between independent bind engines.
 	 */
-	struct xe_range_fence_tree rftree[XE_MAX_TILES_PER_DEVICE];
+	struct xe_range_fence_tree rftree;
 
 	const struct xe_pt_ops *pt_ops;
 
@@ -268,7 +330,7 @@ struct xe_vm {
 		 * @min_run_period_ms: The minimum run period before preempting
 		 * an engine again
 		 */
-		s64 min_run_period_ms;
+		unsigned int min_run_period_ms;
 		/** @exec_queues: list of exec queues attached to this VM */
 		struct list_head exec_queues;
 		/** @num_exec_queues: number exec queues attached to this VM */
@@ -290,15 +352,26 @@ struct xe_vm {
 		struct list_head pm_activate_link;
 	} preempt;
 
+	/** @exec_queues: Manages list of exec queues attached to this VM, protected by lock. */
+	struct {
+		/**
+		 * @exec_queues.list: list of exec queues attached to this VM,
+		 * per GT
+		 */
+		struct list_head list[XE_MAX_TILES_PER_DEVICE * XE_MAX_GT_PER_TILE];
+		/**
+		 * @exec_queues.count: count of exec queues attached to this VM,
+		 * per GT
+		 */
+		int count[XE_MAX_TILES_PER_DEVICE * XE_MAX_GT_PER_TILE];
+		/** @exec_queues.lock: lock to protect exec_queues list */
+		struct rw_semaphore lock;
+	} exec_queues;
+
 	/** @um: unified memory state */
 	struct {
 		/** @asid: address space ID, unique to each VM */
 		u32 asid;
-		/**
-		 * @last_fault_vma: Last fault VMA, used for fast lookup when we
-		 * get a flood of faults to the same VMA
-		 */
-		struct xe_vma *last_fault_vma;
 	} usm;
 
 	/** @error_capture: allow to track errors */
@@ -306,6 +379,16 @@ struct xe_vm {
 		/** @capture_once: capture only one error per VM */
 		bool capture_once;
 	} error_capture;
+
+	/** @faults: List of all faults associated with this VM */
+	struct {
+		/** @faults.lock: lock protecting @faults.list */
+		spinlock_t lock;
+		/** @faults.list: list of xe_vm_fault_entry entries */
+		struct list_head list;
+		/** @faults.len: length of @faults.list */
+		unsigned int len;
+	} faults;
 
 	/**
 	 * @validation: Validation data only valid with the vm resv held.
@@ -338,7 +421,7 @@ struct xe_vm {
 	u64 tlb_flush_seqno;
 	/** @batch_invalidate_tlb: Always invalidate TLB before batch start */
 	bool batch_invalidate_tlb;
-	/** @xef: XE file handle for tracking this VM's drm client */
+	/** @xef: Xe file handle for tracking this VM's drm client */
 	struct xe_file *xef;
 };
 
@@ -346,11 +429,14 @@ struct xe_vm {
 struct xe_vma_op_map {
 	/** @vma: VMA to map */
 	struct xe_vma *vma;
+	/** @vma_flags: VMA flags for this operation */
 	unsigned int vma_flags;
 	/** @immediate: Immediate bind */
 	bool immediate;
-	/** @read_only: Read only */
+	/** @invalidate_on_bind: Invalidate on bind */
 	bool invalidate_on_bind;
+	/** @request_decompress: schedule decompression for GPU map */
+	bool request_decompress;
 	/** @pat_index: The pat index to use for this operation. */
 	u16 pat_index;
 };
@@ -365,6 +451,10 @@ struct xe_vma_op_remap {
 	u64 start;
 	/** @range: range of the VMA unmap */
 	u64 range;
+	/** @old_start: Original start of the VMA we unmap */
+	u64 old_start;
+	/** @old_range: Original range of the VMA we unmap */
+	u64 old_range;
 	/** @skip_prev: skip prev rebind */
 	bool skip_prev;
 	/** @skip_next: skip next rebind */
@@ -400,10 +490,10 @@ struct xe_vma_op_prefetch_range {
 	/** @ranges_count: number of svm ranges to map */
 	u32 ranges_count;
 	/**
-	 * @tile: Pointer to the tile structure containing memory to prefetch.
-	 *        NULL if prefetch requested region is smem
+	 * @dpagemap: Pointer to the dpagemap structure containing memory to prefetch.
+	 * NULL if prefetch requested region is smem
 	 */
-	struct xe_tile *tile;
+	struct drm_pagemap *dpagemap;
 };
 
 /** enum xe_vma_op_flags - flags for VMA operation */
@@ -467,10 +557,23 @@ struct xe_vma_ops {
 	u32 num_syncs;
 	/** @pt_update_ops: page table update operations */
 	struct xe_vm_pgtable_update_ops pt_update_ops[XE_MAX_TILES_PER_DEVICE];
+	/** @start: start address of ops */
+	u64 start;
+	/** @last: last address of ops */
+	u64 last;
 	/** @flag: signify the properties within xe_vma_ops*/
-#define XE_VMA_OPS_FLAG_HAS_SVM_PREFETCH BIT(0)
-#define XE_VMA_OPS_FLAG_MADVISE          BIT(1)
-#define XE_VMA_OPS_ARRAY_OF_BINDS	 BIT(2)
+#define XE_VMA_OPS_FLAG_HAS_SVM_PREFETCH	BIT(0)
+#define XE_VMA_OPS_FLAG_MADVISE			BIT(1)
+#define XE_VMA_OPS_ARRAY_OF_BINDS		BIT(2)
+#define XE_VMA_OPS_FLAG_SKIP_TLB_WAIT		BIT(3)
+#define XE_VMA_OPS_FLAG_ALLOW_SVM_UNMAP		BIT(4)
+#define XE_VMA_OPS_FLAG_MODIFIES_GPUVA		BIT(5)
+#define XE_VMA_OPS_FLAG_DOWNGRADE_LOCK		BIT(6)
+#define XE_VMA_OPS_FLAG_HAS_SVM_VALID_RANGE	BIT(7)
+#define XE_VMA_OPS_FLAG_WAIT_VM_BOOKKEEP	BIT(8)
+#define XE_VMA_OPS_FLAG_WAIT_VM_KERNEL		BIT(9)
+#define XE_VMA_OPS_FLAG_NEEDS_INVALIDATION	BIT(10)
+#define XE_VMA_OPS_FLAG_NEEDS_SVM_LOCK		BIT(11)
 	u32 flags;
 #ifdef TEST_VM_OPS_ERROR
 	/** @inject_error: inject error to test error handling */

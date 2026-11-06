@@ -357,7 +357,6 @@ static int drv2667_probe(struct i2c_client *client)
 	}
 
 	haptics->input_dev->name = "drv2667:haptics";
-	haptics->input_dev->dev.parent = client->dev.parent;
 	haptics->input_dev->close = drv2667_close;
 	input_set_drvdata(haptics->input_dev, haptics);
 	input_set_capability(haptics->input_dev, EV_FF, FF_RUMBLE);
@@ -458,7 +457,7 @@ static int drv2667_resume(struct device *dev)
 static DEFINE_SIMPLE_DEV_PM_OPS(drv2667_pm_ops, drv2667_suspend, drv2667_resume);
 
 static const struct i2c_device_id drv2667_id[] = {
-	{ "drv2667" },
+	{ .name = "drv2667" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, drv2667_id);

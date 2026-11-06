@@ -66,6 +66,13 @@ struct apple_gpio_pinctrl {
 #define REG_GPIOx_DRIVE_STRENGTH1 GENMASK(23, 22)
 #define REG_IRQ(g, x)        (0x800 + 0x40 * (g) + 4 * ((x) >> 5))
 
+static bool apple_gpio_readable_register(struct device *dev, unsigned int reg)
+{
+	struct apple_gpio_pinctrl *pctl = dev_get_drvdata(dev);
+
+	return gpiochip_line_is_valid(&pctl->gpio_chip, reg / 4);
+}
+
 static const struct regmap_config regmap_config = {
 	.reg_bits = 32,
 	.val_bits = 32,
@@ -75,6 +82,7 @@ static const struct regmap_config regmap_config = {
 	.num_reg_defaults_raw = 512,
 	.use_relaxed_mmio = true,
 	.use_raw_spinlock = true,
+	.readable_reg = apple_gpio_readable_register,
 };
 
 /* No locking needed to mask/unmask IRQs as the interrupt mode is per pin-register. */
@@ -90,6 +98,13 @@ static u32 apple_gpio_get_reg(struct apple_gpio_pinctrl *pctl,
 	int ret;
 	u32 val;
 
+	if (!pctl->map)	{
+		pctl->map = devm_regmap_init_mmio(pctl->dev, pctl->base, &regmap_config);
+		if (IS_ERR(pctl->map))
+			return dev_err_probe(pctl->dev, PTR_ERR(pctl->map),
+					"Failed to create regmap\n");
+	}
+
 	ret = regmap_read(pctl->map, REG_GPIO(pin), &val);
 	if (ret)
 		return 0;
@@ -102,9 +117,9 @@ static u32 apple_gpio_get_reg(struct apple_gpio_pinctrl *pctl,
 static int apple_gpio_dt_node_to_map(struct pinctrl_dev *pctldev,
 				     struct device_node *node,
 				     struct pinctrl_map **map,
-				     unsigned *num_maps)
+				     unsigned int *num_maps)
 {
-	unsigned reserved_maps;
+	unsigned int reserved_maps;
 	struct apple_gpio_pinctrl *pctl;
 	u32 pinfunc, pin, func;
 	int num_pins, i, ret;
@@ -170,8 +185,15 @@ static const struct pinctrl_ops apple_gpio_pinctrl_ops = {
 
 /* Pin multiplexer functions */
 
-static int apple_gpio_pinmux_set(struct pinctrl_dev *pctldev, unsigned func,
-				 unsigned group)
+static bool apple_gpio_pinmux_func_is_gpio(struct pinctrl_dev *pctldev,
+					   unsigned int selector)
+{
+	/* Function selector 0 is always the GPIO mode */
+	return (selector == 0);
+}
+
+static int apple_gpio_pinmux_set(struct pinctrl_dev *pctldev, unsigned int func,
+				 unsigned int group)
 {
 	struct apple_gpio_pinctrl *pctl = pinctrl_dev_get_drvdata(pctldev);
 
@@ -186,6 +208,7 @@ static const struct pinmux_ops apple_gpio_pinmux_ops = {
 	.get_functions_count = pinmux_generic_get_function_count,
 	.get_function_name = pinmux_generic_get_function_name,
 	.get_function_groups = pinmux_generic_get_function_groups,
+	.function_is_gpio = apple_gpio_pinmux_func_is_gpio,
 	.set_mux = apple_gpio_pinmux_set,
 	.strict = true,
 };
@@ -202,7 +225,7 @@ static int apple_gpio_get_direction(struct gpio_chip *chip, unsigned int offset)
 	return GPIO_LINE_DIRECTION_IN;
 }
 
-static int apple_gpio_get(struct gpio_chip *chip, unsigned offset)
+static int apple_gpio_get(struct gpio_chip *chip, unsigned int offset)
 {
 	struct apple_gpio_pinctrl *pctl = gpiochip_get_data(chip);
 	unsigned int reg = apple_gpio_get_reg(pctl, offset);
@@ -392,8 +415,7 @@ static int apple_gpio_register(struct apple_gpio_pinctrl *pctl)
 		girq->parents = kmalloc_array(girq->num_parents,
 					      sizeof(*girq->parents),
 					      GFP_KERNEL);
-		irq_data = kmalloc_array(girq->num_parents, sizeof(*irq_data),
-					 GFP_KERNEL);
+		irq_data = kmalloc_objs(*irq_data, girq->num_parents);
 		if (!girq->parents || !irq_data) {
 			ret = -ENOMEM;
 			goto out_free_irq_data;
@@ -468,11 +490,6 @@ static int apple_gpio_pinctrl_probe(struct platform_device *pdev)
 	if (IS_ERR(pctl->base))
 		return PTR_ERR(pctl->base);
 
-	pctl->map = devm_regmap_init_mmio(&pdev->dev, pctl->base, &regmap_config);
-	if (IS_ERR(pctl->map))
-		return dev_err_probe(&pdev->dev, PTR_ERR(pctl->map),
-				     "Failed to create regmap\n");
-
 	for (i = 0; i < npins; i++) {
 		pins[i].number = i;
 		pins[i].name = devm_kasprintf(&pdev->dev, GFP_KERNEL, "PIN%u", i);
@@ -515,6 +532,7 @@ static int apple_gpio_pinctrl_probe(struct platform_device *pdev)
 }
 
 static const struct of_device_id apple_gpio_pinctrl_of_match[] = {
+	{ .compatible = "apple,t8140-pinctrl", },
 	{ .compatible = "apple,t8103-pinctrl", },
 	{ .compatible = "apple,pinctrl", },
 	{ }

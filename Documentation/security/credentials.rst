@@ -189,9 +189,9 @@ The Linux kernel supports the following types of credentials:
      be searched for the desired key.  Each process may subscribe to a number
      of keyrings:
 
-	Per-thread keying
-	Per-process keyring
-	Per-session keyring
+	- Per-thread keyring
+	- Per-process keyring
+	- Per-session keyring
 
      When a process accesses a key, if not already present, it will normally be
      cached on one of these keyrings for future accesses to find.
@@ -393,16 +393,14 @@ the credentials so obtained when they're finished with.
    The result of ``__task_cred()`` should not be passed directly to
    ``get_cred()`` as this may race with ``commit_cred()``.
 
-There are a couple of convenience functions to access bits of another task's
-credentials, hiding the RCU magic from the caller::
+There is a convenience function to access bits of another task's credentials,
+hiding the RCU magic from the caller::
 
 	uid_t task_uid(task)		Task's real UID
-	uid_t task_euid(task)		Task's effective UID
 
 If the caller is holding the RCU read lock at the time anyway, then::
 
 	__task_cred(task)->uid
-	__task_cred(task)->euid
 
 should be used instead.  Similarly, if multiple aspects of a task's credentials
 need to be accessed, RCU read lock should be used, ``__task_cred()`` called,

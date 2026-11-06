@@ -348,7 +348,7 @@ int cap_inode_need_killpriv(struct dentry *dentry)
  *
  * Return: 0 if successful, -ve on error.
  */
-int cap_inode_killpriv(struct mnt_idmap *idmap, struct dentry *dentry)
+int cap_inode_killpriv(const struct mnt_idmap *idmap, struct dentry *dentry)
 {
 	int error;
 
@@ -358,23 +358,33 @@ int cap_inode_killpriv(struct mnt_idmap *idmap, struct dentry *dentry)
 	return error;
 }
 
-static bool rootid_owns_currentns(vfsuid_t rootvfsuid)
+/**
+ * kuid_root_in_ns - check whether the given kuid is root in the given ns
+ * @kuid: the kuid to be tested
+ * @ns: the user namespace to test against
+ *
+ * Returns true if @kuid represents the root user in @ns, false otherwise.
+ */
+static bool kuid_root_in_ns(kuid_t kuid, struct user_namespace *ns)
 {
-	struct user_namespace *ns;
-	kuid_t kroot;
-
-	if (!vfsuid_valid(rootvfsuid))
-		return false;
-
-	kroot = vfsuid_into_kuid(rootvfsuid);
-	for (ns = current_user_ns();; ns = ns->parent) {
-		if (from_kuid(ns, kroot) == 0)
+	for (;; ns = ns->parent) {
+		if (from_kuid(ns, kuid) == 0)
 			return true;
 		if (ns == &init_user_ns)
 			break;
 	}
 
 	return false;
+}
+
+static bool vfsuid_root_in_currentns(vfsuid_t vfsuid)
+{
+	kuid_t kuid;
+
+	if (!vfsuid_valid(vfsuid))
+		return false;
+	kuid = vfsuid_into_kuid(vfsuid);
+	return kuid_root_in_ns(kuid, current_user_ns());
 }
 
 static __u32 sansflags(__u32 m)
@@ -407,7 +417,7 @@ static bool is_v3header(int size, const struct vfs_cap_data *cap)
  * by the integrity subsystem, which really wants the unconverted values -
  * so that's good.
  */
-int cap_inode_getsecurity(struct mnt_idmap *idmap,
+int cap_inode_getsecurity(const struct mnt_idmap *idmap,
 			  struct inode *inode, const char *name, void **buffer,
 			  bool alloc)
 {
@@ -481,7 +491,7 @@ int cap_inode_getsecurity(struct mnt_idmap *idmap,
 		goto out_free;
 	}
 
-	if (!rootid_owns_currentns(vfsroot)) {
+	if (!vfsuid_root_in_currentns(vfsroot)) {
 		size = -EOVERFLOW;
 		goto out_free;
 	}
@@ -556,7 +566,7 @@ static bool validheader(size_t size, const struct vfs_cap_data *cap)
  *
  * Return: On success, return the new size; on error, return < 0.
  */
-int cap_convert_nscap(struct mnt_idmap *idmap, struct dentry *dentry,
+int cap_convert_nscap(const struct mnt_idmap *idmap, struct dentry *dentry,
 		      const void **ivalue, size_t size)
 {
 	struct vfs_ns_cap_data *nscap;
@@ -662,7 +672,7 @@ static inline int bprm_caps_from_vfs_caps(struct cpu_vfs_cap_data *caps,
  * permissions. On non-idmapped mounts or if permission checking is to be
  * performed on the raw inode simply pass @nop_mnt_idmap.
  */
-int get_vfs_caps_from_disk(struct mnt_idmap *idmap,
+int get_vfs_caps_from_disk(const struct mnt_idmap *idmap,
 			   const struct dentry *dentry,
 			   struct cpu_vfs_cap_data *cpu_caps)
 {
@@ -722,7 +732,7 @@ int get_vfs_caps_from_disk(struct mnt_idmap *idmap,
 	/* Limit the caps to the mounter of the filesystem
 	 * or the more limited uid specified in the xattr.
 	 */
-	if (!rootid_owns_currentns(rootvfsuid))
+	if (!vfsuid_root_in_currentns(rootvfsuid))
 		return -ENODATA;
 
 	cpu_caps->permitted.val = le32_to_cpu(caps->data[0].permitted);
@@ -1053,7 +1063,7 @@ int cap_inode_setxattr(struct dentry *dentry, const char *name,
  * This is used to make sure security xattrs don't get removed by those who
  * aren't privileged to remove them.
  */
-int cap_inode_removexattr(struct mnt_idmap *idmap,
+int cap_inode_removexattr(const struct mnt_idmap *idmap,
 			  struct dentry *dentry, const char *name)
 {
 	struct user_namespace *user_ns = dentry->d_sb->s_user_ns;
@@ -1505,9 +1515,13 @@ static int __init capability_init(void)
 }
 
 DEFINE_LSM(capability) = {
-	.name = "capability",
+	.id = &capability_lsmid,
 	.order = LSM_ORDER_FIRST,
 	.init = capability_init,
 };
 
 #endif /* CONFIG_SECURITY */
+
+#ifdef CONFIG_SECURITY_COMMONCAP_KUNIT_TEST
+#include "commoncap_test.c"
+#endif

@@ -21,6 +21,7 @@
 #include <linux/io-pgtable.h>
 #include <linux/iommu.h>
 #include <linux/iopoll.h>
+#include <linux/minmax.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
@@ -267,6 +268,7 @@ struct apple_dart_domain {
 	struct io_pgtable_ops *pgtbl_ops;
 
 	bool finalized;
+	u64 mask;
 	struct mutex init_lock;
 	struct apple_dart_atomic_stream_map stream_maps[MAX_DARTS_PER_DEVICE];
 
@@ -284,6 +286,13 @@ struct apple_dart_domain {
 struct apple_dart_master_cfg {
 	/* Intersection of DART capabilitles */
 	u32 supports_bypass : 1;
+
+	/*
+	 * DMA aperture start and end to be overridden by "iommus"' phandle
+	 * args. By default determined by DART's ias but may be outside of it.
+	 */
+	dma_addr_t dma_min;
+	dma_addr_t dma_max;
 
 	struct apple_dart_stream_map stream_maps[MAX_DARTS_PER_DEVICE];
 };
@@ -537,7 +546,7 @@ static phys_addr_t apple_dart_iova_to_phys(struct iommu_domain *domain,
 	if (!ops)
 		return 0;
 
-	return ops->iova_to_phys(ops, iova);
+	return ops->iova_to_phys(ops, iova & dart_domain->mask);
 }
 
 static int apple_dart_map_pages(struct iommu_domain *domain, unsigned long iova,
@@ -551,8 +560,8 @@ static int apple_dart_map_pages(struct iommu_domain *domain, unsigned long iova,
 	if (!ops)
 		return -ENODEV;
 
-	return ops->map_pages(ops, iova, paddr, pgsize, pgcount, prot, gfp,
-			      mapped);
+	return ops->map_pages(ops, iova & dart_domain->mask, paddr, pgsize,
+			      pgcount, prot, gfp, mapped);
 }
 
 static size_t apple_dart_unmap_pages(struct iommu_domain *domain,
@@ -563,7 +572,8 @@ static size_t apple_dart_unmap_pages(struct iommu_domain *domain,
 	struct apple_dart_domain *dart_domain = to_dart_domain(domain);
 	struct io_pgtable_ops *ops = dart_domain->pgtbl_ops;
 
-	return ops->unmap_pages(ops, iova, pgsize, pgcount, gather);
+	return ops->unmap_pages(ops, iova & dart_domain->mask, pgsize, pgcount,
+				gather);
 }
 
 static void
@@ -590,6 +600,7 @@ static int apple_dart_finalize_domain(struct apple_dart_domain *dart_domain,
 {
 	struct apple_dart *dart = cfg->stream_maps[0].dart;
 	struct io_pgtable_cfg pgtbl_cfg;
+	u32 ias = min_t(u32, dart->ias, fls64(cfg->dma_max));
 	int ret = 0;
 	int i, j;
 
@@ -610,7 +621,7 @@ static int apple_dart_finalize_domain(struct apple_dart_domain *dart_domain,
 
 	pgtbl_cfg = (struct io_pgtable_cfg){
 		.pgsize_bitmap = dart->pgsize,
-		.ias = dart->ias,
+		.ias = ias,
 		.oas = dart->oas,
 		.coherent_walk = 1,
 		.iommu_dev = dart->dev,
@@ -623,10 +634,10 @@ static int apple_dart_finalize_domain(struct apple_dart_domain *dart_domain,
 		goto done;
 	}
 
+	dart_domain->mask = DMA_BIT_MASK(pgtbl_cfg.ias);
 	dart_domain->domain.pgsize_bitmap = pgtbl_cfg.pgsize_bitmap;
-	dart_domain->domain.geometry.aperture_start = 0;
-	dart_domain->domain.geometry.aperture_end =
-		(dma_addr_t)DMA_BIT_MASK(pgtbl_cfg.ias);
+	dart_domain->domain.geometry.aperture_start = cfg->dma_min;
+	dart_domain->domain.geometry.aperture_end = cfg->dma_max;
 	dart_domain->domain.geometry.force_aperture = true;
 
 	dart_domain->finalized = true;
@@ -672,7 +683,8 @@ static int apple_dart_domain_add_streams(struct apple_dart_domain *domain,
 }
 
 static int apple_dart_attach_dev_paging(struct iommu_domain *domain,
-					struct device *dev)
+					struct device *dev,
+					struct iommu_domain *old)
 {
 	int ret, i;
 	struct apple_dart_stream_map *stream_map;
@@ -693,7 +705,8 @@ static int apple_dart_attach_dev_paging(struct iommu_domain *domain,
 }
 
 static int apple_dart_attach_dev_identity(struct iommu_domain *domain,
-					  struct device *dev)
+					  struct device *dev,
+					  struct iommu_domain *old)
 {
 	struct apple_dart_master_cfg *cfg = dev_iommu_priv_get(dev);
 	struct apple_dart_stream_map *stream_map;
@@ -717,7 +730,8 @@ static struct iommu_domain apple_dart_identity_domain = {
 };
 
 static int apple_dart_attach_dev_blocked(struct iommu_domain *domain,
-					 struct device *dev)
+					 struct device *dev,
+					 struct iommu_domain *old)
 {
 	struct apple_dart_master_cfg *cfg = dev_iommu_priv_get(dev);
 	struct apple_dart_stream_map *stream_map;
@@ -765,7 +779,7 @@ static struct iommu_domain *apple_dart_domain_alloc_paging(struct device *dev)
 {
 	struct apple_dart_domain *dart_domain;
 
-	dart_domain = kzalloc(sizeof(*dart_domain), GFP_KERNEL);
+	dart_domain = kzalloc_obj(*dart_domain);
 	if (!dart_domain)
 		return NULL;
 
@@ -800,18 +814,65 @@ static int apple_dart_of_xlate(struct device *dev,
 	struct platform_device *iommu_pdev = of_find_device_by_node(args->np);
 	struct apple_dart *dart = platform_get_drvdata(iommu_pdev);
 	struct apple_dart *cfg_dart;
+	dma_addr_t dma_max = DMA_BIT_MASK(dart->ias);
+	dma_addr_t dma_min = 0;
 	int i, sid;
 
-	if (args->args_count != 1)
+	put_device(&iommu_pdev->dev);
+
+	if (args->args_count != 1 && args->args_count != 5)
 		return -EINVAL;
+
 	sid = args->args[0];
 
+	if (args->args_count == 5) {
+		dma_addr_t length = ((dma_addr_t)args->args[3] << 32) | args->args[4];
+
+		if (!length)
+			return -EINVAL;
+
+		dma_min = ((dma_addr_t)args->args[1] << 32) | args->args[2];
+
+		if (!IS_ALIGNED(dma_min, dart->pgsize) ||
+		    !IS_ALIGNED(length, dart->pgsize)) {
+			dev_err(dev, "Unaligned DMA window %pad, %pad (0x%x)\n",
+				&dma_min, &length, dart->pgsize);
+			return -EINVAL;
+		}
+		if (check_add_overflow(dma_min, length - 1, &dma_max)) {
+			dev_err(dev, "DMA window length (%pad) overflows range for start %pad\n",
+				&length, &dma_min);
+			return -EINVAL;
+		}
+
+		/*
+		 * Ensure that the DMA window does not exceed the DART's ias.
+		 */
+		if ((dma_min ^ dma_max) & ~DMA_BIT_MASK(dart->ias)) {
+			dev_err(dev, "Invalid DMA window for ias=%d\n",
+				dart->ias);
+			return -EINVAL;
+		}
+	}
+
 	if (!cfg) {
-		cfg = kzalloc(sizeof(*cfg), GFP_KERNEL);
+		cfg = kzalloc_obj(*cfg);
 		if (!cfg)
 			return -ENOMEM;
 		/* Will be ANDed with DART capabilities */
 		cfg->supports_bypass = true;
+		/* Will be merged with other DARTs to the common range. */
+		cfg->dma_min = dma_min;
+		cfg->dma_max = dma_max;
+	} else {
+		if (dma_min >= cfg->dma_max || cfg->dma_min >= dma_max) {
+			dev_err(dev, "non-overlapping DMA windows: %pad..%pad, %pad..%pad\n",
+				&dma_min, &dma_max,
+				&cfg->dma_min, &cfg->dma_max);
+			return -EINVAL;
+		}
+		cfg->dma_min = max(dma_min, cfg->dma_min);
+		cfg->dma_max = min(dma_max, cfg->dma_max);
 	}
 	dev_iommu_priv_set(dev, cfg);
 
@@ -971,7 +1032,7 @@ static int apple_dart_def_domain_type(struct device *dev)
 }
 
 #ifndef CONFIG_PCIE_APPLE_MSI_DOORBELL_ADDR
-/* Keep things compiling when CONFIG_PCI_APPLE isn't selected */
+/* Keep things compiling when CONFIG_PCIE_APPLE isn't selected */
 #define CONFIG_PCIE_APPLE_MSI_DOORBELL_ADDR	0
 #endif
 #define DOORBELL_ADDR	(CONFIG_PCIE_APPLE_MSI_DOORBELL_ADDR & PAGE_MASK)

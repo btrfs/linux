@@ -42,6 +42,8 @@
 #include <linux/mutex.h>
 #include <linux/completion.h>
 #include <linux/cdev.h>
+#include <linux/dma-buf.h>
+#include <linux/dma-resv.h>
 
 #include <rdma/ib_verbs.h>
 #include <rdma/ib_umem.h>
@@ -133,6 +135,25 @@ struct ib_uverbs_completion_event_file {
 	struct ib_uverbs_event_queue		ev_queue;
 };
 
+struct ib_uverbs_dmabuf_file {
+	struct ib_uobject uobj;
+	/*
+	 * Serializes users of dmabuf with the dma_buf's release, which sets it
+	 * to NULL. The uobject can outlive the dma_buf while it waits to be
+	 * destroyed. The map and unmap callbacks use attachment->dmabuf
+	 * instead of taking this lock.
+	 */
+	struct mutex dmabuf_release_lock;
+	struct dma_buf *dmabuf;
+	struct list_head dmabufs_elm;
+	struct rdma_user_mmap_entry *mmap_entry;
+	struct phys_vec phys_vec;
+	struct p2pdma_provider *provider;
+	struct kref kref;
+	struct completion comp;
+	u8 revoked :1;
+};
+
 struct ib_uverbs_event {
 	union {
 		struct ib_uverbs_async_event_desc	async;
@@ -191,7 +212,6 @@ void ib_uverbs_init_event_queue(struct ib_uverbs_event_queue *ev_queue);
 void ib_uverbs_init_async_event_file(struct ib_uverbs_async_event_file *ev_file);
 void ib_uverbs_free_event_queue(struct ib_uverbs_event_queue *event_queue);
 void ib_uverbs_flow_resources_free(struct ib_uflow_resources *uflow_res);
-int uverbs_async_event_release(struct inode *inode, struct file *filp);
 
 int ib_alloc_ucontext(struct uverbs_attr_bundle *attrs);
 int ib_init_ucontext(struct uverbs_attr_bundle *attrs);
@@ -216,6 +236,55 @@ int ib_uverbs_dealloc_xrcd(struct ib_uobject *uobject, struct ib_xrcd *xrcd,
 int uverbs_dealloc_mw(struct ib_mw *mw);
 void ib_uverbs_detach_umcast(struct ib_qp *qp,
 			     struct ib_uqp_object *uobj);
+
+struct bundle_alloc_head {
+	struct_group_tagged(bundle_alloc_head_hdr, hdr,
+		struct bundle_alloc_head *next;
+	);
+	u8 data[];
+};
+
+struct bundle_priv {
+	/* Must be first */
+	struct bundle_alloc_head_hdr alloc_head;
+	struct bundle_alloc_head *allocated_mem;
+	size_t internal_avail;
+	size_t internal_used;
+
+	struct radix_tree_root *radix;
+	void __rcu **radix_slots;
+	unsigned long radix_slots_len;
+	u32 method_key;
+
+	struct ib_uverbs_attr __user *user_attrs;
+	struct ib_uverbs_attr *uattrs;
+
+	DECLARE_BITMAP(uobj_finalize, UVERBS_API_ATTR_BKEY_LEN);
+	DECLARE_BITMAP(spec_finalize, UVERBS_API_ATTR_BKEY_LEN);
+	DECLARE_BITMAP(uobj_hw_obj_valid, UVERBS_API_ATTR_BKEY_LEN);
+
+	/*
+	 * Must be last. bundle ends in a flex array which overlaps
+	 * internal_buffer.
+	 */
+	struct uverbs_attr_bundle_hdr bundle;
+	u64 internal_buffer[32];
+};
+
+static inline int uverbs_set_output(const struct uverbs_attr_bundle *bundle,
+				    const struct uverbs_attr *attr)
+{
+	struct bundle_priv *pbundle =
+		container_of(&bundle->hdr, struct bundle_priv, bundle);
+	u16 flags;
+
+	flags = pbundle->uattrs[attr->ptr_attr.uattr_idx].flags |
+		UVERBS_ATTR_F_VALID_OUTPUT;
+	if (put_user(flags,
+		     &pbundle->user_attrs[attr->ptr_attr.uattr_idx].flags))
+		return -EFAULT;
+	return 0;
+}
 
 long ib_uverbs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
 
@@ -290,4 +359,50 @@ ib_uverbs_get_async_event(struct uverbs_attr_bundle *attrs,
 void copy_port_attr_to_resp(struct ib_port_attr *attr,
 			    struct ib_uverbs_query_port_resp *resp,
 			    struct ib_device *ib_dev, u8 port_num);
+
+static inline void ib_uverbs_dmabuf_done(struct kref *kref)
+{
+	struct ib_uverbs_dmabuf_file *priv =
+		container_of(kref, struct ib_uverbs_dmabuf_file, kref);
+
+	complete(&priv->comp);
+}
+
+/*
+ * Revoke the dmabuf and wait for all of its DMA mappings to be gone. Must be
+ * called with the mmap entry's dmabufs_lock held, after the dmabuf has been
+ * removed from the entry's dmabufs list, so it runs once per dmabuf. Lock
+ * order is dmabufs_lock, dmabuf_release_lock, then the dma_resv lock.
+ */
+static inline void ib_uverbs_dmabuf_revoke(struct ib_uverbs_dmabuf_file *priv)
+{
+	mutex_lock(&priv->dmabuf_release_lock);
+	if (priv->dmabuf) {
+		dma_resv_lock(priv->dmabuf->resv, NULL);
+		priv->revoked = true;
+		dma_buf_invalidate_mappings(priv->dmabuf);
+		dma_resv_wait_timeout(priv->dmabuf->resv,
+				      DMA_RESV_USAGE_BOOKKEEP, false,
+				      MAX_SCHEDULE_TIMEOUT);
+		dma_resv_unlock(priv->dmabuf->resv);
+	} else {
+		/* A released dma_buf has no attachments left to invalidate */
+		priv->revoked = true;
+	}
+	mutex_unlock(&priv->dmabuf_release_lock);
+
+	kref_put(&priv->kref, ib_uverbs_dmabuf_done);
+	/* Wait till all DMA unmaps are completed */
+	wait_for_completion(&priv->comp);
+}
+
+int __uverbs_cleanup_ufile(struct ib_uverbs_file *ufile,
+			   enum rdma_remove_reason reason);
+
+static inline void ib_uverbs_comp_dev(struct ib_uverbs_device *dev)
+{
+	complete(&dev->comp);
+}
+
+
 #endif /* UVERBS_H */

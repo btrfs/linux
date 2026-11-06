@@ -16,6 +16,7 @@
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/minmax.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
 
@@ -86,8 +87,6 @@ static size_t config_rom_length = 1 + 4 + 1 + 1;
  */
 #define DEFAULT_SPLIT_TIMEOUT	(2 * 8000)
 
-#define CANON_OUI		0x000085
-
 static void generate_config_rom(struct fw_card *card, __be32 *config_rom)
 {
 	struct fw_descriptor *desc;
@@ -154,8 +153,8 @@ static void update_config_roms(void)
 
 	list_for_each_entry (card, &card_list, link) {
 		generate_config_rom(card, tmp_config_rom);
-		card->driver->set_config_rom(card, tmp_config_rom,
-					     config_rom_length);
+		smp_load_acquire(&card->driver)->set_config_rom(card, tmp_config_rom,
+								config_rom_length);
 	}
 }
 
@@ -169,15 +168,30 @@ int fw_core_add_descriptor(struct fw_descriptor *desc)
 {
 	size_t i;
 
-	/*
-	 * Check descriptor is valid; the length of all blocks in the
-	 * descriptor has to add up to exactly the length of the
-	 * block.
-	 */
-	i = 0;
-	while (i < desc->length)
-		i += (desc->data[i] >> 16) + 1;
+	/* Reject empty descriptors or those exceeding max Config ROM size (256 quadlets) */
+	if (!in_range(desc->length, 1, 256))
+		return -EINVAL;
 
+	i = 0;
+	/*
+	 * Validate internal block structures within the descriptor. Each sub-block
+	 * encodes its length in the top 16 bits of its header quadlet.
+	 */
+	while (i < desc->length) {
+		u16 block_len = desc->data[i] >> 16;
+
+		/*
+		 * Guard against corrupted descriptors where an individual block length
+		 * claims to extend past the allocated end of desc->data, avoiding
+		 * out-of-bounds reads.
+		 */
+		if (block_len >= desc->length - i)
+			return -EINVAL;
+
+		i += block_len + 1;
+	}
+
+	/* The sum of sub-block lengths must match total descriptor length */
 	if (i != desc->length)
 		return -EINVAL;
 
@@ -217,7 +231,7 @@ static int reset_bus(struct fw_card *card, bool short_reset)
 
 	trace_bus_reset_initiate(card->index, card->generation, short_reset);
 
-	return card->driver->update_phy_reg(card, reg, 0, bit);
+	return smp_load_acquire(&card->driver)->update_phy_reg(card, reg, 0, bit);
 }
 
 void fw_schedule_bus_reset(struct fw_card *card, bool delayed, bool short_reset)
@@ -308,11 +322,9 @@ __must_hold(&card->lock)
 		cpu_to_be32(local_id),
 	};
 	bool grace = time_is_before_jiffies64(card->reset_jiffies + msecs_to_jiffies(125));
-	bool irm_is_1394_1995_only = false;
-	bool keep_this_irm = false;
 	struct fw_node *irm_node;
 	struct fw_device *irm_device;
-	int irm_node_id;
+	int irm_node_id, irm_device_quirks = 0;
 	int rcode;
 
 	lockdep_assert_held(&card->lock);
@@ -328,15 +340,12 @@ __must_hold(&card->lock)
 		return BM_CONTENTION_OUTCOME_IRM_HAS_LINK_OFF;
 	}
 
+	// NOTE: It is likely that the quirk detection for IRM device has not done yet.
 	irm_device = fw_node_get_device(irm_node);
-	if (irm_device && irm_device->config_rom) {
-		irm_is_1394_1995_only = (irm_device->config_rom[2] & 0x000000f0) == 0;
-
-		// Canon MV5i works unreliably if it is not root node.
-		keep_this_irm = irm_device->config_rom[3] >> 8 == CANON_OUI;
-	}
-
-	if (irm_is_1394_1995_only && !keep_this_irm) {
+	if (irm_device)
+		irm_device_quirks = READ_ONCE(irm_device->quirks);
+	if ((irm_device_quirks & FW_DEVICE_QUIRK_IRM_IS_1394_1995_ONLY) &&
+	    !(irm_device_quirks & FW_DEVICE_QUIRK_IRM_IGNORES_BUS_MANAGER)) {
 		fw_notice(card, "IRM is not 1394a compliant, making local node (%02x) root\n",
 			  local_id);
 		return BM_CONTENTION_OUTCOME_IRM_COMPLIES_1394_1995_ONLY;
@@ -373,7 +382,7 @@ __must_hold(&card->lock)
 			return BM_CONTENTION_OUTCOME_IRM_HOLDS_LOCAL_NODE_AS_BM;
 	}
 	default:
-		if (!keep_this_irm) {
+		if (!(irm_device_quirks & FW_DEVICE_QUIRK_IRM_IGNORES_BUS_MANAGER)) {
 			fw_notice(card, "BM lock failed (%s), making local node (%02x) root\n",
 				  fw_rcode_string(rcode), local_id);
 			return BM_CONTENTION_OUTCOME_IRM_COMPLIES_1394_1995_ONLY;
@@ -634,11 +643,12 @@ int fw_card_add(struct fw_card *card, u32 max_receive, u32 link_speed, u64 guid,
 	//  * == WQ_FREEZABLE		The target device would not be available when being freezed.
 	//  * == WQ_HIGHPRI		High priority to process semi-realtime timestamped data.
 	//  * == WQ_SYSFS		Parameters are available via sysfs.
-	//  * max_active == 4		A hardIRQ could notify events for a pair of requests and
-	//				response AR/AT contexts.
+	//  * max_active == 4 + 2	A hardIRQ could notify events for a pair of requests and
+	//				response AR/AT contexts. Additional 2 capacity are for the
+	//				internal handling of local AT request and response packets.
 	async_wq = alloc_workqueue("firewire-async-card%u",
 				   WQ_UNBOUND | WQ_MEM_RECLAIM | WQ_FREEZABLE | WQ_HIGHPRI | WQ_SYSFS,
-				   4, card->index);
+				   6, card->index);
 	if (!async_wq)
 		return -ENOMEM;
 
@@ -650,7 +660,8 @@ int fw_card_add(struct fw_card *card, u32 max_receive, u32 link_speed, u64 guid,
 
 	scoped_guard(mutex, &card_mutex) {
 		generate_config_rom(card, tmp_config_rom);
-		ret = card->driver->enable(card, tmp_config_rom, config_rom_length);
+		ret = smp_load_acquire(&card->driver)->enable(card, tmp_config_rom,
+							      config_rom_length);
 		if (ret < 0) {
 			card->isoc_wq = NULL;
 			card->async_wq = NULL;
@@ -678,6 +689,15 @@ EXPORT_SYMBOL(fw_card_add);
  * .set_config_rom() is never called since the card is taken out of card_list
  * before switching to the dummy driver.
  */
+struct fw_card_driver_closer {
+	const struct fw_card_driver driver;
+
+	// For shutdown operations.
+	struct fw_card *card;
+	struct list_head packet_list;
+	spinlock_t packet_list_lock;
+	struct work_struct work;
+};
 
 static int dummy_read_phy_reg(struct fw_card *card, int address)
 {
@@ -690,14 +710,31 @@ static int dummy_update_phy_reg(struct fw_card *card, int address,
 	return -ENODEV;
 }
 
-static void dummy_send_request(struct fw_card *card, struct fw_packet *packet)
+static void dummy_packet_callback_work(struct work_struct *work)
 {
-	packet->callback(packet, card, RCODE_CANCELLED);
+	struct fw_card_driver_closer *closer = container_of(work, typeof(*closer), work);
+	unsigned long flags;
+	struct fw_packet *p;
+
+	spin_lock_irqsave(&closer->packet_list_lock, flags);
+	while ((p = list_first_entry_or_null(&closer->packet_list, typeof(*p), link_for_local))) {
+		list_del(&p->link_for_local);
+		spin_unlock_irqrestore(&closer->packet_list_lock, flags);
+
+		p->callback(p, closer->card, RCODE_CANCELLED);
+
+		spin_lock_irqsave(&closer->packet_list_lock, flags);
+	}
+	spin_unlock_irqrestore(&closer->packet_list_lock, flags);
 }
 
-static void dummy_send_response(struct fw_card *card, struct fw_packet *packet)
+static void dummy_schedule_packet_callback(struct fw_card *card, struct fw_packet *packet)
 {
-	packet->callback(packet, card, RCODE_CANCELLED);
+	struct fw_card_driver_closer *closer = container_of(card->driver, typeof(*closer), driver);
+
+	scoped_guard(spinlock_irqsave, &closer->packet_list_lock)
+		list_add_tail(&packet->link_for_local, &closer->packet_list);
+	queue_work(card->async_wq, &closer->work);
 }
 
 static int dummy_cancel_packet(struct fw_card *card, struct fw_packet *packet)
@@ -711,8 +748,8 @@ static int dummy_enable_phys_dma(struct fw_card *card,
 	return -ENODEV;
 }
 
-static struct fw_iso_context *dummy_allocate_iso_context(struct fw_card *card,
-				int type, int channel, size_t header_size)
+static struct fw_iso_context *dummy_allocate_iso_context(struct fw_card *card, int type,
+		int channel, size_t header_size, size_t header_storage_size)
 {
 	return ERR_PTR(-ENODEV);
 }
@@ -752,23 +789,6 @@ static int dummy_flush_iso_completions(struct fw_iso_context *ctx)
 	return -ENODEV;
 }
 
-static const struct fw_card_driver dummy_driver_template = {
-	.read_phy_reg		= dummy_read_phy_reg,
-	.update_phy_reg		= dummy_update_phy_reg,
-	.send_request		= dummy_send_request,
-	.send_response		= dummy_send_response,
-	.cancel_packet		= dummy_cancel_packet,
-	.enable_phys_dma	= dummy_enable_phys_dma,
-	.read_csr		= dummy_read_csr,
-	.write_csr		= dummy_write_csr,
-	.allocate_iso_context	= dummy_allocate_iso_context,
-	.start_iso		= dummy_start_iso,
-	.set_iso_channels	= dummy_set_iso_channels,
-	.queue_iso		= dummy_queue_iso,
-	.flush_queue_iso	= dummy_flush_queue_iso,
-	.flush_iso_completions	= dummy_flush_iso_completions,
-};
-
 void fw_card_release(struct kref *kref)
 {
 	struct fw_card *card = container_of(kref, struct fw_card, kref);
@@ -779,7 +799,31 @@ EXPORT_SYMBOL_GPL(fw_card_release);
 
 void fw_core_remove_card(struct fw_card *card)
 {
-	struct fw_card_driver dummy_driver = dummy_driver_template;
+	struct fw_card_driver_closer closer = {
+		// Switch off most of the card driver interface.
+		.driver = {
+			.enable			= NULL,
+			.disable		= card->driver->disable,
+			.read_phy_reg		= dummy_read_phy_reg,
+			.update_phy_reg		= dummy_update_phy_reg,
+			.set_config_rom		= NULL,
+			.send_request		= dummy_schedule_packet_callback,
+			.send_response		= dummy_schedule_packet_callback,
+			.cancel_packet		= dummy_cancel_packet,
+			.enable_phys_dma	= dummy_enable_phys_dma,
+			.read_csr		= dummy_read_csr,
+			.write_csr		= dummy_write_csr,
+			.allocate_iso_context	= dummy_allocate_iso_context,
+			.free_iso_context	= card->driver->free_iso_context,
+			.start_iso		= dummy_start_iso,
+			.set_iso_channels	= dummy_set_iso_channels,
+			.queue_iso		= dummy_queue_iso,
+			.flush_queue_iso	= dummy_flush_queue_iso,
+			.flush_iso_completions	= dummy_flush_iso_completions,
+			.stop_iso		= card->driver->stop_iso,
+		},
+		.card = card,
+	};
 
 	might_sleep();
 
@@ -790,12 +834,19 @@ void fw_core_remove_card(struct fw_card *card)
 	scoped_guard(mutex, &card_mutex)
 		list_del_init(&card->link);
 
-	/* Switch off most of the card driver interface. */
-	dummy_driver.free_iso_context	= card->driver->free_iso_context;
-	dummy_driver.stop_iso		= card->driver->stop_iso;
-	card->driver = &dummy_driver;
-	drain_workqueue(card->isoc_wq);
-	drain_workqueue(card->async_wq);
+	INIT_LIST_HEAD(&closer.packet_list);
+	spin_lock_init(&closer.packet_list_lock);
+	INIT_WORK_ONSTACK(&closer.work, dummy_packet_callback_work);
+
+	// Ensure the entire contents of the driver are visible to other CPUs.
+	smp_store_release(&card->driver, &closer.driver);
+
+	flush_workqueue(card->isoc_wq);
+	flush_workqueue(card->async_wq);
+	card->driver->disable(card);
+
+	scoped_guard(spinlock_irqsave, &card->transactions.lock)
+		fw_cancel_pending_transactions(card);
 
 	scoped_guard(spinlock_irqsave, &card->lock)
 		fw_destroy_nodes(card);
@@ -807,6 +858,10 @@ void fw_core_remove_card(struct fw_card *card)
 	destroy_workqueue(card->isoc_wq);
 	destroy_workqueue(card->async_wq);
 
+	disable_work_sync(&closer.work);
+	destroy_work_on_stack(&closer.work);
+
+	WARN_ON(!list_empty(&closer.packet_list));
 	WARN_ON(!list_empty(&card->transactions.list));
 }
 EXPORT_SYMBOL(fw_core_remove_card);
@@ -829,12 +884,16 @@ EXPORT_SYMBOL(fw_core_remove_card);
  */
 int fw_card_read_cycle_time(struct fw_card *card, u32 *cycle_time)
 {
-	if (card->driver->read_csr == dummy_read_csr)
+	if (smp_load_acquire(&card->driver)->read_csr == dummy_read_csr)
 		return -ENODEV;
 
 	// It's possible to switch to dummy driver between the above and the below. This is the best
 	// effort to return -ENODEV.
-	*cycle_time = card->driver->read_csr(card, CSR_CYCLE_TIME);
+	*cycle_time = smp_load_acquire(&card->driver)->read_csr(card, CSR_CYCLE_TIME);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(fw_card_read_cycle_time);
+
+#ifdef CONFIG_FIREWIRE_KUNIT_CONFIG_ROM_PARSER_AND_GENERATOR_TEST
+#include "config-rom-generator-test.c"
+#endif

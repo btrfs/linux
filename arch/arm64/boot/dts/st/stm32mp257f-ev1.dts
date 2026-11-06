@@ -7,6 +7,8 @@
 /dts-v1/;
 
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/leds/common.h>
+#include <dt-bindings/media/video-interfaces.h>
 #include <dt-bindings/regulator/st,stm32mp25-regulator.h>
 #include "stm32mp257.dtsi"
 #include "stm32mp25xf.dtsi"
@@ -42,33 +44,45 @@
 		};
 	};
 
-	imx335_2v9: regulator-2v9 {
-		compatible = "regulator-fixed";
-		regulator-name = "imx335-avdd";
-		regulator-min-microvolt = <2900000>;
-		regulator-max-microvolt = <2900000>;
-		regulator-always-on;
+	gpio-leds {
+		compatible = "gpio-leds";
+
+		led_blue: led-blue {
+			function = LED_FUNCTION_HEARTBEAT;
+			color = <LED_COLOR_ID_BLUE>;
+			gpios = <&gpioj 7 GPIO_ACTIVE_HIGH>;
+			linux,default-trigger = "heartbeat";
+			default-state = "off";
+		};
+
+		led-green {
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpiod 8 GPIO_ACTIVE_HIGH>;
+		};
+
+		led-orange {
+			color = <LED_COLOR_ID_ORANGE>;
+			gpios = <&gpioj 6 GPIO_ACTIVE_HIGH>;
+		};
 	};
 
-	imx335_1v8: regulator-1v8 {
-		compatible = "regulator-fixed";
-		regulator-name = "imx335-ovdd";
-		regulator-min-microvolt = <1800000>;
-		regulator-max-microvolt = <1800000>;
-		regulator-always-on;
-	};
-
-	imx335_1v2: regulator-1v2 {
-		compatible = "regulator-fixed";
-		regulator-name = "imx335-dvdd";
-		regulator-min-microvolt = <1200000>;
-		regulator-max-microvolt = <1200000>;
-		regulator-always-on;
+	ddr_channel: sdram-channel-0 {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		compatible = "jedec,ddr4-channel";
+		io-width = <32>;
 	};
 
 	memory@80000000 {
 		device_type = "memory";
 		reg = <0x0 0x80000000 0x1 0x0>;
+	};
+
+	options {
+		u-boot {
+			compatible = "u-boot,config";
+			boot-led = <&led_blue>;
+		};
 	};
 
 	panel_lvds: display {
@@ -148,7 +162,7 @@
 			csi_sink: endpoint {
 				remote-endpoint = <&imx335_ep>;
 				data-lanes = <1 2>;
-				bus-type = <4>;
+				bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
 			};
 		};
 		port@1 {
@@ -165,7 +179,7 @@
 	port {
 		dcmipp_0: endpoint {
 			remote-endpoint = <&csi_source>;
-			bus-type = <4>;
+			bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
 		};
 	};
 };
@@ -186,7 +200,7 @@
 		phy1_eth1: ethernet-phy@4 {
 			compatible = "ethernet-phy-id001c.c916";
 			reg = <4>;
-			reset-gpios =  <&gpioj 9 GPIO_ACTIVE_LOW>;
+			reset-gpios = <&gpioj 9 GPIO_ACTIVE_LOW>;
 			reset-assert-us = <10000>;
 			reset-deassert-us = <80000>;
 		};
@@ -216,6 +230,16 @@
 	};
 };
 
+&gpioi {
+	/* Enable the IMX335 power line */
+	imx335-en-hog {
+		gpio-hog;
+		gpios = <0 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "imx335_en";
+	};
+};
+
 &i2c2 {
 	pinctrl-names = "default", "sleep";
 	pinctrl-0 = <&i2c2_pins_a>;
@@ -224,14 +248,17 @@
 	i2c-scl-falling-time-ns = <13>;
 	clock-frequency = <400000>;
 	status = "okay";
+	/* spare dmas for other usage */
+	/delete-property/dmas;
+	/delete-property/dma-names;
 
 	imx335: camera@1a {
 		compatible = "sony,imx335";
 		reg = <0x1a>;
 		clocks = <&clk_ext_camera>;
-		avdd-supply = <&imx335_2v9>;
-		ovdd-supply = <&imx335_1v8>;
-		dvdd-supply = <&imx335_1v2>;
+		avdd-supply = <&scmi_v3v3>;
+		ovdd-supply = <&scmi_v3v3>;
+		dvdd-supply = <&scmi_v3v3>;
 		reset-gpios = <&gpioi 7 (GPIO_ACTIVE_LOW | GPIO_PUSH_PULL)>;
 
 		port {
@@ -262,33 +289,9 @@
 	i2c-scl-falling-time-ns = <7>;
 	clock-frequency = <400000>;
 	status = "disabled";
-};
-
-&ommanager {
-	memory-region = <&mm_ospi1>;
-	pinctrl-0 = <&ospi_port1_clk_pins_a
-		     &ospi_port1_io03_pins_a
-		     &ospi_port1_cs0_pins_a>;
-	pinctrl-1 = <&ospi_port1_clk_sleep_pins_a
-		     &ospi_port1_io03_sleep_pins_a
-		     &ospi_port1_cs0_sleep_pins_a>;
-	pinctrl-names = "default", "sleep";
-	status = "okay";
-
-	spi@0 {
-		#address-cells = <1>;
-		#size-cells = <0>;
-		memory-region = <&mm_ospi1>;
-		status = "okay";
-
-		flash0: flash@0 {
-			compatible = "jedec,spi-nor";
-			reg = <0>;
-			spi-rx-bus-width = <4>;
-			spi-tx-bus-width = <4>;
-			spi-max-frequency = <50000000>;
-		};
-	};
+	/* spare dmas for other usage */
+	/delete-property/dmas;
+	/delete-property/dma-names;
 };
 
 /* use LPTIMER with tick broadcast for suspend mode */
@@ -330,6 +333,34 @@
 	};
 };
 
+&ommanager {
+	memory-region = <&mm_ospi1>;
+	memory-region-names = "ospi1";
+	pinctrl-0 = <&ospi_port1_clk_pins_a
+		     &ospi_port1_io03_pins_a
+		     &ospi_port1_cs0_pins_a>;
+	pinctrl-1 = <&ospi_port1_clk_sleep_pins_a
+		     &ospi_port1_io03_sleep_pins_a
+		     &ospi_port1_cs0_sleep_pins_a>;
+	pinctrl-names = "default", "sleep";
+	status = "okay";
+
+	spi@0 {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		memory-region = <&mm_ospi1>;
+		status = "okay";
+
+		flash0: flash@0 {
+			compatible = "jedec,spi-nor";
+			reg = <0>;
+			spi-rx-bus-width = <4>;
+			spi-tx-bus-width = <4>;
+			spi-max-frequency = <50000000>;
+		};
+	};
+};
+
 &pcie_ep {
 	pinctrl-names = "default", "init";
 	pinctrl-0 = <&pcie_pins_a>;
@@ -360,11 +391,11 @@
 		regulator-min-microvolt = <1800000>;
 		regulator-max-microvolt = <3300000>;
 	};
-	scmi_vddcore: regulator@11  {
+	scmi_vddcore: regulator@11 {
 		reg = <VOLTD_SCMI_STPMIC2_BUCK2>;
 		regulator-name = "vddcore";
 	};
-	scmi_v1v8: regulator@14  {
+	scmi_v1v8: regulator@14 {
 		reg = <VOLTD_SCMI_STPMIC2_BUCK5>;
 		regulator-name = "v1v8";
 	};

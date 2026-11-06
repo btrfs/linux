@@ -10,7 +10,6 @@
  */
 #include <linux/clk.h>
 #include <linux/init.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/i2c.h>
@@ -1098,6 +1097,7 @@ static int ov7670_apply_fmt(struct v4l2_subdev *sd)
  * Set a format.
  */
 static int ov7670_set_fmt(struct v4l2_subdev *sd,
+		const struct v4l2_subdev_client_info *ci,
 		struct v4l2_subdev_state *sd_state,
 		struct v4l2_subdev_format *format)
 {
@@ -1997,8 +1997,8 @@ static const struct ov7670_devtype ov7675_devdata = {
 };
 
 static const struct i2c_device_id ov7670_id[] = {
-	{ "ov7670", (kernel_ulong_t)&ov7670_devdata },
-	{ "ov7675", (kernel_ulong_t)&ov7675_devdata },
+	{ .name = "ov7670", .driver_data = (kernel_ulong_t)&ov7670_devdata },
+	{ .name = "ov7675", .driver_data = (kernel_ulong_t)&ov7675_devdata },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(i2c, ov7670_id);

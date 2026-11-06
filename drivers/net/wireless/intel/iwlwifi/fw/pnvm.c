@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright(c) 2020-2025 Intel Corporation
+ * Copyright(c) 2020-2026 Intel Corporation
  */
 
 #include "iwl-drv.h"
 #include "pnvm.h"
 #include "iwl-prph.h"
-#include "iwl-io.h"
+#include "iwl-trans.h"
 #include "fw/api/commands.h"
 #include "fw/api/nvm-reg.h"
 #include "fw/api/alive.h"
 #include "fw/uefi.h"
 #include "fw/img.h"
+#include "fw/dbg.h"
 
 #define IWL_PNVM_REDUCED_CAP_BIT BIT(25)
 
@@ -25,6 +26,12 @@ static bool iwl_pnvm_complete_fn(struct iwl_notif_wait_data *notif_wait,
 {
 	struct iwl_trans *trans = (struct iwl_trans *)data;
 	struct iwl_pnvm_init_complete_ntfy *pnvm_ntf = (void *)pkt->data;
+
+	if (IWL_FW_CHECK(trans,
+			 iwl_rx_packet_payload_len(pkt) < sizeof(*pnvm_ntf),
+			 "Bad notif len: %d\n",
+			 iwl_rx_packet_payload_len(pkt)))
+		return true;
 
 	IWL_DEBUG_FW(trans,
 		     "PNVM complete notification received with status 0x%0x\n",
@@ -198,6 +205,12 @@ static int iwl_pnvm_parse(struct iwl_trans *trans, const u8 *data,
 			IWL_DEBUG_FW(trans,
 				     "Got IWL_UCODE_TLV_PNVM_SKU len %d\n",
 				     tlv_len);
+			if (tlv_len < sizeof(*tlv_sku_id)) {
+				IWL_ERR(trans, "invalid PNVM SKU TLV len: %u\n",
+					tlv_len);
+				return -EINVAL;
+			}
+
 			IWL_DEBUG_FW(trans, "sku_id 0x%0x 0x%0x 0x%0x\n",
 				     le32_to_cpu(tlv_sku_id->data[0]),
 				     le32_to_cpu(tlv_sku_id->data[1]),
@@ -379,7 +392,7 @@ iwl_pnvm_load_pnvm_to_trans(struct iwl_trans *trans,
 		return;
 	}
 
-	pnvm_data = kzalloc(sizeof(*pnvm_data), GFP_KERNEL);
+	pnvm_data = kzalloc_obj(*pnvm_data);
 	if (!pnvm_data)
 		goto free;
 
@@ -425,7 +438,7 @@ iwl_pnvm_load_reduce_power_to_trans(struct iwl_trans *trans,
 		return;
 	}
 
-	pnvm_data = kzalloc(sizeof(*pnvm_data), GFP_KERNEL);
+	pnvm_data = kzalloc_obj(*pnvm_data);
 	if (!pnvm_data)
 		goto free;
 
@@ -472,8 +485,8 @@ int iwl_pnvm_load(struct iwl_trans *trans,
 				   iwl_pnvm_complete_fn, trans);
 
 	/* kick the doorbell */
-	iwl_write_umac_prph(trans, UREG_DOORBELL_TO_ISR6,
-			    UREG_DOORBELL_TO_ISR6_PNVM);
+	iwl_trans_write_umac_prph(trans, UREG_DOORBELL_TO_ISR6,
+				  UREG_DOORBELL_TO_ISR6_PNVM);
 
 	return iwl_wait_notification(notif_wait, &pnvm_wait,
 				     MVM_UCODE_PNVM_TIMEOUT);

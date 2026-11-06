@@ -31,7 +31,7 @@ fi
 if ! cp "$oldrun/scenarios" $T/scenarios.oldrun
 then
 	# Later on, can reconstitute this from console.log files.
-	echo Prior run batches file does not exist: $oldrun/batches
+	echo Prior run scenarios file does not exist: $oldrun/scenarios
 	exit 1
 fi
 
@@ -68,7 +68,7 @@ usage () {
 	echo "       --datestamp string"
 	echo "       --dryrun"
 	echo "       --duration minutes | <seconds>s | <hours>h | <days>d"
-	echo "       --link hard|soft|copy"
+	echo "       --link hard|soft|copy|inplace|inplace-force"
 	echo "       --remote"
 	echo "       --rundir /new/res/path"
 	echo "Command line: $scriptname $args"
@@ -121,7 +121,7 @@ do
 		shift
 		;;
 	--link)
-		checkarg --link "hard|soft|copy" "$#" "$2" 'hard\|soft\|copy' '^--'
+		checkarg --link "hard|soft|copy|inplace|inplace-force" "$#" "$2" 'hard\|soft\|copy\|inplace\|inplace-force' '^--'
 		case "$2" in
 		copy)
 			arg_link="cp -R"
@@ -131,6 +131,14 @@ do
 			;;
 		soft)
 			arg_link="cp -Rs"
+			;;
+		inplace)
+			arg_link="inplace"
+			rundir="$oldrun"
+			;;
+		inplace-force)
+			arg_link="inplace-force"
+			rundir="$oldrun"
 			;;
 		esac
 		shift
@@ -172,28 +180,51 @@ fi
 
 echo ---- Re-run results directory: $rundir
 
-# Copy old run directory tree over and adjust.
-mkdir -p "`dirname "$rundir"`"
-if ! $arg_link "$oldrun" "$rundir"
+qemu_binary="$(find "$oldrun" -maxdepth 2 -name 'qemu-cmd' -type f 2>/dev/null | head -1 | xargs -r grep -v '^#' 2>/dev/null | awk 'NF { print $1; exit }')"
+boot_image="`identify_boot_image "$qemu_binary"`"
+
+if test "$oldrun" != "$rundir"
 then
-	echo "Cannot copy from $oldrun to $rundir."
-	usage
+	# Copy old run directory tree over and adjust.
+	mkdir -p "`dirname "$rundir"`"
+	if ! $arg_link "$oldrun" "$rundir"
+	then
+		echo "Cannot copy from $oldrun to $rundir."
+		usage
+	fi
+	rm -f "$rundir"/*/{console.log,console.log.diags,qemu_pid,qemu-pid,qemu-retval,Warnings,kvm-test-1-run.sh.out,kvm-test-1-run-qemu.sh.out} "$rundir"/log
+	touch "$rundir/log"
+	echo $scriptname $args | tee -a "$rundir/log"
+	echo $oldrun > "$rundir/re-run"
+	if ! test -d "$rundir/../../bin"
+	then
+		$arg_link "$oldrun/../../bin" "$rundir/../.."
+	fi
+	if test "`basename "$boot_image"`" != vmlinux
+	then
+		rm -f "$rundir"/*/vmlinux
+	fi
+else
+	# Check for a run having already happened.
+	find "$rundir" -name console.log -print > $T/oldrun-console.log
+	if test -s $T/oldrun-console.log
+	then
+		echo Run already took place in $rundir
+		if test "$arg_link" = inplace
+		then
+			usage
+		fi
+	fi
 fi
-rm -f "$rundir"/*/{console.log,console.log.diags,qemu_pid,qemu-pid,qemu-retval,Warnings,kvm-test-1-run.sh.out,kvm-test-1-run-qemu.sh.out,vmlinux} "$rundir"/log
-touch "$rundir/log"
-echo $scriptname $args | tee -a "$rundir/log"
-echo $oldrun > "$rundir/re-run"
-if ! test -d "$rundir/../../bin"
-then
-	$arg_link "$oldrun/../../bin" "$rundir/../.."
-fi
+
+# Find runs to be done based on their qemu-cmd files.
 for i in $rundir/*/qemu-cmd
 do
 	cp "$i" $T
 	qemu_cmd_dir="`dirname "$i"`"
 	kernel_dir="`echo $qemu_cmd_dir | sed -e 's/\.[0-9]\+$//'`"
 	jitter_dir="`dirname "$kernel_dir"`"
-	kvm-transform.sh "$kernel_dir/bzImage" "$qemu_cmd_dir/console.log" "$jitter_dir" "$dur" "$bootargs" < $T/qemu-cmd > $i
+	kvm-transform.sh "$kernel_dir/`basename $boot_image`" "$qemu_cmd_dir/console.log" "$jitter_dir" "$dur" "$bootargs" < $T/qemu-cmd > $i
 	if test -n "$arg_remote"
 	then
 		echo "# TORTURE_KCONFIG_GDB_ARG=''" >> $i

@@ -8,6 +8,7 @@
 #include <linux/percpu-refcount.h>
 #include <linux/semaphore.h>     /* struct semaphore */
 #include <linux/completion.h>
+#include <scsi/scsi_common.h>
 
 #define TARGET_CORE_VERSION		"v5.0"
 
@@ -45,10 +46,6 @@
 #define INQUIRY_VPD_SERIAL_LEN			254
 /* Used by transport_get_inquiry_vpd_device_ident() */
 #define INQUIRY_VPD_DEVICE_IDENTIFIER_LEN	254
-
-#define INQUIRY_VENDOR_LEN			8
-#define INQUIRY_MODEL_LEN			16
-#define INQUIRY_REVISION_LEN			4
 
 /* Attempts before moving from SHORT to LONG */
 #define PYX_TRANSPORT_WINDOW_CLOSED_THRESHOLD	3
@@ -108,6 +105,18 @@
 #define SE_MODE_PAGE_BUF			512
 #define SE_SENSE_BUF				96
 
+/* Peripheral Device Text Identification Information */
+#define PD_TEXT_ID_INFO_LEN			256
+
+enum target_compl_type {
+	/* Use the fabric driver's default completion type */
+	TARGET_FABRIC_DEFAULT_COMPL,
+	/* Complete from the backend calling context */
+	TARGET_DIRECT_COMPL,
+	/* Defer completion to the LIO workqueue */
+	TARGET_QUEUE_COMPL,
+};
+
 enum target_submit_type {
 	/* Use the fabric driver's default submission type */
 	TARGET_FABRIC_DEFAULT_SUBMIT,
@@ -158,6 +167,7 @@ enum se_cmd_flags_table {
 	SCF_TASK_ATTR_SET			= (1 << 17),
 	SCF_TREAT_READ_AS_NORMAL		= (1 << 18),
 	SCF_TASK_ORDERED_SYNC			= (1 << 19),
+	SCF_ATOMIC				= (1 << 20),
 };
 
 /*
@@ -347,6 +357,7 @@ struct t10_wwn {
 	struct se_device *t10_dev;
 	struct config_group t10_wwn_group;
 	struct list_head t10_vpd_list;
+	char pd_text_id_info[PD_TEXT_ID_INFO_LEN];
 };
 
 struct t10_pr_registration {
@@ -671,9 +682,9 @@ struct se_lun_acl {
 };
 
 struct se_dev_entry_io_stats {
-	u32			total_cmds;
-	u32			read_bytes;
-	u32			write_bytes;
+	u64			total_cmds;
+	u64			read_bytes;
+	u64			write_bytes;
 };
 
 struct se_dev_entry {
@@ -731,6 +742,12 @@ struct se_dev_attrib {
 	u32		unmap_granularity;
 	u32		unmap_granularity_alignment;
 	u32		max_write_same_len;
+	u32		atomic_max_len;
+	u32		atomic_alignment;
+	u32		atomic_granularity;
+	u32		atomic_max_with_boundary;
+	u32		atomic_max_boundary;
+	u8		complete_type;
 	u8		submit_type;
 	struct se_device *da_dev;
 	struct config_group da_group;
@@ -744,9 +761,9 @@ struct se_port_stat_grps {
 };
 
 struct scsi_port_stats {
-	atomic_long_t	cmd_pdus;
-	atomic_long_t	tx_data_octets;
-	atomic_long_t	rx_data_octets;
+	u64			cmd_pdus;
+	u64			tx_data_octets;
+	u64			rx_data_octets;
 };
 
 struct se_lun {
@@ -773,7 +790,7 @@ struct se_lun {
 	spinlock_t		lun_tg_pt_gp_lock;
 
 	struct se_portal_group	*lun_tpg;
-	struct scsi_port_stats	lun_stats;
+	struct scsi_port_stats	__percpu *lun_stats;
 	struct config_group	lun_group;
 	struct se_port_stat_grps port_stat_grps;
 	struct completion	lun_shutdown_comp;
@@ -806,9 +823,9 @@ struct se_device_queue {
 };
 
 struct se_dev_io_stats {
-	u32			total_cmds;
-	u32			read_bytes;
-	u32			write_bytes;
+	u64			total_cmds;
+	u64			read_bytes;
+	u64			write_bytes;
 };
 
 struct se_device {

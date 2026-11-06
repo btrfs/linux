@@ -13,7 +13,6 @@
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/tty.h>
-#include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
 #include <linux/module.h>
 #include <linux/serial.h>
@@ -1532,7 +1531,7 @@ static int mos7840_port_probe(struct usb_serial_port *port)
 	pnum = port->port_number;
 
 	dev_dbg(&port->dev, "mos7840_startup: configuring port %d\n", pnum);
-	mos7840_port = kzalloc(sizeof(struct moschip_port), GFP_KERNEL);
+	mos7840_port = kzalloc_obj(struct moschip_port);
 	if (!mos7840_port)
 		return -ENOMEM;
 
@@ -1677,8 +1676,7 @@ static int mos7840_port_probe(struct usb_serial_port *port)
 	/* Initialize LED timers */
 	if (mos7840_port->has_led) {
 		mos7840_port->led_urb = usb_alloc_urb(0, GFP_KERNEL);
-		mos7840_port->led_dr = kmalloc(sizeof(*mos7840_port->led_dr),
-								GFP_KERNEL);
+		mos7840_port->led_dr = kmalloc_obj(*mos7840_port->led_dr);
 		if (!mos7840_port->led_urb || !mos7840_port->led_dr) {
 			status = -ENOMEM;
 			goto error;

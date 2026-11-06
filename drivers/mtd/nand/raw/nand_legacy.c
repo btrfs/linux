@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  *  Copyright (C) 2000 Steven J. Hill (sjhill@realitydiluted.com)
- *		  2002-2006 Thomas Gleixner (tglx@linutronix.de)
+ *		  2002-2006 Thomas Gleixner (tglx@kernel.org)
  *
  *  Credits:
  *	David Woodhouse for adding multichip support
@@ -319,7 +319,7 @@ static void nand_command(struct nand_chip *chip, unsigned int command,
 				      NAND_CTRL_CLE | NAND_CTRL_CHANGE);
 		chip->legacy.cmd_ctrl(chip, NAND_CMD_NONE,
 				      NAND_NCE | NAND_CTRL_CHANGE);
-		/* EZ-NAND can take upto 250ms as per ONFi v4.0 */
+		/* EZ-NAND can take up to 250ms as per ONFi v4.0 */
 		nand_wait_status_ready(chip, 250);
 		return;
 
@@ -459,7 +459,7 @@ static void nand_command_lp(struct nand_chip *chip, unsigned int command,
 				      NAND_NCE | NAND_CLE | NAND_CTRL_CHANGE);
 		chip->legacy.cmd_ctrl(chip, NAND_CMD_NONE,
 				      NAND_NCE | NAND_CTRL_CHANGE);
-		/* EZ-NAND can take upto 250ms as per ONFi v4.0 */
+		/* EZ-NAND can take up to 250ms as per ONFi v4.0 */
 		nand_wait_status_ready(chip, 250);
 		return;
 

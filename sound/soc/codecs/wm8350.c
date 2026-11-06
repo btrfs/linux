@@ -297,7 +297,7 @@ static int pga_event(struct snd_soc_dapm_widget *w,
 static int wm8350_put_volsw_2r_vu(struct snd_kcontrol *kcontrol,
 				  struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct wm8350_data *wm8350_priv = snd_soc_component_get_drvdata(component);
 	struct wm8350_output *out = NULL;
 	struct soc_mixer_control *mc =
@@ -340,7 +340,7 @@ static int wm8350_put_volsw_2r_vu(struct snd_kcontrol *kcontrol,
 static int wm8350_get_volsw_2r(struct snd_kcontrol *kcontrol,
 			       struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct wm8350_data *wm8350_priv = snd_soc_component_get_drvdata(component);
 	struct wm8350_output *out1 = &wm8350_priv->out1;
 	struct wm8350_output *out2 = &wm8350_priv->out2;
@@ -1075,6 +1075,7 @@ static int wm8350_set_fll(struct snd_soc_dai *codec_dai,
 static int wm8350_set_bias_level(struct snd_soc_component *component,
 				 enum snd_soc_bias_level level)
 {
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct wm8350_data *priv = snd_soc_component_get_drvdata(component);
 	struct wm8350 *wm8350 = priv->wm8350;
 	struct wm8350_audio_platform_data *platform =
@@ -1099,7 +1100,7 @@ static int wm8350_set_bias_level(struct snd_soc_component *component,
 		break;
 
 	case SND_SOC_BIAS_STANDBY:
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_OFF) {
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF) {
 			ret = regulator_bulk_enable(ARRAY_SIZE(priv->supplies),
 						    priv->supplies);
 			if (ret != 0)
@@ -1425,6 +1426,28 @@ EXPORT_SYMBOL_GPL(wm8350_mic_jack_detect);
 			SNDRV_PCM_FMTBIT_S20_3LE |\
 			SNDRV_PCM_FMTBIT_S24_LE)
 
+static const u64 wm8350_selectable_formats[] = {
+	/* 1st priority */
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF,
+	/*
+	 * 2nd priority
+	 *
+	 * iface of DSP_A/B are same, the diff is only LRCLK_INV.
+	 * It will be impossible to distinguish between DSP_A/B
+	 * if xB_IF are used. Allow xB_NF only.
+	 */
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF,
+};
+
 static const struct snd_soc_dai_ops wm8350_dai_ops = {
 	 .hw_params	= wm8350_pcm_hw_params,
 	 .mute_stream	= wm8350_mute,
@@ -1433,6 +1456,8 @@ static const struct snd_soc_dai_ops wm8350_dai_ops = {
 	 .set_pll	= wm8350_set_fll,
 	 .set_clkdiv	= wm8350_set_clkdiv,
 	 .no_capture_mute = 1,
+	 .auto_selectable_formats	= wm8350_selectable_formats,
+	 .num_auto_selectable_formats	= ARRAY_SIZE(wm8350_selectable_formats),
 };
 
 static struct snd_soc_dai_driver wm8350_dai = {

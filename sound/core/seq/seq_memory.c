@@ -211,7 +211,7 @@ int snd_seq_expand_var_event_at(const struct snd_seq_event *event, int count,
 	len -= offset;
 	if (len > count)
 		len = count;
-	err = expand_var_event(event, offset, count, buf, true);
+	err = expand_var_event(event, offset, len, buf, true);
 	if (err < 0)
 		return err;
 	return len;
@@ -364,7 +364,7 @@ int snd_seq_event_dup(struct snd_seq_pool *pool, struct snd_seq_event *event,
 	size = snd_seq_event_packet_size(event);
 	memcpy(&cell->ump, event, size);
 #if IS_ENABLED(CONFIG_SND_SEQ_UMP)
-	if (size < sizeof(cell->event))
+	if (size < sizeof(cell->ump))
 		cell->ump.raw.extra = 0;
 #endif
 
@@ -441,9 +441,7 @@ int snd_seq_pool_init(struct snd_seq_pool *pool)
 	if (snd_BUG_ON(!pool))
 		return -EINVAL;
 
-	cellptr = kvmalloc_array(pool->size,
-				 sizeof(struct snd_seq_event_cell),
-				 GFP_KERNEL);
+	cellptr = kvmalloc_objs(struct snd_seq_event_cell, pool->size);
 	if (!cellptr)
 		return -ENOMEM;
 
@@ -518,7 +516,7 @@ struct snd_seq_pool *snd_seq_pool_new(int poolsize)
 	struct snd_seq_pool *pool;
 
 	/* create pool block */
-	pool = kzalloc(sizeof(*pool), GFP_KERNEL);
+	pool = kzalloc_obj(*pool);
 	if (!pool)
 		return NULL;
 	spin_lock_init(&pool->lock);

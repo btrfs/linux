@@ -9,8 +9,10 @@
 #include <linux/f2fs_fs.h>
 #include <linux/writeback.h>
 #include <linux/sched/mm.h>
+#include <linux/swap.h>
 #include <linux/lz4.h>
 #include <linux/zstd.h>
+#include <linux/fserror.h>
 
 #include "f2fs.h"
 #include "node.h"
@@ -22,6 +24,18 @@
 #ifdef CONFIG_F2FS_FS_COMPRESSION
 extern const struct address_space_operations f2fs_compress_aops;
 #endif
+
+#define NUM_PREALLOC_EVICT_INODE_WORK 8
+
+static struct kmem_cache *evict_inode_work_cache;
+static mempool_t *evict_inode_work_pool;
+
+struct evict_inode_work {
+	struct work_struct work;
+	struct f2fs_sb_info *sbi;
+	nid_t ino;
+	unsigned int add_ino_entry_bits;
+};
 
 void f2fs_mark_inode_dirty_sync(struct inode *inode, bool sync)
 {
@@ -68,9 +82,9 @@ void f2fs_set_inode_flags(struct inode *inode)
 			S_ENCRYPTED|S_VERITY|S_CASEFOLD);
 }
 
-static void __get_inode_rdev(struct inode *inode, struct folio *node_folio)
+static void __get_inode_rdev(struct inode *inode, struct f2fs_cached_block *ientry)
 {
-	__le32 *addr = get_dnode_addr(inode, node_folio);
+	__le32 *addr = get_dnode_addr(inode, ientry);
 
 	if (S_ISCHR(inode->i_mode) || S_ISBLK(inode->i_mode) ||
 			S_ISFIFO(inode->i_mode) || S_ISSOCK(inode->i_mode)) {
@@ -81,9 +95,9 @@ static void __get_inode_rdev(struct inode *inode, struct folio *node_folio)
 	}
 }
 
-static void __set_inode_rdev(struct inode *inode, struct folio *node_folio)
+static void __set_inode_rdev(struct inode *inode, struct f2fs_cached_block *ientry)
 {
-	__le32 *addr = get_dnode_addr(inode, node_folio);
+	__le32 *addr = get_dnode_addr(inode, ientry);
 
 	if (S_ISCHR(inode->i_mode) || S_ISBLK(inode->i_mode)) {
 		if (old_valid_dev(inode->i_rdev)) {
@@ -97,34 +111,33 @@ static void __set_inode_rdev(struct inode *inode, struct folio *node_folio)
 	}
 }
 
-static void __recover_inline_status(struct inode *inode, struct folio *ifolio)
+static void __recover_inline_status(struct inode *inode, struct f2fs_cached_block *ientry)
 {
-	void *inline_data = inline_data_addr(inode, ifolio);
+	void *inline_data = inline_data_addr(inode, ientry);
 	__le32 *start = inline_data;
 	__le32 *end = start + MAX_INLINE_DATA(inode) / sizeof(__le32);
 
 	while (start < end) {
 		if (*start++) {
-			f2fs_folio_wait_writeback(ifolio, NODE, true, true);
+			f2fs_cache_wait_writeback(ientry);
 
 			set_inode_flag(inode, FI_DATA_EXIST);
-			set_raw_inline(inode, F2FS_INODE(ifolio));
-			folio_mark_dirty(ifolio);
+			set_raw_inline(inode, F2FS_INODE(ientry));
+			f2fs_mark_cache_dirty(ientry);
 			return;
 		}
 	}
 	return;
 }
 
-static
-bool f2fs_enable_inode_chksum(struct f2fs_sb_info *sbi, struct folio *folio)
+static bool f2fs_enable_inode_chksum(struct f2fs_sb_info *sbi, struct f2fs_cached_block *entry)
 {
-	struct f2fs_inode *ri = &F2FS_NODE(folio)->i;
+	struct f2fs_inode *ri = F2FS_INODE(entry);
 
 	if (!f2fs_sb_has_inode_chksum(sbi))
 		return false;
 
-	if (!IS_INODE(folio) || !(ri->i_inline & F2FS_EXTRA_ATTR))
+	if (!IS_INODE(sbi, entry) || !(ri->i_inline & F2FS_EXTRA_ATTR))
 		return false;
 
 	if (!F2FS_FITS_IN_INODE(ri, le16_to_cpu(ri->i_extra_isize),
@@ -134,11 +147,10 @@ bool f2fs_enable_inode_chksum(struct f2fs_sb_info *sbi, struct folio *folio)
 	return true;
 }
 
-static __u32 f2fs_inode_chksum(struct f2fs_sb_info *sbi, struct folio *folio)
+static __u32 f2fs_inode_chksum(struct f2fs_sb_info *sbi, struct f2fs_cached_block *entry)
 {
-	struct f2fs_node *node = F2FS_NODE(folio);
-	struct f2fs_inode *ri = &node->i;
-	__le32 ino = node->footer.ino;
+	struct f2fs_inode *ri = F2FS_INODE(entry);
+	__le32 ino = F2FS_NODE_FOOTER(sbi, entry)->ino;
 	__le32 gen = ri->i_generation;
 	__u32 chksum, chksum_seed;
 	__u32 dummy_cs = 0;
@@ -152,11 +164,11 @@ static __u32 f2fs_inode_chksum(struct f2fs_sb_info *sbi, struct folio *folio)
 	chksum = f2fs_chksum(chksum, (__u8 *)&dummy_cs, cs_size);
 	offset += cs_size;
 	chksum = f2fs_chksum(chksum, (__u8 *)ri + offset,
-			     F2FS_BLKSIZE - offset);
+			     F2FS_BLKSIZE(sbi) - offset);
 	return chksum;
 }
 
-bool f2fs_inode_chksum_verify(struct f2fs_sb_info *sbi, struct folio *folio)
+bool f2fs_inode_chksum_verify(struct f2fs_sb_info *sbi, struct f2fs_cached_block *entry)
 {
 	struct f2fs_inode *ri;
 	__u32 provided, calculated;
@@ -164,35 +176,33 @@ bool f2fs_inode_chksum_verify(struct f2fs_sb_info *sbi, struct folio *folio)
 	if (unlikely(is_sbi_flag_set(sbi, SBI_IS_SHUTDOWN)))
 		return true;
 
-#ifdef CONFIG_F2FS_CHECK_FS
-	if (!f2fs_enable_inode_chksum(sbi, folio))
-#else
-	if (!f2fs_enable_inode_chksum(sbi, folio) ||
-			folio_test_dirty(folio) ||
-			folio_test_writeback(folio))
-#endif
+	if (!f2fs_enable_inode_chksum(sbi, entry))
 		return true;
+#ifndef CONFIG_F2FS_CHECK_FS
+	if (f2fs_cache_test_dirty(entry) || f2fs_cache_test_writeback(entry))
+		return true;
+#endif
 
-	ri = &F2FS_NODE(folio)->i;
+	ri = F2FS_INODE(entry);
 	provided = le32_to_cpu(ri->i_inode_checksum);
-	calculated = f2fs_inode_chksum(sbi, folio);
+	calculated = f2fs_inode_chksum(sbi, entry);
 
 	if (provided != calculated)
-		f2fs_warn(sbi, "checksum invalid, nid = %lu, ino_of_node = %x, %x vs. %x",
-			  folio->index, ino_of_node(folio),
+		f2fs_warn(sbi, "checksum invalid, nid = %lu, ino_of_node = %u, %x vs. %x",
+			  entry->index, ino_of_node(sbi, entry),
 			  provided, calculated);
 
 	return provided == calculated;
 }
 
-void f2fs_inode_chksum_set(struct f2fs_sb_info *sbi, struct folio *folio)
+void f2fs_inode_chksum_set(struct f2fs_sb_info *sbi, struct f2fs_cached_block *entry)
 {
-	struct f2fs_inode *ri = &F2FS_NODE(folio)->i;
+	struct f2fs_inode *ri = F2FS_INODE(entry);
 
-	if (!f2fs_enable_inode_chksum(sbi, folio))
+	if (!f2fs_enable_inode_chksum(sbi, entry))
 		return;
 
-	ri->i_inode_checksum = cpu_to_le32(f2fs_inode_chksum(sbi, folio));
+	ri->i_inode_checksum = cpu_to_le32(f2fs_inode_chksum(sbi, entry));
 }
 
 static bool sanity_check_compress_inode(struct inode *inode,
@@ -203,22 +213,22 @@ static bool sanity_check_compress_inode(struct inode *inode,
 
 	if (ri->i_compress_algorithm >= COMPRESS_MAX) {
 		f2fs_warn(sbi,
-			"%s: inode (ino=%lx) has unsupported compress algorithm: %u, run fsck to fix",
+			"%s: inode (ino=%llx) has unsupported compress algorithm: %u, run fsck to fix",
 			__func__, inode->i_ino, ri->i_compress_algorithm);
 		return false;
 	}
 	if (le64_to_cpu(ri->i_compr_blocks) >
-			SECTOR_TO_BLOCK(inode->i_blocks)) {
+			SECTOR_TO_BLOCK(sbi, inode->i_blocks)) {
 		f2fs_warn(sbi,
-			"%s: inode (ino=%lx) has inconsistent i_compr_blocks:%llu, i_blocks:%llu, run fsck to fix",
+			"%s: inode (ino=%llx) has inconsistent i_compr_blocks:%llu, i_blocks:%llu, run fsck to fix",
 			__func__, inode->i_ino, le64_to_cpu(ri->i_compr_blocks),
-			SECTOR_TO_BLOCK(inode->i_blocks));
+			SECTOR_TO_BLOCK(sbi, inode->i_blocks));
 		return false;
 	}
 	if (ri->i_log_cluster_size < MIN_COMPRESS_LOG_SIZE ||
 		ri->i_log_cluster_size > MAX_COMPRESS_LOG_SIZE) {
 		f2fs_warn(sbi,
-			"%s: inode (ino=%lx) has unsupported log cluster size: %u, run fsck to fix",
+			"%s: inode (ino=%llx) has unsupported log cluster size: %u, run fsck to fix",
 			__func__, inode->i_ino, ri->i_log_cluster_size);
 		return false;
 	}
@@ -262,48 +272,55 @@ static bool sanity_check_compress_inode(struct inode *inode,
 
 	return true;
 err_level:
-	f2fs_warn(sbi, "%s: inode (ino=%lx) has unsupported compress level: %u, run fsck to fix",
+	f2fs_warn(sbi, "%s: inode (ino=%llx) has unsupported compress level: %u, run fsck to fix",
 		  __func__, inode->i_ino, clevel);
 	return false;
 }
 
-static bool sanity_check_inode(struct inode *inode, struct folio *node_folio)
+static bool sanity_check_inode(struct inode *inode,
+			struct f2fs_cached_block *node_entry)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 	struct f2fs_inode_info *fi = F2FS_I(inode);
-	struct f2fs_inode *ri = F2FS_INODE(node_folio);
+	struct f2fs_inode *ri = F2FS_INODE(node_entry);
 	unsigned long long iblocks;
 
-	iblocks = le64_to_cpu(F2FS_INODE(node_folio)->i_blocks);
+	iblocks = le64_to_cpu(ri->i_blocks);
 	if (!iblocks) {
-		f2fs_warn(sbi, "%s: corrupted inode i_blocks i_ino=%lx iblocks=%llu, run fsck to fix.",
+		f2fs_warn(sbi, "%s: corrupted inode i_blocks i_ino=%llx iblocks=%llu, run fsck to fix.",
 			  __func__, inode->i_ino, iblocks);
 		return false;
 	}
 
-	if (ino_of_node(node_folio) != nid_of_node(node_folio)) {
-		f2fs_warn(sbi, "%s: corrupted inode footer i_ino=%lx, ino,nid: [%u, %u] run fsck to fix.",
+	if (ino_of_node(sbi, node_entry) != nid_of_node(sbi, node_entry)) {
+		f2fs_warn(sbi, "%s: corrupted inode footer i_ino=%llx, ino,nid: [%u, %u] run fsck to fix.",
 			  __func__, inode->i_ino,
-			  ino_of_node(node_folio), nid_of_node(node_folio));
+			  ino_of_node(sbi, node_entry), nid_of_node(sbi, node_entry));
 		return false;
 	}
 
-	if (ino_of_node(node_folio) == fi->i_xattr_nid) {
-		f2fs_warn(sbi, "%s: corrupted inode i_ino=%lx, xnid=%x, run fsck to fix.",
+	if (ino_of_node(sbi, node_entry) == fi->i_xattr_nid) {
+		f2fs_warn(sbi, "%s: corrupted inode i_ino=%llx, xnid=%x, run fsck to fix.",
 			  __func__, inode->i_ino, fi->i_xattr_nid);
+		return false;
+	}
+
+	if (S_ISDIR(inode->i_mode) && unlikely(inode->i_nlink == 1)) {
+		f2fs_warn(sbi, "%s: directory inode (ino=%llx) has a single i_nlink",
+			  __func__, inode->i_ino);
 		return false;
 	}
 
 	if (f2fs_has_extra_attr(inode)) {
 		if (!f2fs_sb_has_extra_attr(sbi)) {
-			f2fs_warn(sbi, "%s: inode (ino=%lx) is with extra_attr, but extra_attr feature is off",
+			f2fs_warn(sbi, "%s: inode (ino=%llx) is with extra_attr, but extra_attr feature is off",
 				  __func__, inode->i_ino);
 			return false;
 		}
 		if (fi->i_extra_isize > F2FS_TOTAL_EXTRA_ATTR_SIZE ||
 			fi->i_extra_isize < F2FS_MIN_EXTRA_ATTR_SIZE ||
 			fi->i_extra_isize % sizeof(__le32)) {
-			f2fs_warn(sbi, "%s: inode (ino=%lx) has corrupted i_extra_isize: %d, max: %zu",
+			f2fs_warn(sbi, "%s: inode (ino=%llx) has corrupted i_extra_isize: %d, max: %zu",
 				  __func__, inode->i_ino, fi->i_extra_isize,
 				  F2FS_TOTAL_EXTRA_ATTR_SIZE);
 			return false;
@@ -318,75 +335,76 @@ static bool sanity_check_inode(struct inode *inode, struct folio *node_folio)
 	}
 
 	if (f2fs_sb_has_flexible_inline_xattr(sbi) &&
-		f2fs_has_inline_xattr(inode) &&
-		(fi->i_inline_xattr_size < MIN_INLINE_XATTR_SIZE ||
-		fi->i_inline_xattr_size > MAX_INLINE_XATTR_SIZE)) {
-		f2fs_warn(sbi, "%s: inode (ino=%lx) has corrupted i_inline_xattr_size: %d, min: %zu, max: %lu",
+		(fi->i_inline_xattr_size > MAX_INLINE_XATTR_SIZE(i_blocksize(inode)) ||
+		(f2fs_has_inline_xattr(inode) &&
+		fi->i_inline_xattr_size < MIN_INLINE_XATTR_SIZE))) {
+		f2fs_warn(sbi, "%s: inode (ino=%llx) has corrupted i_inline_xattr_size: %d, min: %zu, max: %zu",
 			  __func__, inode->i_ino, fi->i_inline_xattr_size,
-			  MIN_INLINE_XATTR_SIZE, MAX_INLINE_XATTR_SIZE);
+			  MIN_INLINE_XATTR_SIZE,
+			  (size_t)MAX_INLINE_XATTR_SIZE(i_blocksize(inode)));
 		return false;
 	}
 
 	if (!f2fs_sb_has_extra_attr(sbi)) {
 		if (f2fs_sb_has_project_quota(sbi)) {
-			f2fs_warn(sbi, "%s: corrupted inode ino=%lx, wrong feature flag: %u, run fsck to fix.",
+			f2fs_warn(sbi, "%s: corrupted inode ino=%llx, wrong feature flag: %u, run fsck to fix.",
 				  __func__, inode->i_ino, F2FS_FEATURE_PRJQUOTA);
 			return false;
 		}
 		if (f2fs_sb_has_inode_chksum(sbi)) {
-			f2fs_warn(sbi, "%s: corrupted inode ino=%lx, wrong feature flag: %u, run fsck to fix.",
+			f2fs_warn(sbi, "%s: corrupted inode ino=%llx, wrong feature flag: %u, run fsck to fix.",
 				  __func__, inode->i_ino, F2FS_FEATURE_INODE_CHKSUM);
 			return false;
 		}
 		if (f2fs_sb_has_flexible_inline_xattr(sbi)) {
-			f2fs_warn(sbi, "%s: corrupted inode ino=%lx, wrong feature flag: %u, run fsck to fix.",
+			f2fs_warn(sbi, "%s: corrupted inode ino=%llx, wrong feature flag: %u, run fsck to fix.",
 				  __func__, inode->i_ino, F2FS_FEATURE_FLEXIBLE_INLINE_XATTR);
 			return false;
 		}
 		if (f2fs_sb_has_inode_crtime(sbi)) {
-			f2fs_warn(sbi, "%s: corrupted inode ino=%lx, wrong feature flag: %u, run fsck to fix.",
+			f2fs_warn(sbi, "%s: corrupted inode ino=%llx, wrong feature flag: %u, run fsck to fix.",
 				  __func__, inode->i_ino, F2FS_FEATURE_INODE_CRTIME);
 			return false;
 		}
 		if (f2fs_sb_has_compression(sbi)) {
-			f2fs_warn(sbi, "%s: corrupted inode ino=%lx, wrong feature flag: %u, run fsck to fix.",
+			f2fs_warn(sbi, "%s: corrupted inode ino=%llx, wrong feature flag: %u, run fsck to fix.",
 				  __func__, inode->i_ino, F2FS_FEATURE_COMPRESSION);
 			return false;
 		}
 	}
 
-	if (f2fs_sanity_check_inline_data(inode, node_folio)) {
-		f2fs_warn(sbi, "%s: inode (ino=%lx, mode=%u) should not have inline_data, run fsck to fix",
+	if (f2fs_sanity_check_inline_data(inode, node_entry)) {
+		f2fs_warn(sbi, "%s: inode (ino=%llx, mode=%u) should not have inline_data, run fsck to fix",
 			  __func__, inode->i_ino, inode->i_mode);
 		return false;
 	}
 
 	if (f2fs_has_inline_dentry(inode) && !S_ISDIR(inode->i_mode)) {
-		f2fs_warn(sbi, "%s: inode (ino=%lx, mode=%u) should not have inline_dentry, run fsck to fix",
+		f2fs_warn(sbi, "%s: inode (ino=%llx, mode=%u) should not have inline_dentry, run fsck to fix",
 			  __func__, inode->i_ino, inode->i_mode);
 		return false;
 	}
 
 	if ((fi->i_flags & F2FS_CASEFOLD_FL) && !f2fs_sb_has_casefold(sbi)) {
-		f2fs_warn(sbi, "%s: inode (ino=%lx) has casefold flag, but casefold feature is off",
+		f2fs_warn(sbi, "%s: inode (ino=%llx) has casefold flag, but casefold feature is off",
 			  __func__, inode->i_ino);
 		return false;
 	}
 
 	if (fi->i_xattr_nid && f2fs_check_nid_range(sbi, fi->i_xattr_nid)) {
-		f2fs_warn(sbi, "%s: inode (ino=%lx) has corrupted i_xattr_nid: %u, run fsck to fix.",
+		f2fs_warn(sbi, "%s: inode (ino=%llx) has corrupted i_xattr_nid: %u, run fsck to fix.",
 			  __func__, inode->i_ino, fi->i_xattr_nid);
 		return false;
 	}
 
 	if (IS_DEVICE_ALIASING(inode)) {
 		if (!f2fs_sb_has_device_alias(sbi)) {
-			f2fs_warn(sbi, "%s: inode (ino=%lx) has device alias flag, but the feature is off",
+			f2fs_warn(sbi, "%s: inode (ino=%llx) has device alias flag, but the feature is off",
 				  __func__, inode->i_ino);
 			return false;
 		}
 		if (!f2fs_is_pinned_file(inode)) {
-			f2fs_warn(sbi, "%s: inode (ino=%lx) has device alias flag, but is not pinned",
+			f2fs_warn(sbi, "%s: inode (ino=%llx) has device alias flag, but is not pinned",
 				  __func__, inode->i_ino);
 			return false;
 		}
@@ -408,7 +426,7 @@ static int do_read_inode(struct inode *inode)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 	struct f2fs_inode_info *fi = F2FS_I(inode);
-	struct folio *node_folio;
+	struct f2fs_cached_block *node_entry;
 	struct f2fs_inode *ri;
 	projid_t i_projid;
 
@@ -416,18 +434,19 @@ static int do_read_inode(struct inode *inode)
 	if (f2fs_check_nid_range(sbi, inode->i_ino))
 		return -EINVAL;
 
-	node_folio = f2fs_get_inode_folio(sbi, inode->i_ino);
-	if (IS_ERR(node_folio))
-		return PTR_ERR(node_folio);
+	node_entry = f2fs_get_inode_cache(sbi, inode->i_ino);
+	if (IS_ERR(node_entry))
+		return PTR_ERR(node_entry);
 
-	ri = F2FS_INODE(node_folio);
+	ri = F2FS_INODE(node_entry);
 
 	inode->i_mode = le16_to_cpu(ri->i_mode);
 	i_uid_write(inode, le32_to_cpu(ri->i_uid));
 	i_gid_write(inode, le32_to_cpu(ri->i_gid));
 	set_nlink(inode, le32_to_cpu(ri->i_links));
 	inode->i_size = le64_to_cpu(ri->i_size);
-	inode->i_blocks = SECTOR_FROM_BLOCK(le64_to_cpu(ri->i_blocks) - 1);
+	inode->i_blocks = SECTOR_FROM_BLOCK(sbi,
+			le64_to_cpu(ri->i_blocks) - 1);
 
 	inode_set_atime(inode, le64_to_cpu(ri->i_atime),
 			le32_to_cpu(ri->i_atime_nsec));
@@ -470,26 +489,27 @@ static int do_read_inode(struct inode *inode)
 		fi->i_inline_xattr_size = 0;
 	}
 
-	if (!sanity_check_inode(inode, node_folio)) {
-		f2fs_folio_put(node_folio, true);
+	if (!sanity_check_inode(inode, node_entry)) {
+		f2fs_put_cache(node_entry, true);
 		set_sbi_flag(sbi, SBI_NEED_FSCK);
 		f2fs_handle_error(sbi, ERROR_CORRUPTED_INODE);
+		fserror_report_file_metadata(inode, -EFSCORRUPTED, GFP_NOFS);
 		return -EFSCORRUPTED;
 	}
 
 	/* check data exist */
 	if (f2fs_has_inline_data(inode) && !f2fs_exist_data(inode))
-		__recover_inline_status(inode, node_folio);
+		__recover_inline_status(inode, node_entry);
 
 	/* try to recover cold bit for non-dir inode */
-	if (!S_ISDIR(inode->i_mode) && !is_cold_node(node_folio)) {
-		f2fs_folio_wait_writeback(node_folio, NODE, true, true);
-		set_cold_node(node_folio, false);
-		folio_mark_dirty(node_folio);
+	if (!S_ISDIR(inode->i_mode) && !is_cold_node(sbi, node_entry)) {
+		f2fs_cache_wait_writeback(node_entry);
+		set_cold_node(sbi, node_entry, false);
+		f2fs_mark_cache_dirty(node_entry);
 	}
 
 	/* get rdev by using inline_info */
-	__get_inode_rdev(inode, node_folio);
+	__get_inode_rdev(inode, node_entry);
 
 	if (!f2fs_need_inode_block_update(sbi, inode->i_ino))
 		fi->last_disk_size = inode->i_size;
@@ -532,17 +552,18 @@ static int do_read_inode(struct inode *inode)
 
 	init_idisk_time(inode);
 
-	if (!sanity_check_extent_cache(inode, node_folio)) {
-		f2fs_folio_put(node_folio, true);
+	if (!sanity_check_extent_cache(inode, node_entry)) {
+		f2fs_put_cache(node_entry, true);
 		f2fs_handle_error(sbi, ERROR_CORRUPTED_INODE);
+		fserror_report_file_metadata(inode, -EFSCORRUPTED, GFP_NOFS);
 		return -EFSCORRUPTED;
 	}
 
 	/* Need all the flag bits */
-	f2fs_init_read_extent_tree(inode, node_folio);
+	f2fs_init_read_extent_tree(inode, node_entry);
 	f2fs_init_age_extent_tree(inode);
 
-	f2fs_folio_put(node_folio, true);
+	f2fs_put_cache(node_entry, true);
 
 	stat_inc_inline_xattr(inode);
 	stat_inc_inline_inode(inode);
@@ -551,12 +572,6 @@ static int do_read_inode(struct inode *inode)
 	stat_add_compr_blocks(inode, atomic_read(&fi->i_compr_blocks));
 
 	return 0;
-}
-
-static bool is_meta_ino(struct f2fs_sb_info *sbi, unsigned int ino)
-{
-	return ino == F2FS_NODE_INO(sbi) || ino == F2FS_META_INO(sbi) ||
-		ino == F2FS_COMPRESS_INO(sbi);
 }
 
 struct inode *f2fs_iget(struct super_block *sb, unsigned long ino)
@@ -569,54 +584,32 @@ struct inode *f2fs_iget(struct super_block *sb, unsigned long ino)
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
 
-	if (!(inode->i_state & I_NEW)) {
-		if (is_meta_ino(sbi, ino)) {
-			f2fs_err(sbi, "inaccessible inode: %lu, run fsck to repair", ino);
-			set_sbi_flag(sbi, SBI_NEED_FSCK);
-			ret = -EFSCORRUPTED;
-			trace_f2fs_iget_exit(inode, ret);
-			iput(inode);
-			f2fs_handle_error(sbi, ERROR_CORRUPTED_INODE);
-			return ERR_PTR(ret);
-		}
-
+	if (!(inode_state_read_once(inode) & I_NEW)) {
 		trace_f2fs_iget(inode);
 		return inode;
 	}
 
-	if (is_meta_ino(sbi, ino))
-		goto make_now;
-
 	ret = do_read_inode(inode);
 	if (ret)
 		goto bad_inode;
-make_now:
-	if (ino == F2FS_NODE_INO(sbi)) {
-		inode->i_mapping->a_ops = &f2fs_node_aops;
-		mapping_set_gfp_mask(inode->i_mapping, GFP_NOFS);
-	} else if (ino == F2FS_META_INO(sbi)) {
-		inode->i_mapping->a_ops = &f2fs_meta_aops;
-		mapping_set_gfp_mask(inode->i_mapping, GFP_NOFS);
-	} else if (ino == F2FS_COMPRESS_INO(sbi)) {
-#ifdef CONFIG_F2FS_FS_COMPRESSION
-		inode->i_mapping->a_ops = &f2fs_compress_aops;
-		/*
-		 * generic_error_remove_folio only truncates pages of regular
-		 * inode
-		 */
-		inode->i_mode |= S_IFREG;
-#endif
-		mapping_set_gfp_mask(inode->i_mapping,
-			GFP_NOFS | __GFP_HIGHMEM | __GFP_MOVABLE);
-	} else if (S_ISREG(inode->i_mode)) {
+
+	f2fs_set_inode_flags(inode);
+
+	if (S_ISREG(inode->i_mode)) {
 		inode->i_op = &f2fs_file_inode_operations;
 		inode->i_fop = &f2fs_file_operations;
 		inode->i_mapping->a_ops = &f2fs_dblock_aops;
+		if (IS_IMMUTABLE(inode) && !f2fs_compressed_file(inode) &&
+		    !f2fs_quota_file(sbi, inode->i_ino))
+			mapping_set_folio_min_order(inode->i_mapping, 0);
 	} else if (S_ISDIR(inode->i_mode)) {
 		inode->i_op = &f2fs_dir_inode_operations;
 		inode->i_fop = &f2fs_dir_operations;
 		inode->i_mapping->a_ops = &f2fs_dblock_aops;
 		mapping_set_gfp_mask(inode->i_mapping, GFP_NOFS);
+
+		/* Let's prepare APPEND/UPDATE_INO before future access. */
+		flush_workqueue(sbi->evict_wq);
 	} else if (S_ISLNK(inode->i_mode)) {
 		if (file_is_encrypt(inode))
 			inode->i_op = &f2fs_encrypted_symlink_inode_operations;
@@ -632,7 +625,6 @@ make_now:
 		ret = -EIO;
 		goto bad_inode;
 	}
-	f2fs_set_inode_flags(inode);
 
 	unlock_new_inode(inode);
 	trace_f2fs_iget(inode);
@@ -659,25 +651,28 @@ retry:
 	return inode;
 }
 
-void f2fs_update_inode(struct inode *inode, struct folio *node_folio)
+void f2fs_update_inode(struct inode *inode,
+		struct f2fs_cached_block *node_entry)
 {
+	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 	struct f2fs_inode_info *fi = F2FS_I(inode);
 	struct f2fs_inode *ri;
 	struct extent_tree *et = fi->extent_tree[EX_READ];
 
-	f2fs_folio_wait_writeback(node_folio, NODE, true, true);
-	folio_mark_dirty(node_folio);
+	f2fs_cache_wait_writeback(node_entry);
+	f2fs_mark_cache_dirty(node_entry);
 
 	f2fs_inode_synced(inode);
 
-	ri = F2FS_INODE(node_folio);
+	ri = F2FS_INODE(node_entry);
 
 	ri->i_mode = cpu_to_le16(inode->i_mode);
 	ri->i_advise = fi->i_advise;
 	ri->i_uid = cpu_to_le32(i_uid_read(inode));
 	ri->i_gid = cpu_to_le32(i_gid_read(inode));
 	ri->i_links = cpu_to_le32(inode->i_nlink);
-	ri->i_blocks = cpu_to_le64(SECTOR_TO_BLOCK(inode->i_blocks) + 1);
+	ri->i_blocks = cpu_to_le64(SECTOR_TO_BLOCK(sbi,
+					   READ_ONCE(inode->i_blocks)) + 1);
 
 	if (!f2fs_is_atomic_file(inode) ||
 			is_inode_flag_set(inode, FI_ATOMIC_COMMITTED))
@@ -745,27 +740,27 @@ void f2fs_update_inode(struct inode *inode, struct folio *node_folio)
 		}
 	}
 
-	__set_inode_rdev(inode, node_folio);
+	__set_inode_rdev(inode, node_entry);
 
 	/* deleted inode */
 	if (inode->i_nlink == 0)
-		folio_clear_f2fs_inline(node_folio);
+		f2fs_cache_clear_inline(node_entry);
 
 	init_idisk_time(inode);
 #ifdef CONFIG_F2FS_CHECK_FS
-	f2fs_inode_chksum_set(F2FS_I_SB(inode), node_folio);
+	f2fs_inode_chksum_set(F2FS_I_SB(inode), node_entry);
 #endif
 }
 
-void f2fs_update_inode_page(struct inode *inode)
+void f2fs_update_inode_cache(struct inode *inode)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
-	struct folio *node_folio;
+	struct f2fs_cached_block *node_entry;
 	int count = 0;
 retry:
-	node_folio = f2fs_get_inode_folio(sbi, inode->i_ino);
-	if (IS_ERR(node_folio)) {
-		int err = PTR_ERR(node_folio);
+	node_entry = f2fs_get_inode_cache(sbi, inode->i_ino);
+	if (IS_ERR(node_entry)) {
+		int err = PTR_ERR(node_entry);
 
 		/* The node block was truncated. */
 		if (err == -ENOENT)
@@ -777,20 +772,17 @@ retry:
 		if (err == -ENOMEM || ++count <= DEFAULT_RETRY_IO_COUNT)
 			goto retry;
 stop_checkpoint:
+		fserror_report_file_metadata(inode, -EFSCORRUPTED, GFP_NOFS);
 		f2fs_stop_checkpoint(sbi, false, STOP_CP_REASON_UPDATE_INODE);
 		return;
 	}
-	f2fs_update_inode(inode, node_folio);
-	f2fs_folio_put(node_folio, true);
+	f2fs_update_inode(inode, node_entry);
+	f2fs_put_cache(node_entry, true);
 }
 
 int f2fs_write_inode(struct inode *inode, struct writeback_control *wbc)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
-
-	if (inode->i_ino == F2FS_NODE_INO(sbi) ||
-			inode->i_ino == F2FS_META_INO(sbi))
-		return 0;
 
 	/*
 	 * atime could be updated without dirtying f2fs inode in lazytime mode
@@ -815,7 +807,7 @@ int f2fs_write_inode(struct inode *inode, struct writeback_control *wbc)
 	 * We need to balance fs here to prevent from producing dirty node pages
 	 * during the urgent cleaning time when running out of free sections.
 	 */
-	f2fs_update_inode_page(inode);
+	f2fs_update_inode_cache(inode);
 	if (wbc && wbc->nr_to_write)
 		f2fs_balance_fs(sbi, true);
 	return 0;
@@ -834,37 +826,53 @@ void f2fs_remove_donate_inode(struct inode *inode)
 	spin_unlock(&sbi->inode_lock[DONATE_INODE]);
 }
 
+static void f2fs_record_inode_state(struct f2fs_sb_info *sbi, nid_t ino,
+				    unsigned int bits)
+{
+	if (bits & BIT(APPEND_INO))
+		f2fs_add_ino_entry(sbi, ino, APPEND_INO);
+	if (bits & BIT(UPDATE_INO))
+		f2fs_add_ino_entry(sbi, ino, UPDATE_INO);
+}
+
+static void f2fs_evict_inode_work(struct work_struct *work)
+{
+	struct evict_inode_work *ew =
+		container_of(work, struct evict_inode_work, work);
+
+	f2fs_record_inode_state(ew->sbi, ew->ino, ew->add_ino_entry_bits);
+
+	mempool_free(ew, evict_inode_work_pool);
+}
+
 /*
- * Called at the last iput() if i_nlink is zero
+ * Return true, if we shouldn't go through post_evict_inode.
  */
-void f2fs_evict_inode(struct inode *inode)
+static void f2fs_pre_evict_inode(struct inode *inode)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 	struct f2fs_inode_info *fi = F2FS_I(inode);
-	nid_t xnid = fi->i_xattr_nid;
-	int err = 0;
-	bool freeze_protected = false;
 
 	f2fs_abort_atomic_write(inode, true);
 
 	if (fi->cow_inode && f2fs_is_cow_file(fi->cow_inode)) {
-		clear_inode_flag(fi->cow_inode, FI_COW_FILE);
-		F2FS_I(fi->cow_inode)->atomic_inode = NULL;
-		iput(fi->cow_inode);
+		struct inode *cow_inode = fi->cow_inode;
+
+		f2fs_down_write(&F2FS_I(cow_inode)->i_sem);
+		clear_inode_flag(cow_inode, FI_COW_FILE);
+		F2FS_I(cow_inode)->atomic_inode = NULL;
 		fi->cow_inode = NULL;
+		f2fs_up_write(&F2FS_I(cow_inode)->i_sem);
+
+		iput(cow_inode);
 	}
 
 	trace_f2fs_evict_inode(inode);
 	truncate_inode_pages_final(&inode->i_data);
 
 	if ((inode->i_nlink || is_bad_inode(inode)) &&
-		test_opt(sbi, COMPRESS_CACHE) && f2fs_compressed_file(inode))
+	    test_opt(sbi, COMPRESS_CACHE) && f2fs_compressed_file(inode))
 		f2fs_invalidate_compress_pages(sbi, inode->i_ino);
-
-	if (inode->i_ino == F2FS_NODE_INO(sbi) ||
-			inode->i_ino == F2FS_META_INO(sbi) ||
-			inode->i_ino == F2FS_COMPRESS_INO(sbi))
-		goto out_clear;
 
 	f2fs_bug_on(sbi, get_dirty_pages(inode));
 	f2fs_remove_dirty_inode(inode);
@@ -872,15 +880,17 @@ void f2fs_evict_inode(struct inode *inode)
 
 	if (!IS_DEVICE_ALIASING(inode))
 		f2fs_destroy_extent_tree(inode);
+}
 
-	if (inode->i_nlink || is_bad_inode(inode))
-		goto no_delete;
+static void f2fs_delete_inode(struct inode *inode)
+{
+	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
+	bool freeze_protected = false;
+	struct f2fs_lock_context lc;
+	int err = 0;
 
-	err = f2fs_dquot_initialize(inode);
-	if (err) {
-		err = 0;
+	if (f2fs_dquot_initialize(inode))
 		set_sbi_flag(sbi, SBI_QUOTA_NEED_REPAIR);
-	}
 
 	f2fs_remove_ino_entry(sbi, inode->i_ino, APPEND_INO);
 	f2fs_remove_ino_entry(sbi, inode->i_ino, UPDATE_INO);
@@ -899,28 +909,30 @@ retry:
 	if (time_to_inject(sbi, FAULT_EVICT_INODE))
 		err = -EIO;
 
-	if (!err) {
-		f2fs_lock_op(sbi);
-		err = f2fs_remove_inode_page(inode);
-		f2fs_unlock_op(sbi);
-		if (err == -ENOENT) {
-			err = 0;
+	if (err)
+		goto error_check;
 
-			/*
-			 * in fuzzed image, another node may has the same
-			 * block address as inode's, if it was truncated
-			 * previously, truncation of inode node will fail.
-			 */
-			if (is_inode_flag_set(inode, FI_DIRTY_INODE)) {
-				f2fs_warn(F2FS_I_SB(inode),
-					"f2fs_evict_inode: inconsistent node id, ino:%lu",
-					inode->i_ino);
-				f2fs_inode_synced(inode);
-				set_sbi_flag(sbi, SBI_NEED_FSCK);
-			}
+	f2fs_lock_op(sbi, &lc);
+	err = f2fs_remove_inode_cache(inode);
+	f2fs_unlock_op(sbi, &lc);
+
+	if (err == -ENOENT) {
+		err = 0;
+
+		/*
+		 * in fuzzed image, another node may has the same
+		 * block address as inode's, if it was truncated
+		 * previously, truncation of inode node will fail.
+		 */
+		if (is_inode_flag_set(inode, FI_DIRTY_INODE)) {
+			f2fs_warn(F2FS_I_SB(inode),
+				"f2fs_evict_inode: inconsistent node id, ino:%llu",
+				inode->i_ino);
+			f2fs_inode_synced(inode);
+			set_sbi_flag(sbi, SBI_NEED_FSCK);
 		}
 	}
-
+error_check:
 	/* give more chances, if ENOMEM case */
 	if (err == -ENOMEM) {
 		err = 0;
@@ -930,27 +942,38 @@ retry:
 	if (IS_DEVICE_ALIASING(inode))
 		f2fs_destroy_extent_tree(inode);
 
-	if (err) {
-		f2fs_update_inode_page(inode);
-		if (dquot_initialize_needed(inode))
-			set_sbi_flag(sbi, SBI_QUOTA_NEED_REPAIR);
+	if (!err)
+		goto unfreeze_out;
 
-		/*
-		 * If both f2fs_truncate() and f2fs_update_inode_page() failed
-		 * due to fuzzed corrupted inode, call f2fs_inode_synced() to
-		 * avoid triggering later f2fs_bug_on().
-		 */
-		if (is_inode_flag_set(inode, FI_DIRTY_INODE)) {
-			f2fs_warn(sbi,
-				"f2fs_evict_inode: inode is dirty, ino:%lu",
-				inode->i_ino);
-			f2fs_inode_synced(inode);
-			set_sbi_flag(sbi, SBI_NEED_FSCK);
-		}
+	f2fs_update_inode_cache(inode);
+
+	if (dquot_initialize_needed(inode))
+		set_sbi_flag(sbi, SBI_QUOTA_NEED_REPAIR);
+
+	/*
+	 * If both f2fs_truncate() and f2fs_update_inode_cache() failed
+	 * due to fuzzed corrupted inode, call f2fs_inode_synced() to
+	 * avoid triggering later f2fs_bug_on().
+	 */
+	if (is_inode_flag_set(inode, FI_DIRTY_INODE)) {
+		f2fs_warn(sbi,
+			"f2fs_evict_inode: inode is dirty, ino:%llu",
+			inode->i_ino);
+		f2fs_inode_synced(inode);
+		set_sbi_flag(sbi, SBI_NEED_FSCK);
 	}
+unfreeze_out:
 	if (freeze_protected)
 		sb_end_intwrite(inode->i_sb);
-no_delete:
+}
+
+static void f2fs_post_evict_inode(struct inode *inode)
+{
+	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
+	struct f2fs_inode_info *fi = F2FS_I(inode);
+	nid_t xnid = fi->i_xattr_nid;
+	unsigned int record_bits = 0;
+
 	dquot_drop(inode);
 
 	stat_dec_inline_xattr(inode);
@@ -972,16 +995,35 @@ no_delete:
 
 	/* for the case f2fs_new_inode() was failed, .i_ino is zero, skip it */
 	if (inode->i_ino)
-		invalidate_mapping_pages(NODE_MAPPING(sbi), inode->i_ino,
-							inode->i_ino);
+		f2fs_invalidate_node_cache(sbi, inode->i_ino);
 	if (xnid)
-		invalidate_mapping_pages(NODE_MAPPING(sbi), xnid, xnid);
-	if (inode->i_nlink) {
-		if (is_inode_flag_set(inode, FI_APPEND_WRITE))
-			f2fs_add_ino_entry(sbi, inode->i_ino, APPEND_INO);
-		if (is_inode_flag_set(inode, FI_UPDATE_WRITE))
-			f2fs_add_ino_entry(sbi, inode->i_ino, UPDATE_INO);
+		f2fs_invalidate_node_cache(sbi, xnid);
+
+	if (!inode->i_nlink)
+		goto skip_record;
+
+	if (is_inode_flag_set(inode, FI_APPEND_WRITE))
+		record_bits |= BIT(APPEND_INO);
+	if (is_inode_flag_set(inode, FI_UPDATE_WRITE))
+		record_bits |= BIT(UPDATE_INO);
+
+	if (!record_bits)
+		goto skip_record;
+
+	/* Let's do this in workqueue out of the direct reclaim path. */
+	if (current_is_kswapd()) {
+		f2fs_record_inode_state(sbi, inode->i_ino, record_bits);
+	} else {
+		struct evict_inode_work *ew =
+			mempool_alloc(evict_inode_work_pool, GFP_NOFS);
+
+		ew->sbi = sbi;
+		ew->ino = inode->i_ino;
+		ew->add_ino_entry_bits = record_bits;
+		INIT_WORK(&ew->work, f2fs_evict_inode_work);
+		queue_work(sbi->evict_wq, &ew->work);
 	}
+skip_record:
 	if (is_inode_flag_set(inode, FI_FREE_NID)) {
 		f2fs_alloc_nid_failed(sbi, inode->i_ino);
 		clear_inode_flag(inode, FI_FREE_NID);
@@ -992,14 +1034,27 @@ no_delete:
 		 * In that case, f2fs_check_nid_range() is enough to give a clue.
 		 */
 	}
-out_clear:
+}
+
+/*
+ * Called at the last iput() if i_nlink is zero
+ */
+void f2fs_evict_inode(struct inode *inode)
+{
+	f2fs_pre_evict_inode(inode);
+
+	if (!inode->i_nlink && !is_bad_inode(inode))
+		f2fs_delete_inode(inode);
+
+	f2fs_post_evict_inode(inode);
+
 	fscrypt_put_encryption_info(inode);
-	fsverity_cleanup_inode(inode);
 	clear_inode(inode);
 }
 
 /* caller should call f2fs_lock_op() */
-void f2fs_handle_failed_inode(struct inode *inode)
+void f2fs_handle_failed_inode(struct inode *inode,
+		struct f2fs_lock_context *lc, bool orphan_free)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 	struct node_info ni;
@@ -1015,11 +1070,14 @@ void f2fs_handle_failed_inode(struct inode *inode)
 	 * we must call this to avoid inode being remained as dirty, resulting
 	 * in a panic when flushing dirty inodes in gdirty_list.
 	 */
-	f2fs_update_inode_page(inode);
+	f2fs_update_inode_cache(inode);
 	f2fs_inode_synced(inode);
 
 	/* don't make bad inode, since it becomes a regular file. */
 	unlock_new_inode(inode);
+
+	if (!orphan_free)
+		goto out;
 
 	/*
 	 * Note: we should add inode to orphan list before f2fs_unlock_op()
@@ -1048,8 +1106,34 @@ void f2fs_handle_failed_inode(struct inode *inode)
 	}
 
 out:
-	f2fs_unlock_op(sbi);
+	f2fs_unlock_op(sbi, lc);
 
 	/* iput will drop the inode object */
 	iput(inode);
+}
+
+int __init f2fs_init_evict_inode_work(void)
+{
+	evict_inode_work_cache =
+		kmem_cache_create("f2fs_evict_inode_work",
+				  sizeof(struct evict_inode_work), 0, 0, NULL);
+	if (!evict_inode_work_cache)
+		goto fail;
+	evict_inode_work_pool =
+		mempool_create_slab_pool(NUM_PREALLOC_EVICT_INODE_WORK,
+					 evict_inode_work_cache);
+	if (!evict_inode_work_pool)
+		goto fail_free_cache;
+	return 0;
+
+fail_free_cache:
+	kmem_cache_destroy(evict_inode_work_cache);
+fail:
+	return -ENOMEM;
+}
+
+void f2fs_destroy_evict_inode_work(void)
+{
+	mempool_destroy(evict_inode_work_pool);
+	kmem_cache_destroy(evict_inode_work_cache);
 }

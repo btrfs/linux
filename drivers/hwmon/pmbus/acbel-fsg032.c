@@ -49,9 +49,10 @@ static void acbel_fsg032_init_debugfs(struct i2c_client *client)
 }
 
 static const struct i2c_device_id acbel_fsg032_id[] = {
-	{ "acbel_fsg032" },
-	{}
+	{ .name = "acbel_fsg032" },
+	{ }
 };
+MODULE_DEVICE_TABLE(i2c, acbel_fsg032_id);
 
 static struct pmbus_driver_info acbel_fsg032_info = {
 	.pages = 1,

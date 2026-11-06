@@ -670,6 +670,7 @@ static void dspi_dma_xfer(struct fsl_dspi *dspi)
 static int dspi_request_dma(struct fsl_dspi *dspi, phys_addr_t phy_addr)
 {
 	struct device *dev = &dspi->pdev->dev;
+	struct device *tx_dev, *rx_dev;
 	struct dma_slave_config cfg;
 	struct fsl_dspi_dma *dma;
 	int ret;
@@ -688,20 +689,23 @@ static int dspi_request_dma(struct fsl_dspi *dspi, phys_addr_t phy_addr)
 		goto err_tx_channel;
 	}
 
+	tx_dev = dmaengine_get_dma_device(dma->chan_tx);
+	rx_dev = dmaengine_get_dma_device(dma->chan_rx);
+
 	if (spi_controller_is_target(dspi->ctlr)) {
 		/*
 		 * In target mode we have to be ready to receive the maximum
 		 * that can possibly be transferred at once by EDMA without any
 		 * FIFO underflows.
 		 */
-		dma->bufsize = min(dma_get_max_seg_size(dma->chan_rx->device->dev),
-				   dma_get_max_seg_size(dma->chan_tx->device->dev)) *
+		dma->bufsize = min(dma_get_max_seg_size(rx_dev),
+				   dma_get_max_seg_size(tx_dev)) *
 			       DMA_SLAVE_BUSWIDTH_4_BYTES;
 	} else {
 		dma->bufsize = PAGE_SIZE;
 	}
 
-	dma->tx_dma_buf = dma_alloc_noncoherent(dma->chan_tx->device->dev,
+	dma->tx_dma_buf = dma_alloc_noncoherent(tx_dev,
 						dma->bufsize, &dma->tx_dma_phys,
 						DMA_TO_DEVICE, GFP_KERNEL);
 	if (!dma->tx_dma_buf) {
@@ -709,7 +713,7 @@ static int dspi_request_dma(struct fsl_dspi *dspi, phys_addr_t phy_addr)
 		goto err_tx_dma_buf;
 	}
 
-	dma->rx_dma_buf = dma_alloc_noncoherent(dma->chan_rx->device->dev,
+	dma->rx_dma_buf = dma_alloc_noncoherent(rx_dev,
 						dma->bufsize, &dma->rx_dma_phys,
 						DMA_FROM_DEVICE, GFP_KERNEL);
 	if (!dma->rx_dma_buf) {
@@ -746,12 +750,11 @@ static int dspi_request_dma(struct fsl_dspi *dspi, phys_addr_t phy_addr)
 	return 0;
 
 err_slave_config:
-	dma_free_noncoherent(dma->chan_rx->device->dev, dma->bufsize,
-			     dma->rx_dma_buf, dma->rx_dma_phys,
-			     DMA_FROM_DEVICE);
+	dma_free_noncoherent(rx_dev, dma->bufsize, dma->rx_dma_buf,
+			     dma->rx_dma_phys, DMA_FROM_DEVICE);
 err_rx_dma_buf:
-	dma_free_noncoherent(dma->chan_tx->device->dev, dma->bufsize,
-			     dma->tx_dma_buf, dma->tx_dma_phys, DMA_TO_DEVICE);
+	dma_free_noncoherent(tx_dev, dma->bufsize, dma->tx_dma_buf,
+			     dma->tx_dma_phys, DMA_TO_DEVICE);
 err_tx_dma_buf:
 	dma_release_channel(dma->chan_tx);
 err_tx_channel:
@@ -771,16 +774,18 @@ static void dspi_release_dma(struct fsl_dspi *dspi)
 		return;
 
 	if (dma->chan_tx) {
-		dma_free_noncoherent(dma->chan_tx->device->dev, dma->bufsize,
-				     dma->tx_dma_buf, dma->tx_dma_phys,
-				     DMA_TO_DEVICE);
+		struct device *tx_dev = dmaengine_get_dma_device(dma->chan_tx);
+
+		dma_free_noncoherent(tx_dev, dma->bufsize, dma->tx_dma_buf,
+				     dma->tx_dma_phys, DMA_TO_DEVICE);
 		dma_release_channel(dma->chan_tx);
 	}
 
 	if (dma->chan_rx) {
-		dma_free_noncoherent(dma->chan_rx->device->dev, dma->bufsize,
-				     dma->rx_dma_buf, dma->rx_dma_phys,
-				     DMA_FROM_DEVICE);
+		struct device *rx_dev = dmaengine_get_dma_device(dma->chan_rx);
+
+		dma_free_noncoherent(rx_dev, dma->bufsize, dma->rx_dma_buf,
+				     dma->rx_dma_phys, DMA_FROM_DEVICE);
 		dma_release_channel(dma->chan_rx);
 	}
 }
@@ -1290,7 +1295,7 @@ static int dspi_setup(struct spi_device *spi)
 	/* Only alloc on first setup */
 	chip = spi_get_ctldata(spi);
 	if (chip == NULL) {
-		chip = kzalloc(sizeof(struct chip_data), GFP_KERNEL);
+		chip = kzalloc_obj(struct chip_data);
 		if (!chip)
 			return -ENOMEM;
 	}
@@ -1460,14 +1465,21 @@ static int dspi_init(struct fsl_dspi *dspi)
 	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int dspi_suspend(struct device *dev)
 {
 	struct fsl_dspi *dspi = dev_get_drvdata(dev);
+	int ret;
 
 	if (dspi->irq)
 		disable_irq(dspi->irq);
-	spi_controller_suspend(dspi->ctlr);
+
+	ret = spi_controller_suspend(dspi->ctlr);
+	if (ret) {
+		if (dspi->irq)
+			enable_irq(dspi->irq);
+		return ret;
+	}
+
 	clk_disable_unprepare(dspi->clk);
 
 	pinctrl_pm_select_sleep_state(dev);
@@ -1485,12 +1497,15 @@ static int dspi_resume(struct device *dev)
 	ret = clk_prepare_enable(dspi->clk);
 	if (ret)
 		return ret;
-	spi_controller_resume(dspi->ctlr);
+
+	ret = spi_controller_resume(dspi->ctlr);
+	if (ret)
+		goto disable_clk;
 
 	ret = dspi_init(dspi);
 	if (ret) {
 		dev_err(dev, "failed to initialize dspi during resume\n");
-		return ret;
+		goto disable_clk;
 	}
 
 	dspi_set_mtf(dspi);
@@ -1499,10 +1514,13 @@ static int dspi_resume(struct device *dev)
 		enable_irq(dspi->irq);
 
 	return 0;
-}
-#endif /* CONFIG_PM_SLEEP */
 
-static SIMPLE_DEV_PM_OPS(dspi_pm, dspi_suspend, dspi_resume);
+disable_clk:
+	clk_disable_unprepare(dspi->clk);
+	return ret;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(dspi_pm, dspi_suspend, dspi_resume);
 
 static int dspi_target_abort(struct spi_controller *host)
 {
@@ -1555,7 +1573,6 @@ static int dspi_probe(struct platform_device *pdev)
 
 	ctlr->setup = dspi_setup;
 	ctlr->transfer_one_message = dspi_transfer_one_message;
-	ctlr->dev.of_node = pdev->dev.of_node;
 
 	ctlr->cleanup = dspi_cleanup;
 	ctlr->target_abort = dspi_target_abort;
@@ -1716,6 +1733,8 @@ static void dspi_remove(struct platform_device *pdev)
 	dspi_release_dma(dspi);
 	if (dspi->irq)
 		free_irq(dspi->irq, dspi);
+
+	spi_controller_put(dspi->ctlr);
 }
 
 static void dspi_shutdown(struct platform_device *pdev)
@@ -1726,7 +1745,7 @@ static void dspi_shutdown(struct platform_device *pdev)
 static struct platform_driver fsl_dspi_driver = {
 	.driver.name		= DRIVER_NAME,
 	.driver.of_match_table	= fsl_dspi_dt_ids,
-	.driver.pm		= &dspi_pm,
+	.driver.pm		= pm_sleep_ptr(&dspi_pm),
 	.probe			= dspi_probe,
 	.remove			= dspi_remove,
 	.shutdown		= dspi_shutdown,

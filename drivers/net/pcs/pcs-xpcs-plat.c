@@ -275,6 +275,15 @@ static int xpcs_plat_init_res(struct dw_xpcs_plat *pxpcs)
 	return 0;
 }
 
+#ifdef CONFIG_PM
+static void xpcs_plat_exit_clk(void *data)
+{
+	struct dw_xpcs_plat *pxpcs = data;
+	struct device *dev = &pxpcs->pdev->dev;
+
+	pm_runtime_force_suspend(dev);
+}
+
 static int xpcs_plat_init_clk(struct dw_xpcs_plat *pxpcs)
 {
 	struct device *dev = &pxpcs->pdev->dev;
@@ -285,15 +294,50 @@ static int xpcs_plat_init_clk(struct dw_xpcs_plat *pxpcs)
 		return dev_err_probe(dev, PTR_ERR(pxpcs->cclk),
 				     "Failed to get CSR clock\n");
 
-	pm_runtime_set_active(dev);
-	ret = devm_pm_runtime_enable(dev);
+	pm_runtime_set_suspended(dev);
+	pm_runtime_enable(dev);
+
+	ret = devm_add_action_or_reset(dev, xpcs_plat_exit_clk, pxpcs);
 	if (ret) {
-		dev_err(dev, "Failed to enable runtime-PM\n");
+		dev_err(dev, "Failed to register devm for xpcs_plat_exit_clk: %d\n", ret);
 		return ret;
 	}
 
 	return 0;
 }
+#else
+static void xpcs_plat_exit_clk(void *data)
+{
+	struct dw_xpcs_plat *pxpcs = data;
+
+	clk_disable_unprepare(pxpcs->cclk);
+}
+
+static int xpcs_plat_init_clk(struct dw_xpcs_plat *pxpcs)
+{
+	struct device *dev = &pxpcs->pdev->dev;
+	int ret;
+
+	pxpcs->cclk = devm_clk_get_optional(dev, "csr");
+	if (IS_ERR(pxpcs->cclk))
+		return dev_err_probe(dev, PTR_ERR(pxpcs->cclk),
+				     "Failed to get CSR clock\n");
+
+	ret = clk_prepare_enable(pxpcs->cclk);
+	if (ret) {
+		dev_err(dev, "Failed to enable CSR clock: %d\n", ret);
+		return ret;
+	}
+
+	ret = devm_add_action_or_reset(dev, xpcs_plat_exit_clk, pxpcs);
+	if (ret) {
+		dev_err(dev, "Failed to register devm for xpcs_plat_exit_clk: %d\n", ret);
+		return ret;
+	}
+
+	return 0;
+}
+#endif
 
 static int xpcs_plat_init_bus(struct dw_xpcs_plat *pxpcs)
 {
@@ -349,7 +393,7 @@ static int xpcs_plat_init_dev(struct dw_xpcs_plat *pxpcs)
 	 * up later. Make sure DD-core is aware of the OF-node being re-used.
 	 */
 	device_set_node(&mdiodev->dev, fwnode_handle_get(dev_fwnode(dev)));
-	mdiodev->dev.of_node_reused = true;
+	dev_set_of_node_reused(&mdiodev->dev);
 
 	/* Pass the data further so the DW XPCS driver core could use it */
 	mdiodev->dev.platform_data = (void *)device_get_match_data(dev);
@@ -364,9 +408,6 @@ static int xpcs_plat_init_dev(struct dw_xpcs_plat *pxpcs)
 
 err_clean_data:
 	mdiodev->dev.platform_data = NULL;
-
-	fwnode_handle_put(dev_fwnode(&mdiodev->dev));
-	device_set_node(&mdiodev->dev, NULL);
 
 	mdio_device_free(mdiodev);
 
@@ -401,7 +442,7 @@ static int xpcs_plat_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int __maybe_unused xpcs_plat_pm_runtime_suspend(struct device *dev)
+static int xpcs_plat_pm_runtime_suspend(struct device *dev)
 {
 	struct dw_xpcs_plat *pxpcs = dev_get_drvdata(dev);
 
@@ -410,7 +451,7 @@ static int __maybe_unused xpcs_plat_pm_runtime_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused xpcs_plat_pm_runtime_resume(struct device *dev)
+static int xpcs_plat_pm_runtime_resume(struct device *dev)
 {
 	struct dw_xpcs_plat *pxpcs = dev_get_drvdata(dev);
 
@@ -418,9 +459,9 @@ static int __maybe_unused xpcs_plat_pm_runtime_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops xpcs_plat_pm_ops = {
-	SET_RUNTIME_PM_OPS(xpcs_plat_pm_runtime_suspend,
-			   xpcs_plat_pm_runtime_resume,
-			   NULL)
+	RUNTIME_PM_OPS(xpcs_plat_pm_runtime_suspend,
+		       xpcs_plat_pm_runtime_resume,
+		       NULL)
 };
 
 DW_XPCS_INFO_DECLARE(xpcs_generic, DW_XPCS_ID_NATIVE, DW_XPCS_PMA_ID_NATIVE);
@@ -441,7 +482,7 @@ static const struct of_device_id xpcs_of_ids[] = {
 	{ .compatible = "snps,dw-xpcs-gen4-6g", .data = &xpcs_pma_gen4_6g },
 	{ .compatible = "snps,dw-xpcs-gen5-10g", .data = &xpcs_pma_gen5_10g },
 	{ .compatible = "snps,dw-xpcs-gen5-12g", .data = &xpcs_pma_gen5_12g },
-	{ /* sentinel */ },
+	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, xpcs_of_ids);
 
@@ -449,12 +490,12 @@ static struct platform_driver xpcs_plat_driver = {
 	.probe = xpcs_plat_probe,
 	.driver = {
 		.name = "dwxpcs",
-		.pm = &xpcs_plat_pm_ops,
+		.pm = pm_ptr(&xpcs_plat_pm_ops),
 		.of_match_table = xpcs_of_ids,
 	},
 };
 module_platform_driver(xpcs_plat_driver);
 
 MODULE_DESCRIPTION("Synopsys DesignWare XPCS platform device driver");
-MODULE_AUTHOR("Signed-off-by: Serge Semin <fancer.lancer@gmail.com>");
+MODULE_AUTHOR("Serge Semin <fancer.lancer@gmail.com>");
 MODULE_LICENSE("GPL");

@@ -16,14 +16,19 @@ struct ksmbd_work;
 struct ksmbd_share_config {
 	char			*name;
 	char			*path;
+	char			*real_path;
 
 	unsigned int		path_sz;
+	unsigned int		real_path_sz;
 	unsigned int		flags;
 	struct list_head	veto_list;
 
 	struct path		vfs_path;
 
 	atomic_t		refcount;
+#ifdef CONFIG_PROC_FS
+	atomic_t		tree_connections;
+#endif
 	struct hlist_node	hlist;
 	unsigned short		create_mask;
 	unsigned short		directory_mask;
@@ -40,7 +45,7 @@ static inline umode_t
 share_config_create_mode(struct ksmbd_share_config *share,
 			 umode_t posix_mode)
 {
-	umode_t mode = (posix_mode ?: (umode_t)-1) & share->create_mask;
+	umode_t mode = posix_mode & share->create_mask;
 
 	return mode | share->force_create_mode;
 }
@@ -49,7 +54,7 @@ static inline umode_t
 share_config_directory_mode(struct ksmbd_share_config *share,
 			    umode_t posix_mode)
 {
-	umode_t mode = (posix_mode ?: (umode_t)-1) & share->directory_mask;
+	umode_t mode = posix_mode & share->directory_mask;
 
 	return mode | share->force_directory_mode;
 }
@@ -59,6 +64,27 @@ static inline int test_share_config_flag(struct ksmbd_share_config *share,
 {
 	return share->flags & flag;
 }
+
+#ifdef CONFIG_PROC_FS
+static inline void ksmbd_share_tree_conn_init(struct ksmbd_share_config *share)
+{
+	atomic_set(&share->tree_connections, 0);
+}
+
+static inline void ksmbd_share_tree_conn_inc(struct ksmbd_share_config *share)
+{
+	atomic_inc(&share->tree_connections);
+}
+
+static inline void ksmbd_share_tree_conn_dec(struct ksmbd_share_config *share)
+{
+	atomic_dec(&share->tree_connections);
+}
+#else
+static inline void ksmbd_share_tree_conn_init(struct ksmbd_share_config *share) {}
+static inline void ksmbd_share_tree_conn_inc(struct ksmbd_share_config *share) {}
+static inline void ksmbd_share_tree_conn_dec(struct ksmbd_share_config *share) {}
+#endif
 
 void ksmbd_share_config_del(struct ksmbd_share_config *share);
 void __ksmbd_share_config_put(struct ksmbd_share_config *share);
@@ -74,4 +100,5 @@ struct ksmbd_share_config *ksmbd_share_config_get(struct ksmbd_work *work,
 						  const char *name);
 bool ksmbd_share_veto_filename(struct ksmbd_share_config *share,
 			       const char *filename);
+int create_proc_shares(void);
 #endif /* __SHARE_CONFIG_MANAGEMENT_H__ */

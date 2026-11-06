@@ -11,7 +11,7 @@ static struct nft_flow_rule *nft_flow_rule_alloc(int num_actions)
 {
 	struct nft_flow_rule *flow;
 
-	flow = kzalloc(sizeof(struct nft_flow_rule), GFP_KERNEL);
+	flow = kzalloc_obj(struct nft_flow_rule);
 	if (!flow)
 		return NULL;
 
@@ -111,7 +111,7 @@ struct nft_flow_rule *nft_flow_rule_create(struct net *net,
 
 	expr = nft_expr_first(rule);
 
-	ctx = kzalloc(sizeof(struct nft_offload_ctx), GFP_KERNEL);
+	ctx = kzalloc_obj(struct nft_offload_ctx);
 	if (!ctx) {
 		err = -ENOMEM;
 		goto err_out;
@@ -361,7 +361,7 @@ static int nft_block_setup(struct nft_base_chain *basechain,
 		err = nft_flow_offload_unbind(bo, basechain);
 		break;
 	default:
-		WARN_ON_ONCE(1);
+		DEBUG_NET_WARN_ON_ONCE(1);
 		err = -EOPNOTSUPP;
 	}
 
@@ -558,7 +558,7 @@ static void nft_flow_rule_offload_abort(struct net *net,
 			break;
 		}
 
-		if (WARN_ON_ONCE(err))
+		if (WARN_ON_ONCE(err && err != -ENOMEM))
 			break;
 	}
 }

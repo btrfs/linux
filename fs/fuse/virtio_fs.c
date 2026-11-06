@@ -19,6 +19,7 @@
 #include <linux/highmem.h>
 #include <linux/cleanup.h>
 #include <linux/uio.h>
+#include "dev.h"
 #include "fuse_i.h"
 #include "fuse_dev_i.h"
 
@@ -101,9 +102,9 @@ static int virtio_fs_enqueue_req(struct virtio_fs_vq *fsvq,
 				 gfp_t gfp);
 
 static const struct constant_table dax_param_enums[] = {
-	{"always",	FUSE_DAX_ALWAYS },
-	{"never",	FUSE_DAX_NEVER },
-	{"inode",	FUSE_DAX_INODE_USER },
+	{"always",	FUSE_VDAX_ALWAYS },
+	{"never",	FUSE_VDAX_NEVER },
+	{"inode",	FUSE_VDAX_INODE_USER },
 	{}
 };
 
@@ -131,10 +132,10 @@ static int virtio_fs_parse_param(struct fs_context *fsc,
 
 	switch (opt) {
 	case OPT_DAX:
-		ctx->dax_mode = FUSE_DAX_ALWAYS;
+		ctx->vdax_mode = FUSE_VDAX_ALWAYS;
 		break;
 	case OPT_DAX_ENUM:
-		ctx->dax_mode = result.uint_32;
+		ctx->vdax_mode = result.uint_32;
 		break;
 	default:
 		return -EINVAL;
@@ -454,26 +455,23 @@ out_unlock:
 	return ret;
 }
 
-/* Return the virtio_fs with a given tag, or NULL */
+/* Return the virtio_fs with a given tag, or NULL.
+ * Callers hold virtio_fs_mutex, which also keeps the virtqueues alive.
+ */
 static struct virtio_fs *virtio_fs_find_instance(const char *tag)
 {
 	struct virtio_fs *fs;
 
-	mutex_lock(&virtio_fs_mutex);
+	lockdep_assert_held(&virtio_fs_mutex);
 
 	list_for_each_entry(fs, &virtio_fs_instances, list) {
 		if (strcmp(fs->tag, tag) == 0) {
 			kobject_get(&fs->kobj);
-			goto found;
+			return fs;
 		}
 	}
 
-	fs = NULL; /* not found */
-
-found:
-	mutex_unlock(&virtio_fs_mutex);
-
-	return fs;
+	return NULL; /* not found */
 }
 
 static void virtio_fs_free_devs(struct virtio_fs *fs)
@@ -486,7 +484,7 @@ static void virtio_fs_free_devs(struct virtio_fs *fs)
 		if (!fsvq->fud)
 			continue;
 
-		fuse_dev_free(fsvq->fud);
+		fuse_dev_put(fsvq->fud);
 		fsvq->fud = NULL;
 	}
 }
@@ -729,6 +727,10 @@ static void copy_args_from_argbuf(struct fuse_args *args, struct fuse_req *req)
 	unsigned int num_out;
 	unsigned int i;
 
+	/* fuse_request_end() returns this error; there are no args to copy. */
+	if (req->out.h.error)
+		goto out;
+
 	remaining = req->out.h.len - sizeof(req->out.h);
 	num_in = args->in_numargs - args->in_pages;
 	num_out = args->out_numargs - args->out_pages;
@@ -754,8 +756,55 @@ static void copy_args_from_argbuf(struct fuse_args *args, struct fuse_req *req)
 	if (args->out_argvar)
 		args->out_args[args->out_numargs - 1].size = remaining;
 
+out:
 	kfree(req->argbuf);
 	req->argbuf = NULL;
+}
+
+/* Verify that the server properly follows the FUSE protocol */
+static bool virtio_fs_verify_response(struct fuse_req *req, unsigned int len)
+{
+	struct fuse_args *args = req->args;
+	struct fuse_out_header *oh = &req->out.h;
+	unsigned int expected;
+
+	if (len < sizeof(*oh)) {
+		pr_warn("virtio-fs: response too short (%u)\n", len);
+		return false;
+	}
+	if (oh->len != len) {
+		pr_warn("virtio-fs: oh.len mismatch (%u != %u)\n", oh->len, len);
+		return false;
+	}
+	if (oh->unique != req->in.h.unique) {
+		pr_warn("virtio-fs: oh.unique mismatch (%llu != %llu)\n",
+			oh->unique, req->in.h.unique);
+		return false;
+	}
+	if (oh->error <= -ERESTARTSYS || oh->error > 0) {
+		pr_warn("virtio-fs: invalid error value (%d)\n", oh->error);
+		return false;
+	}
+
+	if (oh->error) {
+		if (len != sizeof(*oh)) {
+			pr_warn("virtio-fs: error response too long (%u)\n", len);
+			return false;
+		}
+		return true;
+	}
+
+	expected = sizeof(*oh) +
+		   fuse_len_args(args->out_numargs, args->out_args);
+	if (len > expected ||
+	    (len < expected &&
+	     (!args->out_argvar ||
+	      expected - len > args->out_args[args->out_numargs - 1].size))) {
+		pr_warn("virtio-fs: invalid response length (%u, expected %u)\n",
+			len, expected);
+		return false;
+	}
+	return true;
 }
 
 /* Work function for request completion */
@@ -767,10 +816,6 @@ static void virtio_fs_request_complete(struct fuse_req *req,
 	unsigned int len, i, thislen;
 	struct folio *folio;
 
-	/*
-	 * TODO verify that server properly follows FUSE protocol
-	 * (oh.uniq, oh.len)
-	 */
 	args = req->args;
 	copy_args_from_argbuf(args, req);
 
@@ -780,9 +825,11 @@ static void virtio_fs_request_complete(struct fuse_req *req,
 		for (i = 0; i < ap->num_folios; i++) {
 			thislen = ap->descs[i].length;
 			if (len < thislen) {
-				WARN_ON(ap->descs[i].offset);
+				unsigned int offset = ap->descs[i].offset;
+
 				folio = ap->folios[i];
-				folio_zero_segment(folio, len, thislen);
+				folio_zero_segment(folio, offset + len,
+						   offset + thislen);
 				len = 0;
 			} else {
 				len -= thislen;
@@ -824,6 +871,10 @@ static void virtio_fs_requests_done_work(struct work_struct *work)
 		virtqueue_disable_cb(vq);
 
 		while ((req = virtqueue_get_buf(vq, &len)) != NULL) {
+			if (!virtio_fs_verify_response(req, len)) {
+				req->out.h.error = -EIO;
+				req->out.h.len = sizeof(struct fuse_out_header);
+			}
 			spin_lock(&fpq->lock);
 			list_move_tail(&req->list, &reqs);
 			spin_unlock(&fpq->lock);
@@ -839,7 +890,7 @@ static void virtio_fs_requests_done_work(struct work_struct *work)
 		if (req->args->may_block) {
 			struct virtio_fs_req_work *w;
 
-			w = kzalloc(sizeof(*w), GFP_NOFS | __GFP_NOFAIL);
+			w = kzalloc_obj(*w, GFP_NOFS | __GFP_NOFAIL);
 			INIT_WORK(&w->done_work, virtio_fs_complete_req_work);
 			w->fsvq = fsvq;
 			w->req = req;
@@ -947,14 +998,14 @@ static int virtio_fs_setup_vqs(struct virtio_device *vdev,
 	fs->num_request_queues = min_t(unsigned int, fs->num_request_queues,
 					nr_cpu_ids);
 	fs->nvqs = VQ_REQUEST + fs->num_request_queues;
-	fs->vqs = kcalloc(fs->nvqs, sizeof(fs->vqs[VQ_HIPRIO]), GFP_KERNEL);
+	fs->vqs = kzalloc_objs(fs->vqs[VQ_HIPRIO], fs->nvqs);
 	if (!fs->vqs)
 		return -ENOMEM;
 
-	vqs = kmalloc_array(fs->nvqs, sizeof(vqs[VQ_HIPRIO]), GFP_KERNEL);
+	vqs = kmalloc_objs(vqs[VQ_HIPRIO], fs->nvqs);
 	fs->mq_map = kcalloc_node(nr_cpu_ids, sizeof(*fs->mq_map), GFP_KERNEL,
 					dev_to_node(&vdev->dev));
-	vqs_info = kcalloc(fs->nvqs, sizeof(*vqs_info), GFP_KERNEL);
+	vqs_info = kzalloc_objs(*vqs_info, fs->nvqs);
 	if (!vqs || !vqs_info || !fs->mq_map) {
 		ret = -ENOMEM;
 		goto out;
@@ -988,7 +1039,9 @@ out:
 	kfree(vqs);
 	if (ret) {
 		kfree(fs->vqs);
+		fs->vqs = NULL;
 		kfree(fs->mq_map);
+		fs->mq_map = NULL;
 	}
 	return ret;
 }
@@ -1000,8 +1053,7 @@ static void virtio_fs_cleanup_vqs(struct virtio_device *vdev)
 }
 
 /* Map a window offset to a page frame number.  The window offset will have
- * been produced by .iomap_begin(), which maps a file offset to a window
- * offset.
+ * been produced by .iomap_next(), which maps a file offset to a window offset.
  */
 static long virtio_fs_direct_access(struct dax_device *dax_dev, pgoff_t pgoff,
 				    long nr_pages, enum dax_access_mode mode,
@@ -1056,7 +1108,7 @@ static int virtio_fs_setup_dax(struct virtio_device *vdev, struct virtio_fs *fs)
 	struct dev_pagemap *pgmap;
 	bool have_cache;
 
-	if (!IS_ENABLED(CONFIG_FUSE_DAX))
+	if (!IS_ENABLED(CONFIG_FUSE_VDAX))
 		return 0;
 
 	dax_dev = alloc_dax(fs, &virtio_fs_dax_ops);
@@ -1120,7 +1172,7 @@ static int virtio_fs_probe(struct virtio_device *vdev)
 	struct virtio_fs *fs;
 	int ret;
 
-	fs = kzalloc(sizeof(*fs), GFP_KERNEL);
+	fs = kzalloc_obj(*fs);
 	if (!fs)
 		return -ENOMEM;
 	kobject_init(&fs->kobj, &virtio_fs_ktype);
@@ -1240,7 +1292,7 @@ static void virtio_fs_send_forget(struct fuse_iqueue *fiq, struct fuse_forget_li
 	u64 unique = fuse_get_unique(fiq);
 
 	/* Allocate a buffer for the request */
-	forget = kmalloc(sizeof(*forget), GFP_NOFS | __GFP_NOFAIL);
+	forget = kmalloc_obj(*forget, GFP_NOFS | __GFP_NOFAIL);
 	req = &forget->req;
 
 	req->ih = (struct fuse_in_header){
@@ -1390,8 +1442,8 @@ static int virtio_fs_enqueue_req(struct virtio_fs_vq *fsvq,
 	/* Does the sglist fit on the stack? */
 	total_sgs = sg_count_fuse_req(req);
 	if (total_sgs > ARRAY_SIZE(stack_sgs)) {
-		sgs = kmalloc_array(total_sgs, sizeof(sgs[0]), gfp);
-		sg = kmalloc_array(total_sgs, sizeof(sg[0]), gfp);
+		sgs = kmalloc_objs(sgs[0], total_sgs, gfp);
+		sg = kmalloc_objs(sg[0], total_sgs, gfp);
 		if (!sgs || !sg) {
 			ret = -ENOMEM;
 			goto out;
@@ -1498,7 +1550,7 @@ static void virtio_fs_send_req(struct fuse_iqueue *fiq, struct fuse_req *req)
 		if (ret == -ENOSPC) {
 			/*
 			 * Virtqueue full. Retry submission from worker
-			 * context as we might be holding fc->bg_lock.
+			 * context as we might be holding fc->chan->bg_lock.
 			 */
 			spin_lock(&fsvq->lock);
 			list_add_tail(&req->list, &fsvq->queued_reqs);
@@ -1541,7 +1593,7 @@ static int virtio_fs_fill_super(struct super_block *sb, struct fs_context *fsc)
 {
 	struct fuse_mount *fm = get_fuse_mount_super(sb);
 	struct fuse_conn *fc = fm->fc;
-	struct virtio_fs *fs = fc->iq.priv;
+	struct virtio_fs *fs = fc->chan->iq.priv;
 	struct fuse_fs_context *ctx = fsc->fs_private;
 	unsigned int i;
 	int err;
@@ -1569,16 +1621,14 @@ static int virtio_fs_fill_super(struct super_block *sb, struct fs_context *fsc)
 			goto err_free_fuse_devs;
 	}
 
-	/* virtiofs allocates and installs its own fuse devices */
-	ctx->fudptr = NULL;
-	if (ctx->dax_mode != FUSE_DAX_NEVER) {
-		if (ctx->dax_mode == FUSE_DAX_ALWAYS && !fs->dax_dev) {
+	if (ctx->vdax_mode != FUSE_VDAX_NEVER) {
+		if (ctx->vdax_mode == FUSE_VDAX_ALWAYS && !fs->dax_dev) {
 			err = -EINVAL;
 			pr_err("virtio-fs: dax can't be enabled as filesystem"
 			       " device does not support it.\n");
 			goto err_free_fuse_devs;
 		}
-		ctx->dax_dev = fs->dax_dev;
+		ctx->vdax_dev = fs->dax_dev;
 	}
 	err = fuse_fill_super_common(sb, ctx);
 	if (err < 0)
@@ -1587,7 +1637,7 @@ static int virtio_fs_fill_super(struct super_block *sb, struct fs_context *fsc)
 	for (i = 0; i < fs->nvqs; i++) {
 		struct virtio_fs_vq *fsvq = &fs->vqs[i];
 
-		fuse_dev_install(fsvq->fud, fc);
+		fuse_dev_install(fsvq->fud, fc->chan);
 	}
 
 	/* Previous unmount will stop all queues. Start these again */
@@ -1606,14 +1656,14 @@ err:
 static void virtio_fs_conn_destroy(struct fuse_mount *fm)
 {
 	struct fuse_conn *fc = fm->fc;
-	struct virtio_fs *vfs = fc->iq.priv;
+	struct virtio_fs *vfs = fc->chan->iq.priv;
 	struct virtio_fs_vq *fsvq = &vfs->vqs[VQ_HIPRIO];
 
 	/* Stop dax worker. Soon evict_inodes() will be called which
 	 * will free all memory ranges belonging to all inodes.
 	 */
-	if (IS_ENABLED(CONFIG_FUSE_DAX))
-		fuse_dax_cancel_work(fc);
+	if (IS_ENABLED(CONFIG_FUSE_VDAX))
+		fuse_vdax_cancel_work(fc);
 
 	/* Stop forget queue. Soon destroy will be sent */
 	spin_lock(&fsvq->lock);
@@ -1654,7 +1704,7 @@ static int virtio_fs_test_super(struct super_block *sb,
 	struct fuse_mount *fsc_fm = fsc->s_fs_info;
 	struct fuse_mount *sb_fm = get_fuse_mount_super(sb);
 
-	return fsc_fm->fc->iq.priv == sb_fm->fc->iq.priv;
+	return fsc_fm->fc->chan->iq.priv == sb_fm->fc->chan->iq.priv;
 }
 
 static int virtio_fs_get_tree(struct fs_context *fsc)
@@ -1664,35 +1714,45 @@ static int virtio_fs_get_tree(struct fs_context *fsc)
 	struct fuse_conn *fc = NULL;
 	struct fuse_mount *fm;
 	unsigned int virtqueue_size;
+	struct fuse_chan *fch __free(fuse_chan_free) = fuse_chan_new();
 	int err = -EIO;
+
+	if (!fch)
+		return -ENOMEM;
 
 	if (!fsc->source)
 		return invalf(fsc, "No source specified");
 
 	/* This gets a reference on virtio_fs object. This ptr gets installed
-	 * in fc->iq->priv. Once fuse_conn is going away, it calls ->put()
+	 * in chan->iq->priv. Once fuse_conn is going away, it calls ->put()
 	 * to drop the reference to this object.
 	 */
+	mutex_lock(&virtio_fs_mutex);
 	fs = virtio_fs_find_instance(fsc->source);
+	if (fs)
+		virtqueue_size = virtqueue_get_vring_size(fs->vqs[VQ_REQUEST].vq);
+	mutex_unlock(&virtio_fs_mutex);
+
 	if (!fs) {
 		pr_info("virtio-fs: tag <%s> not found\n", fsc->source);
 		return -EINVAL;
 	}
 
-	virtqueue_size = virtqueue_get_vring_size(fs->vqs[VQ_REQUEST].vq);
 	if (WARN_ON(virtqueue_size <= FUSE_HEADER_OVERHEAD))
 		goto out_err;
 
 	err = -ENOMEM;
-	fc = kzalloc(sizeof(struct fuse_conn), GFP_KERNEL);
+	fc = kzalloc_obj(struct fuse_conn);
 	if (!fc)
 		goto out_err;
 
-	fm = kzalloc(sizeof(struct fuse_mount), GFP_KERNEL);
+	fm = kzalloc_obj(struct fuse_mount);
 	if (!fm)
 		goto out_err;
 
-	fuse_conn_init(fc, fm, fsc->user_ns, &virtio_fs_fiq_ops, fs);
+	fuse_iqueue_init(&fch->iq, &virtio_fs_fiq_ops, fs);
+	fuse_conn_init(fc, fm, fsc->user_ns, no_free_ptr(fch));
+
 	fc->release = fuse_free_conn;
 	fc->delete_stale = true;
 	fc->auto_submounts = true;
@@ -1743,7 +1803,7 @@ static int virtio_fs_init_fs_context(struct fs_context *fsc)
 	if (fsc->purpose == FS_CONTEXT_FOR_SUBMOUNT)
 		return fuse_init_fs_context_submount(fsc);
 
-	ctx = kzalloc(sizeof(struct fuse_fs_context), GFP_KERNEL);
+	ctx = kzalloc_obj(struct fuse_fs_context);
 	if (!ctx)
 		return -ENOMEM;
 	fsc->fs_private = ctx;

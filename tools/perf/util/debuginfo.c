@@ -42,6 +42,7 @@ static int debuginfo__init_offline_dwarf(struct debuginfo *dbg,
 {
 	GElf_Addr dummy;
 	int fd;
+	bool fd_consumed = false;
 
 	fd = open(path, O_RDONLY);
 	if (fd < 0)
@@ -55,6 +56,7 @@ static int debuginfo__init_offline_dwarf(struct debuginfo *dbg,
 	dbg->mod = dwfl_report_offline(dbg->dwfl, "", "", fd);
 	if (!dbg->mod)
 		goto error;
+	fd_consumed = true;
 
 	dbg->dbg = dwfl_module_getdwarf(dbg->mod, &dbg->bias);
 	if (!dbg->dbg)
@@ -62,13 +64,14 @@ static int debuginfo__init_offline_dwarf(struct debuginfo *dbg,
 
 	dwfl_module_build_id(dbg->mod, &dbg->build_id, &dummy);
 
-	dwfl_report_end(dbg->dwfl, NULL, NULL);
+	if (dwfl_report_end(dbg->dwfl, NULL, NULL) != 0)
+		goto error;
 
 	return 0;
 error:
 	if (dbg->dwfl)
 		dwfl_end(dbg->dwfl);
-	else
+	if (!fd_consumed)
 		close(fd);
 	memset(dbg, 0, sizeof(*dbg));
 
@@ -88,53 +91,45 @@ static struct debuginfo *__debuginfo__new(const char *path)
 	return dbg;
 }
 
-enum dso_binary_type distro_dwarf_types[] = {
-	DSO_BINARY_TYPE__FEDORA_DEBUGINFO,
-	DSO_BINARY_TYPE__UBUNTU_DEBUGINFO,
-	DSO_BINARY_TYPE__OPENEMBEDDED_DEBUGINFO,
-	DSO_BINARY_TYPE__BUILDID_DEBUGINFO,
-	DSO_BINARY_TYPE__MIXEDUP_UBUNTU_DEBUGINFO,
-	DSO_BINARY_TYPE__NOT_FOUND,
-};
-
-struct debuginfo *debuginfo__new(const char *path)
+struct debuginfo *debuginfo__new(struct dso *dso)
 {
-	enum dso_binary_type *type;
-	char buf[PATH_MAX], nil = '\0';
+	struct debuginfo *dinfo;
+	char *path;
+	bool decomp = false;
+
+	dso__find_dbginfo_type(dso);
+	path = dso__get_filename(dso, "", &decomp, dso__dbginfo_type(dso));
+	if (path == NULL)
+		return NULL;
+
+	dinfo = __debuginfo__new(path);
+	dso__put_filename(dso, path, decomp);
+	return dinfo;
+}
+
+struct debuginfo *debuginfo__from_path(const char *path)
+{
 	struct dso *dso;
-	struct debuginfo *dinfo = NULL;
-	struct build_id bid = { .size = 0};
+	struct debuginfo *dinfo;
+	struct build_id bid = { .size = 0 };
 
 	/* Try to open distro debuginfo files */
 	dso = dso__new(path);
 	if (!dso)
-		goto out;
+		return NULL;
 
 	/*
 	 * Set the build id for DSO_BINARY_TYPE__BUILDID_DEBUGINFO. Don't block
 	 * incase the path isn't for a regular file.
 	 */
 	assert(!dso__has_build_id(dso));
-	if (filename__read_build_id(path, &bid, /*block=*/false) > 0)
+	if (filename__read_build_id(path, &bid) > 0)
 		dso__set_build_id(dso, &bid);
 
-	for (type = distro_dwarf_types;
-	     !dinfo && *type != DSO_BINARY_TYPE__NOT_FOUND;
-	     type++) {
-		if (dso__read_binary_type_filename(dso, *type, &nil,
-						   buf, PATH_MAX) < 0)
-			continue;
-		dinfo = __debuginfo__new(buf);
-	}
+	dinfo = debuginfo__new(dso);
 	dso__put(dso);
 
-out:
-	if (dinfo)
-		return dinfo;
-
-	/* if failed to open all distro debuginfo, open given binary */
-	symbol__join_symfs(buf, path);
-	return __debuginfo__new(buf);
+	return dinfo;
 }
 
 void debuginfo__delete(struct debuginfo *dbg)
@@ -168,7 +163,7 @@ int debuginfo__get_text_offset(struct debuginfo *dbg, Dwarf_Addr *offs,
 	/* Search the relocation related .text section */
 	for (i = 0; i < n; i++) {
 		p = dwfl_module_relocation_info(dbg->mod, i, &shndx);
-		if (strcmp(p, ".text") == 0) {
+		if (p && strcmp(p, ".text") == 0) {
 			/* OK, get the section header */
 			scn = elf_getscn(elf, shndx);
 			if (!scn)

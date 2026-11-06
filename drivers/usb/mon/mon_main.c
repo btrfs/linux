@@ -199,6 +199,9 @@ static void mon_bus_remove(struct usb_bus *ubus)
 {
 	struct mon_bus *mbus = ubus->mon_bus;
 
+	if (mbus == NULL)
+		return;
+
 	mutex_lock(&mon_lock);
 	list_del(&mbus->bus_link);
 	if (mbus->text_inited)
@@ -273,7 +276,7 @@ static void mon_bus_init(struct usb_bus *ubus)
 {
 	struct mon_bus *mbus;
 
-	mbus = kzalloc(sizeof(struct mon_bus), GFP_KERNEL);
+	mbus = kzalloc_obj(struct mon_bus);
 	if (mbus == NULL)
 		goto err_alloc;
 	kref_init(&mbus->ref);

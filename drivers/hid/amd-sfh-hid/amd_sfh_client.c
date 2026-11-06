@@ -47,7 +47,7 @@ int amd_sfh_get_report(struct hid_device *hid, int report_id, int report_type)
 	guard(mutex)(&mp2->lock);
 	for (i = 0; i < cli_data->num_hid_devices; i++) {
 		if (cli_data->hid_sensor_hubs[i] == hid) {
-			struct request_list *new = kzalloc(sizeof(*new), GFP_KERNEL);
+			struct request_list *new = kzalloc_obj(*new);
 
 			if (!new)
 				return -ENOMEM;
@@ -95,7 +95,7 @@ void amd_sfh_work(struct work_struct *work)
 						    cli_data->feature_report[current_index]);
 		if (report_size)
 			hid_input_report(cli_data->hid_sensor_hubs[current_index],
-					 cli_data->report_type[current_index],
+					 node_type,
 					 cli_data->feature_report[current_index], report_size, 0);
 		else
 			pr_err("AMDSFH: Invalid report size\n");
@@ -104,7 +104,7 @@ void amd_sfh_work(struct work_struct *work)
 		report_size = mp2_ops->get_in_rep(current_index, sensor_index, report_id, in_data);
 		if (report_size)
 			hid_input_report(cli_data->hid_sensor_hubs[current_index],
-					 cli_data->report_type[current_index],
+					 node_type,
 					 in_data->input_report[current_index], report_size, 0);
 		else
 			pr_err("AMDSFH: Invalid report size\n");
@@ -382,4 +382,20 @@ int amd_sfh_hid_client_deinit(struct amd_mp2_dev *privdata)
 	amdtp_hid_remove(cl_data);
 
 	return 0;
+}
+
+bool amd_sfh_op_idx_enabled(struct amd_mp2_dev *mp2)
+{
+	struct amdtp_cl_data *cl = mp2->cl_data;
+	int i;
+
+	if (!cl)
+		return false;
+
+	for (i = 0; i < cl->num_hid_devices; i++)
+		if (cl->sensor_idx[i] == op_idx &&
+		    READ_ONCE(cl->sensor_sts[i]) == SENSOR_ENABLED)
+			return true;
+
+	return false;
 }

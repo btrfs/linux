@@ -13,7 +13,6 @@
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/pm_runtime.h>
@@ -107,7 +106,7 @@ static const struct soc_enum rt9123_i2sch_select_enum =
 
 static int rt9123_kcontrol_name_comp(struct snd_kcontrol *kcontrol, const char *s)
 {
-	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *comp = snd_kcontrol_chip(kcontrol);
 	const char *kctlname = kcontrol->id.name;
 
 	if (comp && comp->name_prefix)
@@ -118,7 +117,7 @@ static int rt9123_kcontrol_name_comp(struct snd_kcontrol *kcontrol, const char *
 
 static int rt9123_xhandler_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *comp = snd_kcontrol_chip(kcontrol);
 	struct device *dev = comp->dev;
 	int ret;
 
@@ -145,7 +144,7 @@ static int rt9123_xhandler_get(struct snd_kcontrol *kcontrol, struct snd_ctl_ele
 
 static int rt9123_xhandler_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *comp = snd_kcontrol_chip(kcontrol);
 	struct device *dev = comp->dev;
 	int ret;
 
@@ -300,10 +299,23 @@ static int rt9123_dai_hw_params(struct snd_pcm_substream *substream,
 	return 0;
 }
 
+/*
+ * NOTE
+ *
+ * auto_select doesn't include _DSP_A / _DSP_B, because it has limitaion for TDM
+ * (= rt9123_dai_hw_params()). It can be selected via Card directly if needed.
+ */
+static const u64 rt9123_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J;
+
 static const struct snd_soc_dai_ops rt9123_dai_ops = {
 	.set_fmt	= rt9123_dai_set_format,
 	.set_tdm_slot	= rt9123_dai_set_tdm_slot,
 	.hw_params	= rt9123_dai_hw_params,
+	.auto_selectable_formats	= &rt9123_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 static struct snd_soc_dai_driver rt9123_dai_driver = {

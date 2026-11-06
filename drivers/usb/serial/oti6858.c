@@ -38,15 +38,12 @@
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/tty.h>
-#include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
 #include <linux/serial.h>
 #include <linux/module.h>
-#include <linux/moduleparam.h>
 #include <linux/spinlock.h>
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
-#include <linux/uaccess.h>
 #include <linux/kfifo.h>
 #include "oti6858.h"
 
@@ -328,7 +325,7 @@ static int oti6858_port_probe(struct usb_serial_port *port)
 {
 	struct oti6858_private *priv;
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 

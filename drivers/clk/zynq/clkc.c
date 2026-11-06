@@ -112,10 +112,10 @@ static void __init zynq_clk_register_fclk(enum zynq_clk fclk,
 	spinlock_t *fclk_gate_lock;
 	void __iomem *fclk_gate_reg = fclk_ctrl_reg + 8;
 
-	fclk_lock = kmalloc(sizeof(*fclk_lock), GFP_KERNEL);
+	fclk_lock = kmalloc_obj(*fclk_lock);
 	if (!fclk_lock)
 		goto err;
-	fclk_gate_lock = kmalloc(sizeof(*fclk_gate_lock), GFP_KERNEL);
+	fclk_gate_lock = kmalloc_obj(*fclk_gate_lock);
 	if (!fclk_gate_lock)
 		goto err_fclk_gate_lock;
 	spin_lock_init(fclk_lock);
@@ -180,13 +180,17 @@ static void __init zynq_clk_register_periph_clk(enum zynq_clk clk0,
 	char *div_name;
 	spinlock_t *lock;
 
-	lock = kmalloc(sizeof(*lock), GFP_KERNEL);
+	lock = kmalloc_obj(*lock);
 	if (!lock)
 		goto err;
 	spin_lock_init(lock);
 
 	mux_name = kasprintf(GFP_KERNEL, "%s_mux", clk_name0);
+	if (!mux_name)
+		goto err_mux_name;
 	div_name = kasprintf(GFP_KERNEL, "%s_div", clk_name0);
+	if (!div_name)
+		goto err_div_name;
 
 	clk_register_mux(NULL, mux_name, parents, 4,
 			CLK_SET_RATE_NO_REPARENT, clk_ctrl, 4, 2, 0, lock);
@@ -205,6 +209,10 @@ static void __init zynq_clk_register_periph_clk(enum zynq_clk clk0,
 
 	return;
 
+err_div_name:
+	kfree(mux_name);
+err_mux_name:
+	kfree(lock);
 err:
 	clks[clk0] = ERR_PTR(-ENOMEM);
 	if (two_gates)

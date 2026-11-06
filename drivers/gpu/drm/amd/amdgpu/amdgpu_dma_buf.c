@@ -37,11 +37,13 @@
 #include "amdgpu_dma_buf.h"
 #include "amdgpu_xgmi.h"
 #include "amdgpu_vm.h"
+#include "amdgpu_ttm.h"
 #include <drm/amdgpu_drm.h>
 #include <drm/ttm/ttm_tt.h>
 #include <linux/dma-buf.h>
 #include <linux/dma-fence-array.h>
 #include <linux/pci-p2pdma.h>
+#include <linux/pm_runtime.h>
 
 static const struct dma_buf_attach_ops amdgpu_dma_buf_attach_ops;
 
@@ -81,6 +83,7 @@ static int amdgpu_dma_buf_attach(struct dma_buf *dmabuf,
 	struct drm_gem_object *obj = dmabuf->priv;
 	struct amdgpu_bo *bo = gem_to_amdgpu_bo(obj);
 	struct amdgpu_device *adev = amdgpu_ttm_adev(bo->tbo.bdev);
+	int r;
 
 	/*
 	 * Disable peer-to-peer access for DCC-enabled VRAM surfaces on GFX12+.
@@ -98,9 +101,54 @@ static int amdgpu_dma_buf_attach(struct dma_buf *dmabuf,
 	    pci_p2pdma_distance(adev->pdev, attach->dev, false) < 0)
 		attach->peer2peer = false;
 
+	/*
+	 * Only allow P2P while the exporter is active, and keep it active
+	 * until detach.  With runtime PM disabled take a plain reference so
+	 * the put in detach stays balanced.
+	 */
+	if (attach->peer2peer) {
+		struct device *dev = adev_to_drm(adev)->dev;
+		int ret = pm_runtime_get_if_active(dev);
+
+		if (!ret)
+			attach->peer2peer = false;
+		else if (ret < 0)
+			pm_runtime_get_noresume(dev);
+	}
+
+	r = dma_resv_lock(bo->tbo.base.resv, NULL);
+	if (r)
+		goto err_pm_put;
+
 	amdgpu_vm_bo_update_shared(bo);
 
+	dma_resv_unlock(bo->tbo.base.resv);
+
 	return 0;
+
+err_pm_put:
+	if (attach->peer2peer)
+		pm_runtime_put_autosuspend(adev_to_drm(adev)->dev);
+	return r;
+}
+
+/**
+ * amdgpu_dma_buf_detach - &dma_buf_ops.detach implementation
+ *
+ * @dmabuf: DMA-buf where we remove the attachment from
+ * @attach: the attachment to remove
+ *
+ * Drop the runtime PM reference taken in amdgpu_dma_buf_attach().
+ */
+static void amdgpu_dma_buf_detach(struct dma_buf *dmabuf,
+				  struct dma_buf_attachment *attach)
+{
+	struct drm_gem_object *obj = dmabuf->priv;
+	struct amdgpu_bo *bo = gem_to_amdgpu_bo(obj);
+	struct amdgpu_device *adev = amdgpu_ttm_adev(bo->tbo.bdev);
+
+	if (attach->peer2peer)
+		pm_runtime_put_autosuspend(adev_to_drm(adev)->dev);
 }
 
 /**
@@ -126,13 +174,9 @@ static int amdgpu_dma_buf_pin(struct dma_buf_attachment *attach)
 	 * notifiers are disabled, only allow pinning in VRAM when move
 	 * notiers are enabled.
 	 */
-	if (!IS_ENABLED(CONFIG_DMABUF_MOVE_NOTIFY)) {
-		domains &= ~AMDGPU_GEM_DOMAIN_VRAM;
-	} else {
-		list_for_each_entry(attach, &dmabuf->attachments, node)
-			if (!attach->peer2peer)
-				domains &= ~AMDGPU_GEM_DOMAIN_VRAM;
-	}
+	list_for_each_entry(attach, &dmabuf->attachments, node)
+		if (!attach->peer2peer)
+			domains &= ~AMDGPU_GEM_DOMAIN_VRAM;
 
 	if (domains & AMDGPU_GEM_DOMAIN_VRAM)
 		bo->flags |= AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED;
@@ -222,6 +266,14 @@ static struct sg_table *amdgpu_dma_buf_map(struct dma_buf_attachment *attach,
 		if (r)
 			return ERR_PTR(r);
 		break;
+
+	case AMDGPU_PL_MMIO_REMAP:
+		r = amdgpu_ttm_mmio_remap_alloc_sgt(adev, bo->tbo.resource,
+						    attach->dev, dir, &sgt);
+		if (r)
+			return ERR_PTR(r);
+		break;
+
 	default:
 		return ERR_PTR(-EINVAL);
 	}
@@ -247,6 +299,15 @@ static void amdgpu_dma_buf_unmap(struct dma_buf_attachment *attach,
 				 struct sg_table *sgt,
 				 enum dma_data_direction dir)
 {
+	struct drm_gem_object *obj = attach->dmabuf->priv;
+	struct amdgpu_bo *bo = gem_to_amdgpu_bo(obj);
+
+	if (bo->tbo.resource &&
+	    bo->tbo.resource->mem_type == AMDGPU_PL_MMIO_REMAP) {
+		amdgpu_ttm_mmio_remap_free_sgt(attach->dev, dir, sgt);
+		return;
+	}
+
 	if (sg_page(sgt->sgl)) {
 		dma_unmap_sgtable(attach->dev, sgt, dir, 0);
 		sg_free_table(sgt);
@@ -329,6 +390,7 @@ static void amdgpu_dma_buf_vunmap(struct dma_buf *dma_buf, struct iosys_map *map
 
 const struct dma_buf_ops amdgpu_dmabuf_ops = {
 	.attach = amdgpu_dma_buf_attach,
+	.detach = amdgpu_dma_buf_detach,
 	.pin = amdgpu_dma_buf_pin,
 	.unpin = amdgpu_dma_buf_unpin,
 	.map_dma_buf = amdgpu_dma_buf_map,
@@ -410,6 +472,15 @@ amdgpu_dma_buf_create_obj(struct drm_device *dev, struct dma_buf *dma_buf)
 					 AMDGPU_GEM_CREATE_COHERENT |
 					 AMDGPU_GEM_CREATE_EXT_COHERENT |
 					 AMDGPU_GEM_CREATE_UNCACHED);
+
+		/*
+		 * A VRAM-capable import is backed by the exporter's device
+		 * memory, not host pages of its own. Place it in the PREEMPT
+		 * domain (GTT-like, but with no host-page budget) so many such
+		 * imports cannot exhaust the GTT limit.
+		 */
+		if (other->preferred_domains & AMDGPU_GEM_DOMAIN_VRAM)
+			flags |= AMDGPU_GEM_CREATE_PREEMPTIBLE;
 	}
 
 	ret = amdgpu_gem_object_create(adev, dma_buf->size, PAGE_SIZE,
@@ -431,7 +502,7 @@ error:
 }
 
 /**
- * amdgpu_dma_buf_move_notify - &attach.move_notify implementation
+ * amdgpu_dma_buf_move_notify - &attach.invalidate_mappings implementation
  *
  * @attach: the DMA-buf attachment
  *
@@ -489,8 +560,15 @@ amdgpu_dma_buf_move_notify(struct dma_buf_attachment *attach)
 		r = dma_resv_reserve_fences(resv, 2);
 		if (!r)
 			r = amdgpu_vm_clear_freed(adev, vm, NULL);
+
+		/* Don't pass 'ticket' to amdgpu_vm_handle_moved: we want the clear=true
+		 * path to be used otherwise we might update the PT of another process
+		 * while it's using the BO.
+		 * With clear=true, amdgpu_vm_bo_update will sync to command submission
+		 * from the same VM.
+		 */
 		if (!r)
-			r = amdgpu_vm_handle_moved(adev, vm, ticket);
+			r = amdgpu_vm_handle_moved(adev, vm, NULL);
 
 		if (r && r != -EBUSY)
 			DRM_ERROR("Failed to invalidate VM page tables (%d))\n",
@@ -502,7 +580,7 @@ amdgpu_dma_buf_move_notify(struct dma_buf_attachment *attach)
 
 static const struct dma_buf_attach_ops amdgpu_dma_buf_attach_ops = {
 	.allow_peer2peer = true,
-	.move_notify = amdgpu_dma_buf_move_notify
+	.invalidate_mappings = amdgpu_dma_buf_move_notify
 };
 
 /**
@@ -530,6 +608,11 @@ struct drm_gem_object *amdgpu_gem_prime_import(struct drm_device *dev,
 			 */
 			drm_gem_object_get(obj);
 			return obj;
+		} else {
+			struct ttm_resource *mem = gem_to_amdgpu_bo(obj)->tbo.resource;
+			/* NPA DMA-buf can only be imported on the same device. */
+			if (mem && mem->mem_type == AMDGPU_PL_NPA)
+				return ERR_PTR(-EPERM);
 		}
 	}
 
@@ -543,6 +626,17 @@ struct drm_gem_object *amdgpu_gem_prime_import(struct drm_device *dev,
 		drm_gem_object_put(obj);
 		return ERR_CAST(attach);
 	}
+
+	/*
+	 * The PREEMPT domain is only correct when the attachment actually
+	 * resolves to P2P access, in which case the import lives in the
+	 * exporter's VRAM and consumes no host GTT pages.  Without P2P the
+	 * import is staged in system memory and must count against the GTT
+	 * budget normally, so drop AMDGPU_GEM_CREATE_PREEMPTIBLE again.  The
+	 * BO is not published yet, so clearing the flag here is race-free.
+	 */
+	if (!attach->peer2peer)
+		gem_to_amdgpu_bo(obj)->flags &= ~AMDGPU_GEM_CREATE_PREEMPTIBLE;
 
 	get_dma_buf(dma_buf);
 	obj->import_attach = attach;

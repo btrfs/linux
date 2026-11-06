@@ -238,7 +238,7 @@ struct mlx5hws_table *mlx5hws_table_create(struct mlx5hws_context *ctx,
 		return NULL;
 	}
 
-	tbl = kzalloc(sizeof(*tbl), GFP_KERNEL);
+	tbl = kzalloc_obj(*tbl);
 	if (!tbl)
 		return NULL;
 
@@ -281,6 +281,9 @@ int mlx5hws_table_destroy(struct mlx5hws_table *tbl)
 		ret = -EBUSY;
 		goto unlock_err;
 	}
+
+	if (tbl->default_miss.miss_tbl)
+		list_del_init(&tbl->default_miss.next);
 
 	list_del_init(&tbl->tbl_list_node);
 	mutex_unlock(&ctx->ctrl_lock);

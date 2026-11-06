@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright (C) 2018-2025 Intel Corporation
+ * Copyright (C) 2018-2026 Intel Corporation
  */
 #include <linux/firmware.h>
 #include "iwl-drv.h"
@@ -71,7 +71,7 @@ static struct iwl_ucode_tlv *iwl_dbg_tlv_add(const struct iwl_ucode_tlv *tlv,
 	u32 len = le32_to_cpu(tlv->length);
 	struct iwl_dbg_tlv_node *node;
 
-	node = kzalloc(struct_size(node, tlv.data, len), GFP_KERNEL);
+	node = kzalloc_flex(*node, tlv.data, len);
 	if (!node)
 		return NULL;
 
@@ -167,10 +167,12 @@ static int iwl_dbg_tlv_alloc_hcmd(struct iwl_trans *trans,
 				  const struct iwl_ucode_tlv *tlv)
 {
 	const struct iwl_fw_ini_hcmd_tlv *hcmd = (const void *)tlv->data;
-	u32 tp = le32_to_cpu(hcmd->time_point);
+	u32 tp;
 
 	if (le32_to_cpu(tlv->length) <= sizeof(*hcmd))
 		return -EINVAL;
+
+	tp = le32_to_cpu(hcmd->time_point);
 
 	/* Host commands can not be sent in early time point since the FW
 	 * is not ready
@@ -194,9 +196,14 @@ static int iwl_dbg_tlv_alloc_region(struct iwl_trans *trans,
 {
 	const struct iwl_fw_ini_region_tlv *reg = (const void *)tlv->data;
 	struct iwl_ucode_tlv **active_reg;
-	u32 id = le32_to_cpu(reg->id);
-	u8 type = reg->type;
 	u32 tlv_len = sizeof(*tlv) + le32_to_cpu(tlv->length);
+	u32 id;
+	u8 type;
+
+	if (le32_to_cpu(tlv->length) < sizeof(*reg))
+		return -EINVAL;
+
+	id = le32_to_cpu(reg->id);
 
 	/*
 	 * The higher part of the ID from version 2 is debug policy.
@@ -204,9 +211,6 @@ static int iwl_dbg_tlv_alloc_region(struct iwl_trans *trans,
 	 */
 	if (le32_to_cpu(reg->hdr.version) >= 2)
 		id &= IWL_FW_INI_REGION_ID_MASK;
-
-	if (le32_to_cpu(tlv->length) < sizeof(*reg))
-		return -EINVAL;
 
 	/* for safe use of a string from FW, limit it to IWL_FW_INI_MAX_NAME */
 	IWL_DEBUG_FW(trans, "WRT: parsing region: %.*s\n",
@@ -217,10 +221,24 @@ static int iwl_dbg_tlv_alloc_region(struct iwl_trans *trans,
 		return -EINVAL;
 	}
 
+	type = reg->type;
+
 	if (type <= IWL_FW_INI_REGION_INVALID ||
 	    type >= IWL_FW_INI_REGION_NUM) {
 		IWL_ERR(trans, "WRT: Invalid region type %u\n", type);
 		return -EINVAL;
+	}
+
+	if (type == IWL_FW_INI_REGION_DRAM_BUFFER) {
+		u32 alloc_id = le32_to_cpu(reg->dram_alloc_id);
+
+		if (alloc_id <= IWL_FW_INI_ALLOCATION_INVALID ||
+		    alloc_id >= ARRAY_SIZE(trans->dbg.fw_mon_ini)) {
+			IWL_ERR(trans,
+				"WRT: Invalid dram_alloc_id %u for region %u\n",
+				alloc_id, id);
+			return -EINVAL;
+		}
 	}
 
 	if (type == IWL_FW_INI_REGION_INTERNAL_BUFFER) {
@@ -251,12 +269,13 @@ static int iwl_dbg_tlv_alloc_trigger(struct iwl_trans *trans,
 				     const struct iwl_ucode_tlv *tlv)
 {
 	const struct iwl_fw_ini_trigger_tlv *trig = (const void *)tlv->data;
-	u32 tp = le32_to_cpu(trig->time_point);
-	u32 rf = le32_to_cpu(trig->reset_fw);
+	u32 tp, rf;
 	struct iwl_ucode_tlv *new_tlv;
 
 	if (le32_to_cpu(tlv->length) < sizeof(*trig))
 		return -EINVAL;
+
+	tp = le32_to_cpu(trig->time_point);
 
 	if (tp <= IWL_FW_INI_TIME_POINT_INVALID ||
 	    tp >= IWL_FW_INI_TIME_POINT_NUM) {
@@ -265,6 +284,8 @@ static int iwl_dbg_tlv_alloc_trigger(struct iwl_trans *trans,
 			tp);
 		return -EINVAL;
 	}
+
+	rf = le32_to_cpu(trig->reset_fw);
 
 	IWL_DEBUG_FW(trans,
 		     "WRT: time point %u for trigger TLV with reset_fw %u\n",
@@ -288,8 +309,13 @@ static int iwl_dbg_tlv_config_set(struct iwl_trans *trans,
 				  const struct iwl_ucode_tlv *tlv)
 {
 	const struct iwl_fw_ini_conf_set_tlv *conf_set = (const void *)tlv->data;
-	u32 tp = le32_to_cpu(conf_set->time_point);
-	u32 type = le32_to_cpu(conf_set->set_type);
+	u32 tp, type;
+
+	if (le32_to_cpu(tlv->length) < sizeof(*conf_set))
+		return -EINVAL;
+
+	tp = le32_to_cpu(conf_set->time_point);
+	type = le32_to_cpu(conf_set->set_type);
 
 	if (tp <= IWL_FW_INI_TIME_POINT_INVALID ||
 	    tp >= IWL_FW_INI_TIME_POINT_NUM) {
@@ -475,6 +501,7 @@ static int iwl_dbg_tlv_parse_bin(struct iwl_trans *trans, const u8 *data,
 {
 	const struct iwl_ucode_tlv *tlv;
 	u32 tlv_len;
+	size_t aligned_tlv_len;
 
 	while (len >= sizeof(*tlv)) {
 		len -= sizeof(*tlv);
@@ -487,8 +514,16 @@ static int iwl_dbg_tlv_parse_bin(struct iwl_trans *trans, const u8 *data,
 				len, tlv_len);
 			return -EINVAL;
 		}
-		len -= ALIGN(tlv_len, 4);
-		data += sizeof(*tlv) + ALIGN(tlv_len, 4);
+
+		aligned_tlv_len = ALIGN(tlv_len, 4);
+		if (len < aligned_tlv_len) {
+			IWL_ERR(trans, "invalid aligned TLV len: %zd/%zu\n",
+				len, aligned_tlv_len);
+			return -EINVAL;
+		}
+
+		len -= aligned_tlv_len;
+		data += sizeof(*tlv) + aligned_tlv_len;
 
 		iwl_dbg_tlv_alloc(trans, tlv, true);
 	}
@@ -584,7 +619,7 @@ static int iwl_dbg_tlv_alloc_fragments(struct iwl_fw_runtime *fwrt,
 	u32 num_frags, remain_pages, frag_pages;
 	int i;
 
-	if (alloc_id < IWL_FW_INI_ALLOCATION_INVALID ||
+	if (alloc_id <= IWL_FW_INI_ALLOCATION_INVALID ||
 	    alloc_id >= IWL_FW_INI_ALLOCATION_NUM)
 		return -EIO;
 
@@ -602,6 +637,9 @@ static int iwl_dbg_tlv_alloc_fragments(struct iwl_fw_runtime *fwrt,
 	    cpu_to_le32(IWL_FW_INI_LOCATION_DRAM_PATH))
 		return 0;
 
+	if (!fw_mon_cfg->req_size)
+		return -EIO;
+
 	num_frags = le32_to_cpu(fw_mon_cfg->max_frags_num);
 	if (fwrt->trans->mac_cfg->device_family < IWL_DEVICE_FAMILY_AX210) {
 		if (alloc_id != IWL_FW_INI_ALLOCATION_ID_DBGC1)
@@ -612,13 +650,16 @@ static int iwl_dbg_tlv_alloc_fragments(struct iwl_fw_runtime *fwrt,
 		return -EIO;
 	}
 
+	if (!num_frags)
+		return -EIO;
+
 	remain_pages = DIV_ROUND_UP(le32_to_cpu(fw_mon_cfg->req_size),
 				    PAGE_SIZE);
 	num_frags = min_t(u32, num_frags, BUF_ALLOC_MAX_NUM_FRAGS);
 	num_frags = min_t(u32, num_frags, remain_pages);
 	frag_pages = DIV_ROUND_UP(remain_pages, num_frags);
 
-	fw_mon->frags = kcalloc(num_frags, sizeof(*fw_mon->frags), GFP_KERNEL);
+	fw_mon->frags = kzalloc_objs(*fw_mon->frags, num_frags);
 	if (!fw_mon->frags)
 		return -ENOMEM;
 
@@ -661,7 +702,7 @@ static int iwl_dbg_tlv_apply_buffer(struct iwl_fw_runtime *fwrt,
 			 IWL_UCODE_TLV_CAPA_DBG_BUF_ALLOC_CMD_SUPP))
 		return 0;
 
-	if (alloc_id < IWL_FW_INI_ALLOCATION_INVALID ||
+	if (alloc_id <= IWL_FW_INI_ALLOCATION_INVALID ||
 	    alloc_id >= IWL_FW_INI_ALLOCATION_NUM)
 		return -EIO;
 
@@ -871,7 +912,7 @@ static void iwl_dbg_tlv_apply_config(struct iwl_fw_runtime *fwrt,
 			for (count = 0; count < len; count++) {
 				address = le32_to_cpu(config_list->addr_val[count].address);
 				value = le32_to_cpu(config_list->addr_val[count].value);
-				iwl_trans_write_prph(fwrt->trans, address + offset, value);
+				iwl_trans_write_prph_no_grab(fwrt->trans, address + offset, value);
 			}
 			iwl_trans_release_nic_access(fwrt->trans);
 		break;
@@ -890,7 +931,7 @@ static void iwl_dbg_tlv_apply_config(struct iwl_fw_runtime *fwrt,
 			for (count = 0; count < len; count++) {
 				address = le32_to_cpu(config_list->addr_val[count].address);
 				value = le32_to_cpu(config_list->addr_val[count].value);
-				iwl_write32(fwrt->trans, address + offset, value);
+				iwl_trans_write32(fwrt->trans, address + offset, value);
 				IWL_DEBUG_FW(fwrt, "WRT: CSR: count %u, add: %u val: %u\n",
 					     count, address, value);
 			}
@@ -1001,7 +1042,7 @@ static void iwl_dbg_tlv_set_periodic_trigs(struct iwl_fw_runtime *fwrt)
 
 		collect_interval = le32_to_cpu(trig->data[0]);
 
-		timer_node = kzalloc(sizeof(*timer_node), GFP_KERNEL);
+		timer_node = kzalloc_obj(*timer_node);
 		if (!timer_node) {
 			IWL_ERR(fwrt,
 				"WRT: Failed to allocate periodic trigger\n");

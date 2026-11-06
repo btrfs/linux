@@ -15,6 +15,8 @@ properties:
       - items:
           - enum:
               - qcom,apq8064-dsi-ctrl
+              - qcom,kaanapali-dsi-ctrl
+              - qcom,milos-dsi-ctrl
               - qcom,msm8226-dsi-ctrl
               - qcom,msm8916-dsi-ctrl
               - qcom,msm8953-dsi-ctrl
@@ -45,6 +47,20 @@ properties:
               - qcom,sm8650-dsi-ctrl
               - qcom,sm8750-dsi-ctrl
           - const: qcom,mdss-dsi-ctrl
+      - items:
+          - const: qcom,shikra-dsi-ctrl
+          - const: qcom,qcm2290-dsi-ctrl
+          - const: qcom,mdss-dsi-ctrl
+      - items:
+          - enum:
+              - qcom,qcs8300-dsi-ctrl
+              - qcom,sc8280xp-dsi-ctrl
+          - const: qcom,sa8775p-dsi-ctrl
+          - const: qcom,mdss-dsi-ctrl
+      - items:
+          - const: qcom,eliza-dsi-ctrl
+          - const: qcom,sm8750-dsi-ctrl
+          - const: qcom,mdss-dsi-ctrl
       - enum:
           - qcom,dsi-ctrl-6g-qcm2290
           - qcom,mdss-dsi-ctrl # This should always come with an SoC-specific compatible
@@ -61,16 +77,16 @@ properties:
 
   clocks:
     description: |
-      Several clocks are used, depending on the variant. Typical ones are::
-       - bus:: Display AHB clock.
-       - byte:: Display byte clock.
-       - byte_intf:: Display byte interface clock.
-       - core:: Display core clock.
-       - core_mss:: Core MultiMedia SubSystem clock.
-       - iface:: Display AXI clock.
-       - mdp_core:: MDP Core clock.
-       - mnoc:: MNOC clock
-       - pixel:: Display pixel clock.
+      Several clocks are used, depending on the variant. Typical ones are:
+       - bus: Display AHB clock.
+       - byte: Display byte clock.
+       - byte_intf: Display byte interface clock.
+       - core: Display core clock.
+       - core_mss: Core MultiMedia SubSystem clock.
+       - iface: Display AXI clock.
+       - mdp_core: MDP Core clock.
+       - mnoc: MNOC clock
+       - pixel: Display pixel clock.
     minItems: 3
     maxItems: 12
 
@@ -328,6 +344,7 @@ allOf:
         compatible:
           contains:
             enum:
+              - qcom,milos-dsi-ctrl
               - qcom,msm8998-dsi-ctrl
               - qcom,sa8775p-dsi-ctrl
               - qcom,sar2130p-dsi-ctrl
@@ -369,6 +386,7 @@ allOf:
         compatible:
           contains:
             enum:
+              - qcom,kaanapali-dsi-ctrl
               - qcom,sm8750-dsi-ctrl
     then:
       properties:

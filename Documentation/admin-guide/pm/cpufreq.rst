@@ -439,7 +439,7 @@ This governor exposes only one tunable:
 ``rate_limit_us``
 	Minimum time (in microseconds) that has to pass between two consecutive
 	runs of governor computations (default: 1.5 times the scaling driver's
-	transition latency or the maximum 2ms).
+	transition latency or 1ms if the driver does not provide a latency value).
 
 	The purpose of this tunable is to reduce the scheduler context overhead
 	of the governor which might be excessive without it.
@@ -497,7 +497,7 @@ This governor exposes the following tunables:
 	represented by it to be 1.5 times as high as the transition latency
 	(the default)::
 
-	# echo `$(($(cat cpuinfo_transition_latency) * 3 / 2))` > ondemand/sampling_rate
+	# echo $(($(cat cpuinfo_transition_latency) * 3 / 2)) > ondemand/sampling_rate
 
 ``up_threshold``
 	If the estimated CPU load is above this value (in percent), the governor
@@ -516,7 +516,7 @@ This governor exposes the following tunables:
 	of those tasks above 0 and set this attribute to 1.
 
 ``sampling_down_factor``
-	Temporary multiplier, between 1 (default) and 100 inclusive, to apply to
+	Temporary multiplier, between 1 (default) and 100000 inclusive, to apply to
 	the ``sampling_rate`` value if the CPU load goes above ``up_threshold``.
 
 	This causes the next execution of the governor's worker routine (after
@@ -586,8 +586,8 @@ This governor exposes the following tunables:
 	100 (5 by default).
 
 	This is how much the frequency is allowed to change in one go.  Setting
-	it to 0 will cause the default frequency step (5 percent) to be used
-	and setting it to 100 effectively causes the governor to periodically
+	it to 0 disables frequency changes by the governor entirely and setting
+	it to 100 effectively causes the governor to periodically
 	switch the frequency between the ``scaling_min_freq`` and
 	``scaling_max_freq`` policy limits.
 

@@ -298,7 +298,6 @@ static const struct v4l2_subdev_video_ops ml86v7667_subdev_video_ops = {
 static const struct v4l2_subdev_pad_ops ml86v7667_subdev_pad_ops = {
 	.enum_mbus_code = ml86v7667_enum_mbus_code,
 	.get_fmt = ml86v7667_fill_fmt,
-	.set_fmt = ml86v7667_fill_fmt,
 	.get_mbus_config = ml86v7667_get_mbus_config,
 };
 
@@ -424,8 +423,8 @@ static void ml86v7667_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ml86v7667_id[] = {
-	{ DRV_NAME },
-	{}
+	{ .name = DRV_NAME },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ml86v7667_id);
 

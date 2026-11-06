@@ -25,7 +25,7 @@ static int pSeries_reconfig_add_node(const char *path, struct property *proplist
 	struct device_node *np;
 	int err = -ENOMEM;
 
-	np = kzalloc(sizeof(*np), GFP_KERNEL);
+	np = kzalloc_obj(*np);
 	if (!np)
 		goto out_err;
 
@@ -168,7 +168,7 @@ static char * parse_next_property(char *buf, char *end, char **name, int *length
 static struct property *new_property(const char *name, const int length,
 				     const unsigned char *value, struct property *last)
 {
-	struct property *new = kzalloc(sizeof(*new), GFP_KERNEL);
+	struct property *new = kzalloc_obj(*new);
 
 	if (!new)
 		return NULL;
@@ -307,7 +307,7 @@ static int do_remove_property(char *buf, size_t bufsize)
 	if (tmp)
 		*tmp = '\0';
 
-	if (strlen(buf) == 0)
+	if (*buf == '\0')
 		return -EINVAL;
 
 	return of_remove_property(np, of_find_property(np, buf, NULL));
@@ -330,7 +330,7 @@ static int do_update_property(char *buf, size_t bufsize)
 	if (!next_prop)
 		return -EINVAL;
 
-	if (!strlen(name))
+	if (*name == '\0')
 		return -ENODEV;
 
 	newprop = new_property(name, length, value, NULL);

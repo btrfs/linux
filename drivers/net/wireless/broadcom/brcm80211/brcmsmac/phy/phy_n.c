@@ -221,7 +221,7 @@ static const struct nphy_ipa_txrxgain nphy_ipa_rxcal_gaintbl_5GHz[] = {
 };
 
 static const struct nphy_ipa_txrxgain nphy_ipa_rxcal_gaintbl_2GHz[] = {
-	{0, 0, 0, 0, 0, 128},
+	{0, 0, 0, 0, 0, -128},
 	{0, 0, 0, 0, 0, 70},
 	{0, 0, 0, 0, 0, 20},
 	{0, 0, 0, 3, 0, 20},
@@ -23049,8 +23049,7 @@ wlc_phy_gen_load_samples_nphy(struct brcms_phy *pi, u32 f_kHz, u16 max_val,
 		tbl_len = (phy_bw << 1);
 	}
 
-	tone_buf = kmalloc_array(tbl_len, sizeof(struct cordic_iq),
-				 GFP_ATOMIC);
+	tone_buf = kmalloc_objs(struct cordic_iq, tbl_len, GFP_ATOMIC);
 	if (tone_buf == NULL)
 		return 0;
 

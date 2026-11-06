@@ -169,7 +169,7 @@ static int open_getadapter_fib(struct aac_dev * dev, void __user *arg)
 	struct aac_fib_context * fibctx;
 	int status;
 
-	fibctx = kmalloc(sizeof(struct aac_fib_context), GFP_KERNEL);
+	fibctx = kmalloc_obj(struct aac_fib_context);
 	if (fibctx == NULL) {
 		status = -ENOMEM;
 	} else {
@@ -1043,6 +1043,7 @@ struct aac_reset_iop {
 };
 
 static int aac_send_reset_adapter(struct aac_dev *dev, void __user *arg)
+	__must_hold(&dev->ioctl_mutex)
 {
 	struct aac_reset_iop reset;
 	int retval;

@@ -10,19 +10,20 @@
 #include <linux/kvm_host.h>
 #include <linux/seq_file.h>
 
+#include <asm/cpufeature.h>
 #include <asm/kvm_mmu.h>
 #include <asm/kvm_pgtable.h>
 #include <asm/ptdump.h>
 
 #define MARKERS_LEN		2
 #define KVM_PGTABLE_MAX_LEVELS	(KVM_PGTABLE_LAST_LEVEL + 1)
+#define S2FNAMESZ		sizeof("nested_mmu0000")
 
 struct kvm_ptdump_guest_state {
-	struct kvm		*kvm;
+	struct kvm_s2_mmu	*mmu;
 	struct ptdump_pg_state	parser_state;
 	struct addr_marker	ipa_marker[MARKERS_LEN];
 	struct ptdump_pg_level	level[KVM_PGTABLE_MAX_LEVELS];
-	struct ptdump_range	range[MARKERS_LEN];
 };
 
 static const struct ptdump_prot_bits stage2_pte_bits[] = {
@@ -31,27 +32,46 @@ static const struct ptdump_prot_bits stage2_pte_bits[] = {
 		.val	= PTE_VALID,
 		.set	= " ",
 		.clear	= "F",
-	}, {
+	},
+	{
 		.mask	= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R,
 		.val	= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R,
 		.set	= "R",
 		.clear	= " ",
-	}, {
+	},
+	{
 		.mask	= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W,
 		.val	= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W,
 		.set	= "W",
 		.clear	= " ",
-	}, {
+	},
+	{
 		.mask	= KVM_PTE_LEAF_ATTR_HI_S2_XN,
-		.val	= KVM_PTE_LEAF_ATTR_HI_S2_XN,
-		.set	= "NX",
-		.clear	= "x ",
-	}, {
+		.val	= 0b00UL << __bf_shf(KVM_PTE_LEAF_ATTR_HI_S2_XN),
+		.set	= "px ux ",
+	},
+	{
+		.mask	= KVM_PTE_LEAF_ATTR_HI_S2_XN,
+		.val	= 0b01UL << __bf_shf(KVM_PTE_LEAF_ATTR_HI_S2_XN),
+		.set	= "PXNux ",
+	},
+	{
+		.mask	= KVM_PTE_LEAF_ATTR_HI_S2_XN,
+		.val	= 0b10UL << __bf_shf(KVM_PTE_LEAF_ATTR_HI_S2_XN),
+		.set	= "PXNUXN",
+	},
+	{
+		.mask	= KVM_PTE_LEAF_ATTR_HI_S2_XN,
+		.val	= 0b11UL << __bf_shf(KVM_PTE_LEAF_ATTR_HI_S2_XN),
+		.set	= "px UXN",
+	},
+	{
 		.mask	= KVM_PTE_LEAF_ATTR_LO_S2_AF,
 		.val	= KVM_PTE_LEAF_ATTR_LO_S2_AF,
 		.set	= "AF",
 		.clear	= "  ",
-	}, {
+	},
+	{
 		.mask	= PMD_TYPE_MASK,
 		.val	= PMD_TYPE_SECT,
 		.set	= "BLK",
@@ -93,36 +113,39 @@ static int kvm_ptdump_build_levels(struct ptdump_pg_level *level, u32 start_lvl)
 	return 0;
 }
 
-static struct kvm_ptdump_guest_state *kvm_ptdump_parser_create(struct kvm *kvm)
+static struct kvm_ptdump_guest_state *kvm_ptdump_parser_create(struct kvm_s2_mmu *mmu)
 {
+	struct kvm *kvm = kvm_s2_mmu_to_kvm(mmu);
 	struct kvm_ptdump_guest_state *st;
-	struct kvm_s2_mmu *mmu = &kvm->arch.mmu;
-	struct kvm_pgtable *pgtable = mmu->pgt;
+	s8 start_level;
 	int ret;
 
-	st = kzalloc(sizeof(struct kvm_ptdump_guest_state), GFP_KERNEL_ACCOUNT);
+	/*
+	 * We only need the pgt start level to initialize the ptdump, get it
+	 * while holding the mmu_lock. It's fine if the pgt gets freed
+	 * afterwards, we'll check again when doing the actual dump.
+	 */
+	scoped_guard(read_lock, &kvm->mmu_lock) {
+		if (mmu->pgt)
+			start_level = mmu->pgt->start_level;
+		else
+			return ERR_PTR(-ENOENT);
+	}
+
+	st = kzalloc_obj(struct kvm_ptdump_guest_state, GFP_KERNEL_ACCOUNT);
 	if (!st)
 		return ERR_PTR(-ENOMEM);
 
-	ret = kvm_ptdump_build_levels(&st->level[0], pgtable->start_level);
+	ret = kvm_ptdump_build_levels(&st->level[0], start_level);
 	if (ret) {
 		kfree(st);
 		return ERR_PTR(ret);
 	}
 
 	st->ipa_marker[0].name		= "Guest IPA";
-	st->ipa_marker[1].start_address = BIT(pgtable->ia_bits);
-	st->range[0].end		= BIT(pgtable->ia_bits);
+	st->ipa_marker[1].start_address = ULONG_MAX;
 
-	st->kvm				= kvm;
-	st->parser_state = (struct ptdump_pg_state) {
-		.marker		= &st->ipa_marker[0],
-		.level		= -1,
-		.pg_level	= &st->level[0],
-		.ptdump.range	= &st->range[0],
-		.start_address	= 0,
-	};
-
+	st->mmu				= mmu;
 	return st;
 }
 
@@ -130,34 +153,54 @@ static int kvm_ptdump_guest_show(struct seq_file *m, void *unused)
 {
 	int ret;
 	struct kvm_ptdump_guest_state *st = m->private;
-	struct kvm *kvm = st->kvm;
-	struct kvm_s2_mmu *mmu = &kvm->arch.mmu;
-	struct ptdump_pg_state *parser_state = &st->parser_state;
+	struct kvm_s2_mmu *mmu = st->mmu;
+	struct kvm *kvm = kvm_s2_mmu_to_kvm(mmu);
 	struct kvm_pgtable_walker walker = (struct kvm_pgtable_walker) {
 		.cb	= kvm_ptdump_visitor,
-		.arg	= parser_state,
+		.arg	= &st->parser_state,
 		.flags	= KVM_PGTABLE_WALK_LEAF,
 	};
 
-	parser_state->seq = m;
+	guard(write_lock)(&kvm->mmu_lock);
+	if (!mmu->pgt)
+		return 0;
 
-	write_lock(&kvm->mmu_lock);
+	st->parser_state = (struct ptdump_pg_state) {
+		.marker		= &st->ipa_marker[0],
+		.end_address	= BIT(mmu->pgt->ia_bits),
+		.level		= -1,
+		.pg_level	= &st->level[0],
+		.seq		= m,
+	};
+
+	if (kvm_is_nested_s2_mmu(kvm, mmu)) {
+		if (kvm_s2_mmu_valid(mmu))
+			seq_printf(m, "VTCR: 0x%016llx VTTBR: 0x%016llx s2: %s\n",
+				   mmu->tlb_vtcr, mmu->tlb_vttbr,
+				   mmu->nested_stage2_enabled ? "enabled" : "disabled");
+		else
+			return 0;
+	}
+
 	ret = kvm_pgtable_walk(mmu->pgt, 0, BIT(mmu->pgt->ia_bits), &walker);
-	write_unlock(&kvm->mmu_lock);
+	if (ret)
+		return ret;
+	note_page_flush(&st->parser_state.ptdump);
 
-	return ret;
+	return 0;
 }
 
 static int kvm_ptdump_guest_open(struct inode *m, struct file *file)
 {
-	struct kvm *kvm = m->i_private;
+	struct kvm_s2_mmu *mmu = m->i_private;
+	struct kvm *kvm = kvm_s2_mmu_to_kvm(mmu);
 	struct kvm_ptdump_guest_state *st;
 	int ret;
 
 	if (!kvm_get_kvm_safe(kvm))
 		return -ENOENT;
 
-	st = kvm_ptdump_parser_create(kvm);
+	st = kvm_ptdump_parser_create(mmu);
 	if (IS_ERR(st)) {
 		ret = PTR_ERR(st);
 		goto err_with_kvm_ref;
@@ -175,7 +218,7 @@ err_with_kvm_ref:
 
 static int kvm_ptdump_guest_close(struct inode *m, struct file *file)
 {
-	struct kvm *kvm = m->i_private;
+	struct kvm *kvm = kvm_s2_mmu_to_kvm(m->i_private);
 	void *st = ((struct seq_file *)file->private_data)->private;
 
 	kfree(st);
@@ -193,33 +236,41 @@ static const struct file_operations kvm_ptdump_guest_fops = {
 
 static int kvm_pgtable_range_show(struct seq_file *m, void *unused)
 {
-	struct kvm_pgtable *pgtable = m->private;
+	struct kvm_s2_mmu *mmu = m->private;
+	struct kvm *kvm = kvm_s2_mmu_to_kvm(mmu);
 
-	seq_printf(m, "%2u\n", pgtable->ia_bits);
+	guard(read_lock)(&kvm->mmu_lock);
+
+	if (mmu->pgt)
+		seq_printf(m, "%2u\n", mmu->pgt->ia_bits);
+
 	return 0;
 }
 
 static int kvm_pgtable_levels_show(struct seq_file *m, void *unused)
 {
-	struct kvm_pgtable *pgtable = m->private;
+	struct kvm_s2_mmu *mmu = m->private;
+	struct kvm *kvm = kvm_s2_mmu_to_kvm(mmu);
 
-	seq_printf(m, "%1d\n", KVM_PGTABLE_MAX_LEVELS - pgtable->start_level);
+	guard(read_lock)(&kvm->mmu_lock);
+
+	if (mmu->pgt)
+		seq_printf(m, "%1d\n", KVM_PGTABLE_MAX_LEVELS - mmu->pgt->start_level);
+
 	return 0;
 }
 
 static int kvm_pgtable_debugfs_open(struct inode *m, struct file *file,
 				    int (*show)(struct seq_file *, void *))
 {
-	struct kvm *kvm = m->i_private;
-	struct kvm_pgtable *pgtable;
+	struct kvm_s2_mmu *mmu = m->i_private;
+	struct kvm *kvm = kvm_s2_mmu_to_kvm(mmu);
 	int ret;
 
 	if (!kvm_get_kvm_safe(kvm))
 		return -ENOENT;
 
-	pgtable = kvm->arch.mmu.pgt;
-
-	ret = single_open(file, show, pgtable);
+	ret = single_open(file, show, mmu);
 	if (ret < 0)
 		kvm_put_kvm(kvm);
 	return ret;
@@ -237,7 +288,7 @@ static int kvm_pgtable_levels_open(struct inode *m, struct file *file)
 
 static int kvm_pgtable_debugfs_close(struct inode *m, struct file *file)
 {
-	struct kvm *kvm = m->i_private;
+	struct kvm *kvm = kvm_s2_mmu_to_kvm(m->i_private);
 
 	kvm_put_kvm(kvm);
 	return single_release(m, file);
@@ -257,12 +308,29 @@ static const struct file_operations kvm_pgtable_levels_fops = {
 	.release	= kvm_pgtable_debugfs_close,
 };
 
+void kvm_nested_s2_ptdump_create_debugfs(struct kvm_s2_mmu *mmu, int idx)
+{
+	char file_name[S2FNAMESZ];
+
+	snprintf(file_name, sizeof(file_name), "nested_mmu%d", idx);
+
+	debugfs_create_file(file_name, 0400,
+			    mmu->arch->debugfs_nv_dentry, mmu,
+			    &kvm_ptdump_guest_fops);
+}
+
 void kvm_s2_ptdump_create_debugfs(struct kvm *kvm)
 {
+	/* pKVM handles the page-tables in the hypervisor */
+	if (is_protected_kvm_enabled())
+		return;
+
 	debugfs_create_file("stage2_page_tables", 0400, kvm->debugfs_dentry,
-			    kvm, &kvm_ptdump_guest_fops);
-	debugfs_create_file("ipa_range", 0400, kvm->debugfs_dentry, kvm,
-			    &kvm_pgtable_range_fops);
+			    &kvm->arch.mmu, &kvm_ptdump_guest_fops);
+	debugfs_create_file("ipa_range", 0400, kvm->debugfs_dentry,
+			    &kvm->arch.mmu, &kvm_pgtable_range_fops);
 	debugfs_create_file("stage2_levels", 0400, kvm->debugfs_dentry,
-			    kvm, &kvm_pgtable_levels_fops);
+			    &kvm->arch.mmu, &kvm_pgtable_levels_fops);
+	if (cpus_have_final_cap(ARM64_HAS_NESTED_VIRT))
+		kvm->arch.debugfs_nv_dentry = debugfs_create_dir("nested", kvm->debugfs_dentry);
 }

@@ -199,12 +199,48 @@ void intel_unlock_cpuid_leafs(struct cpuinfo_x86 *c)
 		c->cpuid_level = cpuid_eax(0);
 }
 
+/*
+ * Use CPUID to generate a "vfm" value. Useful before cpuinfo_x86
+ * structures are populated.
+ */
+static u32 intel_cpuid_vfm(void)
+{
+	u32 eax   = cpuid_eax(1);
+	u32 fam   = x86_family(eax);
+	u32 model = x86_model(eax);
+
+	return IFM(fam, model);
+}
+
+u32 intel_get_platform_id(void)
+{
+	unsigned int val[2];
+
+	if (x86_hypervisor_present)
+		return 0;
+
+	/*
+	 * This can be called early. Use CPUID directly instead of
+	 * relying on cpuinfo_x86 which may not be fully initialized.
+	 * The PII does not have MSR_IA32_PLATFORM_ID. Everything
+	 * before _it_ has no microcode (for Linux at least).
+	 */
+	if (intel_cpuid_vfm() <= INTEL_PENTIUM_II_KLAMATH)
+		return 0;
+
+	/* get processor flags from MSR 0x17 */
+	native_rdmsr(MSR_IA32_PLATFORM_ID, val[0], val[1]);
+
+	return (val[1] >> 18) & 7;
+}
+
 static void early_init_intel(struct cpuinfo_x86 *c)
 {
 	u64 misc_enable;
 
 	if (c->x86 >= 6 && !cpu_has(c, X86_FEATURE_IA64))
 		c->microcode = intel_get_microcode_revision();
+	c->intel_platform_id = intel_get_platform_id();
 
 	/* Now if any of them are set, check the blacklist and clear the lot */
 	if ((cpu_has(c, X86_FEATURE_SPEC_CTRL) ||
@@ -236,9 +272,7 @@ static void early_init_intel(struct cpuinfo_x86 *c)
 		clear_cpu_cap(c, X86_FEATURE_PSE);
 	}
 
-#ifdef CONFIG_X86_64
-	set_cpu_cap(c, X86_FEATURE_SYSENTER32);
-#else
+#ifndef CONFIG_X86_64
 	/* Netburst reports 64 bytes clflush size, but does IO in 128 bytes */
 	if (c->x86 == 15 && c->x86_cache_alignment == 64)
 		c->x86_cache_alignment = 128;
@@ -389,24 +423,15 @@ __setup("forcepae", forcepae_setup);
 
 static void intel_workarounds(struct cpuinfo_x86 *c)
 {
-#ifdef CONFIG_X86_F00F_BUG
 	/*
 	 * All models of Pentium and Pentium with MMX technology CPUs
 	 * have the F0 0F bug, which lets nonprivileged users lock up the
-	 * system. Announce that the fault handler will be checking for it.
+	 * system. The fault handler always checks for it.
 	 * The Quark is also family 5, but does not have the same bug.
 	 */
-	clear_cpu_bug(c, X86_BUG_F00F);
-	if (c->x86_vfm >= INTEL_FAM5_START && c->x86_vfm < INTEL_QUARK_X1000) {
-		static int f00f_workaround_enabled;
-
+	if (IS_ENABLED(CONFIG_X86_F00F_BUG) &&
+	    (c->x86_vfm >= INTEL_FAM5_START && c->x86_vfm < INTEL_QUARK_X1000))
 		set_cpu_bug(c, X86_BUG_F00F);
-		if (!f00f_workaround_enabled) {
-			pr_notice("Intel Pentium with F0 0F bug - workaround enabled.\n");
-			f00f_workaround_enabled = 1;
-		}
-	}
-#endif
 
 	/*
 	 * SEP CPUID bug: Pentium Pro reports SEP but doesn't have it until
@@ -552,12 +577,12 @@ static void init_intel(struct cpuinfo_x86 *c)
 		set_cpu_cap(c, X86_FEATURE_LFENCE_RDTSC);
 
 	if (boot_cpu_has(X86_FEATURE_DS)) {
-		unsigned int l1, l2;
+		u64 l;
 
-		rdmsr(MSR_IA32_MISC_ENABLE, l1, l2);
-		if (!(l1 & MSR_IA32_MISC_ENABLE_BTS_UNAVAIL))
+		rdmsrq(MSR_IA32_MISC_ENABLE, l);
+		if (!(l & MSR_IA32_MISC_ENABLE_BTS_UNAVAIL))
 			set_cpu_cap(c, X86_FEATURE_BTS);
-		if (!(l1 & MSR_IA32_MISC_ENABLE_PEBS_UNAVAIL))
+		if (!(l & MSR_IA32_MISC_ENABLE_PEBS_UNAVAIL))
 			set_cpu_cap(c, X86_FEATURE_PEBS);
 	}
 

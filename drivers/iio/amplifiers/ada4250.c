@@ -109,7 +109,7 @@ static int ada4250_set_offset_uv(struct iio_dev *indio_dev,
 
 	/*
 	 * Compute Range and Voltage per LSB for the Sensor Offset Calibration
-	 * Example of computation for Range 1 and Range 2 (Curren Bias Set = AVDD):
+	 * Example of computation for Range 1 and Range 2 (Current Bias Set = AVDD):
 	 *                     Range 1                            Range 2
 	 *   Gain   | Max Vos(mV) |   LSB(mV)        |  Max Vos(mV)  | LSB(mV) |
 	 *    2     |    X1*127   | X1=0.126(AVDD-1) |   X1*3*127    |  X1*3   |
@@ -358,7 +358,7 @@ static int ada4250_probe(struct spi_device *spi)
 }
 
 static const struct spi_device_id ada4250_id[] = {
-	{ "ada4250", 0 },
+	{ .name = "ada4250" },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, ada4250_id);

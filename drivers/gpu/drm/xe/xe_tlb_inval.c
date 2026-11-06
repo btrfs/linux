@@ -5,17 +5,16 @@
 
 #include <drm/drm_managed.h>
 
-#include "abi/guc_actions_abi.h"
-#include "xe_device.h"
+#include "xe_devcoredump.h"
+#include "xe_device_types.h"
 #include "xe_force_wake.h"
-#include "xe_gt.h"
-#include "xe_gt_printk.h"
 #include "xe_gt_stats.h"
-#include "xe_guc.h"
+#include "xe_gt_types.h"
 #include "xe_guc_ct.h"
 #include "xe_guc_tlb_inval.h"
 #include "xe_mmio.h"
 #include "xe_pm.h"
+#include "xe_printk.h"
 #include "xe_tlb_inval.h"
 #include "xe_trace.h"
 
@@ -32,6 +31,12 @@
 
 #define FENCE_STACK_BIT		DMA_FENCE_FLAG_USER_BITS
 
+/* The frontend is only ever embedded in a GT */
+static struct xe_gt *tlb_inval_to_gt(struct xe_tlb_inval *tlb_inval)
+{
+	return container_of(tlb_inval, struct xe_gt, tlb_inval);
+}
+
 static void xe_tlb_inval_fence_fini(struct xe_tlb_inval_fence *fence)
 {
 	if (WARN_ON_ONCE(!fence->tlb_inval))
@@ -44,11 +49,14 @@ static void xe_tlb_inval_fence_fini(struct xe_tlb_inval_fence *fence)
 static void
 xe_tlb_inval_fence_signal(struct xe_tlb_inval_fence *fence)
 {
+	struct xe_tlb_inval *tlb_inval = fence->tlb_inval;
 	bool stack = test_bit(FENCE_STACK_BIT, &fence->base.flags);
 
 	lockdep_assert_held(&fence->tlb_inval->pending_lock);
 
 	list_del(&fence->link);
+	if (list_empty(&tlb_inval->pending_fences))
+		cancel_delayed_work(&tlb_inval->fence_tdr);
 	trace_xe_tlb_inval_fence_signal(fence->tlb_inval->xe, fence);
 	xe_tlb_inval_fence_fini(fence);
 	dma_fence_signal(&fence->base);
@@ -73,6 +81,7 @@ static void xe_tlb_inval_fence_timeout(struct work_struct *work)
 	struct xe_device *xe = tlb_inval->xe;
 	struct xe_tlb_inval_fence *fence, *next;
 	long timeout_delay = tlb_inval->ops->timeout_delay(tlb_inval);
+	int timedout_seqno = 0, seqno_recv = 0;
 
 	tlb_inval->ops->flush(tlb_inval);
 
@@ -90,13 +99,45 @@ static void xe_tlb_inval_fence_timeout(struct work_struct *work)
 			"TLB invalidation fence timeout, seqno=%d recv=%d",
 			fence->seqno, tlb_inval->seqno_recv);
 
+		if (!timedout_seqno) {
+			/*
+			 * Hold a PM reference across the capture below. Every
+			 * pending fence holds one, so the device is awake
+			 * here, but signalling them may drop the last
+			 * reference and let it autosuspend before the
+			 * snapshot touches the hardware.
+			 */
+			xe_pm_runtime_get_noresume(xe);
+		}
+
+		timedout_seqno = fence->seqno;
+		if (!tlb_inval->timedout_seqno) {
+			tlb_inval->timedout_seqno = fence->seqno;
+			tlb_inval->timedout_inval_time = fence->inval_time;
+			tlb_inval->timedout_time = ktime_get();
+		}
+
 		fence->base.error = -ETIME;
 		xe_tlb_inval_fence_signal(fence);
 	}
 	if (!list_empty(&tlb_inval->pending_fences))
-		queue_delayed_work(system_wq, &tlb_inval->fence_tdr,
+		queue_delayed_work(tlb_inval->timeout_wq, &tlb_inval->fence_tdr,
 				   timeout_delay);
+	seqno_recv = tlb_inval->seqno_recv;
 	spin_unlock_irq(&tlb_inval->pending_lock);
+
+	/*
+	 * Capture the GuC log and CT state so the firmware side of the hang
+	 * can be inspected; there is no queue or job to blame here. Must be
+	 * outside pending_lock as the capture takes sleeping locks, hence
+	 * @seqno_recv is sampled above while the lock is still held.
+	 */
+	if (timedout_seqno) {
+		xe_devcoredump_gt(tlb_inval_to_gt(tlb_inval),
+				  "TLB invalidation fence timeout, seqno=%d recv=%d",
+				  timedout_seqno, seqno_recv);
+		xe_pm_runtime_put(xe);
+	}
 }
 
 /**
@@ -114,8 +155,18 @@ static void tlb_inval_fini(struct drm_device *drm, void *arg)
 	xe_tlb_inval_reset(tlb_inval);
 }
 
+static void primelockdep(struct xe_tlb_inval *tlb_inval)
+{
+	if (!IS_ENABLED(CONFIG_LOCKDEP))
+		return;
+
+	fs_reclaim_acquire(GFP_KERNEL);
+	might_lock(&tlb_inval->seqno_lock);
+	fs_reclaim_release(GFP_KERNEL);
+}
+
 /**
- * xe_gt_tlb_inval_init - Initialize TLB invalidation state
+ * xe_gt_tlb_inval_init_early() - Initialize TLB invalidation state
  * @gt: GT structure
  *
  * Initialize TLB invalidation state, purely software initialization, should
@@ -140,11 +191,17 @@ int xe_gt_tlb_inval_init_early(struct xe_gt *gt)
 	if (err)
 		return err;
 
+	primelockdep(tlb_inval);
+
 	tlb_inval->job_wq = drmm_alloc_ordered_workqueue(&xe->drm,
 							 "gt-tbl-inval-job-wq",
 							 WQ_MEM_RECLAIM);
 	if (IS_ERR(tlb_inval->job_wq))
 		return PTR_ERR(tlb_inval->job_wq);
+
+	tlb_inval->timeout_wq = gt->ordered_wq;
+	if (IS_ERR(tlb_inval->timeout_wq))
+		return PTR_ERR(tlb_inval->timeout_wq);
 
 	/* XXX: Blindly setting up backend to GuC */
 	xe_guc_tlb_inval_init_early(&gt->uc.guc, tlb_inval);
@@ -191,12 +248,27 @@ void xe_tlb_inval_reset(struct xe_tlb_inval *tlb_inval)
 	else
 		pending_seqno = tlb_inval->seqno - 1;
 	WRITE_ONCE(tlb_inval->seqno_recv, pending_seqno);
+	tlb_inval->timedout_seqno = 0;
 
 	list_for_each_entry_safe(fence, next,
 				 &tlb_inval->pending_fences, link)
 		xe_tlb_inval_fence_signal(fence);
 	spin_unlock_irq(&tlb_inval->pending_lock);
 	mutex_unlock(&tlb_inval->seqno_lock);
+}
+
+/**
+ * xe_tlb_inval_reset_timeout() - Reset TLB inval fence timeout
+ * @tlb_inval: TLB invalidation client
+ *
+ * Reset the TLB invalidation timeout timer.
+ */
+static void xe_tlb_inval_reset_timeout(struct xe_tlb_inval *tlb_inval)
+{
+	lockdep_assert_held(&tlb_inval->pending_lock);
+
+	mod_delayed_work(system_wq, &tlb_inval->fence_tdr,
+			 tlb_inval->ops->timeout_delay(tlb_inval));
 }
 
 static bool xe_tlb_inval_seqno_past(struct xe_tlb_inval *tlb_inval, int seqno)
@@ -226,7 +298,7 @@ static void xe_tlb_inval_fence_prep(struct xe_tlb_inval_fence *fence)
 	list_add_tail(&fence->link, &tlb_inval->pending_fences);
 
 	if (list_is_singular(&tlb_inval->pending_fences))
-		queue_delayed_work(system_wq, &tlb_inval->fence_tdr,
+		queue_delayed_work(tlb_inval->timeout_wq, &tlb_inval->fence_tdr,
 				   tlb_inval->ops->timeout_delay(tlb_inval));
 	spin_unlock_irq(&tlb_inval->pending_lock);
 
@@ -250,7 +322,8 @@ static void xe_tlb_inval_fence_prep(struct xe_tlb_inval_fence *fence)
 		xe_tlb_inval_fence_signal_unlocked((__fence));	\
 	mutex_unlock(&(__tlb_inval)->seqno_lock);		\
 								\
-	__ret == -ECANCELED ? 0 : __ret;			\
+	/* Undelivered: fence already signalled, report done */	\
+	(__ret == -ECANCELED || __ret == -ENOTRECOVERABLE) ? 0 : __ret;	\
 })
 
 /**
@@ -271,6 +344,26 @@ int xe_tlb_inval_all(struct xe_tlb_inval *tlb_inval,
 }
 
 /**
+ * xe_tlb_inval_issue_op_wait() - Issue a TLB invalidation and wait
+ * @tlb_inval: TLB invalidation client
+ * @op: backend invalidation hook to issue
+ *
+ * Return: 0 on success, negative error code on error
+ */
+static int xe_tlb_inval_issue_op_wait(struct xe_tlb_inval *tlb_inval,
+				      int (*op)(struct xe_tlb_inval *tlb_inval, u32 seqno))
+{
+	struct xe_tlb_inval_fence fence, *fence_ptr = &fence;
+	int ret;
+
+	xe_tlb_inval_fence_init(tlb_inval, fence_ptr, true);
+	ret = xe_tlb_inval_issue(tlb_inval, fence_ptr, op);
+	xe_tlb_inval_fence_wait(fence_ptr);
+
+	return ret;
+}
+
+/**
  * xe_tlb_inval_ggtt() - Issue a TLB invalidation for the GGTT
  * @tlb_inval: TLB invalidation client
  *
@@ -281,14 +374,24 @@ int xe_tlb_inval_all(struct xe_tlb_inval *tlb_inval,
  */
 int xe_tlb_inval_ggtt(struct xe_tlb_inval *tlb_inval)
 {
-	struct xe_tlb_inval_fence fence, *fence_ptr = &fence;
-	int ret;
+	return xe_tlb_inval_issue_op_wait(tlb_inval, tlb_inval->ops->ggtt);
+}
 
-	xe_tlb_inval_fence_init(tlb_inval, fence_ptr, true);
-	ret = xe_tlb_inval_issue(tlb_inval, fence_ptr, tlb_inval->ops->ggtt);
-	xe_tlb_inval_fence_wait(fence_ptr);
+/**
+ * xe_tlb_inval_ggtt_full() - Full engine TLB invalidation within a VF
+ * @tlb_inval: TLB invalidation client
+ *
+ * Issue INVAL_FULL (intra vf) to flush engine TLBs across all engines
+ * within the requesting VF.
+ *
+ * Return: 0 on success, negative error code on error
+ */
+int xe_tlb_inval_ggtt_full(struct xe_tlb_inval *tlb_inval)
+{
+	if (!tlb_inval->ops->ggtt_full)
+		return -EOPNOTSUPP;
 
-	return ret;
+	return xe_tlb_inval_issue_op_wait(tlb_inval, tlb_inval->ops->ggtt_full);
 }
 
 /**
@@ -299,6 +402,7 @@ int xe_tlb_inval_ggtt(struct xe_tlb_inval *tlb_inval)
  * @start: start address
  * @end: end address
  * @asid: address space id
+ * @prl_sa: suballocation of page reclaim list if used, NULL indicates PPC flush
  *
  * Issue a range based TLB invalidation if supported, if not fallback to a full
  * TLB invalidation. Completion of TLB is asynchronous and caller can use
@@ -308,10 +412,10 @@ int xe_tlb_inval_ggtt(struct xe_tlb_inval *tlb_inval)
  */
 int xe_tlb_inval_range(struct xe_tlb_inval *tlb_inval,
 		       struct xe_tlb_inval_fence *fence, u64 start, u64 end,
-		       u32 asid)
+		       u32 asid, struct drm_suballoc *prl_sa)
 {
 	return xe_tlb_inval_issue(tlb_inval, fence, tlb_inval->ops->ppgtt,
-				  start, end, asid);
+				  start, end, asid, prl_sa);
 }
 
 /**
@@ -327,7 +431,7 @@ void xe_tlb_inval_vm(struct xe_tlb_inval *tlb_inval, struct xe_vm *vm)
 	u64 range = 1ull << vm->xe->info.va_bits;
 
 	xe_tlb_inval_fence_init(tlb_inval, &fence, true);
-	xe_tlb_inval_range(tlb_inval, &fence, 0, range, vm->usm.asid);
+	xe_tlb_inval_range(tlb_inval, &fence, 0, range, vm->usm.asid, NULL);
 	xe_tlb_inval_fence_wait(&fence);
 }
 
@@ -360,12 +464,30 @@ void xe_tlb_inval_done_handler(struct xe_tlb_inval *tlb_inval, int seqno)
 	 * process_g2h_msg().
 	 */
 	spin_lock_irqsave(&tlb_inval->pending_lock, flags);
+	if (seqno == TLB_INVALIDATION_SEQNO_INVALID) {
+		xe_tlb_inval_reset_timeout(tlb_inval);
+		spin_unlock_irqrestore(&tlb_inval->pending_lock, flags);
+		return;
+	}
+
 	if (xe_tlb_inval_seqno_past(tlb_inval, seqno)) {
 		spin_unlock_irqrestore(&tlb_inval->pending_lock, flags);
 		return;
 	}
 
 	WRITE_ONCE(tlb_inval->seqno_recv, seqno);
+
+	if (tlb_inval->timedout_seqno &&
+	    xe_tlb_inval_seqno_past(tlb_inval, tlb_inval->timedout_seqno)) {
+		ktime_t now = ktime_get();
+
+		xe_warn(xe,
+			"TLB invalidation late ack: seqno=%d recv=%d, request-to-ack=%lldms, timeout-to-ack=%lldms",
+			tlb_inval->timedout_seqno, seqno,
+			ktime_ms_delta(now, tlb_inval->timedout_inval_time),
+			ktime_ms_delta(now, tlb_inval->timedout_time));
+		tlb_inval->timedout_seqno = 0;
+	}
 
 	list_for_each_entry_safe(fence, next,
 				 &tlb_inval->pending_fences, link) {
@@ -378,7 +500,7 @@ void xe_tlb_inval_done_handler(struct xe_tlb_inval *tlb_inval, int seqno)
 	}
 
 	if (!list_empty(&tlb_inval->pending_fences))
-		mod_delayed_work(system_wq,
+		mod_delayed_work(tlb_inval->timeout_wq,
 				 &tlb_inval->fence_tdr,
 				 tlb_inval->ops->timeout_delay(tlb_inval));
 	else
@@ -430,4 +552,106 @@ void xe_tlb_inval_fence_init(struct xe_tlb_inval *tlb_inval,
 	else
 		dma_fence_get(&fence->base);
 	fence->tlb_inval = tlb_inval;
+}
+
+/**
+ * xe_tlb_inval_idle() - Initialize TLB invalidation is idle
+ * @tlb_inval: TLB invalidation client
+ *
+ * Check the TLB invalidation seqno to determine if it is idle (i.e., no TLB
+ * invalidations are in flight). Expected to be called in the backend after the
+ * fence has been added to the pending list, and takes this into account.
+ *
+ * Return: True if TLB invalidation client is idle, False otherwise
+ */
+bool xe_tlb_inval_idle(struct xe_tlb_inval *tlb_inval)
+{
+	lockdep_assert_held(&tlb_inval->seqno_lock);
+
+	guard(spinlock_irq)(&tlb_inval->pending_lock);
+	return list_is_singular(&tlb_inval->pending_fences);
+}
+
+/**
+ * xe_tlb_inval_batch_wait() - Wait for all fences in a TLB invalidation batch
+ * @batch: Batch of TLB invalidation fences to wait on
+ *
+ * Waits for every fence in @batch to signal, then resets @batch so it can be
+ * reused for a subsequent invalidation.
+ */
+void xe_tlb_inval_batch_wait(struct xe_tlb_inval_batch *batch)
+{
+	struct xe_tlb_inval_fence *fence = &batch->fence[0];
+	unsigned int i;
+
+	for (i = 0; i < batch->num_fences; ++i)
+		xe_tlb_inval_fence_wait(fence++);
+
+	batch->num_fences = 0;
+}
+
+/**
+ * xe_tlb_inval_range_tilemask_submit() - Submit TLB invalidations for an
+ * address range on a tile mask
+ * @xe: The xe device
+ * @asid: Address space ID
+ * @start: start address
+ * @end: end address
+ * @tile_mask: mask for which gt's issue tlb invalidation
+ * @batch: Batch of tlb invalidate fences
+ *
+ * Issue a range based TLB invalidation for gt's in tilemask
+ * If the function returns an error, there is no need to call
+ * xe_tlb_inval_batch_wait() on @batch.
+ *
+ * Returns 0 for success, negative error code otherwise.
+ */
+int xe_tlb_inval_range_tilemask_submit(struct xe_device *xe, u32 asid,
+				       u64 start, u64 end, u8 tile_mask,
+				       struct xe_tlb_inval_batch *batch)
+{
+	struct xe_tlb_inval_fence *fence = &batch->fence[0];
+	struct xe_tile *tile;
+	u32 fence_id = 0;
+	u8 id;
+	int err = 0;
+
+	batch->num_fences = 0;
+	if (!tile_mask)
+		return 0;
+
+	for_each_tile(tile, xe, id) {
+		if (!(tile_mask & BIT(id)))
+			continue;
+
+		xe_tlb_inval_fence_init(&tile->primary_gt->tlb_inval,
+					&fence[fence_id], true);
+
+		err = xe_tlb_inval_range(&tile->primary_gt->tlb_inval,
+					 &fence[fence_id], start, end,
+					 asid, NULL);
+		if (err)
+			goto wait;
+		++fence_id;
+
+		if (!tile->media_gt)
+			continue;
+
+		xe_tlb_inval_fence_init(&tile->media_gt->tlb_inval,
+					&fence[fence_id], true);
+
+		err = xe_tlb_inval_range(&tile->media_gt->tlb_inval,
+					 &fence[fence_id], start, end,
+					 asid, NULL);
+		if (err)
+			goto wait;
+		++fence_id;
+	}
+
+wait:
+	batch->num_fences = fence_id;
+	if (err)
+		xe_tlb_inval_batch_wait(batch);
+
+	return err;
 }

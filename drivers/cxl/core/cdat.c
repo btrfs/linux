@@ -17,6 +17,8 @@ struct dsmas_entry {
 	struct access_coordinate cdat_coord[ACCESS_COORDINATE_MAX];
 	int entries;
 	int qos_class;
+	bool shareable;
+	bool read_only;
 };
 
 static u32 cdat_normalize(u16 entry, u64 base, u8 type)
@@ -69,11 +71,17 @@ static int cdat_dsmas_handler(union acpi_subtable_headers *header, void *arg,
 	/* Skip common header */
 	dsmas = (struct acpi_cdat_dsmas *)(hdr + 1);
 
-	dent = kzalloc(sizeof(*dent), GFP_KERNEL);
+	dent = kzalloc_obj(*dent);
 	if (!dent)
 		return -ENOMEM;
 
+	/* Stays invalid unless the QTG lookup assigns a class */
+	dent->qos_class = CXL_QOS_CLASS_INVALID;
 	dent->handle = dsmas->dsmad_handle;
+	/* Shareable is CDAT 1.03 and later, DSMAS Flags bit 3 */
+	dent->shareable = dsmas->flags & ACPI_CDAT_DSMAS_SHAREABLE;
+	/* Read Only is CDAT 1.04 and later, DSMAS Flags bit 6 */
+	dent->read_only = dsmas->flags & ACPI_CDAT_DSMAS_READ_ONLY;
 	dent->dpa_range.start = le64_to_cpu((__force __le64)dsmas->dpa_base_address);
 	dent->dpa_range.end = le64_to_cpu((__force __le64)dsmas->dpa_base_address) +
 			      le64_to_cpu((__force __le64)dsmas->dpa_length) - 1;
@@ -188,9 +196,10 @@ static int cxl_cdat_endpoint_process(struct cxl_port *port,
 	if (rc)
 		return rc;
 
+	/* DSLBIS is optional; zero entries is not an error */
 	rc = cdat_table_parse(ACPI_CDAT_TYPE_DSLBIS, cdat_dslbis_handler,
 			      dsmas_xa, port->cdat.table, port->cdat.length);
-	return cdat_table_parse_output(rc);
+	return rc < 0 ? rc : 0;
 }
 
 static int cxl_port_perf_data_calculate(struct cxl_port *port,
@@ -213,17 +222,24 @@ static int cxl_port_perf_data_calculate(struct cxl_port *port,
 	if (!cxl_root)
 		return -ENODEV;
 
-	if (!cxl_root->ops || !cxl_root->ops->qos_class)
+	if (!cxl_root->ops.qos_class)
 		return -EOPNOTSUPP;
 
 	xa_for_each(dsmas_xa, index, dent) {
 		int qos_class;
 
+		/* No DSLBIS for this DSMAS; nothing to hand the QTG _DSM */
+		if (!dent->cdat_coord[ACCESS_COORDINATE_CPU].read_bandwidth &&
+		    !dent->cdat_coord[ACCESS_COORDINATE_CPU].write_bandwidth &&
+		    !dent->cdat_coord[ACCESS_COORDINATE_CPU].read_latency &&
+		    !dent->cdat_coord[ACCESS_COORDINATE_CPU].write_latency)
+			continue;
+
 		cxl_coordinates_combine(dent->coord, dent->cdat_coord, ep_c);
 		dent->entries = 1;
-		rc = cxl_root->ops->qos_class(cxl_root,
-					      &dent->coord[ACCESS_COORDINATE_CPU],
-					      1, &qos_class);
+		rc = cxl_root->ops.qos_class(cxl_root,
+					     &dent->coord[ACCESS_COORDINATE_CPU],
+					     1, &qos_class);
 		if (rc != 1)
 			continue;
 
@@ -255,35 +271,90 @@ static void update_perf_entry(struct device *dev, struct dsmas_entry *dent,
 		dent->coord[ACCESS_COORDINATE_CPU].write_latency);
 }
 
-static void cxl_memdev_set_qos_class(struct cxl_dev_state *cxlds,
-				     struct xarray *dsmas_xa)
+/*
+ * A DCD shall describe its DC partition in a DSMAS entry (CXL r4.0 9.13.3).
+ * Without one the partition's attributes are unknown, so disable DCD.
+ */
+static void cxl_dcd_dsmas_missing(struct cxl_dev_state *cxlds, const char *why)
+{
+	struct cxl_memdev_state *mds;
+
+	if (cxlds->type != CXL_DEVTYPE_CLASSMEM)
+		return;
+
+	mds = to_cxl_memdev_state(cxlds);
+	if (!cxl_dcd_supported(mds) ||
+	    !cxl_part_size(cxlds, CXL_PARTMODE_DYNAMIC_RAM))
+		return;
+
+	dev_warn(cxlds->dev, "DC partition has no valid DSMAS entry (%s), disabling DCD\n",
+		 why);
+	cxl_disable_dcd(mds);
+}
+
+enum cxl_dsmas_apply {
+	CXL_DSMAS_APPLY_FLAGS,		/* shareable etc.; no QTG data */
+	CXL_DSMAS_APPLY_FLAGS_PERF,	/* perf coordinates and qos_class */
+};
+
+/*
+ * DSMAS flags such as shareable are properties of the CDAT entry and are
+ * applied regardless; perf data is applied only if the QTG lookup produced
+ * recommendations.
+ */
+static void cxl_memdev_apply_dsmas(struct cxl_dev_state *cxlds,
+				   struct xarray *dsmas_xa,
+				   enum cxl_dsmas_apply attrs)
 {
 	struct device *dev = cxlds->dev;
 	struct dsmas_entry *dent;
+	bool dc_matched = false;
 	unsigned long index;
 
 	xa_for_each(dsmas_xa, index, dent) {
 		bool found = false;
 
 		for (int i = 0; i < cxlds->nr_partitions; i++) {
-			struct resource *res = &cxlds->part[i].res;
+			struct cxl_dpa_partition *part = &cxlds->part[i];
 			struct range range = {
-				.start = res->start,
-				.end = res->end,
+				.start = part->res.start,
+				.end = part->res.end,
 			};
 
-			if (range_contains(&range, &dent->dpa_range)) {
-				update_perf_entry(dev, dent,
-						  &cxlds->part[i].perf);
-				found = true;
+			if (!range_contains(&range, &dent->dpa_range))
+				continue;
+
+			found = true;
+			/*
+			 * part->handle is from Get DC Config, dent->handle
+			 * from the CDAT DSMAS entry.
+			 */
+			if (part->mode == CXL_PARTMODE_DYNAMIC_RAM &&
+			    dent->handle != part->handle) {
+				dev_warn(dev,
+					 "DSMAD handle mismatch: %pra has %u, DSMAS %pra has %u\n",
+					 &range, part->handle,
+					 &dent->dpa_range, dent->handle);
 				break;
 			}
+
+			if (attrs == CXL_DSMAS_APPLY_FLAGS_PERF)
+				update_perf_entry(dev, dent, &part->perf);
+			if (part->mode == CXL_PARTMODE_DYNAMIC_RAM) {
+				part->shareable = dent->shareable;
+				part->read_only = dent->read_only;
+				dc_matched = true;
+			}
+			break;
 		}
 
 		if (!found)
 			dev_dbg(dev, "no partition for dsmas dpa: %pra\n",
 				&dent->dpa_range);
 	}
+
+	if (!dc_matched)
+		cxl_dcd_dsmas_missing(cxlds, "no matching entry");
 }
 
 static int match_cxlrd_qos_class(struct device *dev, void *data)
@@ -409,22 +480,26 @@ void cxl_endpoint_parse_cdat(struct cxl_port *port)
 	int rc;
 
 	xa_init(&__dsmas_xa);
-	if (!port->cdat.table)
+	if (!port->cdat.table) {
+		cxl_dcd_dsmas_missing(cxlds, "no CDAT");
 		return;
+	}
 
 	rc = cxl_cdat_endpoint_process(port, dsmas_xa);
 	if (rc < 0) {
 		dev_dbg(&port->dev, "Failed to parse CDAT: %d\n", rc);
+		cxl_dcd_dsmas_missing(cxlds, "CDAT parse failed");
 		return;
 	}
 
 	rc = cxl_port_perf_data_calculate(port, dsmas_xa);
 	if (rc) {
 		dev_dbg(&port->dev, "Failed to do perf coord calculations.\n");
+		cxl_memdev_apply_dsmas(cxlds, dsmas_xa, CXL_DSMAS_APPLY_FLAGS);
 		return;
 	}
 
-	cxl_memdev_set_qos_class(cxlds, dsmas_xa);
+	cxl_memdev_apply_dsmas(cxlds, dsmas_xa, CXL_DSMAS_APPLY_FLAGS_PERF);
 	cxl_qos_class_verify(cxlmd);
 	cxl_memdev_update_perf(cxlmd);
 }
@@ -633,9 +708,9 @@ static int cxl_endpoint_gather_bandwidth(struct cxl_region *cxlr,
 	struct cxl_port *endpoint = to_cxl_port(cxled->cxld.dev.parent);
 	struct cxl_port *parent_port = to_cxl_port(endpoint->dev.parent);
 	struct cxl_port *gp_port = to_cxl_port(parent_port->dev.parent);
-	struct access_coordinate pci_coord[ACCESS_COORDINATE_MAX];
-	struct access_coordinate sw_coord[ACCESS_COORDINATE_MAX];
-	struct access_coordinate ep_coord[ACCESS_COORDINATE_MAX];
+	struct access_coordinate pci_coord[ACCESS_COORDINATE_MAX] = { };
+	struct access_coordinate sw_coord[ACCESS_COORDINATE_MAX] = { };
+	struct access_coordinate ep_coord[ACCESS_COORDINATE_MAX] = { };
 	struct cxl_memdev *cxlmd = cxled_to_memdev(cxled);
 	struct cxl_dev_state *cxlds = cxlmd->cxlds;
 	struct pci_dev *pdev = to_pci_dev(cxlds->dev);
@@ -669,7 +744,7 @@ static int cxl_endpoint_gather_bandwidth(struct cxl_region *cxlr,
 	perf_ctx = xa_load(usp_xa, index);
 	if (!perf_ctx) {
 		struct cxl_perf_ctx *c __free(kfree) =
-			kzalloc(sizeof(*perf_ctx), GFP_KERNEL);
+			kzalloc_obj(*perf_ctx);
 
 		if (!c)
 			return -ENOMEM;
@@ -756,8 +831,8 @@ static struct xarray *cxl_switch_gather_bandwidth(struct cxl_region *cxlr,
 						  bool *gp_is_root)
 {
 	struct xarray *res_xa __free(free_perf_xa) =
-		kzalloc(sizeof(*res_xa), GFP_KERNEL);
-	struct access_coordinate coords[ACCESS_COORDINATE_MAX];
+		kzalloc_obj(*res_xa);
+	struct access_coordinate coords[ACCESS_COORDINATE_MAX] = { };
 	struct cxl_perf_ctx *ctx, *us_ctx;
 	unsigned long index, us_index;
 	int dev_count = 0;
@@ -795,7 +870,7 @@ static struct xarray *cxl_switch_gather_bandwidth(struct cxl_region *cxlr,
 		us_ctx = xa_load(res_xa, us_index);
 		if (!us_ctx) {
 			struct cxl_perf_ctx *n __free(kfree) =
-				kzalloc(sizeof(*n), GFP_KERNEL);
+				kzalloc_obj(*n);
 
 			if (!n)
 				return ERR_PTR(-ENOMEM);
@@ -826,7 +901,7 @@ static struct xarray *cxl_switch_gather_bandwidth(struct cxl_region *cxlr,
 		cxl_coordinates_combine(coords, coords, ctx->coord);
 
 		/*
-		 * Take the min of the calculated bandwdith and the upstream
+		 * Take the min of the calculated bandwidth and the upstream
 		 * switch SSLBIS bandwidth if there's a parent switch
 		 */
 		if (!is_root)
@@ -862,7 +937,7 @@ static struct xarray *cxl_switch_gather_bandwidth(struct cxl_region *cxlr,
 static struct xarray *cxl_rp_gather_bandwidth(struct xarray *xa)
 {
 	struct xarray *hb_xa __free(free_perf_xa) =
-		kzalloc(sizeof(*hb_xa), GFP_KERNEL);
+		kzalloc_obj(*hb_xa);
 	struct cxl_perf_ctx *ctx;
 	unsigned long index;
 
@@ -879,7 +954,7 @@ static struct xarray *cxl_rp_gather_bandwidth(struct xarray *xa)
 		hb_ctx = xa_load(hb_xa, hb_index);
 		if (!hb_ctx) {
 			struct cxl_perf_ctx *n __free(kfree) =
-				kzalloc(sizeof(*n), GFP_KERNEL);
+				kzalloc_obj(*n);
 
 			if (!n)
 				return ERR_PTR(-ENOMEM);
@@ -906,7 +981,7 @@ static struct xarray *cxl_rp_gather_bandwidth(struct xarray *xa)
 static struct xarray *cxl_hb_gather_bandwidth(struct xarray *xa)
 {
 	struct xarray *mw_xa __free(free_perf_xa) =
-		kzalloc(sizeof(*mw_xa), GFP_KERNEL);
+		kzalloc_obj(*mw_xa);
 	struct cxl_perf_ctx *ctx;
 	unsigned long index;
 
@@ -928,7 +1003,7 @@ static struct xarray *cxl_hb_gather_bandwidth(struct xarray *xa)
 		mw_ctx = xa_load(mw_xa, mw_index);
 		if (!mw_ctx) {
 			struct cxl_perf_ctx *n __free(kfree) =
-				kzalloc(sizeof(*n), GFP_KERNEL);
+				kzalloc_obj(*n);
 
 			if (!n)
 				return ERR_PTR(-ENOMEM);
@@ -949,7 +1024,7 @@ static struct xarray *cxl_hb_gather_bandwidth(struct xarray *xa)
 /**
  * cxl_region_update_bandwidth - Update the bandwidth access coordinates of a region
  * @cxlr: The region being operated on
- * @input_xa: xarray holds cxl_perf_ctx wht calculated bandwidth per ACPI0017 instance
+ * @input_xa: xarray holds cxl_perf_ctx with calculated bandwidth per ACPI0017 instance
  */
 static void cxl_region_update_bandwidth(struct cxl_region *cxlr,
 					struct xarray *input_xa)
@@ -987,7 +1062,7 @@ void cxl_region_shared_upstream_bandwidth_update(struct cxl_region *cxlr)
 	lockdep_assert_held(&cxl_rwsem.dpa);
 
 	struct xarray *usp_xa __free(free_perf_xa) =
-		kzalloc(sizeof(*usp_xa), GFP_KERNEL);
+		kzalloc_obj(*usp_xa);
 
 	if (!usp_xa)
 		return;

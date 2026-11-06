@@ -311,7 +311,7 @@ struct mlx5_aso *mlx5_aso_create(struct mlx5_core_dev *mdev, u32 pdn)
 	struct mlx5_aso *aso;
 	int err;
 
-	aso = kzalloc(sizeof(*aso), GFP_KERNEL);
+	aso = kzalloc_obj(*aso);
 	if (!aso)
 		return ERR_PTR(-ENOMEM);
 
@@ -421,7 +421,7 @@ int mlx5_aso_poll_cq(struct mlx5_aso *aso, bool with_data)
 	mlx5_cqwq_update_db_record(&cq->wq);
 
 	/* ensure cq space is freed before enabling more cqes */
-	wmb();
+	dma_wmb();
 
 	if (with_data)
 		aso->cc += MLX5_ASO_WQEBBS_DATA;

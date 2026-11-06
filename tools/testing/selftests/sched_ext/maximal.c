@@ -19,6 +19,9 @@ static enum scx_test_status setup(void **ctx)
 	SCX_ENUM_INIT(skel);
 	SCX_FAIL_IF(maximal__load(skel), "Failed to load skel");
 
+	bpf_map__set_autoattach(skel->maps.maximal_ops, false);
+	SCX_FAIL_IF(maximal__attach(skel), "Failed to attach skel");
+
 	*ctx = skel;
 
 	return SCX_TEST_PASS;
@@ -31,6 +34,8 @@ static enum scx_test_status run(void *ctx)
 
 	link = bpf_map__attach_struct_ops(skel->maps.maximal_ops);
 	SCX_FAIL_IF(!link, "Failed to attach scheduler");
+
+	SCX_ASSERT_ALIVE(skel, uei);
 
 	bpf_link__destroy(link);
 

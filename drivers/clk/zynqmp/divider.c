@@ -111,10 +111,9 @@ static unsigned long zynqmp_clk_divider_recalc_rate(struct clk_hw *hw,
 }
 
 /**
- * zynqmp_clk_divider_round_rate() - Round rate of divider clock
+ * zynqmp_clk_divider_determine_rate() - Determine rate of divider clock
  * @hw:			handle between common and hardware-specific interfaces
- * @rate:		rate of clock to be set
- * @prate:		rate of parent clock
+ * @req:		rate of clock to be set
  *
  * Return: 0 on success else error+reason
  */
@@ -151,8 +150,9 @@ static int zynqmp_clk_divider_determine_rate(struct clk_hw *hw,
 
 	width = fls(divider->max_div);
 
-	req->rate = divider_round_rate(hw, req->rate, &req->best_parent_rate,
-				       NULL, width, divider->flags);
+	ret = divider_determine_rate(hw, req, NULL, width, divider->flags);
+	if (ret != 0)
+		return ret;
 
 	if (divider->is_frac && (clk_hw_get_flags(hw) & CLK_SET_RATE_PARENT) &&
 	    (req->rate % req->best_parent_rate))
@@ -278,13 +278,13 @@ struct clk_hw *zynqmp_clk_register_divider(const char *name,
 					   u8 num_parents,
 					   const struct clock_topology *nodes)
 {
+	struct clk_init_data init = {};
 	struct zynqmp_clk_divider *div;
 	struct clk_hw *hw;
-	struct clk_init_data init;
 	int ret;
 
 	/* allocate the divider */
-	div = kzalloc(sizeof(*div), GFP_KERNEL);
+	div = kzalloc_obj(*div);
 	if (!div)
 		return ERR_PTR(-ENOMEM);
 

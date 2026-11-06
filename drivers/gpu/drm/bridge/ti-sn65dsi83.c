@@ -11,6 +11,8 @@
  *   = 1x Single-link DSI ~ 2x Single-link or 1x Dual-link LVDS
  *   - Supported
  *   - Dual-link LVDS mode tested
+ *   - Single-link to LVDS Channel A tested
+ *   - Single-link to LVDS Channel B tested
  *   - 2x Single-link LVDS mode unsupported
  *     (should be easy to add by someone who has the HW)
  * - SN65DSI85
@@ -114,6 +116,7 @@
 #define REG_VID_CHA_HORIZONTAL_FRONT_PORCH	0x38
 #define REG_VID_CHA_VERTICAL_FRONT_PORCH	0x3a
 #define REG_VID_CHA_TEST_PATTERN		0x3c
+#define  REG_VID_CHA_TEST_PATTERN_EN		BIT(4)
 /* IRQ registers */
 #define REG_IRQ_GLOBAL				0xe0
 #define  REG_IRQ_GLOBAL_IRQ_EN			BIT(0)
@@ -133,6 +136,9 @@
 #define  REG_IRQ_STAT_CHA_LLP_ERR		BIT(3)
 #define  REG_IRQ_STAT_CHA_SOT_BIT_ERR		BIT(2)
 #define  REG_IRQ_STAT_CHA_PLL_UNLOCK		BIT(0)
+
+static bool sn65dsi83_test_pattern;
+module_param_named(test_pattern, sn65dsi83_test_pattern, bool, 0644);
 
 enum sn65dsi83_channel {
 	CHANNEL_A,
@@ -158,7 +164,7 @@ struct sn65dsi83 {
 	struct gpio_desc		*enable_gpio;
 	struct regulator		*vcc;
 	bool				lvds_dual_link;
-	bool				lvds_dual_link_even_odd_swap;
+	bool				lvds_channel_swap;
 	int				lvds_vod_swing_conf[2];
 	int				lvds_term_conf[2];
 	int				irq;
@@ -351,9 +357,9 @@ static u8 sn65dsi83_get_dsi_range(struct sn65dsi83 *ctx,
 	 *  DSI_CLK = mode clock * bpp / dsi_data_lanes / 2
 	 * the 2 is there because the bus is DDR.
 	 */
-	return DIV_ROUND_UP(clamp((unsigned int)mode->clock *
-			    mipi_dsi_pixel_format_to_bpp(ctx->dsi->format) /
-			    ctx->dsi->lanes / 2, 40000U, 500000U), 5000U);
+	return clamp((unsigned int)mode->clock *
+		     mipi_dsi_pixel_format_to_bpp(ctx->dsi->format) /
+		     ctx->dsi->lanes / 2, 40000U, 500000U) / 5000U;
 }
 
 static u8 sn65dsi83_get_dsi_div(struct sn65dsi83 *ctx)
@@ -399,28 +405,40 @@ retry:
 	drm_modeset_drop_locks(&ctx);
 	drm_modeset_acquire_fini(&ctx);
 
-	return 0;
+	return err;
 }
 
 static void sn65dsi83_reset_work(struct work_struct *ws)
 {
 	struct sn65dsi83 *ctx = container_of(ws, struct sn65dsi83, reset_work);
 	int ret;
+	int idx;
+
+	if (!drm_bridge_enter(&ctx->bridge, &idx))
+		return;
 
 	/* Reset the pipe */
 	ret = sn65dsi83_reset_pipe(ctx);
 	if (ret) {
 		dev_err(ctx->dev, "reset pipe failed %pe\n", ERR_PTR(ret));
-		return;
+		goto bridge_exit;
 	}
+
 	if (ctx->irq)
 		enable_irq(ctx->irq);
+
+bridge_exit:
+	drm_bridge_exit(idx);
 }
 
 static void sn65dsi83_handle_errors(struct sn65dsi83 *ctx)
 {
 	unsigned int irq_stat;
 	int ret;
+	int idx;
+
+	if (!drm_bridge_enter(&ctx->bridge, &idx))
+		return;
 
 	/*
 	 * Schedule a reset in case of:
@@ -429,7 +447,14 @@ static void sn65dsi83_handle_errors(struct sn65dsi83 *ctx)
 	 */
 
 	ret = regmap_read(ctx->regmap, REG_IRQ_STAT, &irq_stat);
-	if (ret || irq_stat) {
+
+	/*
+	 * Some hardware (Toradex Verdin AM62) is known to report the
+	 * PLL_UNLOCK error interrupt while working without visible
+	 * problems. In lack of a reliable way to discriminate such cases
+	 * from user-visible PLL_UNLOCK cases, ignore that bit entirely.
+	 */
+	if (ret || irq_stat & ~REG_IRQ_STAT_CHA_PLL_UNLOCK) {
 		/*
 		 * IRQ acknowledged is not always possible (the bridge can be in
 		 * a state where it doesn't answer anymore). To prevent an
@@ -441,6 +466,8 @@ static void sn65dsi83_handle_errors(struct sn65dsi83 *ctx)
 
 		schedule_work(&ctx->reset_work);
 	}
+
+	drm_bridge_exit(idx);
 }
 
 static void sn65dsi83_monitor_work(struct work_struct *work)
@@ -463,26 +490,63 @@ static void sn65dsi83_monitor_stop(struct sn65dsi83 *ctx)
 	cancel_delayed_work_sync(&ctx->monitor_work);
 }
 
+/*
+ * Release resources taken by sn65dsi83_atomic_pre_enable().
+ *
+ * Invoked by sn65dsi83_atomic_disable() normally, or by devres after
+ * sn65dsi83_remove() in case this happens befora atomic_disable.
+ */
+static void sn65dsi83_release_resources(void *data)
+{
+	struct sn65dsi83 *ctx = (struct sn65dsi83 *)data;
+	int ret;
+
+	if (ctx->irq) {
+		/* Disable irq */
+		regmap_write(ctx->regmap, REG_IRQ_EN, 0x0);
+		regmap_write(ctx->regmap, REG_IRQ_GLOBAL, 0x0);
+	} else {
+		/* Stop the polling task */
+		sn65dsi83_monitor_stop(ctx);
+	}
+
+	/* Put the chip in reset, pull EN line low, and assure 10ms reset low timing. */
+	gpiod_set_value_cansleep(ctx->enable_gpio, 0);
+	usleep_range(10000, 11000);
+
+	ret = regulator_disable(ctx->vcc);
+	if (ret)
+		dev_err(ctx->dev, "Failed to disable vcc: %d\n", ret);
+
+	regcache_mark_dirty(ctx->regmap);
+}
+
 static void sn65dsi83_atomic_pre_enable(struct drm_bridge *bridge,
-					struct drm_atomic_state *state)
+					struct drm_atomic_commit *state)
 {
 	struct sn65dsi83 *ctx = bridge_to_sn65dsi83(bridge);
+	const unsigned int dual_factor = ctx->lvds_dual_link ? 2 : 1;
 	const struct drm_bridge_state *bridge_state;
 	const struct drm_crtc_state *crtc_state;
 	const struct drm_display_mode *mode;
 	struct drm_connector *connector;
 	struct drm_crtc *crtc;
+	bool test_pattern = sn65dsi83_test_pattern;
 	bool lvds_format_24bpp;
 	bool lvds_format_jeida;
 	unsigned int pval;
 	__le16 le16val;
 	u16 val;
 	int ret;
+	int idx;
+
+	if (!drm_bridge_enter(bridge, &idx))
+		return;
 
 	ret = regulator_enable(ctx->vcc);
 	if (ret) {
 		dev_err(ctx->dev, "Failed to enable vcc: %d\n", ret);
-		return;
+		goto err_exit;
 	}
 
 	/* Deassert reset */
@@ -582,7 +646,7 @@ static void sn65dsi83_atomic_pre_enable(struct drm_bridge *bridge,
 			REG_LVDS_VCOM_CHA_LVDS_VOD_SWING(ctx->lvds_vod_swing_conf[CHANNEL_A]) |
 			REG_LVDS_VCOM_CHB_LVDS_VOD_SWING(ctx->lvds_vod_swing_conf[CHANNEL_B]));
 	regmap_write(ctx->regmap, REG_LVDS_LANE,
-		     (ctx->lvds_dual_link_even_odd_swap ?
+		     (ctx->lvds_channel_swap ?
 		      REG_LVDS_LANE_EVEN_ODD_SWAP : 0) |
 		     (ctx->lvds_term_conf[CHANNEL_A] ?
 			  REG_LVDS_LANE_CHA_LVDS_TERM : 0) |
@@ -590,7 +654,11 @@ static void sn65dsi83_atomic_pre_enable(struct drm_bridge *bridge,
 			  REG_LVDS_LANE_CHB_LVDS_TERM : 0));
 	regmap_write(ctx->regmap, REG_LVDS_CM, 0x00);
 
-	le16val = cpu_to_le16(mode->hdisplay);
+	/*
+	 * Active line length needs to be halved for test pattern
+	 * generation in dual LVDS output.
+	 */
+	le16val = cpu_to_le16(mode->hdisplay / (test_pattern ? dual_factor : 1));
 	regmap_bulk_write(ctx->regmap, REG_VID_CHA_ACTIVE_LINE_LENGTH_LOW,
 			  &le16val, 2);
 	le16val = cpu_to_le16(mode->vdisplay);
@@ -599,21 +667,22 @@ static void sn65dsi83_atomic_pre_enable(struct drm_bridge *bridge,
 	/* 32 + 1 pixel clock to ensure proper operation */
 	le16val = cpu_to_le16(32 + 1);
 	regmap_bulk_write(ctx->regmap, REG_VID_CHA_SYNC_DELAY_LOW, &le16val, 2);
-	le16val = cpu_to_le16(mode->hsync_end - mode->hsync_start);
+	le16val = cpu_to_le16((mode->hsync_end - mode->hsync_start) / dual_factor);
 	regmap_bulk_write(ctx->regmap, REG_VID_CHA_HSYNC_PULSE_WIDTH_LOW,
 			  &le16val, 2);
 	le16val = cpu_to_le16(mode->vsync_end - mode->vsync_start);
 	regmap_bulk_write(ctx->regmap, REG_VID_CHA_VSYNC_PULSE_WIDTH_LOW,
 			  &le16val, 2);
 	regmap_write(ctx->regmap, REG_VID_CHA_HORIZONTAL_BACK_PORCH,
-		     mode->htotal - mode->hsync_end);
+		     (mode->htotal - mode->hsync_end) / dual_factor);
 	regmap_write(ctx->regmap, REG_VID_CHA_VERTICAL_BACK_PORCH,
 		     mode->vtotal - mode->vsync_end);
 	regmap_write(ctx->regmap, REG_VID_CHA_HORIZONTAL_FRONT_PORCH,
-		     mode->hsync_start - mode->hdisplay);
+		     (mode->hsync_start - mode->hdisplay) / dual_factor);
 	regmap_write(ctx->regmap, REG_VID_CHA_VERTICAL_FRONT_PORCH,
 		     mode->vsync_start - mode->vdisplay);
-	regmap_write(ctx->regmap, REG_VID_CHA_TEST_PATTERN, 0x00);
+	regmap_write(ctx->regmap, REG_VID_CHA_TEST_PATTERN,
+		     test_pattern ? REG_VID_CHA_TEST_PATTERN_EN : 0);
 
 	/* Enable PLL */
 	regmap_write(ctx->regmap, REG_RC_PLL_EN, REG_RC_PLL_EN_PLL_EN);
@@ -625,7 +694,7 @@ static void sn65dsi83_atomic_pre_enable(struct drm_bridge *bridge,
 		dev_err(ctx->dev, "failed to lock PLL, ret=%i\n", ret);
 		/* On failure, disable PLL again and exit. */
 		regmap_write(ctx->regmap, REG_RC_PLL_EN, 0x00);
-		return;
+		goto err_add_action;
 	}
 
 	/* Trigger reset after CSR register update. */
@@ -633,13 +702,22 @@ static void sn65dsi83_atomic_pre_enable(struct drm_bridge *bridge,
 
 	/* Wait for 10ms after soft reset as specified in datasheet */
 	usleep_range(10000, 12000);
+
+err_add_action:
+	devm_add_action(ctx->dev, sn65dsi83_release_resources, ctx);
+err_exit:
+	drm_bridge_exit(idx);
 }
 
 static void sn65dsi83_atomic_enable(struct drm_bridge *bridge,
-				    struct drm_atomic_state *state)
+				    struct drm_atomic_commit *state)
 {
 	struct sn65dsi83 *ctx = bridge_to_sn65dsi83(bridge);
 	unsigned int pval;
+	int idx;
+
+	if (!drm_bridge_enter(bridge, &idx))
+		return;
 
 	/* Clear all errors that got asserted during initialization. */
 	regmap_read(ctx->regmap, REG_IRQ_STAT, &pval);
@@ -654,37 +732,27 @@ static void sn65dsi83_atomic_enable(struct drm_bridge *bridge,
 	if (ctx->irq) {
 		/* Enable irq to detect errors */
 		regmap_write(ctx->regmap, REG_IRQ_GLOBAL, REG_IRQ_GLOBAL_IRQ_EN);
-		regmap_write(ctx->regmap, REG_IRQ_EN, 0xff);
+		regmap_write(ctx->regmap, REG_IRQ_EN, 0xff & ~REG_IRQ_EN_CHA_PLL_UNLOCK_EN);
 	} else {
 		/* Use the polling task */
 		sn65dsi83_monitor_start(ctx);
 	}
+
+	drm_bridge_exit(idx);
 }
 
 static void sn65dsi83_atomic_disable(struct drm_bridge *bridge,
-				     struct drm_atomic_state *state)
+				     struct drm_atomic_commit *state)
 {
 	struct sn65dsi83 *ctx = bridge_to_sn65dsi83(bridge);
-	int ret;
+	int idx;
 
-	if (ctx->irq) {
-		/* Disable irq */
-		regmap_write(ctx->regmap, REG_IRQ_EN, 0x0);
-		regmap_write(ctx->regmap, REG_IRQ_GLOBAL, 0x0);
-	} else {
-		/* Stop the polling task */
-		sn65dsi83_monitor_stop(ctx);
-	}
+	if (!drm_bridge_enter(bridge, &idx))
+		return;
 
-	/* Put the chip in reset, pull EN line low, and assure 10ms reset low timing. */
-	gpiod_set_value_cansleep(ctx->enable_gpio, 0);
-	usleep_range(10000, 11000);
+	devm_release_action(ctx->dev, sn65dsi83_release_resources, ctx);
 
-	ret = regulator_disable(ctx->vcc);
-	if (ret)
-		dev_err(ctx->dev, "Failed to disable vcc: %d\n", ret);
-
-	regcache_mark_dirty(ctx->regmap);
+	drm_bridge_exit(idx);
 }
 
 static enum drm_mode_status
@@ -737,7 +805,7 @@ static const struct drm_bridge_funcs sn65dsi83_funcs = {
 
 	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
-	.atomic_reset = drm_atomic_helper_bridge_reset,
+	.atomic_create_state = drm_atomic_helper_bridge_create_state,
 	.atomic_get_input_bus_fmts = sn65dsi83_atomic_get_input_bus_fmts,
 };
 
@@ -761,48 +829,35 @@ static int sn65dsi83_select_lvds_vod_swing(struct device *dev,
 static int sn65dsi83_parse_lvds_endpoint(struct sn65dsi83 *ctx, int channel)
 {
 	struct device *dev = ctx->dev;
-	struct device_node *endpoint;
-	int endpoint_reg;
+	int endpoint_reg = (channel == CHANNEL_A) ? 2 : 3;
+	struct device_node *endpoint __free(device_node) =
+		of_graph_get_endpoint_by_regs(dev->of_node, endpoint_reg, -1);
 	/* Set so the property can be freely selected if not defined */
 	u32 lvds_vod_swing_data[2] = { 0, 1000000 };
 	u32 lvds_vod_swing_clk[2] = { 0, 1000000 };
 	/* Set default near end terminataion to 200 Ohm */
 	u32 lvds_term = 200;
 	int lvds_vod_swing_conf;
-	int ret = 0;
 	int ret_data;
 	int ret_clock;
-
-	if (channel == CHANNEL_A)
-		endpoint_reg = 2;
-	else
-		endpoint_reg = 3;
-
-	endpoint = of_graph_get_endpoint_by_regs(dev->of_node, endpoint_reg, -1);
 
 	of_property_read_u32(endpoint, "ti,lvds-termination-ohms", &lvds_term);
 	if (lvds_term == 100)
 		ctx->lvds_term_conf[channel] = OHM_100;
 	else if (lvds_term == 200)
 		ctx->lvds_term_conf[channel] = OHM_200;
-	else {
-		ret = -EINVAL;
-		goto exit;
-	}
+	else
+		return -EINVAL;
 
 	ret_data = of_property_read_u32_array(endpoint, "ti,lvds-vod-swing-data-microvolt",
 					lvds_vod_swing_data, ARRAY_SIZE(lvds_vod_swing_data));
-	if (ret_data != 0 && ret_data != -EINVAL) {
-		ret = ret_data;
-		goto exit;
-	}
+	if (ret_data != 0 && ret_data != -EINVAL)
+		return ret_data;
 
 	ret_clock = of_property_read_u32_array(endpoint, "ti,lvds-vod-swing-clock-microvolt",
 					lvds_vod_swing_clk, ARRAY_SIZE(lvds_vod_swing_clk));
-	if (ret_clock != 0 && ret_clock != -EINVAL) {
-		ret = ret_clock;
-		goto exit;
-	}
+	if (ret_clock != 0 && ret_clock != -EINVAL)
+		return ret_clock;
 
 	/* Use default value if both properties are NOT defined. */
 	if (ret_data == -EINVAL && ret_clock == -EINVAL)
@@ -812,23 +867,20 @@ static int sn65dsi83_parse_lvds_endpoint(struct sn65dsi83 *ctx, int channel)
 	if (!ret_data || !ret_clock) {
 		lvds_vod_swing_conf = sn65dsi83_select_lvds_vod_swing(dev, lvds_vod_swing_data,
 						lvds_vod_swing_clk, ctx->lvds_term_conf[channel]);
-		if (lvds_vod_swing_conf < 0) {
-			ret = lvds_vod_swing_conf;
-			goto exit;
-		}
+		if (lvds_vod_swing_conf < 0)
+			return lvds_vod_swing_conf;
 	}
 
 	ctx->lvds_vod_swing_conf[channel] = lvds_vod_swing_conf;
-	ret = 0;
-exit:
-	of_node_put(endpoint);
-	return ret;
+
+	return 0;
 }
 
 static int sn65dsi83_parse_dt(struct sn65dsi83 *ctx, enum sn65dsi83_model model)
 {
 	struct drm_bridge *panel_bridge;
 	struct device *dev = ctx->dev;
+	u32 output_port = 2;
 	int ret;
 
 	ret = sn65dsi83_parse_lvds_endpoint(ctx, CHANNEL_A);
@@ -840,29 +892,38 @@ static int sn65dsi83_parse_dt(struct sn65dsi83 *ctx, enum sn65dsi83_model model)
 		return ret;
 
 	ctx->lvds_dual_link = false;
-	ctx->lvds_dual_link_even_odd_swap = false;
+	ctx->lvds_channel_swap = false;
 	if (model != MODEL_SN65DSI83) {
-		struct device_node *port2, *port3;
+		struct device_node *port0, *port1, *port2, *port3;
 		int dual_link;
 
+		port0 = of_graph_get_port_by_id(dev->of_node, 0);
+		port1 = of_graph_get_port_by_id(dev->of_node, 1);
 		port2 = of_graph_get_port_by_id(dev->of_node, 2);
 		port3 = of_graph_get_port_by_id(dev->of_node, 3);
 		dual_link = drm_of_lvds_get_dual_link_pixel_order(port2, port3);
-		of_node_put(port2);
-		of_node_put(port3);
 
 		if (dual_link == DRM_LVDS_DUAL_LINK_ODD_EVEN_PIXELS) {
-			ctx->lvds_dual_link = true;
 			/* Odd pixels to LVDS Channel A, even pixels to B */
-			ctx->lvds_dual_link_even_odd_swap = false;
-		} else if (dual_link == DRM_LVDS_DUAL_LINK_EVEN_ODD_PIXELS) {
 			ctx->lvds_dual_link = true;
+		} else if (dual_link == DRM_LVDS_DUAL_LINK_EVEN_ODD_PIXELS) {
 			/* Even pixels to LVDS Channel A, odd pixels to B */
-			ctx->lvds_dual_link_even_odd_swap = true;
+			ctx->lvds_dual_link = true;
+			ctx->lvds_channel_swap = true;
+		} else if (port0 && !port1 && port2 && !port3) {
+			/* DSI Channel A to LVDS Channel A */
+		} else if (port0 && !port1 && !port2 && port3) {
+			/* DSI Channel A to LVDS Channel B */
+			ctx->lvds_channel_swap = true;
+			output_port = 3;
 		}
+		of_node_put(port0);
+		of_node_put(port1);
+		of_node_put(port2);
+		of_node_put(port3);
 	}
 
-	panel_bridge = devm_drm_of_get_bridge(dev, dev->of_node, 2, 0);
+	panel_bridge = devm_drm_of_get_bridge(dev, dev->of_node, output_port, 0);
 	if (IS_ERR(panel_bridge))
 		return dev_err_probe(dev, PTR_ERR(panel_bridge), "Failed to get panel bridge\n");
 
@@ -913,7 +974,6 @@ static int sn65dsi83_host_attach(struct sn65dsi83 *ctx)
 	dsi->lanes = dsi_lanes;
 	dsi->format = MIPI_DSI_FMT_RGB888;
 	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST |
-			  MIPI_DSI_MODE_VIDEO_NO_HFP | MIPI_DSI_MODE_VIDEO_NO_HBP |
 			  MIPI_DSI_MODE_VIDEO_NO_HSA | MIPI_DSI_MODE_NO_EOT_PACKET;
 
 	ret = devm_mipi_dsi_attach(dev, dsi);
@@ -977,7 +1037,7 @@ static int sn65dsi83_probe(struct i2c_client *client)
 		ret = devm_request_threaded_irq(ctx->dev, ctx->irq, NULL, sn65dsi83_irq,
 						IRQF_ONESHOT, dev_name(ctx->dev), ctx);
 		if (ret)
-			return dev_err_probe(dev, ret, "failed to request irq\n");
+			return ret;
 	}
 
 	dev_set_drvdata(dev, ctx);
@@ -1005,13 +1065,13 @@ static void sn65dsi83_remove(struct i2c_client *client)
 {
 	struct sn65dsi83 *ctx = i2c_get_clientdata(client);
 
-	drm_bridge_remove(&ctx->bridge);
+	drm_bridge_unplug(&ctx->bridge);
 }
 
 static const struct i2c_device_id sn65dsi83_id[] = {
-	{ "ti,sn65dsi83", MODEL_SN65DSI83 },
-	{ "ti,sn65dsi84", MODEL_SN65DSI84 },
-	{},
+	{ .name = "ti,sn65dsi83", .driver_data = MODEL_SN65DSI83 },
+	{ .name = "ti,sn65dsi84", .driver_data = MODEL_SN65DSI84 },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, sn65dsi83_id);
 

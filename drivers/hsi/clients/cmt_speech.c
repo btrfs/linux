@@ -139,7 +139,7 @@ static void cs_notify(u32 message, struct list_head *head)
 		goto out;
 	}
 
-	entry = kmalloc(sizeof(*entry), GFP_ATOMIC);
+	entry = kmalloc_obj(*entry, GFP_ATOMIC);
 	if (!entry) {
 		dev_err(&cs_char_data.cl->device,
 			"Can't allocate new entry for the queue.\n");
@@ -273,7 +273,7 @@ static int cs_alloc_cmds(struct cs_hsi_iface *hi)
 		msg = hsi_alloc_msg(1, GFP_KERNEL);
 		if (!msg)
 			goto out;
-		buf = kmalloc(sizeof(*buf), GFP_KERNEL);
+		buf = kmalloc_obj(*buf);
 		if (!buf) {
 			hsi_free_msg(msg);
 			goto out;
@@ -892,7 +892,7 @@ static void cs_hsi_data_enable(struct cs_hsi_iface *hi,
 
 	data_start = L1_CACHE_ALIGN(sizeof(*hi->mmap_cfg));
 	dev_dbg(&hi->cl->device,
-			"setting data start at %u, cfg block %u, align %u\n",
+			"setting data start at %u, cfg block %zu, align %u\n",
 			data_start, sizeof(*hi->mmap_cfg), L1_CACHE_BYTES);
 
 	for (i = 0; i < hi->mmap_cfg->rx_bufs; i++) {
@@ -985,7 +985,7 @@ static int cs_hsi_start(struct cs_hsi_iface **hi, struct hsi_client *cl,
 			unsigned long mmap_base, unsigned long mmap_size)
 {
 	int err = 0;
-	struct cs_hsi_iface *hsi_if = kzalloc(sizeof(*hsi_if), GFP_KERNEL);
+	struct cs_hsi_iface *hsi_if = kzalloc_obj(*hsi_if);
 
 	dev_dbg(&cl->device, "cs_hsi_start\n");
 
@@ -1083,22 +1083,6 @@ static void cs_hsi_stop(struct cs_hsi_iface *hi)
 	spin_unlock_bh(&hi->lock);
 	kfree(hi);
 }
-
-static vm_fault_t cs_char_vma_fault(struct vm_fault *vmf)
-{
-	struct cs_char *csdata = vmf->vma->vm_private_data;
-	struct page *page;
-
-	page = virt_to_page((void *)csdata->mmap_base);
-	get_page(page);
-	vmf->page = page;
-
-	return 0;
-}
-
-static const struct vm_operations_struct cs_char_vm_ops = {
-	.fault	= cs_char_vma_fault,
-};
 
 static int cs_char_fasync(int fd, struct file *file, int on)
 {
@@ -1256,18 +1240,19 @@ static long cs_char_ioctl(struct file *file, unsigned int cmd,
 	return r;
 }
 
-static int cs_char_mmap(struct file *file, struct vm_area_struct *vma)
+static int cs_char_mmap_prepare(struct vm_area_desc *desc)
 {
-	if (vma->vm_end < vma->vm_start)
+	struct file *file = desc->file;
+	struct cs_char *csdata = file->private_data;
+	struct page **pages = (struct page **)&desc->private_data;
+
+	if (vma_desc_pages(desc) != 1)
 		return -EINVAL;
 
-	if (vma_pages(vma) != 1)
-		return -EINVAL;
+	vma_desc_set_flags(desc, VMA_DONTDUMP_BIT, VMA_DONTEXPAND_BIT);
 
-	vm_flags_set(vma, VM_IO | VM_DONTDUMP | VM_DONTEXPAND);
-	vma->vm_ops = &cs_char_vm_ops;
-	vma->vm_private_data = file->private_data;
-
+	*pages = virt_to_page((void *)csdata->mmap_base);
+	mmap_action_map_kernel_pages_full(desc, pages);
 	return 0;
 }
 
@@ -1353,7 +1338,7 @@ static const struct file_operations cs_char_fops = {
 	.write		= cs_char_write,
 	.poll		= cs_char_poll,
 	.unlocked_ioctl	= cs_char_ioctl,
-	.mmap		= cs_char_mmap,
+	.mmap_prepare	= cs_char_mmap_prepare,
 	.open		= cs_char_open,
 	.release	= cs_char_release,
 	.fasync		= cs_char_fasync,

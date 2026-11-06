@@ -15,11 +15,6 @@ import time
 import json
 import math
 
-import drgn
-from drgn import container_of
-from drgn.helpers.linux.list import list_for_each_entry,list_empty
-from drgn.helpers.linux.radixtree import radix_tree_for_each,radix_tree_lookup
-
 import argparse
 parser = argparse.ArgumentParser(description=desc,
                                  formatter_class=argparse.RawTextHelpFormatter)
@@ -33,6 +28,11 @@ parser.add_argument('--interval', '-i', metavar='SECONDS', type=float, default=1
 parser.add_argument('--json', action='store_true',
                     help='Output in json')
 args = parser.parse_args()
+
+import drgn
+from drgn import container_of
+from drgn.helpers.linux.list import list_for_each_entry,list_empty
+from drgn.helpers.linux.radixtree import radix_tree_for_each,radix_tree_lookup
 
 def err(s):
     print(s, file=sys.stderr, flush=True)
@@ -149,8 +149,11 @@ class IocgStat:
         self.weight = iocg.weight.value_() / WEIGHT_ONE
         self.active = iocg.active.value_() / WEIGHT_ONE
         self.inuse = iocg.inuse.value_() / WEIGHT_ONE
-        self.hwa_pct = iocg.hweight_active.value_() * 100 / WEIGHT_ONE
-        self.hwi_pct = iocg.hweight_inuse.value_() * 100 / WEIGHT_ONE
+        hweight_cache = iocg.hweight_cache.counter.value_()
+        hwa = ((hweight_cache >> 16) & (WEIGHT_ONE - 1)) + 1
+        hwi = (hweight_cache & (WEIGHT_ONE - 1)) + 1
+        self.hwa_pct = hwa * 100 / WEIGHT_ONE
+        self.hwi_pct = hwi * 100 / WEIGHT_ONE
         self.address = iocg.value_()
 
         vdone = iocg.done_vtime.counter.value_()

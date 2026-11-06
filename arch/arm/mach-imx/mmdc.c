@@ -127,7 +127,7 @@ static ssize_t mmdc_pmu_cpumask_show(struct device *dev,
 {
 	struct mmdc_pmu *pmu_mmdc = dev_get_drvdata(dev);
 
-	return cpumap_print_to_pagebuf(true, buf, &pmu_mmdc->cpu);
+	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(&pmu_mmdc->cpu));
 }
 
 static struct device_attribute mmdc_pmu_cpumask_attr =
@@ -477,7 +477,7 @@ static int imx_mmdc_perf_init(struct platform_device *pdev, void __iomem *mmdc_b
 	char *name;
 	int ret;
 
-	pmu_mmdc = kzalloc(sizeof(*pmu_mmdc), GFP_KERNEL);
+	pmu_mmdc = kzalloc_obj(*pmu_mmdc);
 	if (!pmu_mmdc) {
 		pr_err("failed to allocate PMU device!\n");
 		return -ENOMEM;

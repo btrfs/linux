@@ -4,6 +4,7 @@
 #ifndef _FBNIC_FW_H_
 #define _FBNIC_FW_H_
 
+#include <linux/completion.h>
 #include <linux/if_ether.h>
 #include <linux/types.h>
 
@@ -12,6 +13,7 @@ struct fbnic_tlv_msg;
 
 struct fbnic_fw_mbx {
 	u8 ready, head, tail;
+	u64 resp_error;
 	struct {
 		struct fbnic_tlv_msg	*msg;
 		dma_addr_t		addr;
@@ -36,13 +38,29 @@ struct fbnic_fw_mbx {
  *                       + INDEX_SZ))
  */
 #define FBNIC_FW_MAX_LOG_HISTORY		14
+#define FBNIC_MBX_RX_TO_SEC			10
 
 struct fbnic_fw_ver {
 	u32 version;
 	char commit[FBNIC_FW_CAP_RESP_COMMIT_MAX_SIZE];
 };
 
+/* Bits in fbnic_fw_cap.state. The firmware mailbox publishes the BMC state
+ * and the service task consumes it, so they are updated with atomic bitops.
+ */
+enum {
+	FBNIC_FW_CAP_F_BMC_PRESENT,
+	FBNIC_FW_CAP_F_BMC_ALL_MULTI,
+	FBNIC_FW_CAP_F_BMC_TCAM_REINIT,
+	FBNIC_FW_CAP_F_BMC_MACDA_SYNC,
+};
+
+#define FBNIC_FW_CAP_BMC_PENDING	\
+	(BIT(FBNIC_FW_CAP_F_BMC_TCAM_REINIT) |	\
+	 BIT(FBNIC_FW_CAP_F_BMC_MACDA_SYNC))
+
 struct fbnic_fw_cap {
+	unsigned long state;
 	struct {
 		struct fbnic_fw_ver mgmt, bootloader;
 	} running;
@@ -51,10 +69,6 @@ struct fbnic_fw_cap {
 	} stored;
 	u8	active_slot;
 	u8	bmc_mac_addr[4][ETH_ALEN];
-	u8	bmc_present		: 1;
-	u8	need_bmc_tcam_reinit	: 1;
-	u8	need_bmc_macda_sync	: 1;
-	u8	all_multi		: 1;
 	u8	link_speed;
 	u8	link_fec;
 	u32	anti_rollback_version;
@@ -92,6 +106,7 @@ struct fbnic_fw_completion {
 	} u;
 };
 
+u64 __fbnic_mbx_rd_desc(struct fbnic_dev *fbd, int mbx_idx, int desc_idx);
 void fbnic_mbx_init(struct fbnic_dev *fbd);
 void fbnic_mbx_clean(struct fbnic_dev *fbd);
 int fbnic_mbx_set_cmpl(struct fbnic_dev *fbd,
@@ -101,6 +116,33 @@ void fbnic_mbx_clear_cmpl(struct fbnic_dev *fbd,
 void fbnic_mbx_poll(struct fbnic_dev *fbd);
 int fbnic_mbx_poll_tx_ready(struct fbnic_dev *fbd);
 void fbnic_mbx_flush_tx(struct fbnic_dev *fbd);
+
+/**
+ * enum fbnic_fw_self_test_codes - return codes from self test routines
+ *
+ * These are the codes returned from the self test routines and
+ * stored in the test result array indexed by the specific
+ * test name.
+ *
+ * @FBNIC_TEST_FW_SUCCESS: test success
+ * @FBNIC_TEST_FW_NO_FIRMWARE: FW interface not present
+ * @FBNIC_TEST_FW_NO_CMPL: No completion available
+ * @FBNIC_TEST_FW_NO_XMIT: Could not xmit message
+ * @FBNIC_TEST_FW_NO_MSG: no message returned
+ * @FBNIC_TEST_FW_PARSE: returned message had parsing error
+ */
+enum fbnic_fw_self_test_codes {
+	FBNIC_TEST_FW_SUCCESS = 0,
+	FBNIC_TEST_FW_NO_FIRMWARE = 10,
+	FBNIC_TEST_FW_NO_CMPL = 20,
+	FBNIC_TEST_FW_NO_XMIT = 30,
+	FBNIC_TEST_FW_NO_MSG = 40,
+	FBNIC_TEST_FW_PARSE = 50,
+};
+
+enum fbnic_fw_self_test_codes fbnic_fw_mbx_self_test(struct fbnic_dev *fbd);
+int fbnic_fw_xmit_test_msg(struct fbnic_dev *fbd,
+			   struct fbnic_fw_completion *c);
 int fbnic_fw_xmit_ownership_msg(struct fbnic_dev *fbd, bool take_ownership);
 int fbnic_fw_init_heartbeat(struct fbnic_dev *fbd, bool poll);
 void fbnic_fw_check_heartbeat(struct fbnic_dev *fbd);
@@ -128,6 +170,13 @@ struct fbnic_fw_completion *__fbnic_fw_alloc_cmpl(u32 msg_type,
 						  size_t priv_size);
 struct fbnic_fw_completion *fbnic_fw_alloc_cmpl(u32 msg_type);
 void fbnic_fw_put_cmpl(struct fbnic_fw_completion *cmpl_data);
+
+static inline unsigned long
+fbnic_mbx_wait_for_cmpl(struct fbnic_fw_completion *cmpl)
+{
+	return wait_for_completion_timeout(&cmpl->done,
+					   FBNIC_MBX_RX_TO_SEC * HZ);
+}
 
 #define fbnic_mk_full_fw_ver_str(_rev_id, _delim, _commit, _str, _str_sz) \
 do {									\

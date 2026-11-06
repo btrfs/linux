@@ -30,7 +30,7 @@ enum cpuid_leafs
 	CPUID_6_EAX,
 	CPUID_8000_000A_EDX,
 	CPUID_7_ECX,
-	CPUID_8000_0007_EBX,
+	CPUID_LNX_6,
 	CPUID_7_EDX,
 	CPUID_8000_001F_EAX,
 	CPUID_8000_0021_EAX,
@@ -69,7 +69,7 @@ extern const char * const x86_bug_flags[NBUGINTS*32];
  * is not relevant.
  */
 #define cpu_feature_enabled(bit)	\
-	(__builtin_constant_p(bit) && DISABLED_MASK_BIT_SET(bit) ? 0 : static_cpu_has(bit))
+	(__builtin_constant_p(bit) && DISABLED_MASK_BIT_SET(bit) ? 0 : _static_cpu_has(bit))
 
 #define boot_cpu_has(bit)	cpu_has(&boot_cpu_data, bit)
 
@@ -96,11 +96,12 @@ void check_cpufeature_deps(struct cpuinfo_x86 *c);
  * it to manifest the address of boot_cpu_data in a register, fouling
  * the mainline (post-initialization) code.
  */
-static __always_inline bool _static_cpu_has(u16 bit)
+static __always_inline bool __static_cpu_has(u16 bit)
 {
 	asm goto(ALTERNATIVE_TERNARY("jmp 6f", %c[feature], "", "jmp %l[t_no]")
 		".pushsection .altinstr_aux,\"ax\"\n"
 		"6:\n"
+		ANNOTATE_DATA_SPECIAL "\n"
 		" testb %[bitnum], %a[cap_byte]\n"
 		" jnz %l[t_yes]\n"
 		" jmp %l[t_no]\n"
@@ -115,18 +116,17 @@ t_no:
 	return false;
 }
 
-#define static_cpu_has(bit)					\
+#define _static_cpu_has(bit)					\
 (								\
 	__builtin_constant_p(boot_cpu_has(bit)) ?		\
 		boot_cpu_has(bit) :				\
-		_static_cpu_has(bit)				\
+		__static_cpu_has(bit)				\
 )
 
 #define cpu_has_bug(c, bit)		cpu_has(c, (bit))
 #define set_cpu_bug(c, bit)		set_cpu_cap(c, (bit))
-#define clear_cpu_bug(c, bit)		clear_cpu_cap(c, (bit))
 
-#define static_cpu_has_bug(bit)		static_cpu_has((bit))
+#define static_cpu_has_bug(bit)		_static_cpu_has((bit))
 #define boot_cpu_has_bug(bit)		cpu_has_bug(&boot_cpu_data, (bit))
 #define boot_cpu_set_bug(bit)		set_cpu_cap(&boot_cpu_data, (bit))
 

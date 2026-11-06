@@ -173,14 +173,13 @@ static int ath79_spi_probe(struct platform_device *pdev)
 	unsigned long rate;
 	int ret;
 
-	host = spi_alloc_host(&pdev->dev, sizeof(*sp));
+	host = devm_spi_alloc_host(&pdev->dev, sizeof(*sp));
 	if (host == NULL) {
 		dev_err(&pdev->dev, "failed to allocate spi host\n");
 		return -ENOMEM;
 	}
 
 	sp = spi_controller_get_devdata(host);
-	host->dev.of_node = pdev->dev.of_node;
 	platform_set_drvdata(pdev, sp);
 
 	host->use_gpio_descriptors = true;
@@ -195,22 +194,16 @@ static int ath79_spi_probe(struct platform_device *pdev)
 	sp->bitbang.flags = SPI_CS_HIGH;
 
 	sp->base = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(sp->base)) {
-		ret = PTR_ERR(sp->base);
-		goto err_put_host;
-	}
+	if (IS_ERR(sp->base))
+		return PTR_ERR(sp->base);
 
 	sp->clk = devm_clk_get_enabled(&pdev->dev, "ahb");
-	if (IS_ERR(sp->clk)) {
-		ret = PTR_ERR(sp->clk);
-		goto err_put_host;
-	}
+	if (IS_ERR(sp->clk))
+		return PTR_ERR(sp->clk);
 
 	rate = DIV_ROUND_UP(clk_get_rate(sp->clk), MHZ);
-	if (!rate) {
-		ret = -EINVAL;
-		goto err_put_host;
-	}
+	if (!rate)
+		return -EINVAL;
 
 	sp->rrw_delay = ATH79_SPI_RRW_DELAY_FACTOR / rate;
 	dev_dbg(&pdev->dev, "register read/write delay is %u nsecs\n",
@@ -225,9 +218,6 @@ static int ath79_spi_probe(struct platform_device *pdev)
 
 err_disable:
 	ath79_spi_disable(sp);
-err_put_host:
-	spi_controller_put(host);
-
 	return ret;
 }
 
@@ -237,7 +227,6 @@ static void ath79_spi_remove(struct platform_device *pdev)
 
 	spi_bitbang_stop(&sp->bitbang);
 	ath79_spi_disable(sp);
-	spi_controller_put(sp->bitbang.ctlr);
 }
 
 static void ath79_spi_shutdown(struct platform_device *pdev)

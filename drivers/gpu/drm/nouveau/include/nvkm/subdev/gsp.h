@@ -44,6 +44,9 @@ typedef void (*nvkm_gsp_event_func)(struct nvkm_gsp_event *, void *repv, u32 rep
  * NVKM_GSP_RPC_REPLY_NOWAIT - If specified, immediately return to the
  * caller after the GSP RPC command is issued.
  *
+ * NVKM_GSP_RPC_REPLY_NOSEQ - If specified, exactly like NOWAIT
+ * but don't emit RPC sequence number.
+ *
  * NVKM_GSP_RPC_REPLY_RECV - If specified, wait and receive the entire GSP
  * RPC message after the GSP RPC command is issued.
  *
@@ -53,6 +56,7 @@ typedef void (*nvkm_gsp_event_func)(struct nvkm_gsp_event *, void *repv, u32 rep
  */
 enum nvkm_gsp_rpc_reply_policy {
 	NVKM_GSP_RPC_REPLY_NOWAIT = 0,
+	NVKM_GSP_RPC_REPLY_NOSEQ,
 	NVKM_GSP_RPC_REPLY_RECV,
 	NVKM_GSP_RPC_REPLY_POLL,
 };
@@ -73,6 +77,10 @@ struct nvkm_gsp {
 
 		const struct firmware *bl;
 		const struct firmware *rm;
+
+		struct {
+			struct nvkm_falcon_fw sb;
+		} falcon;
 	} fws;
 
 	struct nvkm_firmware fw;
@@ -147,6 +155,10 @@ struct nvkm_gsp {
 		struct nvkm_gsp_mem meta;
 		struct sg_table fbsr;
 	} sr;
+
+	struct {
+		bool use_raw_mode_comptagline_alloc;
+	} memsys;
 
 	struct {
 		struct nvkm_gsp_mem mem;
@@ -237,6 +249,8 @@ struct nvkm_gsp {
 
 	/* The size of the registry RPC */
 	size_t registry_rpc_size;
+
+	u32 rpc_seq;
 
 #ifdef CONFIG_DEBUG_FS
 	/*
@@ -484,6 +498,8 @@ nvkm_gsp_event_dtor(struct nvkm_gsp_event *event)
 
 int nvkm_gsp_intr_stall(struct nvkm_gsp *, enum nvkm_subdev_type, int);
 int nvkm_gsp_intr_nonstall(struct nvkm_gsp *, enum nvkm_subdev_type, int);
+
+int nvkm_gsp_gcx_ready(struct nvkm_gsp *gsp);
 
 int gv100_gsp_new(struct nvkm_device *, enum nvkm_subdev_type, int, struct nvkm_gsp **);
 int tu102_gsp_new(struct nvkm_device *, enum nvkm_subdev_type, int, struct nvkm_gsp **);

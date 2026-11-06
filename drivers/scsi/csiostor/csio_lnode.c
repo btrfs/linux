@@ -872,6 +872,7 @@ csio_ln_read_fcf_entry(struct csio_lnode *ln,
 static void
 csio_handle_link_up(struct csio_hw *hw, uint8_t portid, uint32_t fcfi,
 		    uint32_t vnpi)
+	__must_hold(&hw->lock)
 {
 	struct csio_lnode *ln = NULL;
 
@@ -1165,6 +1166,7 @@ csio_lns_uninit(struct csio_lnode *ln, enum csio_ln_ev evt)
  */
 static void
 csio_lns_online(struct csio_lnode *ln, enum csio_ln_ev evt)
+	__must_hold(&csio_lnode_to_hw(ln)->lock)
 {
 	struct csio_hw *hw = csio_lnode_to_hw(ln);
 
@@ -1216,6 +1218,7 @@ csio_lns_online(struct csio_lnode *ln, enum csio_ln_ev evt)
  */
 static void
 csio_lns_ready(struct csio_lnode *ln, enum csio_ln_ev evt)
+	__must_hold(&csio_lnode_to_hw(ln)->lock)
 {
 	struct csio_hw *hw = csio_lnode_to_hw(ln);
 
@@ -1837,7 +1840,7 @@ csio_ln_fdmi_init(struct csio_lnode *ln)
 	struct csio_dma_buf	*dma_buf;
 
 	/* Allocate MGMT request required for FDMI */
-	ln->mgmt_req = kzalloc(sizeof(struct csio_ioreq), GFP_KERNEL);
+	ln->mgmt_req = kzalloc_obj(struct csio_ioreq);
 	if (!ln->mgmt_req) {
 		csio_ln_err(ln, "Failed to alloc ioreq for FDMI\n");
 		CSIO_INC_STATS(hw, n_err_nomem);
@@ -2002,7 +2005,7 @@ csio_ln_init(struct csio_lnode *ln)
 
 		/* This is the lnode used during initialization */
 
-		ln->fcfinfo = kzalloc(sizeof(struct csio_fcf_info), GFP_KERNEL);
+		ln->fcfinfo = kzalloc_obj(struct csio_fcf_info);
 		if (!ln->fcfinfo) {
 			csio_ln_err(ln, "Failed to alloc FCF record\n");
 			CSIO_INC_STATS(hw, n_err_nomem);
@@ -2029,8 +2032,7 @@ csio_ln_init(struct csio_lnode *ln)
 			ln->fcfinfo = pln->fcfinfo;
 		} else {
 			/* Another non-root physical lnode (FCF) */
-			ln->fcfinfo = kzalloc(sizeof(struct csio_fcf_info),
-								GFP_KERNEL);
+			ln->fcfinfo = kzalloc_obj(struct csio_fcf_info);
 			if (!ln->fcfinfo) {
 				csio_ln_err(ln, "Failed to alloc FCF info\n");
 				CSIO_INC_STATS(hw, n_err_nomem);

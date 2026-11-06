@@ -77,14 +77,14 @@ struct clk *tegra_clk_register_periph_fixed(const char *name,
 {
 	const struct tegra_clk_periph_regs *regs;
 	struct tegra_clk_periph_fixed *fixed;
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	struct clk *clk;
 
 	regs = get_reg_bank(num);
 	if (!regs)
 		return ERR_PTR(-EINVAL);
 
-	fixed = kzalloc(sizeof(*fixed), GFP_KERNEL);
+	fixed = kzalloc_obj(*fixed);
 	if (!fixed)
 		return ERR_PTR(-ENOMEM);
 

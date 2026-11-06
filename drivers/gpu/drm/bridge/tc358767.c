@@ -35,7 +35,6 @@
 #include <drm/drm_edid.h>
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_of.h>
-#include <drm/drm_panel.h>
 #include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 
@@ -370,7 +369,6 @@ struct tc_data {
 	struct drm_dp_aux	aux;
 
 	struct drm_bridge	bridge;
-	struct drm_bridge	*panel_bridge;
 	struct drm_connector	connector;
 
 	struct mipi_dsi_device	*dsi;
@@ -527,7 +525,7 @@ static ssize_t tc_aux_transfer(struct drm_dp_aux *aux,
 	 * address-only transfer
 	 */
 	if (size)
-		size = FIELD_GET(AUX_BYTES, auxstatus);
+		size = min_t(size_t, size, FIELD_GET(AUX_BYTES, auxstatus));
 	msg->reply = FIELD_GET(AUX_STATUS, auxstatus);
 
 	switch (request) {
@@ -1557,7 +1555,7 @@ static int tc_edp_stream_disable(struct tc_data *tc)
 }
 
 static void tc_dpi_bridge_atomic_enable(struct drm_bridge *bridge,
-					struct drm_atomic_state *state)
+					struct drm_atomic_commit *state)
 
 {
 	struct tc_data *tc = bridge_to_tc(bridge);
@@ -1572,7 +1570,7 @@ static void tc_dpi_bridge_atomic_enable(struct drm_bridge *bridge,
 }
 
 static void tc_dpi_bridge_atomic_disable(struct drm_bridge *bridge,
-					 struct drm_atomic_state *state)
+					 struct drm_atomic_commit *state)
 {
 	struct tc_data *tc = bridge_to_tc(bridge);
 	int ret;
@@ -1583,7 +1581,7 @@ static void tc_dpi_bridge_atomic_disable(struct drm_bridge *bridge,
 }
 
 static void tc_edp_bridge_atomic_enable(struct drm_bridge *bridge,
-					struct drm_atomic_state *state)
+					struct drm_atomic_commit *state)
 {
 	struct tc_data *tc = bridge_to_tc(bridge);
 	int ret;
@@ -1609,7 +1607,7 @@ static void tc_edp_bridge_atomic_enable(struct drm_bridge *bridge,
 }
 
 static void tc_edp_bridge_atomic_disable(struct drm_bridge *bridge,
-					 struct drm_atomic_state *state)
+					 struct drm_atomic_commit *state)
 {
 	struct tc_data *tc = bridge_to_tc(bridge);
 	int ret;
@@ -1742,8 +1740,8 @@ static int tc_connector_get_modes(struct drm_connector *connector)
 		return 0;
 	}
 
-	if (tc->panel_bridge) {
-		num_modes = drm_bridge_get_modes(tc->panel_bridge, connector);
+	if (tc->bridge.next_bridge) {
+		num_modes = drm_bridge_get_modes(tc->bridge.next_bridge, connector);
 		if (num_modes > 0)
 			return num_modes;
 	}
@@ -1788,7 +1786,7 @@ tc_connector_detect(struct drm_connector *connector, bool force)
 	if (tc->hpd_pin >= 0)
 		return tc_bridge_detect(&tc->bridge, connector);
 
-	if (tc->panel_bridge)
+	if (tc->bridge.next_bridge)
 		return connector_status_connected;
 	else
 		return connector_status_unknown;
@@ -1809,10 +1807,10 @@ static int tc_dpi_bridge_attach(struct drm_bridge *bridge,
 {
 	struct tc_data *tc = bridge_to_tc(bridge);
 
-	if (!tc->panel_bridge)
+	if (!tc->bridge.next_bridge)
 		return 0;
 
-	return drm_bridge_attach(tc->bridge.encoder, tc->panel_bridge,
+	return drm_bridge_attach(tc->bridge.encoder, tc->bridge.next_bridge,
 				 &tc->bridge, flags);
 }
 
@@ -1825,9 +1823,9 @@ static int tc_edp_bridge_attach(struct drm_bridge *bridge,
 	struct drm_device *drm = bridge->dev;
 	int ret;
 
-	if (tc->panel_bridge) {
+	if (tc->bridge.next_bridge) {
 		/* If a connector is required then this driver shall create it */
-		ret = drm_bridge_attach(tc->bridge.encoder, tc->panel_bridge,
+		ret = drm_bridge_attach(tc->bridge.encoder, tc->bridge.next_bridge,
 					&tc->bridge, flags | DRM_BRIDGE_ATTACH_NO_CONNECTOR);
 		if (ret)
 			return ret;
@@ -1933,7 +1931,7 @@ static const struct drm_bridge_funcs tc_dpi_bridge_funcs = {
 	.atomic_disable = tc_dpi_bridge_atomic_disable,
 	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
-	.atomic_reset = drm_atomic_helper_bridge_reset,
+	.atomic_create_state = drm_atomic_helper_bridge_create_state,
 	.atomic_get_input_bus_fmts = tc_dpi_atomic_get_input_bus_fmts,
 };
 
@@ -1949,7 +1947,7 @@ static const struct drm_bridge_funcs tc_edp_bridge_funcs = {
 	.edid_read = tc_edid_read,
 	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
-	.atomic_reset = drm_atomic_helper_bridge_reset,
+	.atomic_create_state = drm_atomic_helper_bridge_create_state,
 	.atomic_get_input_bus_fmts = drm_atomic_helper_bridge_propagate_bus_fmt,
 	.atomic_get_output_bus_fmts = tc_edp_atomic_get_output_bus_fmts,
 };
@@ -2318,51 +2316,31 @@ static int tc_probe_dpi_bridge_endpoint(struct tc_data *tc)
 {
 	struct device *dev = tc->dev;
 	struct drm_bridge *bridge;
-	struct drm_panel *panel;
-	int ret;
 
 	/* port@1 is the DPI input/output port */
-	ret = drm_of_find_panel_or_bridge(dev->of_node, 1, 0, &panel, &bridge);
-	if (ret && ret != -ENODEV)
-		return dev_err_probe(dev, ret,
-				     "Could not find DPI panel or bridge\n");
+	bridge = of_drm_get_bridge_by_endpoint(dev->of_node, 1, 0);
+	if (IS_ERR(bridge))
+		return dev_err_probe(dev, PTR_ERR(bridge),
+				     "Could not find DPI bridge\n");
 
-	if (panel) {
-		bridge = devm_drm_panel_bridge_add(dev, panel);
-		if (IS_ERR(bridge))
-			return PTR_ERR(bridge);
-	}
+	tc->bridge.next_bridge = bridge;
+	tc->bridge.type = DRM_MODE_CONNECTOR_DPI;
 
-	if (bridge) {
-		tc->panel_bridge = bridge;
-		tc->bridge.type = DRM_MODE_CONNECTOR_DPI;
-
-		return 0;
-	}
-
-	return ret;
+	return 0;
 }
 
 static int tc_probe_edp_bridge_endpoint(struct tc_data *tc)
 {
 	struct device *dev = tc->dev;
-	struct drm_panel *panel;
-	int ret;
+	struct drm_bridge *bridge;
 
 	/* port@2 is the output port */
-	ret = drm_of_find_panel_or_bridge(dev->of_node, 2, 0, &panel, NULL);
-	if (ret && ret != -ENODEV)
-		return dev_err_probe(dev, ret,
-				     "Could not find DSI panel or bridge\n");
+	bridge = of_drm_get_bridge_by_endpoint(dev->of_node, 2, 0);
+	if (IS_ERR(bridge) && PTR_ERR(bridge) != -ENODEV)
+		return dev_err_probe(dev, PTR_ERR(bridge), "Could not find DSI bridge\n");
 
-	if (panel) {
-		struct drm_bridge *panel_bridge;
-
-		panel_bridge = devm_drm_panel_bridge_add(dev, panel);
-		if (IS_ERR(panel_bridge))
-			return PTR_ERR(panel_bridge);
-
-		tc->panel_bridge = panel_bridge;
+	if (!IS_ERR(bridge)) {
+		tc->bridge.next_bridge = bridge;
 		tc->bridge.type = DRM_MODE_CONNECTOR_eDP;
 	} else {
 		tc->bridge.type = DRM_MODE_CONNECTOR_DisplayPort;
@@ -2528,10 +2506,8 @@ static int tc_probe(struct i2c_client *client)
 						NULL, tc_irq_handler,
 						IRQF_ONESHOT,
 						"tc358767-irq", tc);
-		if (ret) {
-			dev_err(dev, "failed to register dp interrupt\n");
+		if (ret)
 			return ret;
-		}
 
 		tc->have_irq = true;
 	}
@@ -2611,7 +2587,7 @@ static void tc_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id tc358767_i2c_ids[] = {
-	{ "tc358767" },
+	{ .name = "tc358767" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tc358767_i2c_ids);

@@ -3,7 +3,7 @@
  * Copyright (C) 2022-2023 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -71,7 +71,7 @@ xrep_newbt_estimate_slack(
 		free = sc->sa.pag->pagf_freeblks;
 		sz = xfs_ag_block_count(sc->mp, pag_agno(sc->sa.pag));
 	} else {
-		free = xfs_sum_freecounter_raw(sc->mp, XC_FREE_BLOCKS);
+		free = xfs_sum_freecounter(sc->mp, XC_FREE_BLOCKS);
 		sz = sc->mp->m_sb.sb_dblocks;
 	}
 
@@ -123,8 +123,7 @@ xrep_newbt_init_inode(
 	if (!ifp)
 		return -ENOMEM;
 
-	xrep_newbt_init_ag(xnr, sc, oinfo,
-			XFS_INO_TO_FSB(sc->mp, sc->ip->i_ino),
+	xrep_newbt_init_ag(xnr, sc, oinfo, XFS_INODE_TO_FSB(sc->ip),
 			XFS_AG_RESV_NONE);
 	xnr->ifake.if_fork = ifp;
 	xnr->ifake.if_fork_size = xfs_inode_fork_size(sc->ip, whichfork);
@@ -146,7 +145,7 @@ xrep_newbt_init_metadir_inode(
 
 	ASSERT(xfs_is_metadir_inode(sc->ip));
 
-	xfs_rmap_ino_bmbt_owner(&oinfo, sc->ip->i_ino, XFS_DATA_FORK);
+	xfs_rmap_inode_bmbt_owner(&oinfo, sc->ip, XFS_DATA_FORK);
 
 	ifp = kmem_cache_zalloc(xfs_ifork_cache, XCHK_GFP_FLAGS);
 	if (!ifp)
@@ -160,8 +159,7 @@ xrep_newbt_init_metadir_inode(
 	 * as if they were regular file blocks.  This exposes us to a higher
 	 * risk of the repair being cancelled due to ENOSPC.
 	 */
-	xrep_newbt_init_ag(xnr, sc, &oinfo,
-			XFS_INO_TO_FSB(sc->mp, sc->ip->i_ino),
+	xrep_newbt_init_ag(xnr, sc, &oinfo, XFS_INODE_TO_FSB(sc->ip),
 			XFS_AG_RESV_NONE);
 	xnr->ifake.if_fork = ifp;
 	xnr->ifake.if_fork_size = xfs_inode_fork_size(sc->ip, XFS_DATA_FORK);
@@ -195,9 +193,11 @@ xrep_newbt_add_blocks(
 	struct xrep_newbt_resv		*resv;
 	int				error;
 
-	resv = kmalloc(sizeof(struct xrep_newbt_resv), XCHK_GFP_FLAGS);
-	if (!resv)
-		return -ENOMEM;
+	/*
+	 * We have no way to clean up the allocated space *and* return an
+	 * ENOMEM if we fail to allocate this control structure.
+	 */
+	resv = kmalloc_obj(struct xrep_newbt_resv, GFP_KERNEL | __GFP_NOFAIL);
 
 	INIT_LIST_HEAD(&resv->list);
 	resv->agbno = XFS_FSB_TO_AGBNO(mp, args->fsbno);
@@ -280,7 +280,7 @@ xrep_newbt_alloc_ag_blocks(
 			.mp		= mp,
 			.oinfo		= xnr->oinfo,
 			.minlen		= 1,
-			.maxlen		= nr_blocks,
+			.maxlen		= min(XFS_MAX_BMBT_EXTLEN, nr_blocks),
 			.prod		= 1,
 			.resv		= xnr->resv,
 		};
@@ -354,7 +354,7 @@ xrep_newbt_alloc_file_blocks(
 			.mp		= mp,
 			.oinfo		= xnr->oinfo,
 			.minlen		= 1,
-			.maxlen		= nr_blocks,
+			.maxlen		= min(XFS_MAX_BMBT_EXTLEN, nr_blocks),
 			.prod		= 1,
 			.resv		= xnr->resv,
 		};
@@ -597,17 +597,4 @@ xrep_newbt_claim_block(
 
 	/* Relog all the EFIs. */
 	return xrep_defer_finish(xnr->sc);
-}
-
-/* How many reserved blocks are unused? */
-unsigned int
-xrep_newbt_unused_blocks(
-	struct xrep_newbt	*xnr)
-{
-	struct xrep_newbt_resv	*resv;
-	unsigned int		unused = 0;
-
-	list_for_each_entry(resv, &xnr->resv_list, list)
-		unused += resv->len - resv->used;
-	return unused;
 }

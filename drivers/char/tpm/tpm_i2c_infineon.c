@@ -544,8 +544,10 @@ static int tpm_tis_i2c_send(struct tpm_chip *chip, u8 *buf, size_t bufsiz,
 		burstcnt = get_burstcount(chip);
 
 		/* burstcnt < 0 = TPM is busy */
-		if (burstcnt < 0)
-			return burstcnt;
+		if (burstcnt < 0) {
+			rc = burstcnt;
+			goto out_err;
+		}
 
 		if (burstcnt > (len - 1 - count))
 			burstcnt = len - 1 - count;
@@ -680,7 +682,7 @@ static const struct of_device_id tpm_tis_i2c_of_match[] = {
 MODULE_DEVICE_TABLE(of, tpm_tis_i2c_of_match);
 #endif
 
-static SIMPLE_DEV_PM_OPS(tpm_tis_i2c_ops, tpm_pm_suspend, tpm_pm_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(tpm_tis_i2c_ops, tpm_pm_suspend, tpm_pm_resume);
 
 static int tpm_tis_i2c_probe(struct i2c_client *client)
 {
@@ -721,7 +723,7 @@ static struct i2c_driver tpm_tis_i2c_driver = {
 	.remove = tpm_tis_i2c_remove,
 	.driver = {
 		   .name = "tpm_i2c_infineon",
-		   .pm = &tpm_tis_i2c_ops,
+		   .pm = pm_sleep_ptr(&tpm_tis_i2c_ops),
 		   .of_match_table = of_match_ptr(tpm_tis_i2c_of_match),
 		   },
 };

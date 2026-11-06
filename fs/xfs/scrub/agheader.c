@@ -3,7 +3,7 @@
  * Copyright (C) 2017-2023 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -18,6 +18,8 @@
 #include "xfs_inode.h"
 #include "scrub/scrub.h"
 #include "scrub/common.h"
+#include "scrub/bitmap.h"
+#include "scrub/agino_bitmap.h"
 
 int
 xchk_setup_agheader(
@@ -33,8 +35,7 @@ xchk_setup_agheader(
 /* Cross-reference with the other btrees. */
 STATIC void
 xchk_superblock_xref(
-	struct xfs_scrub	*sc,
-	struct xfs_buf		*bp)
+	struct xfs_scrub	*sc)
 {
 	struct xfs_mount	*mp = sc->mp;
 	xfs_agnumber_t		agno = sc->sm->sm_agno;
@@ -46,7 +47,7 @@ xchk_superblock_xref(
 
 	agbno = XFS_SB_BLOCK(mp);
 
-	error = xchk_ag_init_existing(sc, agno, &sc->sa);
+	error = xchk_ag_init_existing(sc, agno);
 	if (!xchk_xref_process_error(sc, agno, agbno, &error))
 		return;
 
@@ -55,8 +56,7 @@ xchk_superblock_xref(
 	xchk_xref_is_only_owned_by(sc, agbno, 1, &XFS_RMAP_OINFO_FS);
 	xchk_xref_is_not_shared(sc, agbno, 1);
 	xchk_xref_is_not_cow_staging(sc, agbno, 1);
-
-	/* scrub teardown will take care of sc->sa for us */
+	xchk_ag_free(sc);
 }
 
 /*
@@ -104,15 +104,11 @@ xchk_superblock(
 	struct xfs_dsb		*sb;
 	struct xfs_perag	*pag;
 	size_t			sblen;
-	xfs_agnumber_t		agno;
+	xfs_agnumber_t		agno = sc->sm->sm_agno;
 	uint32_t		v2_ok;
 	__be32			features_mask;
 	int			error;
 	__be16			vernum_mask;
-
-	agno = sc->sm->sm_agno;
-	if (agno == 0)
-		return 0;
 
 	/*
 	 * Grab an active reference to the perag structure.  If we can't get
@@ -122,6 +118,41 @@ xchk_superblock(
 	pag = xfs_perag_get(mp, agno);
 	if (!pag)
 		return -ENOENT;
+
+	if (agno == 0) {
+		/*
+		 * Reread the primary super from disk in case it's become
+		 * corrupted enough since mount time to fail the verifier.
+		 * Crashing now with a bad primary super will prevent remount
+		 * (which might recover the primary super from the log) so we
+		 * want to trigger a repair to write the incore primary
+		 * superblock out to disk ASAP.
+		 *
+		 * Note that we don't check the geometry (like we do for a
+		 * secondary super) because the incore copy is the source of
+		 * truth while the filesystem is mounted.
+		 *
+		 * If the read races with a write, we end up writing the
+		 * primary super unnecessarily, but that's not a big deal.
+		 */
+		error = xfs_buf_read_uncached(sc->mp->m_ddev_targp,
+				XFS_SB_DADDR, BTOBB(mp->m_sb.sb_sectsize), &bp,
+				&xfs_sb_buf_ops);
+		switch (error) {
+		case -EINVAL:	/* also -EWRONGFS */
+		case -ENOSYS:
+		case -EFBIG:
+			error = -EFSCORRUPTED;
+			fallthrough;
+		default:
+			break;
+		}
+		if (!xchk_process_error(sc, agno, XFS_SB_BLOCK(mp), &error))
+			goto out_pag;
+
+		xfs_buf_relse(bp);
+		goto out_xref;
+	}
 
 	error = xfs_sb_read_secondary(mp, sc->tp, agno, &bp);
 	/*
@@ -266,7 +297,7 @@ xchk_superblock(
 			xchk_block_set_corrupt(sc, bp);
 
 		if (sb->sb_gquotino != cpu_to_be64(0))
-			xchk_block_set_preen(sc, bp);
+			xchk_block_set_corrupt(sc, bp);
 	} else {
 		if (sb->sb_uquotino != cpu_to_be64(mp->m_sb.sb_uquotino))
 			xchk_block_set_preen(sc, bp);
@@ -416,12 +447,20 @@ xchk_superblock(
 			xchk_block_set_corrupt(sc, bp);
 	}
 
+	if (xfs_has_zoned(mp)) {
+		if (sb->sb_rtstart != cpu_to_be64(mp->m_sb.sb_rtstart))
+			xchk_block_set_corrupt(sc, bp);
+		if (sb->sb_rtreserved != cpu_to_be64(mp->m_sb.sb_rtreserved))
+			xchk_block_set_corrupt(sc, bp);
+	}
+
 	/* Everything else must be zero. */
 	sblen = xchk_superblock_ondisk_size(mp);
 	if (memchr_inv((char *)sb + sblen, 0, BBTOB(bp->b_length) - sblen))
 		xchk_block_set_corrupt(sc, bp);
 
-	xchk_superblock_xref(sc, bp);
+out_xref:
+	xchk_superblock_xref(sc);
 out_pag:
 	xfs_perag_put(pag);
 	return error;
@@ -576,7 +615,7 @@ xchk_agf_xref(
 
 	agbno = XFS_AGF_BLOCK(mp);
 
-	xchk_ag_btcur_init(sc, &sc->sa);
+	xchk_ag_btcur_init(sc);
 
 	xchk_xref_is_used_space(sc, agbno, 1);
 	xchk_agf_xref_freeblks(sc);
@@ -609,7 +648,7 @@ xchk_agf(
 	int			level;
 	int			error = 0;
 
-	error = xchk_ag_read_headers(sc, agno, &sc->sa);
+	error = xchk_ag_read_headers(sc, agno);
 	if (!xchk_process_error(sc, agno, XFS_AGF_BLOCK(sc->mp), &error))
 		goto out;
 	xchk_buffer_recheck(sc, sc->sa.agf_bp);
@@ -764,7 +803,7 @@ xchk_agfl_xref(
 
 	agbno = XFS_AGFL_BLOCK(mp);
 
-	xchk_ag_btcur_init(sc, &sc->sa);
+	xchk_ag_btcur_init(sc);
 
 	xchk_xref_is_used_space(sc, agbno, 1);
 	xchk_xref_is_not_inode_chunk(sc, agbno, 1);
@@ -792,7 +831,7 @@ xchk_agfl(
 	int			error;
 
 	/* Lock the AGF and AGI so that nobody can touch this AG. */
-	error = xchk_ag_read_headers(sc, agno, &sc->sa);
+	error = xchk_ag_read_headers(sc, agno);
 	if (!xchk_process_error(sc, agno, XFS_AGFL_BLOCK(sc->mp), &error))
 		return error;
 	if (!sc->sa.agf_bp)
@@ -816,8 +855,8 @@ xchk_agfl(
 		xchk_block_set_corrupt(sc, sc->sa.agf_bp);
 		goto out;
 	}
-	sai.entries = kvcalloc(sai.agflcount, sizeof(xfs_agblock_t),
-			       XCHK_GFP_FLAGS);
+	sai.entries = kvzalloc_objs(xfs_agblock_t, sai.agflcount,
+				    XCHK_GFP_FLAGS);
 	if (!sai.entries) {
 		error = -ENOMEM;
 		goto out;
@@ -919,7 +958,7 @@ xchk_agi_xref(
 
 	agbno = XFS_AGI_BLOCK(mp);
 
-	xchk_ag_btcur_init(sc, &sc->sa);
+	xchk_ag_btcur_init(sc);
 
 	xchk_xref_is_used_space(sc, agbno, 1);
 	xchk_xref_is_not_inode_chunk(sc, agbno, 1);
@@ -933,40 +972,84 @@ xchk_agi_xref(
 }
 
 /*
+ * Walk the incore unlinked list for a particular AGI bucket to construct
+ * the unlinked inode bitmap for later reconstruction of the unlinked list.
+ * Returns 1 if we should keep checking, 0 to stop checking, or a negative
+ * errno.
+ */
+static int
+xchk_iunlink_bucket(
+	struct xfs_scrub		*sc,
+	unsigned int			bucket,
+	xfs_agino_t			agino)
+{
+	struct xagino_bitmap		seen;
+	int				ret;
+
+	xagino_bitmap_init(&seen);
+
+	while (agino != NULLAGINO) {
+		struct xfs_inode	*ip;
+		unsigned int		len = 1;
+
+		if (agino % XFS_AGI_UNLINKED_BUCKETS != bucket) {
+			xchk_block_set_corrupt(sc, sc->sa.agi_bp);
+			goto bad;
+		}
+
+		if (xagino_bitmap_test(&seen, agino, &len)) {
+			xchk_block_set_corrupt(sc, sc->sa.agi_bp);
+			goto bad;
+		}
+
+		ip = xfs_iunlink_lookup(sc->sa.pag, agino);
+		if (!ip) {
+			xchk_block_set_corrupt(sc, sc->sa.agi_bp);
+			goto bad;
+		}
+
+		if (!xfs_inode_on_unlinked_list(ip)) {
+			xchk_block_set_corrupt(sc, sc->sa.agi_bp);
+			goto bad;
+		}
+
+		ret = xagino_bitmap_set(&seen, agino, 1);
+		if (ret)
+			goto out_bitmap;
+
+		agino = ip->i_next_unlinked;
+	}
+	ret = 1;
+
+out_bitmap:
+	xagino_bitmap_destroy(&seen);
+	return ret;
+bad:
+	ret = 0;
+	goto out_bitmap;
+}
+
+/*
  * Check the unlinked buckets for links to bad inodes.  We hold the AGI, so
  * there cannot be any threads updating unlinked list pointers in this AG.
  */
-STATIC void
+STATIC int
 xchk_iunlink(
 	struct xfs_scrub	*sc,
 	struct xfs_agi		*agi)
 {
 	unsigned int		i;
-	struct xfs_inode	*ip;
 
 	for (i = 0; i < XFS_AGI_UNLINKED_BUCKETS; i++) {
-		xfs_agino_t	agino = be32_to_cpu(agi->agi_unlinked[i]);
+		int		ret;
 
-		while (agino != NULLAGINO) {
-			if (agino % XFS_AGI_UNLINKED_BUCKETS != i) {
-				xchk_block_set_corrupt(sc, sc->sa.agi_bp);
-				return;
-			}
-
-			ip = xfs_iunlink_lookup(sc->sa.pag, agino);
-			if (!ip) {
-				xchk_block_set_corrupt(sc, sc->sa.agi_bp);
-				return;
-			}
-
-			if (!xfs_inode_on_unlinked_list(ip)) {
-				xchk_block_set_corrupt(sc, sc->sa.agi_bp);
-				return;
-			}
-
-			agino = ip->i_next_unlinked;
-		}
+		ret = xchk_iunlink_bucket(sc, i,
+				be32_to_cpu(agi->agi_unlinked[i]));
+		if (ret < 1)
+			return ret;
 	}
+
+	return 0;
 }
 
 /* Scrub the AGI. */
@@ -989,7 +1072,7 @@ xchk_agi(
 	int			level;
 	int			error = 0;
 
-	error = xchk_ag_read_headers(sc, agno, &sc->sa);
+	error = xchk_ag_read_headers(sc, agno);
 	if (!xchk_process_error(sc, agno, XFS_AGI_BLOCK(sc->mp), &error))
 		goto out;
 	xchk_buffer_recheck(sc, sc->sa.agi_bp);
@@ -1053,7 +1136,9 @@ xchk_agi(
 	if (pag->pagi_freecount != be32_to_cpu(agi->agi_freecount))
 		xchk_block_set_corrupt(sc, sc->sa.agi_bp);
 
-	xchk_iunlink(sc, agi);
+	error = xchk_iunlink(sc, agi);
+	if (error)
+		goto out;
 
 	xchk_agi_xref(sc);
 out:

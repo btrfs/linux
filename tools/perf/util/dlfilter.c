@@ -56,7 +56,7 @@ static void al_to_d_al(struct addr_location *al, struct perf_dlfilter_al *d_al)
 			d_al->symoff = al->addr - map__start(al->map) - sym->start;
 		else
 			d_al->symoff = 0;
-		d_al->sym_binding = sym->binding;
+		d_al->sym_binding = symbol__binding(sym);
 	} else {
 		d_al->sym = NULL;
 		d_al->sym_start = 0;
@@ -234,8 +234,7 @@ static const __u8 *dlfilter__insn(void *ctx, __u32 *len)
 			struct machine *machine = maps__machine(thread__maps(al->thread));
 
 			if (machine)
-				script_fetch_insn(d->sample, al->thread, machine,
-						  /*native_arch=*/true);
+				perf_sample__fetch_insn(d->sample, al->thread, machine);
 		}
 	}
 

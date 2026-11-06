@@ -322,7 +322,7 @@ static int ad5770r_read_raw(struct iio_dev *indio_dev,
 				       chan->address,
 				       st->transf_buf, 2);
 		if (ret)
-			return 0;
+			return ret;
 
 		buf16 = get_unaligned_le16(st->transf_buf);
 		*val = buf16 >> 2;
@@ -642,7 +642,7 @@ static const struct of_device_id ad5770r_of_id[] = {
 MODULE_DEVICE_TABLE(of, ad5770r_of_id);
 
 static const struct spi_device_id ad5770r_id[] = {
-	{ "ad5770r", 0 },
+	{ .name = "ad5770r" },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad5770r_id);

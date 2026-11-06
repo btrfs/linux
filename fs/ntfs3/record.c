@@ -71,7 +71,7 @@ static __le16 mi_new_attt_id(struct ntfs_inode *ni, struct mft_inode *mi)
 int mi_get(struct ntfs_sb_info *sbi, CLST rno, struct mft_inode **mi)
 {
 	int err;
-	struct mft_inode *m = kzalloc(sizeof(struct mft_inode), GFP_NOFS);
+	struct mft_inode *m = kzalloc_obj(struct mft_inode, GFP_NOFS);
 
 	if (!m)
 		return -ENOMEM;
@@ -202,7 +202,7 @@ struct ATTRIB *mi_enum_attr(struct ntfs_inode *ni, struct mft_inode *mi,
 	u32 used = le32_to_cpu(rec->used);
 	u32 t32, off, asize, prev_type;
 	u16 t16;
-	u64 data_size, alloc_size, tot_size;
+	u64 svcn, evcn, data_size, alloc_size, tot_size;
 
 	if (!attr) {
 		u32 total = le32_to_cpu(rec->total);
@@ -310,9 +310,37 @@ struct ATTRIB *mi_enum_attr(struct ntfs_inode *ni, struct mft_inode *mi,
 	if (t32 && le16_to_cpu(attr->name_off) + t32 > t16)
 		goto out;
 
-	/* Check start/end vcn. */
-	if (le64_to_cpu(attr->nres.svcn) > le64_to_cpu(attr->nres.evcn) + 1)
+	/*
+	 * Check start/end vcn.  svcn == 0 with evcn == -1 (U64_MAX) is the
+	 * sentinel for an empty non-resident attribute (no allocated
+	 * clusters) and must be accepted: "svcn > evcn + 1" tolerates it,
+	 * since "(u64)-1 + 1" is 0 and "0 > 0" is false.
+	 *
+	 * For a non-empty attribute evcn is a cluster index and must lie
+	 * within the volume (sbi->used.bitmap.nbits, set up in
+	 * ntfs_init_from_boot() before any caller of mi_enum_attr() runs).
+	 * Bounding evcn also prevents a malformed value close to U64_MAX
+	 * from slipping through the near-wrap "evcn + 1" upper bound.
+	 */
+	svcn = le64_to_cpu(attr->nres.svcn);
+	evcn = le64_to_cpu(attr->nres.evcn);
+	if (svcn > evcn + 1)
 		goto out;
+
+	if (is_attr_ext(attr)) {
+		/* sparsed/compressed attribute. */
+#ifdef CONFIG_NTFS3_64BIT_CLUSTER
+		/* No limits. */
+#else
+		/* Check evcn fits into 32 bits. */
+		if (evcn != U64_MAX && evcn >= (1ull << 32))
+			goto out;
+#endif
+	} else {
+		/* Check out of volume for normal attribute. */
+		if (evcn != U64_MAX && evcn >= mi->sbi->used.bitmap.nbits)
+			goto out;
+	}
 
 	data_size = le64_to_cpu(attr->nres.data_size);
 	if (le64_to_cpu(attr->nres.valid_size) > data_size)
@@ -621,7 +649,7 @@ bool mi_resize_attr(struct mft_inode *mi, struct ATTRIB *attr, int bytes)
  * If failed record is not changed.
  */
 int mi_pack_runs(struct mft_inode *mi, struct ATTRIB *attr,
-		 struct runs_tree *run, CLST len)
+		 const struct runs_tree *run, CLST len)
 {
 	int err = 0;
 	struct ntfs_sb_info *sbi = mi->sbi;
@@ -637,16 +665,30 @@ int mi_pack_runs(struct mft_inode *mi, struct ATTRIB *attr,
 	u32 run_size = asize - run_off;
 	u32 tail = used - aoff - asize;
 	u32 dsize = sbi->record_size - used;
+	u32 avail;
 
 	/* Make a maximum gap in current record. */
 	memmove(next + dsize, next, tail);
 
+	/* Leave room for the 8-byte ALIGN() to avoid OOB write */
+	avail = (run_size + dsize) & ~7u;
+
+	if (!avail) {
+		memmove(next, next + dsize, tail);
+		return -ENOSPC;
+	}
+
 	/* Pack as much as possible. */
-	err = run_pack(run, svcn, len, Add2Ptr(attr, run_off), run_size + dsize,
+	err = run_pack(run, svcn, len, Add2Ptr(attr, run_off), avail,
 		       &plen);
 	if (err < 0) {
 		memmove(next, next + dsize, tail);
 		return err;
+	}
+
+	if (!plen) {
+		memmove(next, next + dsize, tail);
+		return -ENOSPC;
 	}
 
 	new_run_size = ALIGN(err, 8);

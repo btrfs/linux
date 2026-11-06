@@ -12,7 +12,7 @@ struct sched_core_cookie {
 
 static unsigned long sched_core_alloc_cookie(void)
 {
-	struct sched_core_cookie *ck = kmalloc(sizeof(*ck), GFP_KERNEL);
+	struct sched_core_cookie *ck = kmalloc_obj(*ck);
 	if (!ck)
 		return 0;
 
@@ -136,7 +136,7 @@ int sched_core_share_pid(unsigned int cmd, pid_t pid, enum pid_type type,
 	struct pid *grp;
 	int err = 0;
 
-	if (!static_branch_likely(&sched_smt_present))
+	if (!sched_smt_active())
 		return -ENODEV;
 
 	BUILD_BUG_ON(PR_SCHED_CORE_SCOPE_THREAD != PIDTYPE_PID);

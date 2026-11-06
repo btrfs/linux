@@ -106,7 +106,7 @@ static int mvumi_map_pci_addr(struct pci_dev *dev, void **addr_array)
 static struct mvumi_res *mvumi_alloc_mem_resource(struct mvumi_hba *mhba,
 				enum resource_type type, unsigned int size)
 {
-	struct mvumi_res *res = kzalloc(sizeof(*res), GFP_ATOMIC);
+	struct mvumi_res *res = kzalloc_obj(*res, GFP_ATOMIC);
 
 	if (!res) {
 		dev_err(&mhba->pdev->dev,
@@ -252,7 +252,7 @@ static struct mvumi_cmd *mvumi_create_internal_cmd(struct mvumi_hba *mhba,
 {
 	struct mvumi_cmd *cmd;
 
-	cmd = kzalloc(sizeof(*cmd), GFP_KERNEL);
+	cmd = kzalloc_obj(*cmd);
 	if (!cmd) {
 		dev_err(&mhba->pdev->dev, "failed to create a internal cmd\n");
 		return NULL;
@@ -368,7 +368,7 @@ static int mvumi_alloc_cmds(struct mvumi_hba *mhba)
 	struct mvumi_cmd *cmd;
 
 	for (i = 0; i < mhba->max_io; i++) {
-		cmd = kzalloc(sizeof(*cmd), GFP_KERNEL);
+		cmd = kzalloc_obj(*cmd);
 		if (!cmd)
 			goto err_exit;
 
@@ -722,9 +722,9 @@ static int mvumi_issue_blocked_cmd(struct mvumi_hba *mhba,
 		return -1;
 	}
 	atomic_inc(&cmd->sync_cmd);
-	spin_lock_irqsave(mhba->shost->host_lock, flags);
+	spin_lock_irqsave(&mhba->shost->host_lock, flags);
 	mhba->instancet->fire_cmd(mhba, cmd);
-	spin_unlock_irqrestore(mhba->shost->host_lock, flags);
+	spin_unlock_irqrestore(&mhba->shost->host_lock, flags);
 
 	wait_event_timeout(mhba->int_cmd_wait_q,
 		(cmd->cmd_status != REQ_STATUS_PENDING),
@@ -732,7 +732,7 @@ static int mvumi_issue_blocked_cmd(struct mvumi_hba *mhba,
 
 	/* command timeout */
 	if (atomic_read(&cmd->sync_cmd)) {
-		spin_lock_irqsave(mhba->shost->host_lock, flags);
+		spin_lock_irqsave(&mhba->shost->host_lock, flags);
 		atomic_dec(&cmd->sync_cmd);
 		if (mhba->tag_cmd[cmd->frame->tag]) {
 			mhba->tag_cmd[cmd->frame->tag] = NULL;
@@ -747,7 +747,7 @@ static int mvumi_issue_blocked_cmd(struct mvumi_hba *mhba,
 		} else
 			atomic_dec(&mhba->fw_outstanding);
 
-		spin_unlock_irqrestore(mhba->shost->host_lock, flags);
+		spin_unlock_irqrestore(&mhba->shost->host_lock, flags);
 	}
 	return 0;
 }
@@ -1572,8 +1572,7 @@ static int mvumi_probe_devices(struct mvumi_hba *mhba)
 			found = mvumi_match_devices(mhba, id, wwid);
 			if (!found) {
 				mvumi_remove_devices(mhba, id);
-				mv_dev = kzalloc(sizeof(struct mvumi_device),
-								GFP_KERNEL);
+				mv_dev = kzalloc_obj(struct mvumi_device);
 				if (!mv_dev) {
 					dev_err(&mhba->pdev->dev,
 						"%s alloc mv_dev failed\n",
@@ -1749,7 +1748,7 @@ static void mvumi_launch_events(struct mvumi_hba *mhba, u32 isr_status)
 			continue;
 		}
 
-		mu_ev = kzalloc(sizeof(*mu_ev), GFP_ATOMIC);
+		mu_ev = kzalloc_obj(*mu_ev, GFP_ATOMIC);
 		if (mu_ev) {
 			INIT_WORK(&mu_ev->work_q, mvumi_scan_events);
 			mu_ev->mhba = mhba;
@@ -1792,9 +1791,9 @@ static irqreturn_t mvumi_isr_handler(int irq, void *devp)
 	struct mvumi_hba *mhba = (struct mvumi_hba *) devp;
 	unsigned long flags;
 
-	spin_lock_irqsave(mhba->shost->host_lock, flags);
+	spin_lock_irqsave(&mhba->shost->host_lock, flags);
 	if (unlikely(mhba->instancet->clear_intr(mhba) || !mhba->global_isr)) {
-		spin_unlock_irqrestore(mhba->shost->host_lock, flags);
+		spin_unlock_irqrestore(&mhba->shost->host_lock, flags);
 		return IRQ_NONE;
 	}
 
@@ -1815,7 +1814,7 @@ static irqreturn_t mvumi_isr_handler(int irq, void *devp)
 	mhba->isr_status = 0;
 	if (mhba->fw_state == FW_STATE_STARTED)
 		mvumi_handle_clob(mhba);
-	spin_unlock_irqrestore(mhba->shost->host_lock, flags);
+	spin_unlock_irqrestore(&mhba->shost->host_lock, flags);
 	return IRQ_HANDLED;
 }
 
@@ -2068,7 +2067,7 @@ static unsigned char mvumi_build_frame(struct mvumi_hba *mhba,
 	return 0;
 
 error:
-	scsi_build_sense(scmd, 0, ILLEGAL_REQUEST, 0x24, 0);
+	scsi_set_sense(scmd, 0, ILLEGAL_REQUEST, INVALID_FIELD_IN_CDB);
 	return -1;
 }
 
@@ -2077,20 +2076,20 @@ error:
  * @shost:			Scsi host to queue command on
  * @scmd:			SCSI command to be queued
  */
-static int mvumi_queue_command(struct Scsi_Host *shost,
-					struct scsi_cmnd *scmd)
+static enum scsi_qc_status mvumi_queue_command(struct Scsi_Host *shost,
+					       struct scsi_cmnd *scmd)
 {
 	struct mvumi_cmd *cmd;
 	struct mvumi_hba *mhba;
 	unsigned long irq_flags;
 
-	spin_lock_irqsave(shost->host_lock, irq_flags);
+	spin_lock_irqsave(&shost->host_lock, irq_flags);
 
 	mhba = (struct mvumi_hba *) shost->hostdata;
 	scmd->result = 0;
 	cmd = mvumi_get_cmd(mhba);
 	if (unlikely(!cmd)) {
-		spin_unlock_irqrestore(shost->host_lock, irq_flags);
+		spin_unlock_irqrestore(&shost->host_lock, irq_flags);
 		return SCSI_MLQUEUE_HOST_BUSY;
 	}
 
@@ -2100,13 +2099,13 @@ static int mvumi_queue_command(struct Scsi_Host *shost,
 	cmd->scmd = scmd;
 	mvumi_priv(scmd)->cmd_priv = cmd;
 	mhba->instancet->fire_cmd(mhba, cmd);
-	spin_unlock_irqrestore(shost->host_lock, irq_flags);
+	spin_unlock_irqrestore(&shost->host_lock, irq_flags);
 	return 0;
 
 out_return_cmd:
 	mvumi_return_cmd(mhba, cmd);
 	scsi_done(scmd);
-	spin_unlock_irqrestore(shost->host_lock, irq_flags);
+	spin_unlock_irqrestore(&shost->host_lock, irq_flags);
 	return 0;
 }
 
@@ -2117,7 +2116,7 @@ static enum scsi_timeout_action mvumi_timed_out(struct scsi_cmnd *scmd)
 	struct mvumi_hba *mhba = shost_priv(host);
 	unsigned long flags;
 
-	spin_lock_irqsave(mhba->shost->host_lock, flags);
+	spin_lock_irqsave(&mhba->shost->host_lock, flags);
 
 	if (mhba->tag_cmd[cmd->frame->tag]) {
 		mhba->tag_cmd[cmd->frame->tag] = NULL;
@@ -2136,7 +2135,7 @@ static enum scsi_timeout_action mvumi_timed_out(struct scsi_cmnd *scmd)
 			     scmd->sc_data_direction);
 	}
 	mvumi_return_cmd(mhba, cmd);
-	spin_unlock_irqrestore(mhba->shost->host_lock, flags);
+	spin_unlock_irqrestore(&mhba->shost->host_lock, flags);
 
 	return SCSI_EH_NOT_HANDLED;
 }
@@ -2193,7 +2192,7 @@ static int mvumi_cfg_hw_reg(struct mvumi_hba *mhba)
 		mhba->mmio = mhba->base_addr[0];
 		base = mhba->mmio;
 		if (!mhba->regs) {
-			mhba->regs = kzalloc(sizeof(*regs), GFP_KERNEL);
+			mhba->regs = kzalloc_obj(*regs);
 			if (mhba->regs == NULL)
 				return -ENOMEM;
 		}
@@ -2245,7 +2244,7 @@ static int mvumi_cfg_hw_reg(struct mvumi_hba *mhba)
 		mhba->mmio = mhba->base_addr[2];
 		base = mhba->mmio;
 		if (!mhba->regs) {
-			mhba->regs = kzalloc(sizeof(*regs), GFP_KERNEL);
+			mhba->regs = kzalloc_obj(*regs);
 			if (mhba->regs == NULL)
 				return -ENOMEM;
 		}

@@ -7,7 +7,6 @@
  */
 
 #include <linux/init.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/err.h>
 #include <linux/spi/spi.h>
@@ -263,22 +262,22 @@ static int maxim_thermocouple_probe(struct spi_device *spi)
 }
 
 static const struct spi_device_id maxim_thermocouple_id[] = {
-	{"max6675", MAX6675},
-	{"max31855", MAX31855},
-	{"max31855k", MAX31855K},
-	{"max31855j", MAX31855J},
-	{"max31855n", MAX31855N},
-	{"max31855s", MAX31855S},
-	{"max31855t", MAX31855T},
-	{"max31855e", MAX31855E},
-	{"max31855r", MAX31855R},
+	{ .name = "max6675", .driver_data = MAX6675 },
+	{ .name = "max31855", .driver_data = MAX31855 },
+	{ .name = "max31855k", .driver_data = MAX31855K },
+	{ .name = "max31855j", .driver_data = MAX31855J },
+	{ .name = "max31855n", .driver_data = MAX31855N },
+	{ .name = "max31855s", .driver_data = MAX31855S },
+	{ .name = "max31855t", .driver_data = MAX31855T },
+	{ .name = "max31855e", .driver_data = MAX31855E },
+	{ .name = "max31855r", .driver_data = MAX31855R },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, maxim_thermocouple_id);
 
 static const struct of_device_id maxim_thermocouple_of_match[] = {
-        { .compatible = "maxim,max6675" },
-        { .compatible = "maxim,max31855" },
+	{ .compatible = "maxim,max6675" },
+	{ .compatible = "maxim,max31855" },
 	{ .compatible = "maxim,max31855k" },
 	{ .compatible = "maxim,max31855j" },
 	{ .compatible = "maxim,max31855n" },
@@ -286,7 +285,7 @@ static const struct of_device_id maxim_thermocouple_of_match[] = {
 	{ .compatible = "maxim,max31855t" },
 	{ .compatible = "maxim,max31855e" },
 	{ .compatible = "maxim,max31855r" },
-        { },
+	{ },
 };
 MODULE_DEVICE_TABLE(of, maxim_thermocouple_of_match);
 

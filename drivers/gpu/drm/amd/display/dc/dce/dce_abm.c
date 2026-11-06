@@ -57,6 +57,7 @@
 
 static bool dce_abm_set_pipe(struct abm *abm, uint32_t controller_id, uint32_t panel_inst)
 {
+	(void)panel_inst;
 	struct dce_abm *abm_dce = TO_DCE_ABM(abm);
 	uint32_t rampingBoundary = 0xFFFF;
 
@@ -219,6 +220,7 @@ static bool dce_abm_set_level(struct abm *abm, uint32_t level)
 
 static bool dce_abm_immediate_disable(struct abm *abm, uint32_t panel_inst)
 {
+
 	if (abm->dmcu_is_running == false)
 		return true;
 
@@ -271,6 +273,7 @@ static void dce_abm_construct(
 	base->ctx = ctx;
 	base->funcs = &dce_funcs;
 	base->dmcu_is_running = false;
+	base->inst = 0;
 
 	abm_dce->regs = regs;
 	abm_dce->abm_shift = abm_shift;
@@ -283,7 +286,7 @@ struct abm *dce_abm_create(
 	const struct dce_abm_shift *abm_shift,
 	const struct dce_abm_mask *abm_mask)
 {
-	struct dce_abm *abm_dce = kzalloc(sizeof(*abm_dce), GFP_ATOMIC);
+	struct dce_abm *abm_dce = kzalloc_obj(*abm_dce);
 
 	if (abm_dce == NULL) {
 		BREAK_TO_DEBUGGER();

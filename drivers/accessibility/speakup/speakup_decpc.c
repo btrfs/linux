@@ -41,7 +41,7 @@
 #define	STAT_new_index		0x0040	/* new last index ready */
 #define	STAT_new_status		0x0080	/* new status posted */
 #define	STAT_dma_state		0x0100	/* dma state toggle */
-#define	STAT_index_valid	0x0200	/* indexs are valid */
+#define	STAT_index_valid	0x0200	/* indexes are valid */
 #define	STAT_flushing		0x0400	/* flush in progress */
 #define	STAT_self_test		0x0800	/* module in self test */
 #define	MODE_ready		0xc000	/* module ready for next phase */
@@ -487,7 +487,6 @@ static int synth_probe(struct spk_synth *synth)
 
 static void dtpc_release(struct spk_synth *synth)
 {
-	spk_stop_serial_interrupt();
 	if (speakup_info.port_tts)
 		synth_release_region(speakup_info.port_tts, SYNTH_IO_EXTENT);
 	speakup_info.port_tts = 0;

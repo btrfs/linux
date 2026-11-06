@@ -9,6 +9,7 @@ Virtualization Support
 
    kvm/index
    uml/user_mode_linux_howto_v2
+   uml/nommu-uml
    paravirt_ops
    guest-halt-polling
    ne_overview
@@ -16,10 +17,3 @@ Virtualization Support
    coco/sev-guest
    coco/tdx-guest
    hyperv/index
-
-.. only:: html and subproject
-
-   Indices
-   =======
-
-   * :ref:`genindex`

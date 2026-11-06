@@ -168,9 +168,8 @@ static int __init cipso_v4_cache_init(void)
 {
 	u32 iter;
 
-	cipso_v4_cache = kcalloc(CIPSO_V4_CACHE_BUCKETS,
-				 sizeof(struct cipso_v4_map_cache_bkt),
-				 GFP_KERNEL);
+	cipso_v4_cache = kzalloc_objs(struct cipso_v4_map_cache_bkt,
+				      CIPSO_V4_CACHE_BUCKETS);
 	if (!cipso_v4_cache)
 		return -ENOMEM;
 
@@ -308,7 +307,7 @@ int cipso_v4_cache_add(const unsigned char *cipso_ptr,
 
 	cipso_ptr_len = cipso_ptr[1];
 
-	entry = kzalloc(sizeof(*entry), GFP_ATOMIC);
+	entry = kzalloc_obj(*entry, GFP_ATOMIC);
 	if (!entry)
 		return -ENOMEM;
 	entry->key = kmemdup(cipso_ptr, cipso_ptr_len, GFP_ATOMIC);
@@ -2014,6 +2013,10 @@ static int cipso_v4_delopt(struct ip_options_rcu __rcu **opt_ptr)
 		cipso_ptr = &opt->opt.__data[cipso_off];
 		cipso_len = cipso_ptr[1];
 
+		optlen_new = cipso_v4_get_actual_opt_len(opt->opt.__data,
+							 opt->opt.optlen);
+		optlen_new -= cipso_len;
+
 		if (opt->opt.srr > opt->opt.cipso)
 			opt->opt.srr -= cipso_len;
 		if (opt->opt.rr > opt->opt.cipso)
@@ -2027,11 +2030,12 @@ static int cipso_v4_delopt(struct ip_options_rcu __rcu **opt_ptr)
 		memmove(cipso_ptr, cipso_ptr + cipso_len,
 			opt->opt.optlen - cipso_off - cipso_len);
 
-		optlen_new = cipso_v4_get_actual_opt_len(opt->opt.__data,
-							 opt->opt.optlen);
 		hdr_delta = opt->opt.optlen;
 		opt->opt.optlen = (optlen_new + 3) & ~3;
 		hdr_delta -= opt->opt.optlen;
+
+		memset(&opt->opt.__data[optlen_new], IPOPT_END,
+		       opt->opt.optlen - optlen_new);
 	} else {
 		/* only the cipso option was present on the socket so we can
 		 * remove the entire option struct */
@@ -2196,7 +2200,8 @@ int cipso_v4_skbuff_setattr(struct sk_buff *skb,
 	/* if we don't ensure enough headroom we could panic on the skb_push()
 	 * call below so make sure we have enough, we are also "mangling" the
 	 * packet so we should probably do a copy-on-write call anyway */
-	ret_val = skb_cow(skb, skb_headroom(skb) + len_delta);
+	ret_val = skb_cow(skb,
+			  skb_headroom(skb) + (len_delta > 0 ? len_delta : 0));
 	if (ret_val < 0)
 		return ret_val;
 
@@ -2287,6 +2292,14 @@ int cipso_v4_skbuff_delattr(struct sk_buff *skb)
 	       new_hdr_len - new_hdr_len_actual);
 
 	opt->optlen -= hdr_len_delta;
+	if (opt->srr > opt->cipso)
+		opt->srr -= cipso_len;
+	if (opt->rr > opt->cipso)
+		opt->rr -= cipso_len;
+	if (opt->ts > opt->cipso)
+		opt->ts -= cipso_len;
+	if (opt->router_alert > opt->cipso)
+		opt->router_alert -= cipso_len;
 	opt->cipso = 0;
 	opt->is_changed = 1;
 	if (hdr_len_delta != 0) {

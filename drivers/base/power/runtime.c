@@ -90,7 +90,7 @@ static void update_pm_runtime_accounting(struct device *dev)
 	/*
 	 * Because ktime_get_mono_fast_ns() is not monotonic during
 	 * timekeeping updates, ensure that 'now' is after the last saved
-	 * timesptamp.
+	 * timestamp.
 	 */
 	if (now < last)
 		return;
@@ -162,14 +162,14 @@ static void pm_runtime_cancel_pending(struct device *dev)
 	dev->power.request = RPM_REQ_NONE;
 }
 
-/*
+/**
  * pm_runtime_autosuspend_expiration - Get a device's autosuspend-delay expiration time.
  * @dev: Device to handle.
  *
  * Compute the autosuspend-delay expiration time based on the device's
  * power.last_busy time.  If the delay has already expired or is disabled
  * (negative) or the power.use_autosuspend flag isn't set, return 0.
- * Otherwise return the expiration time in nanoseconds (adjusted to be nonzero).
+ * Otherwise return the expiration time in nanoseconds.
  *
  * This function may be called either with or without dev->power.lock held.
  * Either way it can be racy, since power.last_busy may be updated at any time.
@@ -200,7 +200,7 @@ static int dev_memalloc_noio(struct device *dev, void *data)
 	return dev->power.memalloc_noio;
 }
 
-/*
+/**
  * pm_runtime_set_memalloc_noio - Set a device's memalloc_noio flag.
  * @dev: Device to handle.
  * @enable: True for setting the flag and False for clearing the flag.
@@ -217,7 +217,7 @@ static int dev_memalloc_noio(struct device *dev, void *data)
  *     resume/suspend callback of any one of its ancestors(or the
  *     block device itself), the deadlock may be triggered inside the
  *     memory allocation since it might not complete until the block
- *     device becomes active and the involed page I/O finishes. The
+ *     device becomes active and the involved page I/O finishes. The
  *     situation is pointed out first by Alan Stern. Network device
  *     are involved in iSCSI kind of situation.
  *
@@ -361,7 +361,8 @@ static void rpm_suspend_suppliers(struct device *dev)
 
 	list_for_each_entry_rcu(link, &dev->links.suppliers, c_node,
 				device_links_read_lock_held())
-		pm_request_idle(link->supplier);
+		if (device_link_test(link, DL_FLAG_PM_RUNTIME))
+			pm_request_idle(link->supplier);
 
 	device_links_read_unlock(idx);
 }
@@ -468,9 +469,6 @@ static int rpm_callback(int (*cb)(struct device *), struct device *dev)
 	 */
 	if (retval == -EACCES)
 		retval = -EAGAIN;
-
-	if (retval != -EAGAIN && retval != -EBUSY)
-		dev->power.runtime_error = retval;
 
 	return retval;
 }
@@ -750,6 +748,9 @@ static int rpm_suspend(struct device *dev, int rpmflags)
 	__update_runtime_status(dev, RPM_ACTIVE);
 	dev->power.deferred_resume = false;
 	wake_up_all(&dev->power.wait_queue);
+
+	if (retval != -EAGAIN && retval != -EBUSY)
+		dev->power.runtime_error = retval;
 
 	/*
 	 * On transient errors, if the callback routine failed an autosuspend,
@@ -1043,6 +1044,11 @@ static enum hrtimer_restart  pm_suspend_timer_fn(struct hrtimer *timer)
  * pm_schedule_suspend - Set up a timer to submit a suspend request in future.
  * @dev: Device to suspend.
  * @delay: Time to wait before submitting a suspend request, in milliseconds.
+ *
+ * Return:
+ * * %1: Success; @dev is already %RPM_SUSPENDED.
+ * * %0: Success.
+ * * Error code on failure.
  */
 int pm_schedule_suspend(struct device *dev, unsigned int delay)
 {
@@ -1096,16 +1102,15 @@ static int rpm_drop_usage_count(struct device *dev)
 }
 
 /**
- * __pm_runtime_idle - Entry point for runtime idle operations.
+ * __pm_runtime_idle - Core entry point for runtime idle operations.
  * @dev: Device to send idle notification for.
  * @rpmflags: Flag bits.
  *
- * If the RPM_GET_PUT flag is set, decrement the device's usage count and
- * return immediately if it is larger than zero (if it becomes negative, log a
- * warning, increment it, and return an error).  Then carry out an idle
- * notification, either synchronous or asynchronous.
+ * Carry out an idle check for @dev, either synchronous or asynchronous.
+ * If %RPM_GET_PUT is set in @rpmflags, decrement the device's usage count
+ * first, proceeding with idle notification only if the counter drops to zero.
  *
- * This routine may be called in atomic context if the RPM_ASYNC flag is set,
+ * This routine may be called in atomic context if the %RPM_ASYNC flag is set,
  * or if pm_runtime_irq_safe() has been called.
  */
 int __pm_runtime_idle(struct device *dev, int rpmflags)
@@ -1134,16 +1139,15 @@ int __pm_runtime_idle(struct device *dev, int rpmflags)
 EXPORT_SYMBOL_GPL(__pm_runtime_idle);
 
 /**
- * __pm_runtime_suspend - Entry point for runtime put/suspend operations.
+ * __pm_runtime_suspend - Core entry point for runtime put/suspend operations.
  * @dev: Device to suspend.
  * @rpmflags: Flag bits.
  *
- * If the RPM_GET_PUT flag is set, decrement the device's usage count and
- * return immediately if it is larger than zero (if it becomes negative, log a
- * warning, increment it, and return an error).  Then carry out a suspend,
- * either synchronous or asynchronous.
+ * Carry out a suspend operation for @dev, either synchronous or asynchronous.
+ * If %RPM_GET_PUT is set in @rpmflags, decrement the device's usage count
+ * first, proceeding with suspend only if the counter drops to zero.
  *
- * This routine may be called in atomic context if the RPM_ASYNC flag is set,
+ * This routine may be called in atomic context if the %RPM_ASYNC flag is set,
  * or if pm_runtime_irq_safe() has been called.
  */
 int __pm_runtime_suspend(struct device *dev, int rpmflags)
@@ -1172,14 +1176,15 @@ int __pm_runtime_suspend(struct device *dev, int rpmflags)
 EXPORT_SYMBOL_GPL(__pm_runtime_suspend);
 
 /**
- * __pm_runtime_resume - Entry point for runtime resume operations.
+ * __pm_runtime_resume - Core entry point for runtime resume operations.
  * @dev: Device to resume.
  * @rpmflags: Flag bits.
  *
- * If the RPM_GET_PUT flag is set, increment the device's usage count.  Then
- * carry out a resume, either synchronous or asynchronous.
+ * Carry out a runtime resume operation for @dev, either synchronous or
+ * asynchronous. If %RPM_GET_PUT is set in @rpmflags, increment the device's
+ * usage count first, then bring the device to %RPM_ACTIVE state.
  *
- * This routine may be called in atomic context if the RPM_ASYNC flag is set,
+ * This routine may be called in atomic context if the %RPM_ASYNC flag is set,
  * or if pm_runtime_irq_safe() has been called.
  */
 int __pm_runtime_resume(struct device *dev, int rpmflags)
@@ -1210,7 +1215,7 @@ EXPORT_SYMBOL_GPL(__pm_runtime_resume);
  *
  * Otherwise, if its runtime PM status is %RPM_ACTIVE and (1) @ign_usage_count
  * is set, or (2) @dev is not ignoring children and its active child count is
- * nonero, or (3) the runtime PM usage counter of @dev is not zero, increment
+ * nonzero, or (3) the runtime PM usage counter of @dev is not zero, increment
  * the usage counter of @dev and return 1.
  *
  * Otherwise, return 0 without changing the usage counter.
@@ -1249,14 +1254,16 @@ static int pm_runtime_get_conditional(struct device *dev, bool ign_usage_count)
 }
 
 /**
- * pm_runtime_get_if_active - Bump up runtime PM usage counter if the device is
- *			      in active state
+ * pm_runtime_get_if_active - Conditionally bump up runtime PM usage counter.
  * @dev: Target device.
  *
  * Increment the runtime PM usage counter of @dev if its runtime PM status is
- * %RPM_ACTIVE, in which case it returns 1. If the device is in a different
- * state, 0 is returned. -EINVAL is returned if runtime PM is disabled for the
- * device, in which case also the usage_count will remain unmodified.
+ * already %RPM_ACTIVE.
+ *
+ * Return:
+ * * %-EINVAL: Runtime PM is disabled for @dev. The usage counter is not incremented.
+ * * %1: Success; usage counter is incremented.
+ * * %0: @dev was not active.
  */
 int pm_runtime_get_if_active(struct device *dev)
 {
@@ -1268,17 +1275,15 @@ EXPORT_SYMBOL_GPL(pm_runtime_get_if_active);
  * pm_runtime_get_if_in_use - Conditionally bump up runtime PM usage counter.
  * @dev: Target device.
  *
- * Increment the runtime PM usage counter of @dev if its runtime PM status is
- * %RPM_ACTIVE and its runtime PM usage counter is greater than 0 or it is not
- * ignoring children and its active child count is nonzero.  1 is returned in
- * this case.
+ * Increment the runtime PM usage counter of @dev if it is "in use." A device
+ * is considered in use if its runtime PM status is %RPM_ACTIVE and its runtime
+ * PM usage counter is greater than 0, or if it is not ignoring children and
+ * its active child count is nonzero.
  *
- * If @dev is in a different state or it is not in use (that is, its usage
- * counter is 0, or it is ignoring children, or its active child count is 0),
- * 0 is returned.
- *
- * -EINVAL is returned if runtime PM is disabled for the device, in which case
- * also the usage counter of @dev is not updated.
+ * Return:
+ * * %-EINVAL: Runtime PM is disabled for @dev. The usage counter is not incremented.
+ * * %1: Success; usage counter is incremented.
+ * * %0: @dev was not in use; usage counter is not incremented.
  */
 int pm_runtime_get_if_in_use(struct device *dev)
 {
@@ -1287,7 +1292,7 @@ int pm_runtime_get_if_in_use(struct device *dev)
 EXPORT_SYMBOL_GPL(pm_runtime_get_if_in_use);
 
 /**
- * __pm_runtime_set_status - Set runtime PM status of a device.
+ * __pm_runtime_set_status - Set runtime PM status of a device and clear errors.
  * @dev: Device to handle.
  * @status: New runtime PM status of the device.
  *
@@ -1306,7 +1311,7 @@ EXPORT_SYMBOL_GPL(pm_runtime_get_if_in_use);
  * If @dev has any suppliers (as reflected by device links to them), and @status
  * is RPM_ACTIVE, they will be activated upfront and if the activation of one
  * of them fails, the status of @dev will be changed to RPM_SUSPENDED (instead
- * of the @status value) and the suppliers will be deacticated on exit.  The
+ * of the @status value) and the suppliers will be deactivated on exit.  The
  * error returned by the failing supplier activation will be returned in that
  * case.
  */
@@ -1462,35 +1467,27 @@ static void __pm_runtime_barrier(struct device *dev)
  * pm_runtime_barrier - Flush pending requests and wait for completions.
  * @dev: Device to handle.
  *
- * Prevent the device from being suspended by incrementing its usage counter and
- * if there's a pending resume request for the device, wake the device up.
- * Next, make sure that all pending requests for the device have been flushed
- * from pm_wq and wait for all runtime PM operations involving the device in
- * progress to complete.
+ * If the device has a pending resume request, resume it synchronously. For all
+ * other request types, cancel any queued request, and wait for running
+ * operations to complete.
  *
- * Return value:
- * 1, if there was a resume request pending and the device had to be woken up,
- * 0, otherwise
+ * Note that this is intentionally asymmetric, as it guarantees any queued
+ * asynchronous resume request will complete, but it may cancel asynchronous
+ * suspend requests.
  */
-int pm_runtime_barrier(struct device *dev)
+void pm_runtime_barrier(struct device *dev)
 {
-	int retval = 0;
-
 	pm_runtime_get_noresume(dev);
 	spin_lock_irq(&dev->power.lock);
 
 	if (dev->power.request_pending
-	    && dev->power.request == RPM_REQ_RESUME) {
+	    && dev->power.request == RPM_REQ_RESUME)
 		rpm_resume(dev, 0);
-		retval = 1;
-	}
 
 	__pm_runtime_barrier(dev);
 
 	spin_unlock_irq(&dev->power.lock);
 	pm_runtime_put_noidle(dev);
-
-	return retval;
 }
 EXPORT_SYMBOL_GPL(pm_runtime_barrier);
 
@@ -1560,8 +1557,16 @@ void __pm_runtime_disable(struct device *dev, bool check_resume)
 EXPORT_SYMBOL_GPL(__pm_runtime_disable);
 
 /**
- * pm_runtime_enable - Enable runtime PM of a device.
+ * pm_runtime_enable - Enable runtime PM for a device.
  * @dev: Device to handle.
+ *
+ * Enable runtime PM transitions for @dev by decrementing its disable counter.
+ * Once the counter reaches zero, the PM core is permitted to execute runtime
+ * PM callbacks for @dev as power conditions change.
+ *
+ * Callers should ensure that the device's runtime PM status accurately reflects
+ * its physical hardware state (via pm_runtime_set_active() or
+ * pm_runtime_set_suspended()) before enabling runtime PM.
  */
 void pm_runtime_enable(struct device *dev)
 {
@@ -1601,7 +1606,6 @@ static void pm_runtime_set_suspended_action(void *data)
 
 /**
  * devm_pm_runtime_set_active_enabled - set_active version of devm_pm_runtime_enable.
- *
  * @dev: Device to handle.
  */
 int devm_pm_runtime_set_active_enabled(struct device *dev)
@@ -1628,11 +1632,10 @@ static void pm_runtime_disable_action(void *data)
 
 /**
  * devm_pm_runtime_enable - devres-enabled version of pm_runtime_enable.
+ * @dev: Device to handle.
  *
  * NOTE: this will also handle calling pm_runtime_dont_use_autosuspend() for
  * you at driver exit time if needed.
- *
- * @dev: Device to handle.
  */
 int devm_pm_runtime_enable(struct device *dev)
 {
@@ -1649,7 +1652,6 @@ static void pm_runtime_put_noidle_action(void *data)
 
 /**
  * devm_pm_runtime_get_noresume - devres-enabled version of pm_runtime_get_noresume.
- *
  * @dev: Device to handle.
  */
 int devm_pm_runtime_get_noresume(struct device *dev)
@@ -1664,9 +1666,12 @@ EXPORT_SYMBOL_GPL(devm_pm_runtime_get_noresume);
  * pm_runtime_forbid - Block runtime PM of a device.
  * @dev: Device to handle.
  *
- * Increase the device's usage count and clear its power.runtime_auto flag,
- * so that it cannot be suspended at run time until pm_runtime_allow() is called
- * for it.
+ * Resume @dev if already suspended and block runtime suspend of @dev in such
+ * a way that it can be unblocked via the /sys/devices/.../power/control
+ * interface, or otherwise by calling pm_runtime_allow().
+ *
+ * Calling this function many times in a row has the same effect as calling it
+ * once.
  */
 void pm_runtime_forbid(struct device *dev)
 {
@@ -1687,7 +1692,13 @@ EXPORT_SYMBOL_GPL(pm_runtime_forbid);
  * pm_runtime_allow - Unblock runtime PM of a device.
  * @dev: Device to handle.
  *
- * Decrease the device's usage count and set its power.runtime_auto flag.
+ * Unblock runtime suspend of @dev after it has been blocked by
+ * pm_runtime_forbid() (for instance, if it has been blocked via the
+ * /sys/devices/.../power/control interface), check if @dev can be
+ * suspended and suspend it in that case.
+ *
+ * Calling this function many times in a row has the same effect as calling it
+ * once.
  */
 void pm_runtime_allow(struct device *dev)
 {
@@ -1869,16 +1880,21 @@ void pm_runtime_init(struct device *dev)
  */
 void pm_runtime_reinit(struct device *dev)
 {
-	if (!pm_runtime_enabled(dev)) {
-		if (dev->power.runtime_status == RPM_ACTIVE)
-			pm_runtime_set_suspended(dev);
-		if (dev->power.irq_safe) {
-			spin_lock_irq(&dev->power.lock);
-			dev->power.irq_safe = 0;
-			spin_unlock_irq(&dev->power.lock);
-			if (dev->parent)
-				pm_runtime_put(dev->parent);
-		}
+	if (pm_runtime_enabled(dev))
+		return;
+
+	if (dev->power.runtime_status == RPM_ACTIVE)
+		pm_runtime_set_suspended(dev);
+
+	if (dev->power.use_autosuspend)
+		pm_runtime_dont_use_autosuspend(dev);
+
+	if (dev->power.irq_safe) {
+		spin_lock_irq(&dev->power.lock);
+		dev->power.irq_safe = 0;
+		spin_unlock_irq(&dev->power.lock);
+		if (dev->parent)
+			pm_runtime_put(dev->parent);
 	}
 	/*
 	 * Clear power.needs_force_resume in case it has been set by
@@ -1894,6 +1910,7 @@ void pm_runtime_reinit(struct device *dev)
 void pm_runtime_remove(struct device *dev)
 {
 	__pm_runtime_disable(dev, false);
+	flush_work(&dev->power.work);
 	pm_runtime_reinit(dev);
 }
 

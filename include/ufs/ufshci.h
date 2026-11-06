@@ -18,6 +18,8 @@ enum {
 	TASK_REQ_UPIU_SIZE_DWORDS	= 8,
 	TASK_RSP_UPIU_SIZE_DWORDS	= 8,
 	ALIGNED_UPIU_SIZE		= 512,
+	/* Larger response area, only for the devman UCD */
+	ALIGNED_DEVMAN_RSP_SIZE		= 4096,
 };
 
 /* UFSHCI Registers */
@@ -83,12 +85,14 @@ enum {
 };
 
 enum {
+	/* Submission Queue (SQ) Configuration Registers */
 	REG_SQATTR		= 0x0,
 	REG_SQLBA		= 0x4,
 	REG_SQUBA		= 0x8,
 	REG_SQDAO		= 0xC,
 	REG_SQISAO		= 0x10,
 
+	/* Completion Queue (CQ) Configuration Registers */
 	REG_CQATTR		= 0x20,
 	REG_CQLBA		= 0x24,
 	REG_CQUBA		= 0x28,
@@ -96,6 +100,7 @@ enum {
 	REG_CQISAO		= 0x30,
 };
 
+/* Operation and Runtime Registers - Submission Queues and Completion Queues */
 enum {
 	REG_SQHP		= 0x0,
 	REG_SQTP		= 0x4,
@@ -112,6 +117,7 @@ enum {
 enum {
 	REG_CQIS		= 0x0,
 	REG_CQIE		= 0x4,
+	REG_MCQIACR		= 0x8,
 };
 
 enum {
@@ -185,6 +191,7 @@ static inline u32 ufshci_version(u32 major, u32 minor)
 #define SYSTEM_BUS_FATAL_ERROR			0x20000
 #define CRYPTO_ENGINE_FATAL_ERROR		0x40000
 #define MCQ_CQ_EVENT_STATUS			0x100000
+#define MCQ_IAG_EVENT_STATUS			0x200000
 
 #define UFSHCD_UIC_HIBERN8_MASK	(UIC_HIBERNATE_ENTER |\
 				UIC_HIBERNATE_EXIT)
@@ -268,6 +275,7 @@ enum {
 /* UECDME - Host UIC Error Code DME 48h */
 #define UIC_DME_ERROR			0x80000000
 #define UIC_DME_ERROR_CODE_MASK		0x1
+#define UIC_DME_QOS_MASK		0xE
 
 /* UTRIACR - Interrupt Aggregation control register - 0x4Ch */
 #define INT_AGGR_TIMEOUT_VAL_MASK		0xFF
@@ -285,6 +293,7 @@ enum {
 
 /* REG_UFS_MEM_CFG - Global Config Registers 300h */
 #define MCQ_MODE_SELECT	BIT(0)
+#define ESI_ENABLE	BIT(1)
 
 /* CQISy - CQ y Interrupt Status Register  */
 #define UFSHCD_MCQ_CQIS_TAIL_ENT_PUSH_STS	0x1
@@ -494,6 +503,16 @@ struct utp_transfer_cmd_desc {
 	u8 prd_table[];
 };
 
+/* Dedicated UCD for the devman/reserved slot */
+struct utp_devman_cmd_desc {
+	u8 command_upiu[ALIGNED_UPIU_SIZE];
+	u8 response_upiu[ALIGNED_DEVMAN_RSP_SIZE];
+	u8 prd_table[];
+};
+
+static_assert(sizeof(struct utp_upiu_req) + QUERY_AGGREGATED_MAX_SIZE <=
+	      ALIGNED_DEVMAN_RSP_SIZE);
+
 /**
  * struct request_desc_header - Descriptor Header common to both UTRD and UTMRD
  */
@@ -569,10 +588,26 @@ struct cq_entry {
 	__le16  prd_table_offset;
 
 	/* DW 4 */
-	__le32 status;
+	u8 overall_status;
+	u8 extended_error_code;
+	__le16 reserved_1;
 
-	/* DW 5-7 */
-	__le32 reserved[3];
+	/* DW 5 */
+	u8 task_tag;
+	u8 lun;
+#if defined(__BIG_ENDIAN)
+	u8 ext_iid:4;
+	u8 iid:4;
+#elif defined(__LITTLE_ENDIAN)
+	u8 iid:4;
+	u8 ext_iid:4;
+#else
+#error
+#endif
+	u8 reserved_2;
+
+	/* DW 6-7 */
+	__le32 reserved_3[2];
 };
 
 static_assert(sizeof(struct cq_entry) == 32);

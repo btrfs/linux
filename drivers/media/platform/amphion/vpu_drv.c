@@ -175,31 +175,6 @@ static void vpu_remove(struct platform_device *pdev)
 	mutex_destroy(&vpu->lock);
 }
 
-static int __maybe_unused vpu_runtime_resume(struct device *dev)
-{
-	return 0;
-}
-
-static int __maybe_unused vpu_runtime_suspend(struct device *dev)
-{
-	return 0;
-}
-
-static int __maybe_unused vpu_resume(struct device *dev)
-{
-	return 0;
-}
-
-static int __maybe_unused vpu_suspend(struct device *dev)
-{
-	return 0;
-}
-
-static const struct dev_pm_ops vpu_pm_ops = {
-	SET_RUNTIME_PM_OPS(vpu_runtime_suspend, vpu_runtime_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(vpu_suspend, vpu_resume)
-};
-
 static struct vpu_resources imx8qxp_res = {
 	.plat_type = IMX8QXP,
 	.mreg_base = 0x40000000,
@@ -230,8 +205,8 @@ static struct platform_driver amphion_vpu_driver = {
 	.remove = vpu_remove,
 	.driver = {
 		.name = "amphion-vpu",
+		.suppress_bind_attrs = true,
 		.of_match_table = vpu_dt_match,
-		.pm = &vpu_pm_ops,
 	},
 };
 

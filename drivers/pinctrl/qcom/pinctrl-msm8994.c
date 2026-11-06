@@ -33,7 +33,6 @@
 		.io_reg = 0x1004 + 0x10 * id,		\
 		.intr_cfg_reg = 0x1008 + 0x10 * id,	\
 		.intr_status_reg = 0x100c + 0x10 * id,	\
-		.intr_target_reg = 0x1008 + 0x10 * id,	\
 		.mux_bit = 2,				\
 		.pull_bit = 0,				\
 		.drv_bit = 6,				\
@@ -59,7 +58,6 @@
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.mux_bit = -1,				\
 		.pull_bit = pull,			\
 		.drv_bit = drv,				\
@@ -1336,6 +1334,7 @@ static const struct of_device_id msm8994_pinctrl_of_match[] = {
 	{ .compatible = "qcom,msm8994-pinctrl", },
 	{ }
 };
+MODULE_DEVICE_TABLE(of, msm8994_pinctrl_of_match);
 
 static struct platform_driver msm8994_pinctrl_driver = {
 	.driver = {
@@ -1359,4 +1358,3 @@ module_exit(msm8994_pinctrl_exit);
 
 MODULE_DESCRIPTION("Qualcomm MSM8994 pinctrl driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, msm8994_pinctrl_of_match);

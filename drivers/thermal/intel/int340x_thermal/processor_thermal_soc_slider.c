@@ -66,15 +66,16 @@ static int slider_def_balance_set(const char *arg, const struct kernel_param *kp
 	guard(mutex)(&slider_param_lock);
 
 	ret = kstrtou8(arg, 16, &slider_val);
-	if (!ret) {
-		if (slider_val <= slider_values[SOC_POWER_SLIDER_PERFORMANCE] ||
-		    slider_val >= slider_values[SOC_POWER_SLIDER_POWERSAVE])
-			return -EINVAL;
+	if (ret)
+		return ret;
 
-		slider_balanced_param = slider_val;
-	}
+	if (slider_val <= slider_values[SOC_POWER_SLIDER_PERFORMANCE] ||
+	    slider_val >= slider_values[SOC_POWER_SLIDER_POWERSAVE])
+		return -EINVAL;
 
-	return ret;
+	slider_balanced_param = slider_val;
+
+	return 0;
 }
 
 static int slider_def_balance_get(char *buf, const struct kernel_param *kp)
@@ -101,14 +102,15 @@ static int slider_def_offset_set(const char *arg, const struct kernel_param *kp)
 	guard(mutex)(&slider_param_lock);
 
 	ret = kstrtou8(arg, 16, &offset);
-	if (!ret) {
-		if (offset > SOC_SLIDER_VALUE_MAXIMUM)
-			return -EINVAL;
+	if (ret)
+		return ret;
 
-		slider_offset = offset;
-	}
+	if (offset > SOC_SLIDER_VALUE_MAXIMUM)
+		return -EINVAL;
 
-	return ret;
+	slider_offset = offset;
+
+	return 0;
 }
 
 static int slider_def_offset_get(char *buf, const struct kernel_param *kp)
@@ -176,15 +178,21 @@ static inline void write_soc_slider(struct proc_thermal_device *proc_priv, u64 v
 
 static void set_soc_power_profile(struct proc_thermal_device *proc_priv, int slider)
 {
+	u8 offset;
 	u64 val;
 
 	val = read_soc_slider(proc_priv);
 	val &= ~SLIDER_MASK;
 	val |= FIELD_PREP(SLIDER_MASK, slider) | BIT(SLIDER_ENABLE_BIT);
 
+	if (slider == SOC_SLIDER_VALUE_MINIMUM || slider == SOC_SLIDER_VALUE_MAXIMUM)
+		offset = 0;
+	else
+		offset = slider_offset;
+
 	/* Set the slider offset from module params */
 	val &= ~SLIDER_OFFSET_MASK;
-	val |= FIELD_PREP(SLIDER_OFFSET_MASK, slider_offset);
+	val |= FIELD_PREP(SLIDER_OFFSET_MASK, offset);
 
 	write_soc_slider(proc_priv, val);
 }

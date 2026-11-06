@@ -32,21 +32,15 @@ properties:
 
 patternProperties:
   "^partitions(-boot[12]|-gp[14])?$":
-    $ref: /schemas/mtd/partitions/partitions.yaml
+    type: object
+    additionalProperties: true
 
-    patternProperties:
-      "^partition@[0-9a-f]+$":
-        $ref: /schemas/mtd/partitions/partition.yaml
-
-        properties:
-          reg:
-            description: Must be multiple of 512 as it's converted
-              internally from bytes to SECTOR_SIZE (512 bytes)
-
-        required:
-          - reg
-
-        unevaluatedProperties: false
+    properties:
+      compatible:
+        contains:
+          enum:
+            - fixed-partitions
+            - fixed-layout
 
 required:
   - compatible
@@ -92,6 +86,25 @@ examples:
                     label = "bl";
                     reg = <0x0 0x2000000>; /* 32MB */
                     read-only;
+                };
+            };
+
+            partitions-boot2 {
+                compatible = "fixed-layout";
+
+                #address-cells = <1>;
+                #size-cells = <1>;
+
+                mac-addr@4400 {
+                    compatible = "mac-base";
+                    reg = <0x4400 0x6>;
+                    #nvmem-cell-cells = <1>;
+                };
+
+                bd-addr@5400 {
+                    compatible = "mac-base";
+                    reg = <0x5400 0x6>;
+                    #nvmem-cell-cells = <1>;
                 };
             };
         };

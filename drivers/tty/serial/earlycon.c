@@ -11,6 +11,7 @@
 #define pr_fmt(fmt)	KBUILD_MODNAME ": " fmt
 
 #include <linux/console.h>
+#include <linux/ctype.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/io.h>
@@ -59,11 +60,10 @@ static void __init earlycon_init(struct earlycon_device *device,
 	const char *s;
 	size_t len;
 
-	/* scan backwards from end of string for first non-numeral */
-	for (s = name + strlen(name);
-	     s > name && s[-1] >= '0' && s[-1] <= '9';
-	     s--)
-		;
+	/* Scan backwards to split the trailing index from the console name. */
+	s = name + strlen(name);
+	while (s > name && isdigit(s[-1]))
+		s--;
 	if (*s)
 		earlycon->index = simple_strtoul(s, NULL, 10);
 	len = s - name;
@@ -75,19 +75,12 @@ static void __init earlycon_print_info(struct earlycon_device *device)
 {
 	struct console *earlycon = device->con;
 	struct uart_port *port = &device->port;
+	char ioinfos[64];
 
-	if (port->iotype == UPIO_MEM || port->iotype == UPIO_MEM16 ||
-	    port->iotype == UPIO_MEM32 || port->iotype == UPIO_MEM32BE)
-		pr_info("%s%d at MMIO%s %pa (options '%s')\n",
-			earlycon->name, earlycon->index,
-			(port->iotype == UPIO_MEM) ? "" :
-			(port->iotype == UPIO_MEM16) ? "16" :
-			(port->iotype == UPIO_MEM32) ? "32" : "32be",
-			&port->mapbase, device->options);
-	else
-		pr_info("%s%d at I/O port 0x%lx (options '%s')\n",
-			earlycon->name, earlycon->index,
-			port->iobase, device->options);
+	uart_get_ioinfos(port, ioinfos, sizeof(ioinfos));
+
+	pr_info("%s%d%s (options '%s')\n", earlycon->name, earlycon->index,
+		ioinfos, device->options);
 }
 
 static int __init parse_options(struct earlycon_device *device, char *options)

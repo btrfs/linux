@@ -7,8 +7,10 @@
  */
 
 #include "vmlinux.h"
+#include "perf_trace_u.h"
 
 #include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
 #include <linux/limits.h>
 
 #define PERF_ALIGN(x, a)        __PERF_ALIGN_MASK(x, (typeof(x))(a)-1)
@@ -26,7 +28,7 @@
 
 #define MAX_CPUS  4096
 
-#define TRACE_AUG_MAX_BUF 32 /* for buffer augmentation in perf trace */
+#define TRACE_AUG_MAX_BUF 128 /* for buffer augmentation in perf trace */
 
 /* bpf-output associated map */
 struct __augmented_syscalls__ {
@@ -45,7 +47,7 @@ struct syscalls_sys_enter {
 	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
 	__type(key, __u32);
 	__type(value, __u32);
-	__uint(max_entries, 512);
+	__uint(max_entries, 1024);
 } syscalls_sys_enter SEC(".maps");
 
 /*
@@ -57,17 +59,23 @@ struct syscalls_sys_exit {
 	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
 	__type(key, __u32);
 	__type(value, __u32);
-	__uint(max_entries, 512);
+	__uint(max_entries, 1024);
 } syscalls_sys_exit SEC(".maps");
 
 struct syscall_enter_args {
-	unsigned long long common_tp_fields;
+	union {
+		unsigned long long common_tp_fields;
+		unsigned short	   common_type;
+	};
 	long		   syscall_nr;
 	unsigned long	   args[6];
 };
 
 struct syscall_exit_args {
-	unsigned long long common_tp_fields;
+	union {
+		unsigned long long common_tp_fields;
+		unsigned short	   common_type;
+	};
 	long		   syscall_nr;
 	long		   ret;
 };
@@ -114,6 +122,22 @@ struct pids_filtered {
 	__uint(max_entries, 64);
 } pids_filtered SEC(".maps");
 
+/* With a target only its tasks are traced, those set false from their next exec. */
+struct pids_to_trace {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, pid_t);
+	__type(value, bool);
+	__uint(max_entries, 16384);
+} pids_to_trace SEC(".maps");
+
+bool has_pids_to_trace;
+/* Also trace the children of traced tasks. */
+bool inherit;
+/* Key pids_to_trace by tgid, so a process's threads share an entry. */
+bool uses_tgid;
+/* Tasks not traced as pids_to_trace was full. */
+int lost_tasks;
+
 struct augmented_args_payload {
 	struct syscall_enter_args args;
 	struct augmented_arg arg, arg2; // We have to reserve space for two arguments (rename, etc)
@@ -152,10 +176,11 @@ static inline struct augmented_args_payload *augmented_args_payload(void)
 	return bpf_map_lookup_elem(&augmented_args_tmp, &key);
 }
 
-static inline int augmented__output(void *ctx, struct augmented_args_payload *args, int len)
+/* Returning 0 would drop the tracepoint for other perf sessions. */
+static inline int augmented__output(void *ctx, void *args, int len)
 {
-	/* If perf_event_output fails, return non-zero so that it gets recorded unaugmented */
-	return bpf_perf_event_output(ctx, &__augmented_syscalls__, BPF_F_CURRENT_CPU, args, len);
+	bpf_perf_event_output(ctx, &__augmented_syscalls__, BPF_F_CURRENT_CPU, args, len);
+	return 1;
 }
 
 static inline int augmented__beauty_output(void *ctx, void *data, int len)
@@ -192,8 +217,22 @@ unsigned int augmented_arg__read_str(struct augmented_arg *augmented_arg, const 
 }
 
 SEC("tp/raw_syscalls/sys_enter")
-int syscall_unaugmented(struct syscall_enter_args *args)
+int sys_enter_unaugmented(struct syscall_enter_args *args)
 {
+	struct augmented_args_payload *augmented_args = augmented_args_payload();
+
+	if (augmented_args)
+		augmented__output(args, &augmented_args->args, sizeof(augmented_args->args));
+	return 1;
+}
+
+SEC("tp/raw_syscalls/sys_exit")
+int sys_exit_unaugmented(struct syscall_exit_args *args)
+{
+	struct augmented_args_payload *augmented_args = augmented_args_payload();
+
+	if (augmented_args)
+		augmented__output(args, &augmented_args->args, sizeof(struct syscall_exit_args));
 	return 1;
 }
 
@@ -210,6 +249,7 @@ int sys_enter_connect(struct syscall_enter_args *args)
 	const void *sockaddr_arg = (const void *)args->args[1];
 	unsigned int socklen = args->args[2];
 	unsigned int len = sizeof(u64) + sizeof(augmented_args->args); // the size + err in all 'augmented_arg' structs
+	int err;
 
         if (augmented_args == NULL)
                 return 1; /* Failure: don't filter */
@@ -217,9 +257,11 @@ int sys_enter_connect(struct syscall_enter_args *args)
 	_Static_assert(is_power_of_2(sizeof(augmented_args->arg.saddr)), "sizeof(augmented_args->arg.saddr) needs to be a power of two");
 	socklen &= sizeof(augmented_args->arg.saddr) - 1;
 
-	bpf_probe_read_user(&augmented_args->arg.saddr, socklen, sockaddr_arg);
+	err = bpf_probe_read_user(&augmented_args->arg.saddr, socklen, sockaddr_arg);
+	if (err)
+		socklen = 0;
 	augmented_args->arg.size = socklen;
-	augmented_args->arg.err = 0;
+	augmented_args->arg.err = err;
 
 	return augmented__output(args, augmented_args, len + socklen);
 }
@@ -231,13 +273,18 @@ int sys_enter_sendto(struct syscall_enter_args *args)
 	const void *sockaddr_arg = (const void *)args->args[4];
 	unsigned int socklen = args->args[5];
 	unsigned int len = sizeof(u64) + sizeof(augmented_args->args); // the size + err in all 'augmented_arg' structs
+	int err;
 
         if (augmented_args == NULL)
                 return 1; /* Failure: don't filter */
 
 	socklen &= sizeof(augmented_args->arg.saddr) - 1;
 
-	bpf_probe_read_user(&augmented_args->arg.saddr, socklen, sockaddr_arg);
+	err = bpf_probe_read_user(&augmented_args->arg.saddr, socklen, sockaddr_arg);
+	if (err)
+		socklen = 0;
+	augmented_args->arg.size = socklen;
+	augmented_args->arg.err = err;
 
 	return augmented__output(args, augmented_args, len + socklen);
 }
@@ -372,9 +419,14 @@ int sys_enter_perf_event_open(struct syscall_enter_args *args)
 	if (bpf_probe_read_user(&augmented_args->arg.value, size, attr) < 0)
 		goto failure;
 
+	augmented_args->arg.size = size;
+	augmented_args->arg.err = 0;
+
 	return augmented__output(args, augmented_args, len + size);
 failure:
-	return 1; /* Failure: don't filter */
+	if (augmented_args)
+		augmented__output(args, augmented_args, sizeof(augmented_args->args));
+	return 1;
 }
 
 SEC("tp/syscalls/sys_enter_clock_nanosleep")
@@ -384,6 +436,7 @@ int sys_enter_clock_nanosleep(struct syscall_enter_args *args)
 	const void *rqtp_arg = (const void *)args->args[2];
 	unsigned int len = sizeof(u64) + sizeof(augmented_args->args); // the size + err in all 'augmented_arg' structs
 	__u32 size = sizeof(struct timespec64);
+	int err;
 
         if (augmented_args == NULL)
 		goto failure;
@@ -391,7 +444,11 @@ int sys_enter_clock_nanosleep(struct syscall_enter_args *args)
 	if (size > sizeof(augmented_args->arg.value))
                 goto failure;
 
-	bpf_probe_read_user(&augmented_args->arg.value, size, rqtp_arg);
+	err = bpf_probe_read_user(&augmented_args->arg.value, size, rqtp_arg);
+	if (err)
+		size = 0;
+	augmented_args->arg.size = size;
+	augmented_args->arg.err = err;
 
 	return augmented__output(args, augmented_args, len + size);
 failure:
@@ -403,8 +460,10 @@ int sys_enter_nanosleep(struct syscall_enter_args *args)
 {
 	struct augmented_args_payload *augmented_args = augmented_args_payload();
 	const void *req_arg = (const void *)args->args[0];
-	unsigned int len = sizeof(augmented_args->args);
+	/* the size + err in all 'augmented_arg' structs */
+	unsigned int len = sizeof(u64) + sizeof(augmented_args->args);
 	__u32 size = sizeof(struct timespec64);
+	int err;
 
         if (augmented_args == NULL)
 		goto failure;
@@ -412,7 +471,11 @@ int sys_enter_nanosleep(struct syscall_enter_args *args)
 	if (size > sizeof(augmented_args->arg.value))
                 goto failure;
 
-	bpf_probe_read_user(&augmented_args->arg.value, size, req_arg);
+	err = bpf_probe_read_user(&augmented_args->arg.value, size, req_arg);
+	if (err)
+		size = 0;
+	augmented_args->arg.size = size;
+	augmented_args->arg.err = err;
 
 	return augmented__output(args, augmented_args, len + size);
 failure:
@@ -429,15 +492,107 @@ static bool pid_filter__has(struct pids_filtered *pids, pid_t pid)
 	return bpf_map_lookup_elem(pids, &pid) != NULL;
 }
 
+static bool task_traced(void)
+{
+	u64 pid_tgid;
+	pid_t pid;
+	bool *traced;
+
+	if (!has_pids_to_trace)
+		return true;
+
+	pid_tgid = bpf_get_current_pid_tgid();
+	pid = uses_tgid ? pid_tgid >> 32 : (pid_t)pid_tgid;
+	traced = bpf_map_lookup_elem(&pids_to_trace, &pid);
+	return traced && *traced;
+}
+
+u64 ZERO = 0;
+
+/*
+ * Determine what type of argument and how many bytes to read from user space, using the
+ * value in the beauty_map. This is the relation of parameter type and its corresponding
+ * value in the beauty map, and how many bytes we read eventually:
+ *
+ * string: 1			          -> size of string
+ * struct: size of struct	          -> size of struct
+ * buffer: -(0-based index of paired len + 1) -> value of paired len (maximum: TRACE_AUG_MAX_BUF)
+ */
+static inline int augment_arg(struct syscall_enter_args *args, int i,
+			      unsigned int *beauty_map,
+			      struct beauty_payload_enter *payload, u64 offset)
+{
+	int index, value_size = sizeof(struct augmented_arg) - offsetof(struct augmented_arg, value);
+	int read_err = 0;
+	struct augmented_arg *payload_offset;
+	s64 aug_size, size;
+	bool augmented;
+	void *arg;
+
+	arg = (void *)args->args[i];
+	augmented = false;
+	size = beauty_map[i];
+	aug_size = size; /* size of the augmented data read from user space */
+
+	if (size == 0 || arg == NULL)
+		return 0;
+
+	/* bounds check for the verifier */
+	if (offset > sizeof(payload->aug_args) - sizeof(payload->aug_args[0]))
+		return -1;
+	barrier_var(offset);
+	payload_offset = (struct augmented_arg *)((void *)&payload->aug_args + offset);
+
+	if (size == 1) { /* string */
+		aug_size = bpf_probe_read_user_str(payload_offset->value, value_size, arg);
+		/* minimum of 0 to pass the verifier */
+		if (aug_size < 0) {
+			read_err = aug_size;
+			aug_size = 0;
+		}
+
+		augmented = true;
+	} else if (size > 0 && size <= value_size) { /* struct */
+		if (!bpf_probe_read_user(payload_offset->value, size, arg))
+			augmented = true;
+	} else if ((int)size < 0 && size >= -6) { /* buffer */
+		index = -(size + 1);
+		barrier_var(index); // Prevent clang (noticed with v18) from removing the &= 7 trick.
+		index &= 7;	    // Satisfy the bounds checking with the verifier in some kernels.
+		aug_size = args->args[index] > TRACE_AUG_MAX_BUF ? TRACE_AUG_MAX_BUF : args->args[index];
+
+		if (aug_size > 0) {
+			if (!bpf_probe_read_user(payload_offset->value, aug_size, arg))
+				augmented = true;
+		}
+	}
+
+	/* Augmented data size is limited to sizeof(augmented_arg->unnamed union with value field) */
+	if (aug_size > value_size)
+		aug_size = value_size;
+
+	/* write data to payload */
+	if (augmented) {
+		int written = offsetof(struct augmented_arg, value) + aug_size;
+
+		if (written < 0 || written > sizeof(struct augmented_arg))
+			return -1;
+
+		payload_offset->size = aug_size;
+		payload_offset->err = read_err;
+		return written;
+	}
+
+	return 0;
+}
+
 static int augment_sys_enter(void *ctx, struct syscall_enter_args *args)
 {
-	bool augmented, do_output = false;
-	int zero = 0, index, value_size = sizeof(struct augmented_arg) - offsetof(struct augmented_arg, value);
+	bool do_output = false;
+	int i, zero = 0, written;
 	u64 output = 0; /* has to be u64, otherwise it won't pass the verifier */
-	s64 aug_size, size;
 	unsigned int nr, *beauty_map;
 	struct beauty_payload_enter *payload;
-	void *arg, *payload_offset;
 
 	/* fall back to do predefined tail call */
 	if (args == NULL)
@@ -449,69 +604,38 @@ static int augment_sys_enter(void *ctx, struct syscall_enter_args *args)
 
 	/* set up payload for output */
 	payload        = bpf_map_lookup_elem(&beauty_payload_enter_map, &zero);
-	payload_offset = (void *)&payload->aug_args;
 
 	if (beauty_map == NULL || payload == NULL)
 		return 1;
 
 	/* copy the sys_enter header, which has the syscall_nr */
 	__builtin_memcpy(&payload->args, args, sizeof(struct syscall_enter_args));
+	payload->args.common_type = SYSCALL_TRACE_ENTER;
 
-	/*
-	 * Determine what type of argument and how many bytes to read from user space, using the
-	 * value in the beauty_map. This is the relation of parameter type and its corresponding
-	 * value in the beauty map, and how many bytes we read eventually:
-	 *
-	 * string: 1			      -> size of string
-	 * struct: size of struct	      -> size of struct
-	 * buffer: -1 * (index of paired len) -> value of paired len (maximum: TRACE_AUG_MAX_BUF)
-	 */
-	for (int i = 0; i < 6; i++) {
-		arg = (void *)args->args[i];
-		augmented = false;
-		size = beauty_map[i];
-		aug_size = size; /* size of the augmented data read from user space */
-
-		if (size == 0 || arg == NULL)
-			continue;
-
-		if (size == 1) { /* string */
-			aug_size = bpf_probe_read_user_str(((struct augmented_arg *)payload_offset)->value, value_size, arg);
-			/* minimum of 0 to pass the verifier */
-			if (aug_size < 0)
-				aug_size = 0;
-
-			augmented = true;
-		} else if (size > 0 && size <= value_size) { /* struct */
-			if (!bpf_probe_read_user(((struct augmented_arg *)payload_offset)->value, size, arg))
-				augmented = true;
-		} else if ((int)size < 0 && size >= -6) { /* buffer */
-			index = -(size + 1);
-			barrier_var(index); // Prevent clang (noticed with v18) from removing the &= 7 trick.
-			index &= 7;	    // Satisfy the bounds checking with the verifier in some kernels.
-			aug_size = args->args[index] > TRACE_AUG_MAX_BUF ? TRACE_AUG_MAX_BUF : args->args[index];
-
-			if (aug_size > 0) {
-				if (!bpf_probe_read_user(((struct augmented_arg *)payload_offset)->value, aug_size, arg))
-					augmented = true;
+	if (bpf_ksym_exists(bpf_iter_num_new)) {
+		bpf_for(i, 0, 6) {
+			written = augment_arg(args, i, beauty_map, payload, output);
+			if (written < 0)
+				return 1;
+			if (written > 0) {
+				output += written;
+				/*
+				 * guide the verifier to forget range of `output`, which
+				 * helps to prove convergence of the loop
+				 */
+				output += ZERO;
+				do_output = true;
 			}
 		}
-
-		/* Augmented data size is limited to sizeof(augmented_arg->unnamed union with value field) */
-		if (aug_size > value_size)
-			aug_size = value_size;
-
-		/* write data to payload */
-		if (augmented) {
-			int written = offsetof(struct augmented_arg, value) + aug_size;
-
-			if (written < 0 || written > sizeof(struct augmented_arg))
+	} else {
+		for (i = 0; i < 6; i++) {
+			written = augment_arg(args, i, beauty_map, payload, output);
+			if (written < 0)
 				return 1;
-
-			((struct augmented_arg *)payload_offset)->size = aug_size;
-			output += written;
-			payload_offset += written;
-			do_output = true;
+			if (written > 0) {
+				output += written;
+				do_output = true;
+			}
 		}
 	}
 
@@ -535,45 +659,122 @@ int sys_enter(struct syscall_enter_args *args)
 	 * initial, non-augmented raw_syscalls:sys_enter payload.
 	 */
 
+	if (!task_traced())
+		return 1;
+
 	if (pid_filter__has(&pids_filtered, getpid()))
-		return 0;
+		return 1;
 
 	augmented_args = augmented_args_payload();
 	if (augmented_args == NULL)
 		return 1;
 
 	bpf_probe_read_kernel(&augmented_args->args, sizeof(augmented_args->args), args);
+	augmented_args->args.common_type = SYSCALL_TRACE_ENTER;
 
 	/*
 	 * Jump to syscall specific augmenter, even if the default one,
-	 * "!raw_syscalls:unaugmented" that will just return 1 to return the
-	 * unaugmented tracepoint payload.
+	 * "!raw_syscalls:unaugmented" that will just output the unaugmented
+	 * payload.
 	 */
 	if (augment_sys_enter(args, &augmented_args->args))
 		bpf_tail_call(args, &syscalls_sys_enter, augmented_args->args.syscall_nr);
 
-	// If not found on the PROG_ARRAY syscalls map, then we're filtering it:
-	return 0;
+	return 1;
 }
 
 SEC("tp/raw_syscalls/sys_exit")
 int sys_exit(struct syscall_exit_args *args)
 {
-	struct syscall_exit_args exit_args;
+	struct augmented_args_payload *augmented_args;
+
+	if (!task_traced())
+		return 1;
 
 	if (pid_filter__has(&pids_filtered, getpid()))
-		return 0;
+		return 1;
 
-	bpf_probe_read_kernel(&exit_args, sizeof(exit_args), args);
+	augmented_args = augmented_args_payload();
+	if (augmented_args == NULL)
+		return 1;
+
+	bpf_probe_read_kernel(&augmented_args->args, sizeof(*args), args);
+	augmented_args->args.common_type = SYSCALL_TRACE_EXIT;
+
 	/*
 	 * Jump to syscall specific return augmenter, even if the default one,
-	 * "!raw_syscalls:unaugmented" that will just return 1 to return the
-	 * unaugmented tracepoint payload.
+	 * "!raw_syscalls:unaugmented" that will just output the unaugmented
+	 * payload.
 	 */
-	bpf_tail_call(args, &syscalls_sys_exit, exit_args.syscall_nr);
+	bpf_tail_call(args, &syscalls_sys_exit, augmented_args->args.syscall_nr);
 	/*
-	 * If not found on the PROG_ARRAY syscalls map, then we're filtering it:
+	 * If not found on the PROG_ARRAY syscalls map, then we're filtering it
+	 * by not emitting bpf-output event.
 	 */
+	return 1;
+}
+
+/* Trace the children of traced tasks, added before they can run. */
+SEC("tp_btf/sched_process_fork")
+int BPF_PROG(sched_process_fork, struct task_struct *parent, struct task_struct *child)
+{
+	pid_t parent_pid = parent->pid, child_pid = child->pid;
+	bool *traced = NULL, val;
+
+	if (uses_tgid) {
+		/* A new thread is traced with its process. */
+		if (child->tgid != child_pid)
+			return 0;
+		parent_pid = parent->tgid;
+	}
+	if (inherit)
+		traced = bpf_map_lookup_elem(&pids_to_trace, &parent_pid);
+	if (traced) {
+		val = *traced;
+		/* Not __sync_fetch_and_add(), as its fetch needs a 5.12 kernel. */
+		if (bpf_map_update_elem(&pids_to_trace, &child_pid, &val, BPF_ANY))
+			__atomic_fetch_add(&lost_tasks, 1, __ATOMIC_RELAXED);
+	} else {
+		/* A new pid, so any entry was seeded for an exited task, e.g. a zombie. */
+		bpf_map_delete_elem(&pids_to_trace, &child_pid);
+	}
+	return 0;
+}
+
+/* Forget exited tasks, as their pid may be reused. */
+SEC("tp_btf/sched_process_exit")
+int BPF_PROG(sched_process_exit, struct task_struct *task)
+{
+	pid_t pid = task->pid;
+
+	if (uses_tgid) {
+		/* A process exits with its last thread. */
+		if (task->signal->live.counter)
+			return 0;
+		pid = task->tgid;
+	}
+	bpf_map_delete_elem(&pids_to_trace, &pid);
+	return 0;
+}
+
+/* Start tracing waiting tasks, and follow a thread given the leader's pid by exec. */
+SEC("tp_btf/sched_process_exec")
+int BPF_PROG(sched_process_exec, struct task_struct *task, pid_t old_pid)
+{
+	pid_t pid = task->pid;
+	bool traced = true;
+
+	/* A process keeps its tgid, which pid now is. */
+	if (uses_tgid)
+		old_pid = pid;
+	if (!bpf_map_lookup_elem(&pids_to_trace, &old_pid))
+		return 0;
+
+	if (pid != old_pid)
+		bpf_map_delete_elem(&pids_to_trace, &old_pid);
+	/* A fork may have taken old_pid's entry, leaving the map full. */
+	if (bpf_map_update_elem(&pids_to_trace, &pid, &traced, BPF_ANY))
+		__atomic_fetch_add(&lost_tasks, 1, __ATOMIC_RELAXED);
 	return 0;
 }
 

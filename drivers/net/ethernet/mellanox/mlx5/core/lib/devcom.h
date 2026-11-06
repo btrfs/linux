@@ -10,8 +10,10 @@ enum mlx5_devom_match_flags {
 	MLX5_DEVCOM_MATCH_FLAGS_NS = BIT(0),
 };
 
+#define MLX5_DEVCOM_MATCH_KEY_MAX 32
 union mlx5_devcom_match_key {
 	u64 val;
+	u8 buf[MLX5_DEVCOM_MATCH_KEY_MAX];
 };
 
 struct mlx5_devcom_match_attr {
@@ -44,6 +46,11 @@ mlx5_devcom_register_component(struct mlx5_devcom_dev *devc,
 			       void *data);
 void mlx5_devcom_unregister_component(struct mlx5_devcom_comp_dev *devcom);
 
+#define DEVCOM_CANT_FAIL (INT_MAX)
+
+int mlx5_devcom_locked_send_event(struct mlx5_devcom_comp_dev *devcom,
+				  int event, int rollback_event,
+				  void *event_data);
 int mlx5_devcom_send_event(struct mlx5_devcom_comp_dev *devcom,
 			   int event, int rollback_event,
 			   void *event_data);
@@ -73,5 +80,6 @@ void *mlx5_devcom_get_next_peer_data_rcu(struct mlx5_devcom_comp_dev *devcom,
 void mlx5_devcom_comp_lock(struct mlx5_devcom_comp_dev *devcom);
 void mlx5_devcom_comp_unlock(struct mlx5_devcom_comp_dev *devcom);
 int mlx5_devcom_comp_trylock(struct mlx5_devcom_comp_dev *devcom);
+void mlx5_devcom_comp_assert_locked(struct mlx5_devcom_comp_dev *devcom);
 
 #endif /* __LIB_MLX5_DEVCOM_H__ */

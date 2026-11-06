@@ -40,12 +40,12 @@ struct amdgpu_tlb_fence {
 
 static const char *amdgpu_tlb_fence_get_driver_name(struct dma_fence *fence)
 {
-	return "amdgpu tlb fence";
+	return "amdgpu_tlb_fence";
 }
 
 static const char *amdgpu_tlb_fence_get_timeline_name(struct dma_fence *f)
 {
-	return "amdgpu tlb timeline";
+	return "amdgpu_tlb_timeline";
 }
 
 static void amdgpu_tlb_fence_work(struct work_struct *work)
@@ -80,7 +80,7 @@ void amdgpu_vm_tlb_fence_create(struct amdgpu_device *adev, struct amdgpu_vm *vm
 {
 	struct amdgpu_tlb_fence *f;
 
-	f = kmalloc(sizeof(*f), GFP_KERNEL);
+	f = kmalloc_obj(*f);
 	if (!f) {
 		/*
 		 * We can't fail since the PDEs and PTEs are already updated, so

@@ -159,8 +159,8 @@ struct rds_ib_connection {
 	atomic_t		i_fastreg_inuse_count;
 
 	/* interrupt handling */
-	struct tasklet_struct	i_send_tasklet;
-	struct tasklet_struct	i_recv_tasklet;
+	struct work_struct	i_send_work;
+	struct work_struct	i_recv_work;
 
 	/* tx */
 	struct rds_ib_work_ring	i_send_ring;
@@ -381,6 +381,7 @@ void rds_ib_cm_connect_complete(struct rds_connection *conn,
 	__rds_ib_conn_error(conn, KERN_WARNING "RDS/IB: " fmt)
 
 /* ib_rdma.c */
+struct rds_ib_device *rds_ib_get_device(__be32 ipaddr);
 int rds_ib_update_ipaddr(struct rds_ib_device *rds_ibdev,
 			 struct in6_addr *ipaddr);
 void rds_ib_add_conn(struct rds_ib_device *rds_ibdev, struct rds_connection *conn);

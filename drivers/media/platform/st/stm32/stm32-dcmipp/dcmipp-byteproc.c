@@ -25,6 +25,7 @@
 #define DCMIPP_P0SCSZR_HSIZE_SHIFT	0
 #define DCMIPP_P0SCSZR_VSIZE_SHIFT	16
 #define DCMIPP_P0PPCR	0x5c0
+#define DCMIPP_P0PPCR_SWAPYUV		BIT(0)
 #define DCMIPP_P0PPCR_BSM_1_2		0x1
 #define DCMIPP_P0PPCR_BSM_1_4		0x2
 #define DCMIPP_P0PPCR_BSM_2_4		0x3
@@ -49,6 +50,8 @@ struct dcmipp_byteproc_pix_map {
 static const struct dcmipp_byteproc_pix_map dcmipp_byteproc_pix_map_list[] = {
 	PIXMAP_MBUS_BPP(RGB565_2X8_LE, 2),
 	PIXMAP_MBUS_BPP(RGB565_1X16, 2),
+	PIXMAP_MBUS_BPP(RGB888_3X8, 3),
+	PIXMAP_MBUS_BPP(RGB888_1X24, 3),
 	PIXMAP_MBUS_BPP(YUYV8_2X8, 2),
 	PIXMAP_MBUS_BPP(YUYV8_1X16, 2),
 	PIXMAP_MBUS_BPP(YVYU8_2X8, 2),
@@ -58,6 +61,9 @@ static const struct dcmipp_byteproc_pix_map dcmipp_byteproc_pix_map_list[] = {
 	PIXMAP_MBUS_BPP(VYUY8_2X8, 2),
 	PIXMAP_MBUS_BPP(VYUY8_1X16, 2),
 	PIXMAP_MBUS_BPP(Y8_1X8, 1),
+	PIXMAP_MBUS_BPP(Y10_1X10, 2),
+	PIXMAP_MBUS_BPP(Y12_1X12, 2),
+	PIXMAP_MBUS_BPP(Y14_1X14, 2),
 	PIXMAP_MBUS_BPP(SBGGR8_1X8, 1),
 	PIXMAP_MBUS_BPP(SGBRG8_1X8, 1),
 	PIXMAP_MBUS_BPP(SGRBG8_1X8, 1),
@@ -126,15 +132,22 @@ static void dcmipp_byteproc_adjust_crop(struct v4l2_rect *r,
 static void dcmipp_byteproc_adjust_compose(struct v4l2_rect *r,
 					   const struct v4l2_mbus_framefmt *fmt)
 {
+	const struct dcmipp_byteproc_pix_map *vpix;
+
 	r->top = 0;
 	r->left = 0;
 
 	/* Compose is not possible for JPEG or Bayer formats */
-	if (fmt->code == MEDIA_BUS_FMT_JPEG_1X8 ||
-	    fmt->code == MEDIA_BUS_FMT_SBGGR8_1X8 ||
-	    fmt->code == MEDIA_BUS_FMT_SGBRG8_1X8 ||
-	    fmt->code == MEDIA_BUS_FMT_SGRBG8_1X8 ||
-	    fmt->code == MEDIA_BUS_FMT_SRGGB8_1X8) {
+	if (fmt->code >= MEDIA_BUS_FMT_SBGGR8_1X8 &&
+	    fmt->code <= MEDIA_BUS_FMT_JPEG_1X8) {
+		r->width = fmt->width;
+		r->height = fmt->height;
+		return;
+	}
+
+	/* Prevent compose on formats which are not 1 or 2 bytes per pixel */
+	vpix = dcmipp_byteproc_pix_map_by_code(fmt->code);
+	if (vpix->bpp != 1 && vpix->bpp != 2) {
 		r->width = fmt->width;
 		r->height = fmt->height;
 		return;
@@ -147,7 +160,7 @@ static void dcmipp_byteproc_adjust_compose(struct v4l2_rect *r,
 		r->height = fmt->height;
 
 	/* Adjust width /2 or /4 for 8bits formats and /2 for 16bits formats */
-	if (fmt->code == MEDIA_BUS_FMT_Y8_1X8 && r->width <= (fmt->width / 4))
+	if (vpix->bpp == 1 && r->width <= (fmt->width / 4))
 		r->width = fmt->width / 4;
 	else if (r->width <= (fmt->width / 2))
 		r->width = fmt->width / 2;
@@ -252,6 +265,7 @@ dcmipp_byteproc_enum_frame_size(struct v4l2_subdev *sd,
 }
 
 static int dcmipp_byteproc_set_fmt(struct v4l2_subdev *sd,
+				   const struct v4l2_subdev_client_info *ci,
 				   struct v4l2_subdev_state *sd_state,
 				   struct v4l2_subdev_format *fmt)
 {
@@ -286,6 +300,7 @@ static int dcmipp_byteproc_set_fmt(struct v4l2_subdev *sd,
 }
 
 static int dcmipp_byteproc_get_selection(struct v4l2_subdev *sd,
+					 const struct v4l2_subdev_client_info *ci,
 					 struct v4l2_subdev_state *sd_state,
 					 struct v4l2_subdev_selection *s)
 {
@@ -339,6 +354,7 @@ static int dcmipp_byteproc_get_selection(struct v4l2_subdev *sd,
 }
 
 static int dcmipp_byteproc_set_selection(struct v4l2_subdev *sd,
+					 const struct v4l2_subdev_client_info *ci,
 					 struct v4l2_subdev_state *sd_state,
 					 struct v4l2_subdev_selection *s)
 {
@@ -416,9 +432,11 @@ static int dcmipp_byteproc_configure_scale_crop
 	if (!vpix)
 		return -EINVAL;
 
-	/* clear decimation/crop */
+	/* clear decimation/crop/swap yuv */
 	reg_clear(byteproc, DCMIPP_P0PPCR, DCMIPP_P0PPCR_BSM_MASK);
 	reg_clear(byteproc, DCMIPP_P0PPCR, DCMIPP_P0PPCR_LSM);
+	if (byteproc->ved.dcmipp->pipe_cfg->has_swapyuv)
+		reg_clear(byteproc, DCMIPP_P0PPCR, DCMIPP_P0PPCR_SWAPYUV);
 	reg_write(byteproc, DCMIPP_P0SCSTR, 0);
 	reg_write(byteproc, DCMIPP_P0SCSZR, 0);
 
@@ -438,6 +456,17 @@ static int dcmipp_byteproc_configure_scale_crop
 	vprediv = sink_fmt->height / compose->height;
 	if (vprediv == 2)
 		val |= DCMIPP_P0PPCR_LSM | DCMIPP_P0PPCR_OELS;
+
+	/*
+	 * Perform a SWAP YUV if input is parallel since in this mode
+	 * the DCMIPP will swap YUV by default
+	 */
+	if (byteproc->ved.dcmipp->pipe_cfg->has_swapyuv &&
+	    (sink_fmt->code == MEDIA_BUS_FMT_YUYV8_2X8 ||
+	     sink_fmt->code == MEDIA_BUS_FMT_YVYU8_2X8 ||
+	     sink_fmt->code == MEDIA_BUS_FMT_UYVY8_2X8 ||
+	     sink_fmt->code == MEDIA_BUS_FMT_VYUY8_2X8))
+		val |= DCMIPP_P0PPCR_SWAPYUV;
 
 	/* decimate using bytes and lines skipping */
 	if (val) {
@@ -559,8 +588,8 @@ void dcmipp_byteproc_ent_release(struct dcmipp_ent_device *ved)
 }
 
 struct dcmipp_ent_device *
-dcmipp_byteproc_ent_init(struct device *dev, const char *entity_name,
-			 struct v4l2_device *v4l2_dev, void __iomem *regs)
+dcmipp_byteproc_ent_init(const char *entity_name,
+			 struct dcmipp_device *dcmipp)
 {
 	struct dcmipp_byteproc_device *byteproc;
 	const unsigned long pads_flag[] = {
@@ -569,15 +598,15 @@ dcmipp_byteproc_ent_init(struct device *dev, const char *entity_name,
 	int ret;
 
 	/* Allocate the byteproc struct */
-	byteproc = kzalloc(sizeof(*byteproc), GFP_KERNEL);
+	byteproc = kzalloc_obj(*byteproc);
 	if (!byteproc)
 		return ERR_PTR(-ENOMEM);
 
-	byteproc->regs = regs;
+	byteproc->regs = dcmipp->regs;
 
 	/* Initialize ved and sd */
 	ret = dcmipp_ent_sd_register(&byteproc->ved, &byteproc->sd,
-				     v4l2_dev, entity_name,
+				     &dcmipp->v4l2_dev, entity_name,
 				     MEDIA_ENT_F_PROC_VIDEO_SCALER,
 				     ARRAY_SIZE(pads_flag), pads_flag,
 				     &dcmipp_byteproc_int_ops,
@@ -588,7 +617,8 @@ dcmipp_byteproc_ent_init(struct device *dev, const char *entity_name,
 		return ERR_PTR(ret);
 	}
 
-	byteproc->dev = dev;
+	byteproc->ved.dcmipp = dcmipp;
+	byteproc->dev = dcmipp->dev;
 
 	return &byteproc->ved;
 }

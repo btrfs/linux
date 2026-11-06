@@ -9,6 +9,7 @@
 #include <linux/mount.h>
 #include <linux/xattr.h>
 #include <linux/file.h>
+#include <linux/namei.h>
 #include <linux/falloc.h>
 #include <trace/events/fscache.h>
 #include "internal.h"
@@ -30,11 +31,6 @@ struct cachefiles_object *cachefiles_alloc_object(struct fscache_cookie *cookie)
 	object = kmem_cache_zalloc(cachefiles_object_jar, GFP_KERNEL);
 	if (!object)
 		return NULL;
-
-	if (cachefiles_ondemand_init_obj_info(object, volume)) {
-		kmem_cache_free(cachefiles_object_jar, object);
-		return NULL;
-	}
 
 	refcount_set(&object->ref, 1);
 
@@ -93,7 +89,6 @@ void cachefiles_put_object(struct cachefiles_object *object,
 		ASSERTCMP(object->file, ==, NULL);
 
 		kfree(object->d_name);
-		cachefiles_ondemand_deinit_obj_info(object);
 		cache = object->volume->cache->cache;
 		fscache_put_cookie(object->cookie, fscache_cookie_put_object);
 		object->cookie = NULL;
@@ -102,73 +97,6 @@ void cachefiles_put_object(struct cachefiles_object *object,
 	}
 
 	_leave("");
-}
-
-/*
- * Adjust the size of a cache file if necessary to match the DIO size.  We keep
- * the EOF marker a multiple of DIO blocks so that we don't fall back to doing
- * non-DIO for a partial block straddling the EOF, but we also have to be
- * careful of someone expanding the file and accidentally accreting the
- * padding.
- */
-static int cachefiles_adjust_size(struct cachefiles_object *object)
-{
-	struct iattr newattrs;
-	struct file *file = object->file;
-	uint64_t ni_size;
-	loff_t oi_size;
-	int ret;
-
-	ni_size = object->cookie->object_size;
-	ni_size = round_up(ni_size, CACHEFILES_DIO_BLOCK_SIZE);
-
-	_enter("{OBJ%x},[%llu]",
-	       object->debug_id, (unsigned long long) ni_size);
-
-	if (!file)
-		return -ENOBUFS;
-
-	oi_size = i_size_read(file_inode(file));
-	if (oi_size == ni_size)
-		return 0;
-
-	inode_lock(file_inode(file));
-
-	/* if there's an extension to a partial page at the end of the backing
-	 * file, we need to discard the partial page so that we pick up new
-	 * data after it */
-	if (oi_size & ~PAGE_MASK && ni_size > oi_size) {
-		_debug("discard tail %llx", oi_size);
-		newattrs.ia_valid = ATTR_SIZE;
-		newattrs.ia_size = oi_size & PAGE_MASK;
-		ret = cachefiles_inject_remove_error();
-		if (ret == 0)
-			ret = notify_change(&nop_mnt_idmap, file->f_path.dentry,
-					    &newattrs, NULL);
-		if (ret < 0)
-			goto truncate_failed;
-	}
-
-	newattrs.ia_valid = ATTR_SIZE;
-	newattrs.ia_size = ni_size;
-	ret = cachefiles_inject_write_error();
-	if (ret == 0)
-		ret = notify_change(&nop_mnt_idmap, file->f_path.dentry,
-				    &newattrs, NULL);
-
-truncate_failed:
-	inode_unlock(file_inode(file));
-
-	if (ret < 0)
-		trace_cachefiles_io_error(NULL, file_inode(file), ret,
-					  cachefiles_trace_notify_change_error);
-	if (ret == -EIO) {
-		cachefiles_io_error_obj(object, "Size set failed");
-		ret = -ENOBUFS;
-	}
-
-	_leave(" = %d", ret);
-	return ret;
 }
 
 /*
@@ -203,7 +131,6 @@ static bool cachefiles_lookup_cookie(struct fscache_cookie *cookie)
 	spin_lock(&cache->object_list_lock);
 	list_add(&object->cache_link, &cache->object_list);
 	spin_unlock(&cache->object_list_lock);
-	cachefiles_adjust_size(object);
 
 	cachefiles_end_secure(cache, saved_cred);
 	_leave(" = t");
@@ -230,14 +157,14 @@ fail:
  * any unused granules.
  */
 static bool cachefiles_shorten_object(struct cachefiles_object *object,
-				      struct file *file, loff_t new_size)
+				      struct file *file, uoff_t new_size)
 {
 	struct cachefiles_cache *cache = object->volume->cache;
 	struct inode *inode = file_inode(file);
-	loff_t i_size, dio_size;
+	uoff_t i_size, dio_size;
 	int ret;
 
-	dio_size = round_up(new_size, CACHEFILES_DIO_BLOCK_SIZE);
+	dio_size = round_up(new_size, cache->bsize);
 	i_size = i_size_read(inode);
 
 	trace_cachefiles_trunc(object, inode, i_size, dio_size,
@@ -269,6 +196,7 @@ static bool cachefiles_shorten_object(struct cachefiles_object *object,
 		}
 	}
 
+	object->object_size = new_size;
 	return true;
 }
 
@@ -276,29 +204,38 @@ static bool cachefiles_shorten_object(struct cachefiles_object *object,
  * Resize the backing object.
  */
 static void cachefiles_resize_cookie(struct netfs_cache_resources *cres,
-				     loff_t new_size)
+				     uoff_t new_size, bool shrank)
 {
 	struct cachefiles_object *object = cachefiles_cres_object(cres);
 	struct cachefiles_cache *cache = object->volume->cache;
 	struct fscache_cookie *cookie = object->cookie;
 	const struct cred *saved_cred;
 	struct file *file = cachefiles_cres_file(cres);
-	loff_t old_size = cookie->object_size;
+	uoff_t i_size = i_size_read(file_inode(file));
 
-	_enter("%llu->%llu", old_size, new_size);
+	_enter("%llu->%llu", object->object_size, new_size);
 
-	if (new_size < old_size) {
+	/* If the file shrank, we need to downsize the backing file and clear
+	 * the end of the final block.
+	 */
+	if (shrank) {
+		if (new_size >= i_size)
+			goto out;
 		cachefiles_begin_secure(cache, &saved_cred);
 		cachefiles_shorten_object(object, file, new_size);
 		cachefiles_end_secure(cache, saved_cred);
 		object->cookie->object_size = new_size;
+		if (new_size == 0)
+			object->content_info = CACHEFILES_CONTENT_NO_DATA;
 		return;
 	}
 
 	/* The file is being expanded.  We don't need to do anything
-	 * particularly.  cookie->initial_size doesn't change and so the point
-	 * at which we have to download before doesn't change.
+	 * particularly.  The tail of the last block should have been cleared
+	 * both when it is written and when it is shrunk.
 	 */
+out:
+	object->object_size = new_size;
 	cookie->object_size = new_size;
 }
 
@@ -373,8 +310,6 @@ static void cachefiles_withdraw_cookie(struct fscache_cookie *cookie)
 		spin_unlock(&cache->object_list_lock);
 	}
 
-	cachefiles_ondemand_clean_object(object);
-
 	if (object->file) {
 		cachefiles_begin_secure(cache, &saved_cred);
 		cachefiles_clean_up_object(object, cache);
@@ -428,11 +363,13 @@ static bool cachefiles_invalidate_cookie(struct fscache_cookie *cookie)
 		if (!old_tmpfile) {
 			struct cachefiles_volume *volume = object->volume;
 			struct dentry *fan = volume->fanout[(u8)cookie->key_hash];
+			struct dentry *obj;
 
-			inode_lock_nested(d_inode(fan), I_MUTEX_PARENT);
-			cachefiles_bury_object(volume->cache, object, fan,
-					       old_file->f_path.dentry,
-					       FSCACHE_OBJECT_INVALIDATED);
+			obj = start_removing_dentry(fan, old_file->f_path.dentry);
+			if (!IS_ERR(obj))
+				cachefiles_bury_object(volume->cache, object,
+						       fan, obj,
+						       FSCACHE_OBJECT_INVALIDATED);
 		}
 		fput(old_file);
 	}

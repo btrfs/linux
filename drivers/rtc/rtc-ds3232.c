@@ -389,45 +389,39 @@ static irqreturn_t ds3232_irq(int irq, void *dev_id)
 	int ret;
 	int stat, control;
 
-	rtc_lock(ds3232->rtc);
+	guard(rtc_ops)(ds3232->rtc);
 
 	ret = regmap_read(ds3232->regmap, DS3232_REG_SR, &stat);
 	if (ret)
-		goto unlock;
+		return IRQ_HANDLED;
 
 	if (stat & DS3232_REG_SR_A1F) {
 		ret = regmap_read(ds3232->regmap, DS3232_REG_CR, &control);
 		if (ret) {
 			dev_warn(ds3232->dev,
 				 "Read Control Register error %d\n", ret);
-		} else {
-			/* disable alarm1 interrupt */
-			control &= ~(DS3232_REG_CR_A1IE);
-			ret = regmap_write(ds3232->regmap, DS3232_REG_CR,
-					   control);
-			if (ret) {
-				dev_warn(ds3232->dev,
-					 "Write Control Register error %d\n",
-					 ret);
-				goto unlock;
-			}
-
-			/* clear the alarm pend flag */
-			stat &= ~DS3232_REG_SR_A1F;
-			ret = regmap_write(ds3232->regmap, DS3232_REG_SR, stat);
-			if (ret) {
-				dev_warn(ds3232->dev,
-					 "Write Status Register error %d\n",
-					 ret);
-				goto unlock;
-			}
-
-			rtc_update_irq(ds3232->rtc, 1, RTC_AF | RTC_IRQF);
+			return IRQ_HANDLED;
 		}
-	}
+		/* disable alarm1 interrupt */
+		control &= ~(DS3232_REG_CR_A1IE);
+		ret = regmap_write(ds3232->regmap, DS3232_REG_CR, control);
+		if (ret) {
+			dev_warn(ds3232->dev,
+				 "Write Control Register error %d\n", ret);
+			return IRQ_HANDLED;
+		}
 
-unlock:
-	rtc_unlock(ds3232->rtc);
+		/* clear the alarm pend flag */
+		stat &= ~DS3232_REG_SR_A1F;
+		ret = regmap_write(ds3232->regmap, DS3232_REG_SR, stat);
+		if (ret) {
+			dev_warn(ds3232->dev,
+				 "Write Status Register error %d\n", ret);
+			return IRQ_HANDLED;
+		}
+
+		rtc_update_irq(ds3232->rtc, 1, RTC_AF | RTC_IRQF);
+	}
 
 	return IRQ_HANDLED;
 }
@@ -566,7 +560,7 @@ static int ds3232_i2c_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ds3232_id[] = {
-	{ "ds3232" },
+	{ .name = "ds3232" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ds3232_id);

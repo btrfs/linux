@@ -8,6 +8,7 @@
 #include <linux/module.h>
 #include <linux/device.h>
 #include <linux/dma-fence.h>
+#include <linux/overflow.h>
 #include <linux/slab.h>
 
 #include <trace/events/host1x.h>
@@ -59,7 +60,7 @@ struct host1x_syncpt *host1x_syncpt_alloc(struct host1x *host,
 					  unsigned long flags,
 					  const char *name)
 {
-	struct host1x_syncpt *sp = host->syncpt;
+	struct host1x_syncpt *sp = host->syncpt + host->syncpt_base;
 	char *full_name;
 	unsigned int i;
 
@@ -68,10 +69,10 @@ struct host1x_syncpt *host1x_syncpt_alloc(struct host1x *host,
 
 	mutex_lock(&host->syncpt_mutex);
 
-	for (i = 0; i < host->info->nb_pts && kref_read(&sp->ref); i++, sp++)
+	for (i = host->syncpt_base; i < host->syncpt_end && kref_read(&sp->ref); i++, sp++)
 		;
 
-	if (i >= host->info->nb_pts)
+	if (i >= host->syncpt_end)
 		goto unlock;
 
 	if (flags & HOST1X_SYNCPT_HAS_BASE) {
@@ -126,6 +127,10 @@ EXPORT_SYMBOL(host1x_syncpt_id);
  */
 u32 host1x_syncpt_incr_max(struct host1x_syncpt *sp, u32 incrs)
 {
+	/*
+	 * Syncpoint values are intended to be modulo 2^32, so overflow
+	 * here is intended.
+	 */
 	return (u32)atomic_add_return(incrs, &sp->max_val);
 }
 EXPORT_SYMBOL(host1x_syncpt_incr_max);
@@ -138,7 +143,7 @@ void host1x_syncpt_restore(struct host1x *host)
 	struct host1x_syncpt *sp_base = host->syncpt;
 	unsigned int i;
 
-	for (i = 0; i < host1x_syncpt_nb_pts(host); i++) {
+	for (i = host->syncpt_base; i < host->syncpt_end; i++) {
 		/*
 		 * Unassign syncpt from channels for purposes of Tegra186
 		 * syncpoint protection. This prevents any channel from
@@ -222,11 +227,12 @@ int host1x_syncpt_wait(struct host1x_syncpt *sp, u32 thresh, long timeout,
 {
 	struct dma_fence *fence;
 	long wait_err;
+	u32 curr;
 
-	host1x_hw_syncpt_load(sp->host, sp);
+	curr = host1x_syncpt_load(sp);
 
 	if (value)
-		*value = host1x_syncpt_load(sp);
+		*value = curr;
 
 	if (host1x_syncpt_is_expired(sp, thresh))
 		return 0;
@@ -245,21 +251,25 @@ int host1x_syncpt_wait(struct host1x_syncpt *sp, u32 thresh, long timeout,
 		host1x_fence_cancel(fence);
 	dma_fence_put(fence);
 
-	if (value)
-		*value = host1x_syncpt_load(sp);
-
 	/*
 	 * Don't rely on dma_fence_wait_timeout return value,
 	 * since it returns zero both on timeout and if the
 	 * wait completed with 0 jiffies left.
 	 */
-	host1x_hw_syncpt_load(sp->host, sp);
-	if (wait_err == 0 && !host1x_syncpt_is_expired(sp, thresh))
+	if (wait_err == 0 && !host1x_syncpt_is_expired(sp, thresh)) {
+		if (value)
+			*value = host1x_syncpt_load(sp);
+
 		return -EAGAIN;
-	else if (wait_err < 0)
+	} else if (wait_err < 0) {
 		return wait_err;
-	else
+	} else {
+		/* Success, read the value cached by ISR */
+		if (value)
+			*value = host1x_syncpt_read_min(sp);
+
 		return 0;
+	}
 }
 EXPORT_SYMBOL(host1x_syncpt_wait);
 
@@ -274,7 +284,7 @@ bool host1x_syncpt_is_expired(struct host1x_syncpt *sp, u32 thresh)
 
 	current_val = (u32)atomic_read(&sp->min_val);
 
-	return ((current_val - thresh) & 0x80000000U) == 0U;
+	return (wrapping_sub(u32, current_val, thresh) & 0x80000000U) == 0U;
 }
 
 int host1x_syncpt_init(struct host1x *host)
@@ -296,6 +306,9 @@ int host1x_syncpt_init(struct host1x *host)
 	for (i = 0; i < host->info->nb_pts; i++) {
 		syncpt[i].id = i;
 		syncpt[i].host = host;
+
+		/* Default to client managed for syncpoints not owned by us */
+		syncpt[i].client_managed = true;
 	}
 
 	for (i = 0; i < host->info->nb_bases; i++)
@@ -305,10 +318,12 @@ int host1x_syncpt_init(struct host1x *host)
 	host->syncpt = syncpt;
 	host->bases = bases;
 
-	/* Allocate sync point to use for clearing waits for expired fences */
-	host->nop_sp = host1x_syncpt_alloc(host, 0, "reserved-nop");
-	if (!host->nop_sp)
-		return -ENOMEM;
+	/* Prevent syncpoint 0 from being allocated by users */
+	if (host->syncpt_base == 0) {
+		host->nop_sp = host1x_syncpt_alloc(host, 0, "reserved-nop");
+		if (!host->nop_sp)
+			return -ENOMEM;
+	}
 
 	if (host->info->reserve_vblank_syncpts) {
 		kref_init(&host->syncpt[26].ref);
@@ -345,8 +360,6 @@ static void syncpt_release(struct kref *ref)
 
 	sp->locked = false;
 
-	mutex_lock(&sp->host->syncpt_mutex);
-
 	host1x_syncpt_base_free(sp->base);
 	kfree(sp->name);
 	sp->base = NULL;
@@ -369,7 +382,7 @@ void host1x_syncpt_put(struct host1x_syncpt *sp)
 	if (!sp)
 		return;
 
-	kref_put(&sp->ref, syncpt_release);
+	kref_put_mutex(&sp->ref, syncpt_release, &sp->host->syncpt_mutex);
 }
 EXPORT_SYMBOL(host1x_syncpt_put);
 

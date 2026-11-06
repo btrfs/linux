@@ -3,11 +3,12 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/rtnetlink.h>
+#include <linux/string.h>
 #include <crypto/algapi.h>
 #include <crypto/internal/aead.h>
 #include <crypto/authenc.h>
 #include <crypto/gcm.h>
-#include <linux/rtnetlink.h>
 #include <crypto/internal/des.h>
 #include "cc_driver.h"
 #include "cc_buffer_mgr.h"
@@ -225,8 +226,8 @@ static void cc_aead_complete(struct device *dev, void *cc_req, int err)
 		goto done;
 
 	if (areq_ctx->gen_ctx.op_type == DRV_CRYPTO_DIRECTION_DECRYPT) {
-		if (memcmp(areq_ctx->mac_buf, areq_ctx->icv_virt_addr,
-			   ctx->authsize) != 0) {
+		if (crypto_memneq(areq_ctx->mac_buf, areq_ctx->icv_virt_addr,
+				  ctx->authsize)) {
 			dev_dbg(dev, "Payload authentication failure, (auth-size=%d, cipher=%d)\n",
 				ctx->authsize, ctx->cipher_mode);
 			/* In case of payload authentication failure, MUST NOT
@@ -2569,11 +2570,9 @@ static struct cc_crypto_alg *cc_create_aead_alg(struct cc_alg_template *tmpl,
 
 	alg = &tmpl->template_aead;
 
-	if (snprintf(alg->base.cra_name, CRYPTO_MAX_ALG_NAME, "%s",
-		     tmpl->name) >= CRYPTO_MAX_ALG_NAME)
+	if (strscpy(alg->base.cra_name, tmpl->name) < 0)
 		return ERR_PTR(-EINVAL);
-	if (snprintf(alg->base.cra_driver_name, CRYPTO_MAX_ALG_NAME, "%s",
-		     tmpl->driver_name) >= CRYPTO_MAX_ALG_NAME)
+	if (strscpy(alg->base.cra_driver_name, tmpl->driver_name) < 0)
 		return ERR_PTR(-EINVAL);
 
 	alg->base.cra_module = THIS_MODULE;

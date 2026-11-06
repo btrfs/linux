@@ -15,7 +15,6 @@
 #include <linux/interrupt.h>
 #include <linux/iopoll.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -36,19 +35,14 @@ static struct starfive_dev_list dev_list = {
 
 struct starfive_cryp_dev *starfive_cryp_find_dev(struct starfive_cryp_ctx *ctx)
 {
-	struct starfive_cryp_dev *cryp = NULL, *tmp;
+	struct starfive_cryp_dev *cryp;
 
 	spin_lock_bh(&dev_list.lock);
-	if (!ctx->cryp) {
-		list_for_each_entry(tmp, &dev_list.dev_list, list) {
-			cryp = tmp;
-			break;
-		}
-		ctx->cryp = cryp;
-	} else {
-		cryp = ctx->cryp;
-	}
-
+	if (!ctx->cryp)
+		ctx->cryp = list_first_entry_or_null(&dev_list.dev_list,
+						     struct starfive_cryp_dev,
+						     list);
+	cryp = ctx->cryp;
 	spin_unlock_bh(&dev_list.lock);
 
 	return cryp;
@@ -126,9 +120,17 @@ static int starfive_cryp_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, PTR_ERR(cryp->rst),
 				     "Error getting hardware reset line\n");
 
-	clk_prepare_enable(cryp->hclk);
-	clk_prepare_enable(cryp->ahb);
-	reset_control_deassert(cryp->rst);
+	ret = clk_prepare_enable(cryp->hclk);
+	if (ret)
+		return ret;
+
+	ret = clk_prepare_enable(cryp->ahb);
+	if (ret)
+		goto disable_hclk;
+
+	ret = reset_control_deassert(cryp->rst);
+	if (ret)
+		goto disable_ahb;
 
 	spin_lock(&dev_list.lock);
 	list_add(&cryp->list, &dev_list.dev_list);
@@ -176,9 +178,11 @@ err_dma_init:
 	list_del(&cryp->list);
 	spin_unlock(&dev_list.lock);
 
-	clk_disable_unprepare(cryp->hclk);
-	clk_disable_unprepare(cryp->ahb);
 	reset_control_assert(cryp->rst);
+disable_ahb:
+	clk_disable_unprepare(cryp->ahb);
+disable_hclk:
+	clk_disable_unprepare(cryp->hclk);
 
 	return ret;
 }

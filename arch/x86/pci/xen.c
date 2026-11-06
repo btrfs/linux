@@ -18,6 +18,7 @@
 #include <linux/io.h>
 #include <asm/io_apic.h>
 #include <asm/pci_x86.h>
+#include <asm/cpuid/api.h>
 
 #include <asm/xen/hypervisor.h>
 
@@ -173,7 +174,7 @@ static int xen_setup_msi_irqs(struct pci_dev *dev, int nvec, int type)
 	if (type == PCI_CAP_ID_MSI && nvec > 1)
 		return 1;
 
-	v = kcalloc(max(1, nvec), sizeof(int), GFP_KERNEL);
+	v = kzalloc_objs(int, max(1, nvec));
 	if (!v)
 		return -ENOMEM;
 

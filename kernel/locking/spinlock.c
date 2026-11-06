@@ -64,8 +64,9 @@ EXPORT_PER_CPU_SYMBOL(__mmiowb_state);
  * time (making _this_ CPU preemptible if possible), and we also signal
  * towards that other CPU that it should break the lock ASAP.
  */
-#define BUILD_LOCK_OPS(op, locktype)					\
+#define BUILD_LOCK_OPS(op, locktype, lock_ctx_op)			\
 static void __lockfunc __raw_##op##_lock(locktype##_t *lock)		\
+	lock_ctx_op(lock)						\
 {									\
 	for (;;) {							\
 		preempt_disable();					\
@@ -78,6 +79,7 @@ static void __lockfunc __raw_##op##_lock(locktype##_t *lock)		\
 }									\
 									\
 static unsigned long __lockfunc __raw_##op##_lock_irqsave(locktype##_t *lock) \
+	lock_ctx_op(lock)						\
 {									\
 	unsigned long flags;						\
 									\
@@ -96,11 +98,13 @@ static unsigned long __lockfunc __raw_##op##_lock_irqsave(locktype##_t *lock) \
 }									\
 									\
 static void __lockfunc __raw_##op##_lock_irq(locktype##_t *lock)	\
+	lock_ctx_op(lock)						\
 {									\
 	_raw_##op##_lock_irqsave(lock);					\
 }									\
 									\
 static void __lockfunc __raw_##op##_lock_bh(locktype##_t *lock)		\
+	lock_ctx_op(lock)						\
 {									\
 	unsigned long flags;						\
 									\
@@ -123,11 +127,26 @@ static void __lockfunc __raw_##op##_lock_bh(locktype##_t *lock)		\
  *         __[spin|read|write]_lock_irqsave()
  *         __[spin|read|write]_lock_bh()
  */
-BUILD_LOCK_OPS(spin, raw_spinlock);
+BUILD_LOCK_OPS(spin, raw_spinlock, __acquires);
+
+/* No rwlock_t variants for now, so just build this function by hand */
+static void __lockfunc __raw_spin_lock_irq_disable(raw_spinlock_t *lock)
+{
+	for (;;) {
+		preempt_disable();
+		local_interrupt_disable();
+		if (likely(do_raw_spin_trylock(lock)))
+			break;
+		local_interrupt_enable();
+		preempt_enable();
+
+		arch_spin_relax(&lock->raw_lock);
+	}
+}
 
 #ifndef CONFIG_PREEMPT_RT
-BUILD_LOCK_OPS(read, rwlock);
-BUILD_LOCK_OPS(write, rwlock);
+BUILD_LOCK_OPS(read, rwlock, __acquires_shared);
+BUILD_LOCK_OPS(write, rwlock, __acquires);
 #endif
 
 #endif
@@ -172,6 +191,14 @@ noinline void __lockfunc _raw_spin_lock_irq(raw_spinlock_t *lock)
 EXPORT_SYMBOL(_raw_spin_lock_irq);
 #endif
 
+#ifndef CONFIG_INLINE_SPIN_LOCK_IRQ
+noinline void __lockfunc _raw_spin_lock_irq_disable(raw_spinlock_t *lock)
+{
+	__raw_spin_lock_irq_disable(lock);
+}
+EXPORT_SYMBOL_GPL(_raw_spin_lock_irq_disable);
+#endif
+
 #ifndef CONFIG_INLINE_SPIN_LOCK_BH
 noinline void __lockfunc _raw_spin_lock_bh(raw_spinlock_t *lock)
 {
@@ -202,6 +229,14 @@ noinline void __lockfunc _raw_spin_unlock_irq(raw_spinlock_t *lock)
 	__raw_spin_unlock_irq(lock);
 }
 EXPORT_SYMBOL(_raw_spin_unlock_irq);
+#endif
+
+#ifndef CONFIG_INLINE_SPIN_UNLOCK_IRQ
+noinline void __lockfunc _raw_spin_unlock_irq_enable(raw_spinlock_t *lock)
+{
+	__raw_spin_unlock_irq_enable(lock);
+}
+EXPORT_SYMBOL_GPL(_raw_spin_unlock_irq_enable);
 #endif
 
 #ifndef CONFIG_INLINE_SPIN_UNLOCK_BH

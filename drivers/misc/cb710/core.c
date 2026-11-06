@@ -166,7 +166,7 @@ void cb710_set_irq_handler(struct cb710_slot *slot,
 }
 EXPORT_SYMBOL_GPL(cb710_set_irq_handler);
 
-static int __maybe_unused cb710_suspend(struct device *dev_d)
+static int cb710_suspend(struct device *dev_d)
 {
 	struct pci_dev *pdev = to_pci_dev(dev_d);
 	struct cb710_chip *chip = pci_get_drvdata(pdev);
@@ -175,7 +175,7 @@ static int __maybe_unused cb710_suspend(struct device *dev_d)
 	return 0;
 }
 
-static int __maybe_unused cb710_resume(struct device *dev_d)
+static int cb710_resume(struct device *dev_d)
 {
 	struct pci_dev *pdev = to_pci_dev(dev_d);
 	struct cb710_chip *chip = pci_get_drvdata(pdev);
@@ -223,13 +223,11 @@ static int cb710_probe(struct pci_dev *pdev,
 	if (err)
 		return err;
 
-	err = pcim_iomap_regions(pdev, 0x0001, KBUILD_MODNAME);
-	if (err)
-		return err;
-
 	spin_lock_init(&chip->irq_lock);
 	chip->pdev = pdev;
-	chip->iobase = pcim_iomap_table(pdev)[0];
+	chip->iobase = pcim_iomap_region(pdev, 0, KBUILD_MODNAME);
+	if (IS_ERR(chip->iobase))
+		return PTR_ERR(chip->iobase);
 
 	pci_set_drvdata(pdev, chip);
 
@@ -294,19 +292,18 @@ static void cb710_remove_one(struct pci_dev *pdev)
 }
 
 static const struct pci_device_id cb710_pci_tbl[] = {
-	{ PCI_VENDOR_ID_ENE, PCI_DEVICE_ID_ENE_CB710_FLASH,
-		PCI_ANY_ID, PCI_ANY_ID, },
-	{ 0, }
+	{ PCI_DEVICE(PCI_VENDOR_ID_ENE, PCI_DEVICE_ID_ENE_CB710_FLASH) },
+	{ }
 };
 
-static SIMPLE_DEV_PM_OPS(cb710_pm_ops, cb710_suspend, cb710_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(cb710_pm_ops, cb710_suspend, cb710_resume);
 
 static struct pci_driver cb710_driver = {
 	.name = KBUILD_MODNAME,
 	.id_table = cb710_pci_tbl,
 	.probe = cb710_probe,
 	.remove = cb710_remove_one,
-	.driver.pm = &cb710_pm_ops,
+	.driver.pm = pm_sleep_ptr(&cb710_pm_ops),
 };
 
 static int __init cb710_init_module(void)

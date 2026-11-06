@@ -11,13 +11,11 @@
 
 #include "assert_support.h"
 
-/*
- * Local function declarations
- */
-static inline void gdc_reg_store(
-    const gdc_ID_t		ID,
-    const unsigned int	reg,
-    const hrt_data		value);
+static inline void gdc_reg_store(const gdc_ID_t ID, const unsigned int reg,
+				 const hrt_data value)
+{
+	ia_css_device_store_uint32(GDC_BASE[ID] + reg * sizeof(hrt_data), value);
+}
 
 #ifndef __INLINE_GDC__
 #include "gdc_private.h"
@@ -26,9 +24,7 @@ static inline void gdc_reg_store(
 /*
  * Exported function implementations
  */
-void gdc_lut_store(
-    const gdc_ID_t		ID,
-    const int			data[4][HRT_GDC_N])
+void gdc_lut_store(const gdc_ID_t ID, const int data[4][HRT_GDC_N])
 {
 	unsigned int i, lut_offset = HRT_GDC_LUT_IDX;
 
@@ -36,20 +32,17 @@ void gdc_lut_store(
 	assert(HRT_GDC_LUT_COEFF_OFFSET <= (4 * sizeof(hrt_data)));
 
 	for (i = 0; i < HRT_GDC_N; i++) {
-		hrt_data	entry_0 = data[0][i] & HRT_GDC_BCI_COEF_MASK;
-		hrt_data	entry_1 = data[1][i] & HRT_GDC_BCI_COEF_MASK;
-		hrt_data	entry_2 = data[2][i] & HRT_GDC_BCI_COEF_MASK;
-		hrt_data	entry_3 = data[3][i] & HRT_GDC_BCI_COEF_MASK;
+		hrt_data entry_0 = data[0][i] & HRT_GDC_BCI_COEF_MASK;
+		hrt_data entry_1 = data[1][i] & HRT_GDC_BCI_COEF_MASK;
+		hrt_data entry_2 = data[2][i] & HRT_GDC_BCI_COEF_MASK;
+		hrt_data entry_3 = data[3][i] & HRT_GDC_BCI_COEF_MASK;
 
-		hrt_data	word_0 = entry_0 |
-				     (entry_1 << HRT_GDC_LUT_COEFF_OFFSET);
-		hrt_data	word_1 = entry_2 |
-				     (entry_3 << HRT_GDC_LUT_COEFF_OFFSET);
+		hrt_data word_0 = entry_0 | (entry_1 << HRT_GDC_LUT_COEFF_OFFSET);
+		hrt_data word_1 = entry_2 | (entry_3 << HRT_GDC_LUT_COEFF_OFFSET);
 
 		gdc_reg_store(ID, lut_offset++, word_0);
 		gdc_reg_store(ID, lut_offset++, word_1);
 	}
-	return;
 }
 
 /*
@@ -85,22 +78,9 @@ void gdc_lut_convert_to_isp_format(const int in_lut[4][HRT_GDC_N],
 	}
 }
 
-int gdc_get_unity(
-    const gdc_ID_t		ID)
+int gdc_get_unity(const gdc_ID_t ID)
 {
 	assert(ID < N_GDC_ID);
 	(void)ID;
 	return (int)(1UL << HRT_GDC_FRAC_BITS);
-}
-
-/*
- * Local function implementations
- */
-static inline void gdc_reg_store(
-    const gdc_ID_t		ID,
-    const unsigned int	reg,
-    const hrt_data		value)
-{
-	ia_css_device_store_uint32(GDC_BASE[ID] + reg * sizeof(hrt_data), value);
-	return;
 }

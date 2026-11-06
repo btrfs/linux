@@ -39,7 +39,7 @@ static const struct drm_plane_funcs dc_plane_funcs = {
 	.update_plane		= drm_atomic_helper_update_plane,
 	.disable_plane		= drm_atomic_helper_disable_plane,
 	.destroy		= drm_plane_cleanup,
-	.reset			= drm_atomic_helper_plane_reset,
+	.atomic_create_state = drm_atomic_helper_plane_create_state,
 	.atomic_duplicate_state	= drm_atomic_helper_plane_duplicate_state,
 	.atomic_destroy_state	= drm_atomic_helper_plane_destroy_state,
 };
@@ -89,7 +89,7 @@ static int dc_plane_check_fb(struct drm_plane_state *state)
 }
 
 static int
-dc_plane_atomic_check(struct drm_plane *plane, struct drm_atomic_state *state)
+dc_plane_atomic_check(struct drm_plane *plane, struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *plane_state =
 				drm_atomic_get_new_plane_state(state, plane);
@@ -106,7 +106,7 @@ dc_plane_atomic_check(struct drm_plane *plane, struct drm_atomic_state *state)
 	}
 
 	crtc_state =
-		drm_atomic_get_existing_crtc_state(state, plane_state->crtc);
+		drm_atomic_get_new_crtc_state(state, plane_state->crtc);
 	if (WARN_ON(!crtc_state))
 		return -EINVAL;
 
@@ -127,7 +127,7 @@ dc_plane_atomic_check(struct drm_plane *plane, struct drm_atomic_state *state)
 }
 
 static void
-dc_plane_atomic_update(struct drm_plane *plane, struct drm_atomic_state *state)
+dc_plane_atomic_update(struct drm_plane *plane, struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *new_state =
 				drm_atomic_get_new_plane_state(state, plane);
@@ -176,7 +176,7 @@ dc_plane_atomic_update(struct drm_plane *plane, struct drm_atomic_state *state)
 }
 
 static void dc_plane_atomic_disable(struct drm_plane *plane,
-				    struct drm_atomic_state *state)
+				    struct drm_atomic_commit *state)
 {
 	struct dc_plane *dplane = to_dc_plane(plane);
 	const struct dc_fu_ops *fu_ops;

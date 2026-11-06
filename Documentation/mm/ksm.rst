@@ -24,13 +24,13 @@ tree.
 
 If a KSM page is shared between less than ``max_page_sharing`` VMAs,
 the node of the stable tree that represents such KSM page points to a
-list of struct ksm_rmap_item and the ``page->mapping`` of the
+list of struct ksm_rmap_item and the ``folio->mapping`` of the
 KSM page points to the stable tree node.
 
 When the sharing passes this threshold, KSM adds a second dimension to
 the stable tree. The tree node becomes a "chain" that links one or
 more "dups". Each "dup" keeps reverse mapping information for a KSM
-page with ``page->mapping`` pointing to that "dup".
+page with ``folio->mapping`` pointing to that "dup".
 
 Every "chain" and all "dups" linked into a "chain" enforce the
 invariant that they represent the same write protected memory content,
@@ -78,7 +78,7 @@ The frequency of such scans is defined by
 Reference
 ---------
 .. kernel-doc:: mm/ksm.c
-   :functions: mm_slot ksm_scan stable_node rmap_item
+   :functions: ksm_mm_slot ksm_scan ksm_stable_node ksm_rmap_item
 
 --
 Izik Eidus,

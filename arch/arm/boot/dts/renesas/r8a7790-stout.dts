@@ -208,12 +208,13 @@
 	status = "okay";
 
 	phy1: ethernet-phy@1 {
-		compatible = "ethernet-phy-id0022.1537",
-			     "ethernet-phy-ieee802.3-c22";
+		compatible = "ethernet-phy-id0022.1537";
 		reg = <1>;
 		interrupts-extended = <&irqc0 1 IRQ_TYPE_LEVEL_LOW>;
 		micrel,led-mode = <1>;
 		reset-gpios = <&gpio3 31 GPIO_ACTIVE_LOW>;
+		reset-assert-us = <10000>;
+		reset-deassert-us = <300>;
 	};
 };
 
@@ -290,7 +291,7 @@
 	cpu0-supply = <&vdd_dvfs>;
 };
 
-&iic2	{
+&iic2 {
 	status = "okay";
 	pinctrl-0 = <&iic2_pins>;
 	pinctrl-names = "default";

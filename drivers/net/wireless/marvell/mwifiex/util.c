@@ -317,10 +317,16 @@ mwifiex_parse_mgmt_packet(struct mwifiex_private *priv, u8 *payload, u16 len,
 
 	switch (stype) {
 	case IEEE80211_STYPE_ACTION:
-		category = *(payload + sizeof(struct ieee80211_hdr));
+		if (len < sizeof(*ieee_hdr) + 1)
+			return -1;
+
+		category = *(payload + sizeof(*ieee_hdr));
 		switch (category) {
 		case WLAN_CATEGORY_PUBLIC:
-			action_code = *(payload + sizeof(struct ieee80211_hdr)
+			if (len < sizeof(*ieee_hdr) + 2)
+				return -1;
+
+			action_code = *(payload + sizeof(*ieee_hdr)
 					+ 1);
 			if (action_code == WLAN_PUB_ACTION_TDLS_DISCOVER_RES) {
 				addr2 = ieee_hdr->addr2;
@@ -694,7 +700,7 @@ mwifiex_add_sta_entry(struct mwifiex_private *priv, const u8 *mac)
 	if (node)
 		goto done;
 
-	node = kzalloc(sizeof(*node), GFP_ATOMIC);
+	node = kzalloc_obj(*node, GFP_ATOMIC);
 	if (!node)
 		goto done;
 

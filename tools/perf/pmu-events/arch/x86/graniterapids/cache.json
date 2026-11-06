@@ -297,6 +297,15 @@
         "UMask": "0x40"
     },
     {
+        "BriefDescription": "Cycles when L1D is locked",
+        "Counter": "0,1,2,3",
+        "EventCode": "0x42",
+        "EventName": "LOCK_CYCLES.CACHE_LOCK_DURATION",
+        "PublicDescription": "This event counts the number of cycles when the L1D is locked. It is a superset of the 0x1 mask (BUS_LOCK_CLOCKS.BUS_LOCK_DURATION).",
+        "SampleAfterValue": "2000003",
+        "UMask": "0x2"
+    },
+    {
         "BriefDescription": "Core-originated cacheable requests that missed L3  (Except hardware prefetches to the L3)",
         "Counter": "0,1,2,3,4,5,6,7",
         "EventCode": "0x2e",
@@ -488,12 +497,12 @@
         "UMask": "0x2"
     },
     {
-        "BriefDescription": "Retired load instructions which data sources missed L3 but serviced from local dram",
+        "BriefDescription": "Retired load instructions which data sources missed L3 but serviced from dram homed in the local socket",
         "Counter": "0,1,2,3",
         "Data_LA": "1",
         "EventCode": "0xd3",
         "EventName": "MEM_LOAD_L3_MISS_RETIRED.LOCAL_DRAM",
-        "PublicDescription": "Retired load instructions which data sources missed L3 but serviced from local DRAM. Available PDIST counters: 0",
+        "PublicDescription": "Retired load instructions which data sources missed L3 but serviced from DRAM homed in the local socket. Available PDIST counters: 0",
         "RetirementLatencyMax": 4146,
         "RetirementLatencyMean": 115.83,
         "RetirementLatencyMin": 0,

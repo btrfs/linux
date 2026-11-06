@@ -18,16 +18,16 @@
 #include <linux/memblock.h>
 #include <linux/param.h>
 #include <linux/percpu-defs.h>
+#include <linux/pm.h>
 #include <linux/sched.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
-#include <linux/pm.h>
 
 #include <asm/addrspace.h>
 #include <asm/bootinfo.h>
-#include <asm/cpu.h>
 #include <asm/cpu-features.h>
 #include <asm/cpu-type.h>
+#include <asm/cpu.h>
 #include <asm/irq.h>
 #include <asm/irq_cpu.h>
 #include <asm/mipsregs.h>
@@ -48,13 +48,9 @@
 #include <asm/dec/kn02ca.h>
 #include <asm/dec/kn03.h>
 #include <asm/dec/kn230.h>
+#include <asm/dec/reset.h>
 #include <asm/dec/system.h>
 
-
-extern void dec_machine_restart(char *command);
-extern void dec_machine_halt(void);
-extern void dec_machine_power_off(void);
-extern irqreturn_t dec_intr_halt(int irq, void *dev_id);
 
 unsigned long dec_kn_slot_base, dec_kn_slot_size;
 
@@ -775,10 +771,4 @@ void __init arch_init_irq(void)
 				IRQF_NO_THREAD, "halt", NULL))
 			pr_err("Failed to register halt interrupt\n");
 	}
-}
-
-asmlinkage unsigned int dec_irq_dispatch(unsigned int irq)
-{
-	do_IRQ(irq);
-	return 0;
 }

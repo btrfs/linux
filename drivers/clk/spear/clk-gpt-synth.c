@@ -114,7 +114,7 @@ struct clk *clk_register_gpt(const char *name, const char *parent_name, unsigned
 		long flags, void __iomem *reg, struct gpt_rate_tbl *rtbl, u8
 		rtbl_cnt, spinlock_t *lock)
 {
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	struct clk_gpt *gpt;
 	struct clk *clk;
 
@@ -123,7 +123,7 @@ struct clk *clk_register_gpt(const char *name, const char *parent_name, unsigned
 		return ERR_PTR(-EINVAL);
 	}
 
-	gpt = kzalloc(sizeof(*gpt), GFP_KERNEL);
+	gpt = kzalloc_obj(*gpt);
 	if (!gpt)
 		return ERR_PTR(-ENOMEM);
 

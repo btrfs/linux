@@ -333,7 +333,7 @@ static const struct snd_soc_dapm_route wm8940_dapm_routes[] = {
 	{"ADC", NULL, "Boost Mixer"},
 };
 
-#define wm8940_reset(c) snd_soc_component_write(c, WM8940_SOFTRESET, 0);
+#define wm8940_reset(c) snd_soc_component_write(c, WM8940_SOFTRESET, 0)
 
 static int wm8940_set_dai_fmt(struct snd_soc_dai *codec_dai,
 			      unsigned int fmt)
@@ -476,6 +476,7 @@ static int wm8940_set_bias_level(struct snd_soc_component *component,
 				 enum snd_soc_bias_level level)
 {
 	struct wm8940_priv *wm8940 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	u16 val;
 	u16 pwr_reg = snd_soc_component_read(component, WM8940_POWER1) & 0x1F0;
 	int ret = 0;
@@ -498,7 +499,7 @@ static int wm8940_set_bias_level(struct snd_soc_component *component,
 		ret = snd_soc_component_write(component, WM8940_POWER1, pwr_reg | 0x1);
 		break;
 	case SND_SOC_BIAS_STANDBY:
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_OFF) {
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF) {
 			ret = regcache_sync(wm8940->regmap);
 			if (ret < 0) {
 				dev_err(component->dev, "Failed to sync cache: %d\n", ret);
@@ -729,6 +730,17 @@ static int wm8940_set_dai_sysclk(struct snd_soc_dai *dai, int clk_id,
 			SNDRV_PCM_FMTBIT_S24_LE |			\
 			SNDRV_PCM_FMTBIT_S32_LE)
 
+static const u64 wm8940_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF;
+
 static const struct snd_soc_dai_ops wm8940_dai_ops = {
 	.hw_params = wm8940_i2s_hw_params,
 	.set_sysclk = wm8940_set_dai_sysclk,
@@ -737,6 +749,8 @@ static const struct snd_soc_dai_ops wm8940_dai_ops = {
 	.set_clkdiv = wm8940_set_dai_clkdiv,
 	.set_pll = wm8940_set_dai_pll,
 	.no_capture_mute = 1,
+	.auto_selectable_formats = &wm8940_selectable_formats,
+	.num_auto_selectable_formats = 1,
 };
 
 static struct snd_soc_dai_driver wm8940_dai = {
@@ -761,6 +775,7 @@ static struct snd_soc_dai_driver wm8940_dai = {
 
 static int wm8940_probe(struct snd_soc_component *component)
 {
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct wm8940_setup_data *pdata = component->dev->platform_data;
 	int ret;
 	u16 reg;
@@ -782,7 +797,7 @@ static int wm8940_probe(struct snd_soc_component *component)
 		return ret;
 	}
 
-	snd_soc_component_force_bias_level(component, SND_SOC_BIAS_STANDBY);
+	snd_soc_dapm_force_bias_level(dapm, SND_SOC_BIAS_STANDBY);
 
 	ret = snd_soc_component_write(component, WM8940_POWER1, 0x180);
 	if (ret < 0)
@@ -849,7 +864,7 @@ static int wm8940_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id wm8940_i2c_id[] = {
-	{ "wm8940" },
+	{ .name = "wm8940" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wm8940_i2c_id);

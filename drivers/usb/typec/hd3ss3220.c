@@ -15,6 +15,9 @@
 #include <linux/usb/typec.h>
 #include <linux/delay.h>
 #include <linux/workqueue.h>
+#include <linux/gpio/consumer.h>
+#include <linux/regulator/consumer.h>
+#include <linux/of_graph.h>
 
 #define HD3SS3220_REG_CN_STAT		0x08
 #define HD3SS3220_REG_CN_STAT_CTRL	0x09
@@ -46,6 +49,9 @@
 #define HD3SS3220_REG_GEN_CTRL_MODE_SELECT_UFP		BIT(4)
 #define HD3SS3220_REG_GEN_CTRL_MODE_SELECT_DRP		(BIT(5) | BIT(4))
 
+/* Minimum time VDD5 has to be stable before VCC33 starts ramping up */
+#define HD3SS3220_TVDD5V_PG_US				2000
+
 struct hd3ss3220 {
 	struct device *dev;
 	struct regmap *regmap;
@@ -54,6 +60,12 @@ struct hd3ss3220 {
 	struct delayed_work output_poll_work;
 	enum usb_role role_state;
 	bool poll;
+
+	struct gpio_desc *id_gpiod;
+	int id_irq;
+
+	struct regulator *vbus;
+	bool vbus_enabled;
 };
 
 static int hd3ss3220_set_power_opmode(struct hd3ss3220 *hd3ss3220, int power_opmode)
@@ -196,6 +208,27 @@ static const struct typec_operations hd3ss3220_ops = {
 	.port_type_set = hd3ss3220_port_type_set,
 };
 
+static void hd3ss3220_regulator_control(struct hd3ss3220 *hd3ss3220, bool on)
+{
+	int ret;
+
+	if (hd3ss3220->vbus_enabled == on)
+		return;
+
+	if (on)
+		ret = regulator_enable(hd3ss3220->vbus);
+	else
+		ret = regulator_disable(hd3ss3220->vbus);
+
+	if (ret) {
+		dev_err(hd3ss3220->dev,
+			"vbus regulator %s failed: %d\n", on ? "enable" : "disable", ret);
+		return;
+	}
+
+	hd3ss3220->vbus_enabled = on;
+}
+
 static void hd3ss3220_set_role(struct hd3ss3220 *hd3ss3220)
 {
 	enum usb_role role_state = hd3ss3220_get_attached_state(hd3ss3220);
@@ -212,6 +245,9 @@ static void hd3ss3220_set_role(struct hd3ss3220 *hd3ss3220)
 	default:
 		break;
 	}
+
+	if (hd3ss3220->vbus && !hd3ss3220->id_gpiod)
+		hd3ss3220_regulator_control(hd3ss3220, role_state == USB_ROLE_HOST);
 
 	hd3ss3220->role_state = role_state;
 }
@@ -319,13 +355,50 @@ static const struct regmap_config config = {
 	.max_register = 0x0A,
 };
 
+static irqreturn_t hd3ss3220_id_isr(int irq, void *dev_id)
+{
+	struct hd3ss3220 *hd3ss3220 = dev_id;
+	int id;
+
+	id = gpiod_get_value_cansleep(hd3ss3220->id_gpiod);
+	hd3ss3220_regulator_control(hd3ss3220, !id);
+
+	return IRQ_HANDLED;
+}
+
+/*
+ * Bring both supplies up in the order the datasheet asks for. Powering VCC33
+ * first can back-power the device in a non-functioning state, which grounds
+ * the I2C bus and takes both this device and any others on the same bus down
+ */
+static int hd3ss3220_power_up(struct device *dev)
+{
+	int ret;
+
+	ret = devm_regulator_get_enable(dev, "vdd5");
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to enable VDD5\n");
+
+	/* Nothing to stagger against unless the board describes both rails */
+	if (device_property_present(dev, "vdd5-supply") &&
+	    device_property_present(dev, "vcc33-supply"))
+		fsleep(HD3SS3220_TVDD5V_PG_US);
+
+	ret = devm_regulator_get_enable(dev, "vcc33");
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to enable VCC33\n");
+
+	return 0;
+}
+
 static int hd3ss3220_probe(struct i2c_client *client)
 {
 	struct typec_capability typec_cap = { };
-	struct hd3ss3220 *hd3ss3220;
 	struct fwnode_handle *connector, *ep;
-	int ret;
+	struct hd3ss3220 *hd3ss3220;
+	struct regulator *vbus;
 	unsigned int data;
+	int ret;
 
 	hd3ss3220 = devm_kzalloc(&client->dev, sizeof(struct hd3ss3220),
 				 GFP_KERNEL);
@@ -338,6 +411,10 @@ static int hd3ss3220_probe(struct i2c_client *client)
 	hd3ss3220->regmap = devm_regmap_init_i2c(client, &config);
 	if (IS_ERR(hd3ss3220->regmap))
 		return PTR_ERR(hd3ss3220->regmap);
+
+	ret = hd3ss3220_power_up(hd3ss3220->dev);
+	if (ret)
+		return ret;
 
 	/* For backward compatibility check the connector child node first */
 	connector = device_get_named_child_node(hd3ss3220->dev, "connector");
@@ -357,6 +434,47 @@ static int hd3ss3220_probe(struct i2c_client *client)
 	if (IS_ERR(hd3ss3220->role_sw)) {
 		ret = PTR_ERR(hd3ss3220->role_sw);
 		goto err_put_fwnode;
+	}
+
+	vbus = devm_of_regulator_get_optional(hd3ss3220->dev,
+					      to_of_node(connector),
+					      "vbus");
+	if (IS_ERR(vbus) && vbus != ERR_PTR(-ENODEV)) {
+		ret = PTR_ERR(vbus);
+		dev_err(hd3ss3220->dev, "failed to get vbus: %d", ret);
+		goto err_put_fwnode;
+	}
+
+	hd3ss3220->vbus = (vbus == ERR_PTR(-ENODEV) ? NULL : vbus);
+
+	if (hd3ss3220->vbus) {
+		hd3ss3220->id_gpiod = devm_gpiod_get_optional(hd3ss3220->dev,
+							      "id",
+							      GPIOD_IN);
+		if (IS_ERR(hd3ss3220->id_gpiod)) {
+			ret = PTR_ERR(hd3ss3220->id_gpiod);
+			goto err_put_fwnode;
+		}
+	}
+
+	if (hd3ss3220->id_gpiod) {
+		hd3ss3220->id_irq = gpiod_to_irq(hd3ss3220->id_gpiod);
+		if (hd3ss3220->id_irq < 0) {
+			ret = hd3ss3220->id_irq;
+			dev_err(hd3ss3220->dev,
+				"failed to get ID gpio: %d\n",
+				hd3ss3220->id_irq);
+			goto err_put_fwnode;
+		}
+
+		ret = devm_request_threaded_irq(hd3ss3220->dev,
+						hd3ss3220->id_irq, NULL,
+						hd3ss3220_id_isr,
+						IRQF_TRIGGER_RISING |
+						IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
+						dev_name(hd3ss3220->dev), hd3ss3220);
+		if (ret < 0)
+			goto err_put_fwnode;
 	}
 
 	typec_cap.prefer_role = TYPEC_NO_PREFERRED_ROLE;

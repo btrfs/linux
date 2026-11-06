@@ -1118,7 +1118,7 @@ static void happy_meal_transceiver_check(struct happy_meal *hp, void __iomem *tr
  *
  * We use skb_reserve() to align the data block we get in the skb.  We
  * also program the etxregs->cfg register to use an offset of 2.  This
- * imperical constant plus the ethernet header size will always leave
+ * empirical constant plus the ethernet header size will always leave
  * us with a nicely aligned ip header once we pass things up to the
  * protocol layers.
  *
@@ -2248,7 +2248,7 @@ static struct quattro *quattro_sbus_find(struct platform_device *child)
 	if (qp)
 		return qp;
 
-	qp = kzalloc(sizeof(*qp), GFP_KERNEL);
+	qp = kzalloc_obj(*qp);
 	if (!qp)
 		return NULL;
 
@@ -2278,7 +2278,7 @@ static struct quattro *quattro_pci_find(struct pci_dev *pdev)
 			return qp;
 	}
 
-	qp = kmalloc(sizeof(struct quattro), GFP_KERNEL);
+	qp = kmalloc_obj(struct quattro);
 	if (!qp)
 		return ERR_PTR(-ENOMEM);
 
@@ -2551,6 +2551,9 @@ static int happy_meal_sbus_probe_one(struct platform_device *op, int is_qfe)
 		goto err_out_clear_quattro;
 	}
 
+	/* BIGMAC may have bogus sizes */
+	if ((op->resource[3].end - op->resource[3].start) >= BMAC_REG_SIZE)
+		op->resource[3].end = op->resource[3].start + BMAC_REG_SIZE - 1;
 	hp->bigmacregs = devm_platform_ioremap_resource(op, 3);
 	if (IS_ERR(hp->bigmacregs)) {
 		dev_err(&op->dev, "Cannot map BIGMAC registers.\n");

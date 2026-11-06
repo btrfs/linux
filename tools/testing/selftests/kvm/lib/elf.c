@@ -7,10 +7,48 @@
 
 #include "test_util.h"
 
-#include <bits/endian.h>
+#include <endian.h>
 #include <linux/elf.h>
 
 #include "kvm_util.h"
+
+static ssize_t elf_read(int fd, void *buf, size_t count)
+{
+	ssize_t rc;
+	ssize_t num_read = 0;
+	size_t num_left = count;
+	char *ptr = buf;
+
+	TEST_ASSERT(count, "Count must be non-zero");
+
+	do {
+		rc = read(fd, ptr, num_left);
+
+		switch (rc) {
+		case -1:
+			TEST_ASSERT(errno == EAGAIN || errno == EINTR,
+				    "Unexpected read failure,\n"
+				    "  rc: %zi errno: %i", rc, errno);
+			break;
+
+		case 0:
+			TEST_FAIL("Unexpected EOF,\n"
+				  "   rc: %zi num_read: %zi num_left: %zu",
+				  rc, num_read, num_left);
+			break;
+
+		default:
+			TEST_ASSERT(rc > 0, "Unexpected ret from read,\n"
+				    "  rc: %zi errno: %i", rc, errno);
+			num_read += rc;
+			num_left -= rc;
+			ptr += rc;
+			break;
+		}
+	} while (num_read < count);
+
+	return num_read;
+}
 
 static void elfhdr_get(const char *filename, Elf64_Ehdr *hdrp)
 {
@@ -31,7 +69,7 @@ static void elfhdr_get(const char *filename, Elf64_Ehdr *hdrp)
 	 * the real size of the ELF header.
 	 */
 	unsigned char ident[EI_NIDENT];
-	test_read(fd, ident, sizeof(ident));
+	elf_read(fd, ident, sizeof(ident));
 	TEST_ASSERT((ident[EI_MAG0] == ELFMAG0) && (ident[EI_MAG1] == ELFMAG1)
 		&& (ident[EI_MAG2] == ELFMAG2) && (ident[EI_MAG3] == ELFMAG3),
 		"ELF MAGIC Mismatch,\n"
@@ -79,7 +117,7 @@ static void elfhdr_get(const char *filename, Elf64_Ehdr *hdrp)
 	offset_rv = lseek(fd, 0, SEEK_SET);
 	TEST_ASSERT(offset_rv == 0, "Seek to ELF header failed,\n"
 		"  rv: %zi expected: %i", offset_rv, 0);
-	test_read(fd, hdrp, sizeof(*hdrp));
+	elf_read(fd, hdrp, sizeof(*hdrp));
 	TEST_ASSERT(hdrp->e_phentsize == sizeof(Elf64_Phdr),
 		"Unexpected physical header size,\n"
 		"  hdrp->e_phentsize: %x\n"
@@ -146,7 +184,7 @@ void kvm_vm_elf_load(struct kvm_vm *vm, const char *filename)
 
 		/* Read in the program header. */
 		Elf64_Phdr phdr;
-		test_read(fd, &phdr, sizeof(phdr));
+		elf_read(fd, &phdr, sizeof(phdr));
 
 		/* Skip if this header doesn't describe a loadable segment. */
 		if (phdr.p_type != PT_LOAD)
@@ -156,21 +194,20 @@ void kvm_vm_elf_load(struct kvm_vm *vm, const char *filename)
 		TEST_ASSERT(phdr.p_memsz > 0, "Unexpected loadable segment "
 			"memsize of 0,\n"
 			"  phdr index: %u p_memsz: 0x%" PRIx64,
-			n1, (uint64_t) phdr.p_memsz);
-		vm_vaddr_t seg_vstart = align_down(phdr.p_vaddr, vm->page_size);
-		vm_vaddr_t seg_vend = phdr.p_vaddr + phdr.p_memsz - 1;
+			n1, (u64)phdr.p_memsz);
+		gva_t seg_vstart = align_down(phdr.p_vaddr, vm->page_size);
+		gva_t seg_vend = phdr.p_vaddr + phdr.p_memsz - 1;
 		seg_vend |= vm->page_size - 1;
 		size_t seg_size = seg_vend - seg_vstart + 1;
 
-		vm_vaddr_t vaddr = __vm_vaddr_alloc(vm, seg_size, seg_vstart,
-						    MEM_REGION_CODE);
-		TEST_ASSERT(vaddr == seg_vstart, "Unable to allocate "
+		gva_t gva = __vm_alloc(vm, seg_size, seg_vstart, MEM_REGION_CODE);
+		TEST_ASSERT(gva == seg_vstart, "Unable to allocate "
 			"virtual memory for segment at requested min addr,\n"
 			"  segment idx: %u\n"
 			"  seg_vstart: 0x%lx\n"
-			"  vaddr: 0x%lx",
-			n1, seg_vstart, vaddr);
-		memset(addr_gva2hva(vm, vaddr), 0, seg_size);
+			"  gva: 0x%lx",
+			n1, seg_vstart, gva);
+		memset(addr_gva2hva(vm, gva), 0, seg_size);
 		/* TODO(lhuemill): Set permissions of each memory segment
 		 * based on the least-significant 3 bits of phdr.p_flags.
 		 */
@@ -187,8 +224,8 @@ void kvm_vm_elf_load(struct kvm_vm *vm, const char *filename)
 				"  expected: 0x%jx",
 				n1, errno, (intmax_t) offset_rv,
 				(intmax_t) phdr.p_offset);
-			test_read(fd, addr_gva2hva(vm, phdr.p_vaddr),
-				phdr.p_filesz);
+			elf_read(fd, addr_gva2hva(vm, phdr.p_vaddr),
+				 phdr.p_filesz);
 		}
 	}
 	close(fd);

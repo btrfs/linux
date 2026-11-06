@@ -104,7 +104,7 @@ static int es7134_set_fmt(struct snd_soc_dai *codec_dai, unsigned int fmt)
 
 static int es7134_component_probe(struct snd_soc_component *c)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(c);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(c);
 	struct es7134_data *priv = snd_soc_component_get_drvdata(c);
 	const struct es7134_chip *chip = priv->chip;
 	int ret;
@@ -130,10 +130,16 @@ static int es7134_component_probe(struct snd_soc_component *c)
 	return 0;
 }
 
+static const u64 es7134_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF;
+
 static const struct snd_soc_dai_ops es7134_dai_ops = {
 	.set_fmt	= es7134_set_fmt,
 	.hw_params	= es7134_hw_params,
 	.set_sysclk	= es7134_set_sysclk,
+	.auto_selectable_formats	= &es7134_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 static struct snd_soc_dai_driver es7134_dai = {

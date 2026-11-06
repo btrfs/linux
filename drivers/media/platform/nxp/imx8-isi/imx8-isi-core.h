@@ -11,6 +11,7 @@
 #define __MXC_ISI_CORE_H__
 
 #include <linux/list.h>
+#include <linux/math.h>
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
@@ -160,13 +161,16 @@ enum model {
 	MXC_ISI_IMX8QM,
 	MXC_ISI_IMX8QXP,
 	MXC_ISI_IMX8ULP,
+	MXC_ISI_IMX91,
 	MXC_ISI_IMX93,
+	MXC_ISI_IMX95,
 };
 
 struct mxc_isi_plat_data {
 	enum model model;
 	unsigned int num_ports;
 	unsigned int num_channels;
+	unsigned int num_vc;		/* Number of VCs, 0 = no VC support */
 	unsigned int reg_offset;
 	const struct mxc_isi_ier_reg  *ier_reg;
 	const struct mxc_isi_set_thd *set_thd;
@@ -182,7 +186,7 @@ struct mxc_isi_dma_buffer {
 };
 
 struct mxc_isi_input {
-	unsigned int			enable_count;
+	u64				enabled_streams;
 };
 
 struct mxc_isi_crossbar {
@@ -255,6 +259,14 @@ struct mxc_isi_pipe {
 	u8				acquired_res;
 	u8				chained_res;
 	bool				chained;
+
+	unsigned int			input;
+	/*
+	 * Stream on the connected crossbar input, expressed as a bitmask. Zero
+	 * when the pipeline is disabled, a single bit set when the pipeline is
+	 * enabled (as each pipeline processes a single stream).
+	 */
+	u64				input_stream;
 };
 
 struct mxc_isi_m2m {
@@ -375,6 +387,7 @@ void mxc_isi_channel_unchain(struct mxc_isi_pipe *pipe);
 
 void mxc_isi_channel_config(struct mxc_isi_pipe *pipe,
 			    enum mxc_isi_input_id input,
+			    unsigned int vc,
 			    const struct v4l2_area *in_size,
 			    const struct v4l2_area *scale,
 			    const struct v4l2_rect *crop,
@@ -411,5 +424,20 @@ static inline void mxc_isi_debug_cleanup(struct mxc_isi_dev *isi)
 {
 }
 #endif
+
+/*
+ * ISI scaling engine works in two parts: it performs pre-decimation of
+ * the image followed by bilinear filtering to achieve the desired
+ * downscaling factor.
+ *
+ * The decimation filter provides a maximum downscaling factor of 8, and
+ * the subsequent bilinear filter provides a maximum downscaling factor
+ * of 2. Combined, the maximum scaling factor can be up to 16.
+ */
+static inline unsigned int
+mxc_isi_clamp_downscale_16(unsigned int val, unsigned int max_val)
+{
+	return clamp(val, max(1U, DIV_ROUND_UP(max_val, 16)), max_val);
+}
 
 #endif /* __MXC_ISI_CORE_H__ */

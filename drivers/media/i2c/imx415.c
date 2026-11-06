@@ -686,7 +686,7 @@ static int imx415_set_testpattern(struct imx415 *sensor, int val)
 		cci_write(sensor->regmap, IMX415_DIG_CLP_MODE, 0x01, &ret);
 		cci_write(sensor->regmap, IMX415_WRJ_OPEN, 0x01, &ret);
 	}
-	return 0;
+	return ret;
 }
 
 static int imx415_s_ctrl(struct v4l2_ctrl *ctrl)
@@ -720,7 +720,7 @@ static int imx415_s_ctrl(struct v4l2_ctrl *ctrl)
 		ret = cci_write(sensor->regmap, IMX415_VMAX,
 				format->height + ctrl->val, NULL);
 		if (ret)
-			return ret;
+			break;
 		/*
 		 * Exposure is set based on VMAX which has just changed, so
 		 * program exposure register as well
@@ -1021,6 +1021,7 @@ static int imx415_enum_frame_size(struct v4l2_subdev *sd,
 }
 
 static int imx415_set_format(struct v4l2_subdev *sd,
+			     const struct v4l2_subdev_client_info *ci,
 			     struct v4l2_subdev_state *state,
 			     struct v4l2_subdev_format *fmt)
 {
@@ -1042,6 +1043,7 @@ static int imx415_set_format(struct v4l2_subdev *sd,
 }
 
 static int imx415_get_selection(struct v4l2_subdev *sd,
+				const struct v4l2_subdev_client_info *ci,
 				struct v4l2_subdev_state *sd_state,
 				struct v4l2_subdev_selection *sel)
 {
@@ -1070,7 +1072,7 @@ static int imx415_init_state(struct v4l2_subdev *sd,
 		},
 	};
 
-	imx415_set_format(sd, state, &format);
+	imx415_set_format(sd, NULL, state, &format);
 
 	return 0;
 }

@@ -550,7 +550,7 @@ static int rxq_num(const char *ifname)
 	struct ifreq ifr = {
 		.ifr_data = (void *)&ch,
 	};
-	strncpy(ifr.ifr_name, ifname, IF_NAMESIZE - 1);
+	strscpy(ifr.ifr_name, ifname);
 	int fd, ret;
 
 	fd = socket(AF_UNIX, SOCK_DGRAM, 0);
@@ -571,7 +571,7 @@ static void hwtstamp_ioctl(int op, const char *ifname, struct hwtstamp_config *c
 	struct ifreq ifr = {
 		.ifr_data = (void *)cfg,
 	};
-	strncpy(ifr.ifr_name, ifname, IF_NAMESIZE - 1);
+	strscpy(ifr.ifr_name, ifname);
 	int fd, ret;
 
 	fd = socket(AF_UNIX, SOCK_DGRAM, 0);
@@ -845,7 +845,7 @@ int main(int argc, char *argv[])
 
 	prog = bpf_object__find_program_by_name(bpf_obj->obj, "rx");
 	bpf_program__set_ifindex(prog, ifindex);
-	bpf_program__set_flags(prog, BPF_F_XDP_DEV_BOUND_ONLY);
+	bpf_program__add_flags(prog, BPF_F_XDP_DEV_BOUND_ONLY);
 
 	printf("load bpf program...\n");
 	ret = xdp_hw_metadata__load(bpf_obj);

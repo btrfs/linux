@@ -1580,7 +1580,7 @@ static struct usb_request *r8a66597_alloc_request(struct usb_ep *_ep,
 {
 	struct r8a66597_request *req;
 
-	req = kzalloc(sizeof(struct r8a66597_request), gfp_flags);
+	req = kzalloc_obj(struct r8a66597_request, gfp_flags);
 	if (!req)
 		return NULL;
 
@@ -1894,10 +1894,8 @@ static int r8a66597_probe(struct platform_device *pdev)
 
 	ret = devm_request_irq(dev, irq, r8a66597_irq, IRQF_SHARED,
 			       udc_name, r8a66597);
-	if (ret < 0) {
-		dev_err(dev, "request_irq error (%d)\n", ret);
+	if (ret < 0)
 		goto clean_up2;
-	}
 
 	INIT_LIST_HEAD(&r8a66597->gadget.ep_list);
 	r8a66597->gadget.ep0 = &r8a66597->ep[0].ep;
@@ -1951,7 +1949,6 @@ static int r8a66597_probe(struct platform_device *pdev)
 	return 0;
 
 err_add_udc:
-	r8a66597_free_request(&r8a66597->ep[0].ep, r8a66597->ep0_req);
 clean_up2:
 	if (r8a66597->pdata->on_chip)
 		clk_disable_unprepare(r8a66597->clk);

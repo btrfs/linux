@@ -500,6 +500,7 @@ static int ssm2518_set_bias_level(struct snd_soc_component *component,
 	enum snd_soc_bias_level level)
 {
 	struct ssm2518 *ssm2518 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	int ret = 0;
 
 	switch (level) {
@@ -508,7 +509,7 @@ static int ssm2518_set_bias_level(struct snd_soc_component *component,
 	case SND_SOC_BIAS_PREPARE:
 		break;
 	case SND_SOC_BIAS_STANDBY:
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_OFF)
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF)
 			ret = ssm2518_set_power(ssm2518, true);
 		break;
 	case SND_SOC_BIAS_OFF:
@@ -619,12 +620,25 @@ static int ssm2518_startup(struct snd_pcm_substream *substream,
 #define SSM2518_FORMATS (SNDRV_PCM_FMTBIT_S8 | SNDRV_PCM_FMTBIT_S16_LE | \
 			SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S32)
 
+static const u64 ssm2518_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF;
+
 static const struct snd_soc_dai_ops ssm2518_dai_ops = {
 	.startup = ssm2518_startup,
 	.hw_params	= ssm2518_hw_params,
 	.mute_stream	= ssm2518_mute,
 	.set_fmt	= ssm2518_set_dai_fmt,
 	.set_tdm_slot	= ssm2518_set_tdm_slot,
+	.auto_selectable_formats	= &ssm2518_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 	.no_capture_mute = 1,
 };
 
@@ -793,7 +807,7 @@ MODULE_DEVICE_TABLE(of, ssm2518_dt_ids);
 #endif
 
 static const struct i2c_device_id ssm2518_i2c_ids[] = {
-	{ "ssm2518" },
+	{ .name = "ssm2518" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ssm2518_i2c_ids);

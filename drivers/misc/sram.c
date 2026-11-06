@@ -191,7 +191,7 @@ static int sram_reserve_regions(struct sram_dev *sram, struct resource *res)
 	 * after the reserved blocks from the dt are processed.
 	 */
 	nblocks = (np) ? of_get_available_child_count(np) + 1 : 1;
-	rblocks = kcalloc(nblocks, sizeof(*rblocks), GFP_KERNEL);
+	rblocks = kzalloc_objs(*rblocks, nblocks);
 	if (!rblocks)
 		return -ENOMEM;
 
@@ -370,7 +370,7 @@ static const struct of_device_id sram_dt_ids[] = {
 	{ .compatible = "nvidia,tegra186-sysram", .data = &tegra_sysram_config },
 	{ .compatible = "nvidia,tegra194-sysram", .data = &tegra_sysram_config },
 	{ .compatible = "nvidia,tegra234-sysram", .data = &tegra_sysram_config },
-	{}
+	{ }
 };
 
 static int sram_probe(struct platform_device *pdev)

@@ -128,14 +128,14 @@ static int siw_init_cpulist(void)
 	siw_cpu_info.num_nodes = num_nodes;
 
 	siw_cpu_info.tx_valid_cpus =
-		kcalloc(num_nodes, sizeof(struct cpumask *), GFP_KERNEL);
+		kzalloc_objs(struct cpumask *, num_nodes);
 	if (!siw_cpu_info.tx_valid_cpus) {
 		siw_cpu_info.num_nodes = 0;
 		return -ENOMEM;
 	}
 	for (i = 0; i < siw_cpu_info.num_nodes; i++) {
 		siw_cpu_info.tx_valid_cpus[i] =
-			kzalloc(sizeof(struct cpumask), GFP_KERNEL);
+			kzalloc_obj(struct cpumask);
 		if (!siw_cpu_info.tx_valid_cpus[i])
 			goto out_err;
 
@@ -217,8 +217,11 @@ static struct ib_qp *siw_get_base_qp(struct ib_device *base_dev, int id)
 		/*
 		 * siw_qp_id2obj() increments object reference count
 		 */
+		struct ib_qp *base_qp = &qp->base_qp;
+
 		siw_qp_put(qp);
-		return &qp->base_qp;
+
+		return base_qp;
 	}
 	return NULL;
 }

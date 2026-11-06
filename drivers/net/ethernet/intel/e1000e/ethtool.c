@@ -26,6 +26,8 @@ struct e1000_stats {
 static const char e1000e_priv_flags_strings[][ETH_GSTRING_LEN] = {
 #define E1000E_PRIV_FLAGS_S0IX_ENABLED	BIT(0)
 	"s0ix-enabled",
+#define E1000E_PRIV_FLAGS_DISABLE_K1	BIT(1)
+	"disable-k1",
 };
 
 #define E1000E_PRIV_FLAGS_STR_LEN ARRAY_SIZE(e1000e_priv_flags_strings)
@@ -549,9 +551,9 @@ static int e1000_set_eeprom(struct net_device *netdev,
 {
 	struct e1000_adapter *adapter = netdev_priv(netdev);
 	struct e1000_hw *hw = &adapter->hw;
-	size_t total_len, max_len;
 	u16 *eeprom_buff;
 	int ret_val = 0;
+	size_t max_len;
 	int first_word;
 	int last_word;
 	void *ptr;
@@ -569,10 +571,6 @@ static int e1000_set_eeprom(struct net_device *netdev,
 
 	max_len = hw->nvm.word_size * 2;
 
-	if (check_add_overflow(eeprom->offset, eeprom->len, &total_len) ||
-	    total_len > max_len)
-		return -EFBIG;
-
 	first_word = eeprom->offset >> 1;
 	last_word = (eeprom->offset + eeprom->len - 1) >> 1;
 	eeprom_buff = kmalloc(max_len, GFP_KERNEL);
@@ -585,20 +583,25 @@ static int e1000_set_eeprom(struct net_device *netdev,
 		/* need read/modify/write of first changed EEPROM word */
 		/* only the second byte of the word is being modified */
 		ret_val = e1000_read_nvm(hw, first_word, 1, &eeprom_buff[0]);
+		if (ret_val)
+			goto out;
+
+		/* Device's eeprom is always little-endian, word addressable */
+		le16_to_cpus(&eeprom_buff[0]);
+
 		ptr++;
 	}
-	if (((eeprom->offset + eeprom->len) & 1) && (!ret_val))
+	if ((eeprom->offset + eeprom->len) & 1) {
 		/* need read/modify/write of last changed EEPROM word */
 		/* only the first byte of the word is being modified */
 		ret_val = e1000_read_nvm(hw, last_word, 1,
 					 &eeprom_buff[last_word - first_word]);
+		if (ret_val)
+			goto out;
 
-	if (ret_val)
-		goto out;
-
-	/* Device's eeprom is always little-endian, word addressable */
-	for (i = 0; i < last_word - first_word + 1; i++)
-		le16_to_cpus(&eeprom_buff[i]);
+		/* Device's eeprom is always little-endian, word addressable */
+		le16_to_cpus(&eeprom_buff[last_word - first_word]);
+	}
 
 	memcpy(ptr, bytes, eeprom->len);
 
@@ -1175,8 +1178,7 @@ static int e1000_setup_desc_rings(struct e1000_adapter *adapter)
 	if (!tx_ring->count)
 		tx_ring->count = E1000_DEFAULT_TXD;
 
-	tx_ring->buffer_info = kcalloc(tx_ring->count,
-				       sizeof(struct e1000_buffer), GFP_KERNEL);
+	tx_ring->buffer_info = kzalloc_objs(struct e1000_buffer, tx_ring->count);
 	if (!tx_ring->buffer_info) {
 		ret_val = 1;
 		goto err_nomem;
@@ -1236,8 +1238,7 @@ static int e1000_setup_desc_rings(struct e1000_adapter *adapter)
 	if (!rx_ring->count)
 		rx_ring->count = E1000_DEFAULT_RXD;
 
-	rx_ring->buffer_info = kcalloc(rx_ring->count,
-				       sizeof(struct e1000_buffer), GFP_KERNEL);
+	rx_ring->buffer_info = kzalloc_objs(struct e1000_buffer, rx_ring->count);
 	if (!rx_ring->buffer_info) {
 		ret_val = 5;
 		goto err_nomem;
@@ -2301,25 +2302,58 @@ static u32 e1000e_get_priv_flags(struct net_device *netdev)
 	if (adapter->flags2 & FLAG2_ENABLE_S0IX_FLOWS)
 		priv_flags |= E1000E_PRIV_FLAGS_S0IX_ENABLED;
 
+	if (adapter->flags2 & FLAG2_DISABLE_K1)
+		priv_flags |= E1000E_PRIV_FLAGS_DISABLE_K1;
+
 	return priv_flags;
 }
 
 static int e1000e_set_priv_flags(struct net_device *netdev, u32 priv_flags)
 {
 	struct e1000_adapter *adapter = netdev_priv(netdev);
+	struct e1000_hw *hw = &adapter->hw;
 	unsigned int flags2 = adapter->flags2;
+	unsigned int changed;
 
-	flags2 &= ~FLAG2_ENABLE_S0IX_FLOWS;
+	flags2 &= ~(FLAG2_ENABLE_S0IX_FLOWS | FLAG2_DISABLE_K1);
+
 	if (priv_flags & E1000E_PRIV_FLAGS_S0IX_ENABLED) {
-		struct e1000_hw *hw = &adapter->hw;
-
-		if (hw->mac.type < e1000_pch_cnp)
+		if (hw->mac.type < e1000_pch_cnp) {
+			e_err("S0ix is not supported on this device\n");
 			return -EINVAL;
+		}
+
 		flags2 |= FLAG2_ENABLE_S0IX_FLOWS;
 	}
 
-	if (flags2 != adapter->flags2)
+	if (priv_flags & E1000E_PRIV_FLAGS_DISABLE_K1) {
+		if (hw->mac.type < e1000_ich8lan) {
+			e_err("Disabling K1 is not supported on this device\n");
+			return -EINVAL;
+		}
+
+		flags2 |= FLAG2_DISABLE_K1;
+	}
+
+	changed = adapter->flags2 ^ flags2;
+	if (changed)
 		adapter->flags2 = flags2;
+
+	if (changed & FLAG2_DISABLE_K1) {
+		/* reset the hardware to apply the changes */
+		while (test_and_set_bit(__E1000_RESETTING,
+					&adapter->state))
+			usleep_range(1000, 2000);
+
+		if (netif_running(adapter->netdev)) {
+			e1000e_down(adapter, true);
+			e1000e_up(adapter);
+		} else {
+			e1000e_reset(adapter);
+		}
+
+		clear_bit(__E1000_RESETTING, &adapter->state);
+	}
 
 	return 0;
 }

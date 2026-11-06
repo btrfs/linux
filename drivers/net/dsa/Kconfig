@@ -63,6 +63,16 @@ config NET_DSA_MT7530_MMIO
 	  are directly mapped into the SoCs register space rather than being
 	  accessible via MDIO.
 
+config NET_DSA_MT7628
+	tristate "MediaTek MT7628 Embedded Ethernet switch support"
+	depends on HAS_IOMEM && (SOC_MT7620 || COMPILE_TEST)
+	select NET_DSA_TAG_MT7628
+	select MEDIATEK_FE_SOC_PHY
+	select REGMAP_MMIO
+	help
+	  This enables support for the built-in Ethernet switch found
+	  in the MT7628 SoC.
+
 config NET_DSA_MV88E6060
 	tristate "Marvell 88E6060 ethernet switch chip support"
 	select NET_DSA_TAG_TRAILER
@@ -72,7 +82,13 @@ config NET_DSA_MV88E6060
 
 source "drivers/net/dsa/microchip/Kconfig"
 
+source "drivers/net/dsa/motorcomm/Kconfig"
+
 source "drivers/net/dsa/mv88e6xxx/Kconfig"
+
+source "drivers/net/dsa/mxl862xx/Kconfig"
+
+source "drivers/net/dsa/netc/Kconfig"
 
 source "drivers/net/dsa/ocelot/Kconfig"
 
@@ -96,10 +112,13 @@ config NET_DSA_RZN1_A5PSW
 config NET_DSA_KS8995
 	tristate "Micrel KS8995 family 5-ports 10/100 Ethernet switches"
 	depends on SPI
-	select NET_DSA_TAG_NONE
+	select NET_DSA_MICROCHIP_KSZ_COMMON
+	select NET_DSA_MICROCHIP_KSZ_SPI
 	help
-	  This driver supports the Micrel KS8995 family of 10/100 Mbit ethernet
-	  switches, managed over SPI.
+	  This is a transitional option for users who had NET_DSA_KS8995
+	  enabled. It automatically enables the new NET_DSA_MICROCHIP_KSZ_SPI
+	  driver which supersedes it. This option will be removed in a future
+	  kernel release.
 
 config NET_DSA_SMSC_LAN9303
 	tristate

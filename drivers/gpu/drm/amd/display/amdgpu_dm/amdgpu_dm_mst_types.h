@@ -37,7 +37,7 @@
 
 #define DP_BRANCH_VENDOR_SPECIFIC_START 0x50C
 
-/**
+/*
  * Panamera MST Hub detection
  * Offset DPCD 050Eh == 0x5A indicates cascaded MST hub case
  * Check from beginning of branch device vendor specific field (050Ch)
@@ -57,8 +57,17 @@ enum mst_msg_ready_type {
 	DOWN_OR_UP_MSG_RDY_EVENT = 3
 };
 
+struct amdgpu_device;
 struct amdgpu_display_manager;
 struct amdgpu_dm_connector;
+struct aux_payload;
+struct dc_state;
+struct dc_stream_state;
+struct dm_atomic_state;
+struct drm_atomic_commit;
+struct drm_dp_aux;
+struct drm_dp_mst_port;
+struct drm_dp_mst_topology_mgr;
 
 uint32_t dm_mst_get_pbn_divider(struct dc_link *link);
 
@@ -80,18 +89,58 @@ struct dsc_mst_fairness_vars {
 	struct amdgpu_dm_connector *aconnector;
 };
 
-int compute_mst_dsc_configs_for_state(struct drm_atomic_state *state,
+int compute_mst_dsc_configs_for_state(struct drm_atomic_commit *state,
 				      struct dc_state *dc_state,
 				      struct dsc_mst_fairness_vars *vars);
 
 bool needs_dsc_aux_workaround(struct dc_link *link);
 
-int pre_validate_dsc(struct drm_atomic_state *state,
+int pre_validate_dsc(struct drm_atomic_commit *state,
 		     struct dm_atomic_state **dm_state_ptr,
 		     struct dsc_mst_fairness_vars *vars);
 
 enum dc_status dm_dp_mst_is_port_support_mode(
 	struct amdgpu_dm_connector *aconnector,
 	struct dc_stream_state *stream);
+
+#if IS_ENABLED(CONFIG_DRM_AMD_DC_KUNIT_TEST)
+void amdgpu_dm_mst_reset_mst_connector_setting(struct amdgpu_dm_connector *aconnector);
+bool is_synaptics_cascaded_panamera(struct dc_link *link, struct drm_dp_mst_port *port);
+bool dp_get_link_current_set_bw(struct drm_dp_aux *aux, uint32_t *cur_link_bw);
+bool get_conv_frl_bw(struct amdgpu_dm_connector *aconnector,
+		     uint32_t *bw_in_kbps, uint32_t *dsc_bw_in_kbps);
+void log_dsc_params(int count, struct dsc_mst_fairness_vars *vars, int k);
+int find_crtc_index_in_state_by_stream(struct drm_atomic_commit *state,
+				       struct dc_stream_state *stream);
+bool is_dsc_precompute_needed(struct drm_atomic_commit *state);
+bool is_dsc_need_re_compute(struct drm_atomic_commit *state, struct dc_state *dc_state,
+			    struct dc_link *dc_link);
+int pre_compute_mst_dsc_configs_for_state(struct drm_atomic_commit *state,
+					  struct dc_state *dc_state,
+					  struct dsc_mst_fairness_vars *vars);
+bool validate_dsc_caps_on_connector(struct amdgpu_dm_connector *aconnector);
+bool retrieve_downstream_port_device(struct amdgpu_dm_connector *aconnector);
+bool retrieve_branch_specific_data(struct amdgpu_dm_connector *aconnector);
+ssize_t dm_dp_aux_transfer_result(ssize_t result,
+				  enum aux_return_code_type operation_result);
+void dm_dp_aux_fill_payload_flags(u8 request, struct aux_payload *payload);
+ssize_t dm_dp_aux_transfer(struct drm_dp_aux *aux, struct drm_dp_aux_msg *msg);
+u8 dm_mst_msg_ready_mask(enum mst_msg_ready_type msg_rdy_type);
+void dm_mst_select_esi_dpcd(u8 dpcd_rev, int *dpcd_addr, u8 *dpcd_bytes_to_read);
+void dm_handle_mst_down_rep_msg_ready(struct drm_dp_mst_topology_mgr *mgr);
+struct drm_encoder *dm_mst_atomic_best_encoder(struct drm_connector *connector,
+						 struct drm_atomic_commit *state);
+int dm_dp_mst_atomic_check(struct drm_connector *connector,
+				   struct drm_atomic_commit *state);
+int dm_dp_mst_detect(struct drm_connector *connector,
+			     struct drm_modeset_acquire_ctx *ctx, bool force);
+int dm_dp_mst_get_modes(struct drm_connector *connector);
+struct drm_connector *dm_dp_add_mst_connector(struct drm_dp_mst_topology_mgr *mgr,
+					      struct drm_dp_mst_port *port,
+					      const char *pathprop);
+int amdgpu_dm_mst_connector_late_register(struct drm_connector *connector);
+void amdgpu_dm_mst_connector_early_unregister(struct drm_connector *connector);
+void dm_dp_mst_connector_destroy(struct drm_connector *connector);
+#endif
 
 #endif

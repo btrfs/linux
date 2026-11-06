@@ -159,18 +159,16 @@ static ssize_t new_policy(struct file *f, const char __user *data,
 	}
 
 	rc = ipe_new_policyfs_node(p);
-	if (rc)
-		goto out;
 
 out:
 	kfree(copy);
 	if (rc < 0) {
 		ipe_free_policy(p);
 		ipe_audit_policy_load(ERR_PTR(rc));
-	} else {
-		ipe_audit_policy_load(p);
+		return rc;
 	}
-	return (rc < 0) ? rc : len;
+
+	return len;
 }
 
 static const struct file_operations np_fops = {
@@ -193,7 +191,7 @@ static const struct file_operations enforce_fops = {
  * Return: %0 on success. If an error occurs, the function will return
  * the -errno.
  */
-static int __init ipe_init_securityfs(void)
+int __init ipe_init_securityfs(void)
 {
 	int rc = 0;
 	struct ipe_policy *ap;
@@ -244,5 +242,3 @@ err:
 	securityfs_remove(root);
 	return rc;
 }
-
-fs_initcall(ipe_init_securityfs);

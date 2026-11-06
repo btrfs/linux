@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Copyright (c) 2021, Linaro Ltd <loic.poulain@linaro.org> */
+/* WWAN Driver Core
+ *
+ * Copyright (c) 2021, Linaro Ltd <loic.poulain@linaro.org>
+ * Copyright (c) 2025, Sergey Ryazanov <ryazanov.s.a@gmail.com>
+ */
 
 #include <linux/bitmap.h>
 #include <linux/err.h>
@@ -16,9 +20,14 @@
 #include <linux/types.h>
 #include <linux/uaccess.h>
 #include <linux/termios.h>
+#include <linux/gnss.h>
 #include <linux/wwan.h>
 #include <net/rtnetlink.h>
 #include <uapi/linux/wwan.h>
+
+/* Modem control bits userspace may set on an AT port, as for tty_tiocmset() */
+#define WWAN_TIOCM_OUTPUTS	(TIOCM_DTR | TIOCM_RTS | TIOCM_OUT1 | \
+				 TIOCM_OUT2 | TIOCM_LOOP)
 
 /* Maximum number of minors in use */
 #define WWAN_MAX_MINORS		(1 << MINORBITS)
@@ -37,21 +46,24 @@ static struct dentry *wwan_debugfs_dir;
 
 /* WWAN port flags */
 #define WWAN_PORT_TX_OFF	0
+#define WWAN_PORT_EXCLUSIVE	1
 
 /**
  * struct wwan_device - The structure that defines a WWAN device
  *
  * @id: WWAN device unique ID.
+ * @refcount: Reference count of this WWAN device. When this refcount reaches
+ * zero, the device is deleted. NB: access is protected by global
+ * wwan_register_lock mutex.
  * @dev: Underlying device.
- * @port_id: Current available port ID to pick.
  * @ops: wwan device ops
  * @ops_ctxt: context to pass to ops
  * @debugfs_dir:  WWAN device debugfs dir
  */
 struct wwan_device {
 	unsigned int id;
+	int refcount;
 	struct device dev;
-	atomic_t port_id;
 	const struct wwan_ops *ops;
 	void *ops_ctxt;
 #ifdef CONFIG_WWAN_DEBUGFS
@@ -65,25 +77,24 @@ struct wwan_device {
  * @start_count: Port start counter
  * @flags: Store port state and capabilities
  * @ops: Pointer to WWAN port operations
- * @ops_lock: Protect port ops
+ * @ops_lock: Protect port ops, and the AT/QCDM termios and TIOCM state
  * @dev: Underlying device
  * @rxq: Buffer inbound queue
  * @waitqueue: The waitqueue for port fops (read/write/poll)
- * @data_lock: Port specific data access serialization
  * @headroom_len: SKB reserved headroom size
  * @frag_len: Length to fragment packet
  * @at_data: AT port specific data
+ * @gnss: Pointer to GNSS device associated with this port
  */
 struct wwan_port {
 	enum wwan_port_type type;
 	unsigned int start_count;
 	unsigned long flags;
 	const struct wwan_port_ops *ops;
-	struct mutex ops_lock; /* Serialize ops + protect against removal */
+	struct mutex ops_lock; /* Serialize ops + at_data, protect against removal */
 	struct device dev;
 	struct sk_buff_head rxq;
 	wait_queue_head_t waitqueue;
-	struct mutex data_lock;	/* Port specific data access serialization */
 	size_t headroom_len;
 	size_t frag_len;
 	union {
@@ -91,8 +102,15 @@ struct wwan_port {
 			struct ktermios termios;
 			int mdmbits;
 		} at_data;
+		struct gnss_device *gnss;
 	};
 };
+
+static int wwan_port_op_start(struct wwan_port *port);
+static void wwan_port_op_stop(struct wwan_port *port);
+static int wwan_port_op_tx(struct wwan_port *port, struct sk_buff *skb,
+			   bool nonblock);
+static int wwan_wait_tx(struct wwan_port *port, bool nonblock);
 
 static ssize_t index_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
@@ -224,8 +242,10 @@ static struct wwan_device *wwan_create_dev(struct device *parent)
 
 	/* If wwandev already exists, return it */
 	wwandev = wwan_dev_get_by_parent(parent);
-	if (!IS_ERR(wwandev))
+	if (!IS_ERR(wwandev)) {
+		wwandev->refcount++;
 		goto done_unlock;
+	}
 
 	id = ida_alloc(&wwan_dev_ids, GFP_KERNEL);
 	if (id < 0) {
@@ -233,7 +253,7 @@ static struct wwan_device *wwan_create_dev(struct device *parent)
 		goto done_unlock;
 	}
 
-	wwandev = kzalloc(sizeof(*wwandev), GFP_KERNEL);
+	wwandev = kzalloc_obj(*wwandev);
 	if (!wwandev) {
 		wwandev = ERR_PTR(-ENOMEM);
 		ida_free(&wwan_dev_ids, id);
@@ -244,6 +264,7 @@ static struct wwan_device *wwan_create_dev(struct device *parent)
 	wwandev->dev.class = &wwan_class;
 	wwandev->dev.type = &wwan_dev_type;
 	wwandev->id = id;
+	wwandev->refcount = 1;
 	dev_set_name(&wwandev->dev, "wwan%d", wwandev->id);
 
 	err = device_register(&wwandev->dev);
@@ -265,30 +286,18 @@ done_unlock:
 	return wwandev;
 }
 
-static int is_wwan_child(struct device *dev, void *data)
-{
-	return dev->class == &wwan_class;
-}
-
 static void wwan_remove_dev(struct wwan_device *wwandev)
 {
-	int ret;
-
 	/* Prevent concurrent picking from wwan_create_dev */
 	mutex_lock(&wwan_register_lock);
 
-	/* WWAN device is created and registered (get+add) along with its first
-	 * child port, and subsequent port registrations only grab a reference
-	 * (get). The WWAN device must then be unregistered (del+put) along with
-	 * its last port, and reference simply dropped (put) otherwise. In the
-	 * same fashion, we must not unregister it when the ops are still there.
-	 */
-	if (wwandev->ops)
-		ret = 1;
-	else
-		ret = device_for_each_child(&wwandev->dev, NULL, is_wwan_child);
+	if (--wwandev->refcount <= 0) {
+		struct device *child = device_find_any_child(&wwandev->dev);
 
-	if (!ret) {
+		put_device(child);
+		if (WARN_ON(wwandev->ops || child))	/* Paranoid */
+			goto out_unlock;
+
 #ifdef CONFIG_WWAN_DEBUGFS
 		debugfs_remove_recursive(wwandev->debugfs_dir);
 #endif
@@ -297,6 +306,7 @@ static void wwan_remove_dev(struct wwan_device *wwandev)
 		put_device(&wwandev->dev);
 	}
 
+out_unlock:
 	mutex_unlock(&wwan_register_lock);
 }
 
@@ -342,6 +352,7 @@ static const struct {
 		.name = "MIPC",
 		.devsuf = "mipc",
 	},
+	/* WWAN_PORT_NMEA is exported via the GNSS subsystem */
 };
 
 static ssize_t type_show(struct device *dev, struct device_attribute *attr,
@@ -363,8 +374,8 @@ static void wwan_port_destroy(struct device *dev)
 {
 	struct wwan_port *port = to_wwan_port(dev);
 
-	ida_free(&minors, MINOR(port->dev.devt));
-	mutex_destroy(&port->data_lock);
+	if (dev->class == &wwan_class)
+		ida_free(&minors, MINOR(dev->devt));
 	mutex_destroy(&port->ops_lock);
 	kfree(port);
 }
@@ -442,6 +453,174 @@ static int __wwan_port_dev_assign_name(struct wwan_port *port, const char *fmt)
 	return dev_set_name(&port->dev, "%s", buf);
 }
 
+/* Register a regular WWAN port device (e.g. AT, MBIM, etc.) */
+static int wwan_port_register_wwan(struct wwan_port *port)
+{
+	struct wwan_device *wwandev = to_wwan_dev(port->dev.parent);
+	char namefmt[0x20];
+	int minor, err;
+
+	/* A port is exposed as character device, get a minor */
+	minor = ida_alloc_range(&minors, 0, WWAN_MAX_MINORS - 1, GFP_KERNEL);
+	if (minor < 0)
+		return minor;
+
+	port->dev.class = &wwan_class;
+	port->dev.devt = MKDEV(wwan_major, minor);
+
+	/* allocate unique name based on wwan device id, port type and number */
+	snprintf(namefmt, sizeof(namefmt), "wwan%u%s%%d", wwandev->id,
+		 wwan_port_types[port->type].devsuf);
+
+	/* Serialize ports registration */
+	mutex_lock(&wwan_register_lock);
+
+	__wwan_port_dev_assign_name(port, namefmt);
+	err = device_add(&port->dev);
+
+	mutex_unlock(&wwan_register_lock);
+
+	if (err) {
+		ida_free(&minors, minor);
+		port->dev.class = NULL;
+		return err;
+	}
+
+	dev_info(&wwandev->dev, "port %s attached\n", dev_name(&port->dev));
+
+	return 0;
+}
+
+/* Unregister a regular WWAN port (e.g. AT, MBIM, etc) */
+static void wwan_port_unregister_wwan(struct wwan_port *port)
+{
+	struct wwan_device *wwandev = to_wwan_dev(port->dev.parent);
+
+	dev_set_drvdata(&port->dev, NULL);
+
+	dev_info(&wwandev->dev, "port %s disconnected\n", dev_name(&port->dev));
+
+	device_del(&port->dev);
+}
+
+#if IS_ENABLED(CONFIG_GNSS)
+static int wwan_gnss_open(struct gnss_device *gdev)
+{
+	return wwan_port_op_start(gnss_get_drvdata(gdev));
+}
+
+static void wwan_gnss_close(struct gnss_device *gdev)
+{
+	wwan_port_op_stop(gnss_get_drvdata(gdev));
+}
+
+static int wwan_gnss_write(struct gnss_device *gdev, const unsigned char *buf,
+			   size_t count)
+{
+	struct wwan_port *port = gnss_get_drvdata(gdev);
+	struct sk_buff *skb, *head = NULL, *tail = NULL;
+	size_t frag_len, remain = count;
+	int ret;
+
+	ret = wwan_wait_tx(port, false);
+	if (ret)
+		return ret;
+
+	do {
+		frag_len = min(remain, port->frag_len);
+		skb = alloc_skb(frag_len + port->headroom_len, GFP_KERNEL);
+		if (!skb) {
+			ret = -ENOMEM;
+			goto freeskb;
+		}
+		skb_reserve(skb, port->headroom_len);
+		memcpy(skb_put(skb, frag_len), buf + count - remain, frag_len);
+
+		if (!head) {
+			head = skb;
+		} else {
+			if (!tail)
+				skb_shinfo(head)->frag_list = skb;
+			else
+				tail->next = skb;
+
+			tail = skb;
+			head->data_len += skb->len;
+			head->len += skb->len;
+			head->truesize += skb->truesize;
+		}
+	} while (remain -= frag_len);
+
+	ret = wwan_port_op_tx(port, head, false);
+	if (!ret)
+		return count;
+
+freeskb:
+	kfree_skb(head);
+	return ret;
+}
+
+static struct gnss_operations wwan_gnss_ops = {
+	.open = wwan_gnss_open,
+	.close = wwan_gnss_close,
+	.write_raw = wwan_gnss_write,
+};
+
+/* GNSS port specific device registration */
+static int wwan_port_register_gnss(struct wwan_port *port)
+{
+	struct wwan_device *wwandev = to_wwan_dev(port->dev.parent);
+	struct gnss_device *gdev;
+	int err;
+
+	gdev = gnss_allocate_device(&wwandev->dev);
+	if (!gdev)
+		return -ENOMEM;
+
+	/* NB: for now we support only NMEA WWAN port type, so hardcode
+	 * the GNSS port type. If more GNSS WWAN port types will be added,
+	 * then we should dynamically map WWAN port type to GNSS type.
+	 */
+	gdev->type = GNSS_TYPE_NMEA;
+	gdev->ops = &wwan_gnss_ops;
+	gnss_set_drvdata(gdev, port);
+
+	port->gnss = gdev;
+
+	err = gnss_register_device(gdev);
+	if (err) {
+		gnss_put_device(gdev);
+		return err;
+	}
+
+	dev_info(&wwandev->dev, "port %s attached\n", dev_name(&gdev->dev));
+
+	return 0;
+}
+
+/* GNSS port specific device unregistration */
+static void wwan_port_unregister_gnss(struct wwan_port *port)
+{
+	struct wwan_device *wwandev = to_wwan_dev(port->dev.parent);
+	struct gnss_device *gdev = port->gnss;
+
+	dev_info(&wwandev->dev, "port %s disconnected\n", dev_name(&gdev->dev));
+
+	gnss_deregister_device(gdev);
+	gnss_put_device(gdev);
+}
+#else
+static int wwan_port_register_gnss(struct wwan_port *port)
+{
+	return -EOPNOTSUPP;
+}
+
+static void wwan_port_unregister_gnss(struct wwan_port *port)
+{
+	WARN_ON(1);	/* This handler cannot be called */
+}
+#endif
+
 struct wwan_port *wwan_create_port(struct device *parent,
 				   enum wwan_port_type type,
 				   const struct wwan_port_ops *ops,
@@ -450,8 +629,7 @@ struct wwan_port *wwan_create_port(struct device *parent,
 {
 	struct wwan_device *wwandev;
 	struct wwan_port *port;
-	char namefmt[0x20];
-	int minor, err;
+	int err;
 
 	if (type > WWAN_PORT_MAX || !ops)
 		return ERR_PTR(-EINVAL);
@@ -463,17 +641,9 @@ struct wwan_port *wwan_create_port(struct device *parent,
 	if (IS_ERR(wwandev))
 		return ERR_CAST(wwandev);
 
-	/* A port is exposed as character device, get a minor */
-	minor = ida_alloc_range(&minors, 0, WWAN_MAX_MINORS - 1, GFP_KERNEL);
-	if (minor < 0) {
-		err = minor;
-		goto error_wwandev_remove;
-	}
-
-	port = kzalloc(sizeof(*port), GFP_KERNEL);
+	port = kzalloc_obj(*port);
 	if (!port) {
 		err = -ENOMEM;
-		ida_free(&minors, minor);
 		goto error_wwandev_remove;
 	}
 
@@ -484,30 +654,24 @@ struct wwan_port *wwan_create_port(struct device *parent,
 	mutex_init(&port->ops_lock);
 	skb_queue_head_init(&port->rxq);
 	init_waitqueue_head(&port->waitqueue);
-	mutex_init(&port->data_lock);
+
+	/* AT ports default to HUPCL, so DTR/RTS are dropped on last close */
+	if (type == WWAN_PORT_AT)
+		port->at_data.termios.c_cflag = HUPCL;
 
 	port->dev.parent = &wwandev->dev;
-	port->dev.class = &wwan_class;
 	port->dev.type = &wwan_port_dev_type;
-	port->dev.devt = MKDEV(wwan_major, minor);
 	dev_set_drvdata(&port->dev, drvdata);
+	device_initialize(&port->dev);
 
-	/* allocate unique name based on wwan device id, port type and number */
-	snprintf(namefmt, sizeof(namefmt), "wwan%u%s%%d", wwandev->id,
-		 wwan_port_types[port->type].devsuf);
-
-	/* Serialize ports registration */
-	mutex_lock(&wwan_register_lock);
-
-	__wwan_port_dev_assign_name(port, namefmt);
-	err = device_register(&port->dev);
-
-	mutex_unlock(&wwan_register_lock);
+	if (port->type == WWAN_PORT_NMEA)
+		err = wwan_port_register_gnss(port);
+	else
+		err = wwan_port_register_wwan(port);
 
 	if (err)
 		goto error_put_device;
 
-	dev_info(&wwandev->dev, "port %s attached\n", dev_name(&port->dev));
 	return port;
 
 error_put_device:
@@ -519,23 +683,59 @@ error_wwandev_remove:
 }
 EXPORT_SYMBOL_GPL(wwan_create_port);
 
+/* Raise DTR/RTS when an AT port is first opened, as a TTY does on open.
+ * Unlike a TTY the termios baud rate is not used. Called with ops_lock held.
+ */
+static void wwan_port_raise_dtr_rts(struct wwan_port *port)
+{
+	lockdep_assert_held(&port->ops_lock);
+
+	if (port->type != WWAN_PORT_AT || !port->ops->dtr_rts)
+		return;
+
+	port->at_data.mdmbits |= TIOCM_DTR | TIOCM_RTS;
+	port->ops->dtr_rts(port, port->at_data.mdmbits);
+}
+
+/* Drop DTR/RTS on an AT port. Called with ops_lock held. On last close
+ * the lines are only dropped if HUPCL is set, as for a TTY. When a port is
+ * removed while still open they are always dropped.
+ */
+static void wwan_port_drop_dtr_rts(struct wwan_port *port, bool hupcl_only)
+{
+	lockdep_assert_held(&port->ops_lock);
+
+	if (port->type != WWAN_PORT_AT || !port->ops->dtr_rts)
+		return;
+	if (hupcl_only && !(port->at_data.termios.c_cflag & HUPCL))
+		return;
+
+	port->at_data.mdmbits &= ~(TIOCM_DTR | TIOCM_RTS);
+	port->ops->dtr_rts(port, port->at_data.mdmbits);
+}
+
 void wwan_remove_port(struct wwan_port *port)
 {
 	struct wwan_device *wwandev = to_wwan_dev(port->dev.parent);
 
 	mutex_lock(&port->ops_lock);
-	if (port->start_count)
+	if (port->start_count) {
+		wwan_port_drop_dtr_rts(port, false);
 		port->ops->stop(port);
+		port->start_count = 0;
+	}
 	port->ops = NULL; /* Prevent any new port operations (e.g. from fops) */
 	mutex_unlock(&port->ops_lock);
 
 	wake_up_interruptible(&port->waitqueue);
-
 	skb_queue_purge(&port->rxq);
-	dev_set_drvdata(&port->dev, NULL);
 
-	dev_info(&wwandev->dev, "port %s disconnected\n", dev_name(&port->dev));
-	device_unregister(&port->dev);
+	if (port->type == WWAN_PORT_NMEA)
+		wwan_port_unregister_gnss(port);
+	else
+		wwan_port_unregister_wwan(port);
+
+	put_device(&port->dev);
 
 	/* Release related wwan device */
 	wwan_remove_dev(wwandev);
@@ -544,8 +744,15 @@ EXPORT_SYMBOL_GPL(wwan_remove_port);
 
 void wwan_port_rx(struct wwan_port *port, struct sk_buff *skb)
 {
-	skb_queue_tail(&port->rxq, skb);
-	wake_up_interruptible(&port->waitqueue);
+	if (port->type == WWAN_PORT_NMEA) {
+#if IS_ENABLED(CONFIG_GNSS)
+		gnss_insert_raw(port->gnss, skb->data, skb->len);
+#endif
+		consume_skb(skb);
+	} else {
+		skb_queue_tail(&port->rxq, skb);
+		wake_up_interruptible(&port->waitqueue);
+	}
 }
 EXPORT_SYMBOL_GPL(wwan_port_rx);
 
@@ -578,9 +785,18 @@ static int wwan_port_op_start(struct wwan_port *port)
 		goto out_unlock;
 	}
 
+	if (test_bit(WWAN_PORT_EXCLUSIVE, &port->flags) &&
+	    !capable(CAP_SYS_ADMIN)) {
+		ret = -EBUSY;
+		goto out_unlock;
+	}
+
 	/* If port is already started, don't start again */
-	if (!port->start_count)
+	if (!port->start_count) {
 		ret = port->ops->start(port);
+		if (!ret)
+			wwan_port_raise_dtr_rts(port);
+	}
 
 	if (!ret)
 		port->start_count++;
@@ -596,9 +812,12 @@ static void wwan_port_op_stop(struct wwan_port *port)
 	mutex_lock(&port->ops_lock);
 	port->start_count--;
 	if (!port->start_count) {
-		if (port->ops)
+		if (port->ops) {
+			wwan_port_drop_dtr_rts(port, true);
 			port->ops->stop(port);
+		}
 		skb_queue_purge(&port->rxq);
+		clear_bit(WWAN_PORT_EXCLUSIVE, &port->flags);
 	}
 	mutex_unlock(&port->ops_lock);
 }
@@ -798,76 +1017,109 @@ static __poll_t wwan_port_fops_poll(struct file *filp, poll_table *wait)
 }
 
 /* Implements minimalistic stub terminal IOCTLs support */
+/* TCGETS/TCSETS and their termios2 variants. @size is the size of the user
+ * structure, a prefix of struct ktermios. As for the TIOCM ioctls, user
+ * memory is only accessed outside ops_lock.
+ */
+static long wwan_port_termios_ioctl(struct wwan_port *port, bool set,
+				    void __user *uarg, size_t size)
+{
+	struct ktermios termios;
+
+	if (!set) {
+		scoped_cond_guard(mutex_intr, return -ERESTARTSYS, &port->ops_lock)
+			termios = port->at_data.termios;
+		return copy_to_user(uarg, &termios, size) ? -EFAULT : 0;
+	}
+
+	/* Commit only on success, a partial copy must not clear HUPCL */
+	if (copy_from_user(&termios, uarg, size))
+		return -EFAULT;
+	scoped_cond_guard(mutex_intr, return -ERESTARTSYS, &port->ops_lock)
+		memcpy(&port->at_data.termios, &termios, size);
+	return 0;
+}
+
 static long wwan_port_fops_at_ioctl(struct wwan_port *port, unsigned int cmd,
 				    unsigned long arg)
 {
-	int ret = 0;
-
-	mutex_lock(&port->data_lock);
-
+	/* ops_lock serialises the termios/TIOCM state with port ops and
+	 * removal. It is only held while that state is read or updated, never
+	 * across a user copy, and is taken interruptibly as a blocking write
+	 * holds it too.
+	 */
 	switch (cmd) {
 	case TCFLSH:
-		break;
+		return 0;
 
 	case TCGETS:
-		if (copy_to_user((void __user *)arg, &port->at_data.termios,
-				 sizeof(struct termios)))
-			ret = -EFAULT;
-		break;
-
 	case TCSETS:
 	case TCSETSW:
 	case TCSETSF:
-		if (copy_from_user(&port->at_data.termios, (void __user *)arg,
-				   sizeof(struct termios)))
-			ret = -EFAULT;
-		break;
+		return wwan_port_termios_ioctl(port, cmd != TCGETS,
+					       (void __user *)arg,
+					       sizeof(struct termios));
 
 #ifdef TCGETS2
 	case TCGETS2:
-		if (copy_to_user((void __user *)arg, &port->at_data.termios,
-				 sizeof(struct termios2)))
-			ret = -EFAULT;
-		break;
-
 	case TCSETS2:
 	case TCSETSW2:
 	case TCSETSF2:
-		if (copy_from_user(&port->at_data.termios, (void __user *)arg,
-				   sizeof(struct termios2)))
-			ret = -EFAULT;
-		break;
+		return wwan_port_termios_ioctl(port, cmd != TCGETS2,
+					       (void __user *)arg,
+					       sizeof(struct termios2));
 #endif
 
-	case TIOCMGET:
-		ret = put_user(port->at_data.mdmbits, (int __user *)arg);
-		break;
+	case TIOCMGET: {
+		int mdmbits;
+
+		scoped_cond_guard(mutex_intr, return -ERESTARTSYS, &port->ops_lock)
+			mdmbits = port->at_data.mdmbits;
+		return put_user(mdmbits, (int __user *)arg);
+	}
 
 	case TIOCMSET:
 	case TIOCMBIC:
 	case TIOCMBIS: {
 		int mdmbits;
 
-		if (copy_from_user(&mdmbits, (int __user *)arg, sizeof(int))) {
-			ret = -EFAULT;
-			break;
+		if (get_user(mdmbits, (int __user *)arg))
+			return -EFAULT;
+		mdmbits &= WWAN_TIOCM_OUTPUTS;
+
+		scoped_cond_guard(mutex_intr, return -ERESTARTSYS, &port->ops_lock) {
+			int old = port->at_data.mdmbits;
+
+			if (cmd == TIOCMBIC)
+				port->at_data.mdmbits &= ~mdmbits;
+			else if (cmd == TIOCMBIS)
+				port->at_data.mdmbits |= mdmbits;
+			else
+				port->at_data.mdmbits = mdmbits;
+			/* Only signal the driver when DTR or RTS actually changes */
+			if (port->type == WWAN_PORT_AT && port->ops &&
+			    port->ops->dtr_rts &&
+			    (old ^ port->at_data.mdmbits) & (TIOCM_DTR | TIOCM_RTS))
+				port->ops->dtr_rts(port, port->at_data.mdmbits);
 		}
-		if (cmd == TIOCMBIC)
-			port->at_data.mdmbits &= ~mdmbits;
-		else if (cmd == TIOCMBIS)
-			port->at_data.mdmbits |= mdmbits;
-		else
-			port->at_data.mdmbits = mdmbits;
-		break;
+		return 0;
 	}
+
+	case TIOCEXCL:
+		set_bit(WWAN_PORT_EXCLUSIVE, &port->flags);
+		return 0;
+
+	case TIOCNXCL:
+		clear_bit(WWAN_PORT_EXCLUSIVE, &port->flags);
+		return 0;
+
+	case TIOCGEXCL:
+		return put_user(test_bit(WWAN_PORT_EXCLUSIVE, &port->flags),
+				(int __user *)arg);
 
 	default:
-		ret = -ENOIOCTLCMD;
+		return -ENOIOCTLCMD;
 	}
-
-	mutex_unlock(&port->data_lock);
-
-	return ret;
 }
 
 static long wwan_port_fops_ioctl(struct file *filp, unsigned int cmd,
@@ -876,7 +1128,8 @@ static long wwan_port_fops_ioctl(struct file *filp, unsigned int cmd,
 	struct wwan_port *port = filp->private_data;
 	int res;
 
-	if (port->type == WWAN_PORT_AT) {	/* AT port specific IOCTLs */
+	if (port->type == WWAN_PORT_AT || port->type == WWAN_PORT_QCDM) {
+		/* AT and QCDM port specific IOCTLs */
 		res = wwan_port_fops_at_ioctl(port, cmd, arg);
 		if (res != -ENOIOCTLCMD)
 			return res;

@@ -86,6 +86,7 @@ struct snd_rawmidi_substream {
 	bool opened;			/* open flag */
 	bool append;			/* append flag (merge more streams) */
 	bool active_sensing;		/* send active sensing when close */
+	bool disconnected;		/* already disconnected */
 	unsigned int framing;		/* whether to frame input data */
 	unsigned int clock_type;	/* clock source to use for input framing */
 	int use_count;			/* use counter (for output) */
@@ -176,9 +177,11 @@ int snd_rawmidi_proceed(struct snd_rawmidi_substream *substream);
 /* main midi functions */
 
 int snd_rawmidi_info_select(struct snd_card *card, struct snd_rawmidi_info *info);
-int snd_rawmidi_kernel_open(struct snd_rawmidi *rmidi, int subdevice,
-			    int mode, struct snd_rawmidi_file *rfile);
-int snd_rawmidi_kernel_release(struct snd_rawmidi_file *rfile);
+int snd_rawmidi_kernel_open_nested(struct snd_rawmidi *rmidi, int subdevice,
+				   int mode, struct snd_rawmidi_file *rfile,
+				   int depth);
+int snd_rawmidi_kernel_release_nested(struct snd_rawmidi_file *rfile,
+				      int depth);
 int snd_rawmidi_output_params(struct snd_rawmidi_substream *substream,
 			      struct snd_rawmidi_params *params);
 int snd_rawmidi_input_params(struct snd_rawmidi_substream *substream,
@@ -190,6 +193,20 @@ long snd_rawmidi_kernel_read(struct snd_rawmidi_substream *substream,
 			     unsigned char *buf, long count);
 long snd_rawmidi_kernel_write(struct snd_rawmidi_substream *substream,
 			      const unsigned char *buf, long count);
+
+/* non-nested version */
+static inline int snd_rawmidi_kernel_open(struct snd_rawmidi *rmidi,
+					  int subdevice,
+					  int mode,
+					  struct snd_rawmidi_file *rfile)
+{
+	return snd_rawmidi_kernel_open_nested(rmidi, subdevice, mode, rfile, 0);
+}
+
+static inline int snd_rawmidi_kernel_release(struct snd_rawmidi_file *rfile)
+{
+	return snd_rawmidi_kernel_release_nested(rfile, 0);
+}
 
 /* set up the tied devices */
 static inline void snd_rawmidi_tie_devices(struct snd_rawmidi *r1,

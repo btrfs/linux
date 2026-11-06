@@ -7,7 +7,6 @@
  */
 
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/rtc.h>
 #include <linux/platform_device.h>
 #include <linux/io.h>
@@ -94,7 +93,7 @@ static ssize_t comp_preload_show(struct device *dev,
 
 	ep93xx_rtc_get_swcomp(dev->parent, &preload, NULL);
 
-	return sprintf(buf, "%d\n", preload);
+	return sysfs_emit(buf, "%d\n", preload);
 }
 static DEVICE_ATTR_RO(comp_preload);
 
@@ -105,7 +104,7 @@ static ssize_t comp_delete_show(struct device *dev,
 
 	ep93xx_rtc_get_swcomp(dev->parent, NULL, &delete);
 
-	return sprintf(buf, "%d\n", delete);
+	return sysfs_emit(buf, "%d\n", delete);
 }
 static DEVICE_ATTR_RO(comp_delete);
 

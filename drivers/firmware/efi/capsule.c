@@ -230,7 +230,7 @@ int efi_capsule_update(efi_capsule_header_t *capsule, phys_addr_t *pages)
 	count = DIV_ROUND_UP(imagesize, PAGE_SIZE);
 	sg_count = sg_pages_num(count);
 
-	sg_pages = kcalloc(sg_count, sizeof(*sg_pages), GFP_KERNEL);
+	sg_pages = kzalloc_objs(*sg_pages, sg_count);
 	if (!sg_pages)
 		return -ENOMEM;
 
@@ -245,7 +245,7 @@ int efi_capsule_update(efi_capsule_header_t *capsule, phys_addr_t *pages)
 	for (i = 0; i < sg_count; i++) {
 		efi_capsule_block_desc_t *sglist;
 
-		sglist = kmap_atomic(sg_pages[i]);
+		sglist = kmap_local_page(sg_pages[i]);
 
 		for (j = 0; j < SGLIST_PER_PAGE && count > 0; j++) {
 			u64 sz = min_t(u64, imagesize,
@@ -277,7 +277,7 @@ int efi_capsule_update(efi_capsule_header_t *capsule, phys_addr_t *pages)
 		 */
 		efi_capsule_flush_cache_range(sglist, PAGE_SIZE);
 #endif
-		kunmap_atomic(sglist);
+		kunmap_local(sglist);
 	}
 
 	mutex_lock(&capsule_mutex);

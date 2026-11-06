@@ -27,10 +27,16 @@ cpuflags-$(CONFIG_ALPHA_GENERIC)	:= -mcpu=ev56 -mtune=ev6
 cflags-y				+= $(cpuflags-y)
 
 
+KBUILD_CFLAGS += $(cflags-y)
+
 # For TSUNAMI, we must have the assembler not emulate our instructions.
 # The same is true for IRONGATE, POLARIS, PYXIS.
 # BWX is most important, but we don't really want any emulation ever.
-KBUILD_CFLAGS += $(cflags-y) -Wa,-mev6
+# Only gas emulates instructions the target does not implement, and only gas
+# understands -mev6.  LLVM's integrated assembler never emulates.
+ifdef CONFIG_AS_IS_GNU
+KBUILD_CFLAGS += -Wa,-mev6
+endif
 
 libs-y				+= arch/alpha/lib/
 
@@ -41,9 +47,9 @@ export LIBS_Y
 boot := arch/alpha/boot
 
 #Default target when executing make with no arguments
-all boot: $(boot)/vmlinux.gz
+all boot: $(boot)/vmlinuz
 
-$(boot)/vmlinux.gz: vmlinux
+$(boot)/vmlinuz: vmlinux
 	$(Q)$(MAKE) $(build)=$(boot) $@
 
 bootimage bootpfile bootpzfile: vmlinux
@@ -53,7 +59,7 @@ archheaders:
 	$(Q)$(MAKE) $(build)=arch/alpha/kernel/syscalls all
 
 define archhelp
-  echo '* boot		- Compressed kernel image (arch/alpha/boot/vmlinux.gz)'
+  echo '* boot		- Compressed kernel image (arch/alpha/boot/vmlinuz)'
   echo '  bootimage	- SRM bootable image (arch/alpha/boot/bootimage)'
   echo '  bootpfile	- BOOTP bootable image (arch/alpha/boot/bootpfile)'
   echo '  bootpzfile	- compressed kernel BOOTP image (arch/alpha/boot/bootpzfile)'

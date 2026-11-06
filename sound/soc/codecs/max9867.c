@@ -78,7 +78,7 @@ static int max9867_adc_dac_event(struct snd_soc_dapm_widget *w,
 static int max9867_filter_get(struct snd_kcontrol *kcontrol,
 			      struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct max9867_priv *max9867 = snd_soc_component_get_drvdata(component);
 	unsigned int reg;
 	int ret;
@@ -98,7 +98,7 @@ static int max9867_filter_get(struct snd_kcontrol *kcontrol,
 static int max9867_filter_set(struct snd_kcontrol *kcontrol,
 			      struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct max9867_priv *max9867 = snd_soc_component_get_drvdata(component);
 	unsigned int reg, mode = ucontrol->value.enumerated.item[0];
 	int ret;
@@ -522,12 +522,22 @@ static int max9867_dai_set_fmt(struct snd_soc_dai *codec_dai,
 	return 0;
 }
 
+static const u64 max9867_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF;
+
 static const struct snd_soc_dai_ops max9867_dai_ops = {
 	.set_sysclk	= max9867_set_dai_sysclk,
 	.set_fmt	= max9867_dai_set_fmt,
 	.mute_stream	= max9867_mute,
 	.startup	= max9867_startup,
 	.hw_params	= max9867_dai_hw_params,
+	.auto_selectable_formats	= &max9867_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 	.no_capture_mute = 1,
 };
 
@@ -556,14 +566,18 @@ static struct snd_soc_dai_driver max9867_dai[] = {
 #ifdef CONFIG_PM
 static int max9867_suspend(struct snd_soc_component *component)
 {
-	snd_soc_component_force_bias_level(component, SND_SOC_BIAS_OFF);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
+
+	snd_soc_dapm_force_bias_level(dapm, SND_SOC_BIAS_OFF);
 
 	return 0;
 }
 
 static int max9867_resume(struct snd_soc_component *component)
 {
-	snd_soc_component_force_bias_level(component, SND_SOC_BIAS_STANDBY);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
+
+	snd_soc_dapm_force_bias_level(dapm, SND_SOC_BIAS_STANDBY);
 
 	return 0;
 }
@@ -577,6 +591,7 @@ static int max9867_set_bias_level(struct snd_soc_component *component,
 {
 	int err;
 	struct max9867_priv *max9867 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 
 	switch (level) {
 	case SND_SOC_BIAS_ON:
@@ -585,7 +600,7 @@ static int max9867_set_bias_level(struct snd_soc_component *component,
 			return err;
 		break;
 	case SND_SOC_BIAS_STANDBY:
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_OFF) {
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF) {
 			err = regcache_sync(max9867->regmap);
 			if (err)
 				return err;
@@ -684,7 +699,7 @@ static int max9867_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id max9867_i2c_id[] = {
-	{ "max9867" },
+	{ .name = "max9867" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max9867_i2c_id);

@@ -27,11 +27,11 @@ struct k_clock {
 	int	(*timer_del)(struct k_itimer *timr);
 	void	(*timer_get)(struct k_itimer *timr,
 			     struct itimerspec64 *cur_setting);
-	void	(*timer_rearm)(struct k_itimer *timr);
+	bool	(*timer_rearm)(struct k_itimer *timr);
 	s64	(*timer_forward)(struct k_itimer *timr, ktime_t now);
 	ktime_t	(*timer_remaining)(struct k_itimer *timr, ktime_t now);
 	int	(*timer_try_to_cancel)(struct k_itimer *timr);
-	void	(*timer_arm)(struct k_itimer *timr, ktime_t expires,
+	bool	(*timer_arm)(struct k_itimer *timr, ktime_t expires,
 			     bool absolute, bool sigev_none);
 	void	(*timer_wait_running)(struct k_itimer *timr);
 };
@@ -51,3 +51,6 @@ int common_timer_set(struct k_itimer *timr, int flags,
 		     struct itimerspec64 *old_setting);
 void posix_timer_set_common(struct k_itimer *timer, struct itimerspec64 *new_setting);
 int common_timer_del(struct k_itimer *timer);
+
+void posix_cpu_timers_exit_task(void);
+void posix_cpu_timers_exit_group(void);

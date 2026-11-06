@@ -1334,7 +1334,7 @@ static int ipc_imem_config(struct iosm_imem *ipc_imem)
 struct iosm_imem *ipc_imem_init(struct iosm_pcie *pcie, unsigned int device_id,
 				void __iomem *mmio, struct device *dev)
 {
-	struct iosm_imem *ipc_imem = kzalloc(sizeof(*pcie->imem), GFP_KERNEL);
+	struct iosm_imem *ipc_imem = kzalloc_obj(*pcie->imem);
 	enum ipc_mem_exec_stage stage;
 
 	if (!ipc_imem)
@@ -1359,8 +1359,7 @@ struct iosm_imem *ipc_imem_init(struct iosm_pcie *pcie, unsigned int device_id,
 		goto mmio_init_fail;
 	}
 
-	ipc_imem->ipc_task = kzalloc(sizeof(*ipc_imem->ipc_task),
-				     GFP_KERNEL);
+	ipc_imem->ipc_task = kzalloc_obj(*ipc_imem->ipc_task);
 
 	/* Create tasklet for event handling*/
 	if (!ipc_imem->ipc_task)
@@ -1426,6 +1425,8 @@ imem_config_fail:
 protocol_init_fail:
 	cancel_work_sync(&ipc_imem->run_state_worker);
 	ipc_task_deinit(ipc_imem->ipc_task);
+	if (ipc_imem->ipc_protocol)
+		ipc_protocol_deinit(ipc_imem->ipc_protocol);
 ipc_task_init_fail:
 	kfree(ipc_imem->ipc_task);
 ipc_task_fail:

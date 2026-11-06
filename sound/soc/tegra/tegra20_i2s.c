@@ -309,12 +309,22 @@ static int tegra20_i2s_startup(struct snd_pcm_substream *substream,
 				   SNDRV_PCM_HW_PARAM_RATE, -1);
 }
 
+static const u64 tegra20_i2s_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J;
+
 static const struct snd_soc_dai_ops tegra20_i2s_dai_ops = {
 	.probe		= tegra20_i2s_probe,
 	.set_fmt	= tegra20_i2s_set_fmt,
 	.hw_params	= tegra20_i2s_hw_params,
 	.trigger	= tegra20_i2s_trigger,
 	.startup	= tegra20_i2s_startup,
+	.auto_selectable_formats	= &tegra20_i2s_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 static const struct snd_soc_dai_driver tegra20_i2s_dai_template = {
@@ -485,6 +495,7 @@ static const struct of_device_id tegra20_i2s_of_match[] = {
 	{ .compatible = "nvidia,tegra20-i2s", },
 	{},
 };
+MODULE_DEVICE_TABLE(of, tegra20_i2s_of_match);
 
 static const struct dev_pm_ops tegra20_i2s_pm_ops = {
 	RUNTIME_PM_OPS(tegra20_i2s_runtime_suspend,
@@ -507,4 +518,3 @@ MODULE_AUTHOR("Stephen Warren <swarren@nvidia.com>");
 MODULE_DESCRIPTION("Tegra20 I2S ASoC driver");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:" DRV_NAME);
-MODULE_DEVICE_TABLE(of, tegra20_i2s_of_match);

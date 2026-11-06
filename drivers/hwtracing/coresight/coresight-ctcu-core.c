@@ -19,8 +19,6 @@
 #include "coresight-ctcu.h"
 #include "coresight-priv.h"
 
-DEFINE_CORESIGHT_DEVLIST(ctcu_devs, "ctcu");
-
 #define ctcu_writel(drvdata, val, offset)	__raw_writel((val), drvdata->base + offset)
 #define ctcu_readl(drvdata, offset)		__raw_readl(drvdata->base + offset)
 
@@ -156,17 +154,14 @@ static int ctcu_set_etr_traceid(struct coresight_device *csdev, struct coresight
 	return __ctcu_set_etr_traceid(csdev, traceid, port_num, enable);
 }
 
-static int ctcu_enable(struct coresight_device *csdev, enum cs_mode mode, void *data)
+static int ctcu_enable(struct coresight_device *csdev, enum cs_mode mode,
+		       struct coresight_path *path)
 {
-	struct coresight_path *path = (struct coresight_path *)data;
-
 	return ctcu_set_etr_traceid(csdev, path, true);
 }
 
-static int ctcu_disable(struct coresight_device *csdev, void *data)
+static int ctcu_disable(struct coresight_device *csdev, struct coresight_path *path)
 {
-	struct coresight_path *path = (struct coresight_path *)data;
-
 	return ctcu_set_etr_traceid(csdev, path, false);
 }
 
@@ -190,7 +185,7 @@ static int ctcu_probe(struct platform_device *pdev)
 	void __iomem *base;
 	int i, ret;
 
-	desc.name = coresight_alloc_device_name(&ctcu_devs, dev);
+	desc.name = coresight_alloc_device_name("ctcu", dev);
 	if (!desc.name)
 		return -ENOMEM;
 
@@ -231,6 +226,7 @@ static int ctcu_probe(struct platform_device *pdev)
 	desc.dev = dev;
 	desc.ops = &ctcu_ops;
 	desc.access = CSDEV_ACCESS_IOMEM(base);
+	raw_spin_lock_init(&drvdata->spin_lock);
 
 	drvdata->csdev = coresight_register(&desc);
 	if (IS_ERR(drvdata->csdev))

@@ -784,8 +784,7 @@ static int bh1745_setup_triggered_buffer(struct iio_dev *indio_dev,
 						IRQF_ONESHOT,
 						"bh1745_interrupt", indio_dev);
 		if (ret)
-			return dev_err_probe(dev, ret,
-					     "Request for IRQ failed\n");
+			return ret;
 	}
 
 	return 0;
@@ -874,7 +873,7 @@ static int bh1745_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id bh1745_idtable[] = {
-	{ "bh1745" },
+	{ .name = "bh1745" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, bh1745_idtable);

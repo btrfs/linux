@@ -27,7 +27,6 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -39,6 +38,7 @@
 #include <linux/io.h>
 #include <linux/slab.h>
 #include <linux/pm_runtime.h>
+#include <linux/stringify.h>
 #include <linux/platform_data/omap-wd-timer.h>
 
 #include "omap_wdt.h"
@@ -46,7 +46,7 @@
 static bool nowayout = WATCHDOG_NOWAYOUT;
 module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started "
-	"(default=" __MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
+	"(default=" __stringify(WATCHDOG_NOWAYOUT) ")");
 
 static unsigned timer_margin;
 module_param(timer_margin, uint, 0);

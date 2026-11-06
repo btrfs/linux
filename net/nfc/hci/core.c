@@ -291,7 +291,7 @@ int nfc_hci_target_discovered(struct nfc_hci_dev *hdev, u8 gate)
 
 	pr_debug("from gate %d\n", gate);
 
-	targets = kzalloc(sizeof(struct nfc_target), GFP_KERNEL);
+	targets = kzalloc_obj(struct nfc_target);
 	if (targets == NULL)
 		return -ENOMEM;
 
@@ -861,6 +861,11 @@ static void nfc_hci_recv_from_llc(struct nfc_hci_dev *hdev, struct sk_buff *skb)
 	struct sk_buff *frag_skb;
 	int msg_len;
 
+	if (!pskb_may_pull(skb, NFC_HCI_HCP_PACKET_HEADER_LEN)) {
+		kfree_skb(skb);
+		return;
+	}
+
 	packet = (struct hcp_packet *)skb->data;
 	if ((packet->header & ~NFC_HCI_FRAGMENT) == 0) {
 		skb_queue_tail(&hdev->rx_hcp_frags, skb);
@@ -904,6 +909,11 @@ static void nfc_hci_recv_from_llc(struct nfc_hci_dev *hdev, struct sk_buff *skb)
 	 * unblock waiting cmd context. Otherwise, enqueue to dispatch
 	 * in separate context where handler can also execute command.
 	 */
+	if (!pskb_may_pull(hcp_skb, NFC_HCI_HCP_HEADER_LEN)) {
+		kfree_skb(hcp_skb);
+		return;
+	}
+
 	packet = (struct hcp_packet *)hcp_skb->data;
 	type = HCP_MSG_GET_TYPE(packet->message.header);
 	if (type == NFC_HCI_HCP_RESPONSE) {
@@ -964,7 +974,7 @@ struct nfc_hci_dev *nfc_hci_allocate_device(const struct nfc_hci_ops *ops,
 	if (protocols == 0)
 		return NULL;
 
-	hdev = kzalloc(sizeof(struct nfc_hci_dev), GFP_KERNEL);
+	hdev = kzalloc_obj(struct nfc_hci_dev);
 	if (hdev == NULL)
 		return NULL;
 

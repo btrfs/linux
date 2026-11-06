@@ -1,24 +1,38 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2017-2018, Intel Corporation
+ * Copyright (C) 2025, Altera Corporation
  */
 
+#include <linux/atomic.h>
 #include <linux/completion.h>
 #include <linux/delay.h>
+#include <linux/dma-mapping.h>
 #include <linux/genalloc.h>
+#include <linux/hashtable.h>
+#include <linux/idr.h>
+#include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/iommu.h>
 #include <linux/kfifo.h>
 #include <linux/kthread.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
+#include <linux/of_irq.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/string.h>
 #include <linux/firmware/intel/stratix10-smc.h>
 #include <linux/firmware/intel/stratix10-svc-client.h>
 #include <linux/types.h>
+#include <linux/cpu.h>
+#include <linux/cpumask.h>
+#include <linux/of_device.h>
+#include <linux/reboot.h>
+#include <linux/workqueue.h>
 
 /**
  * SVC_NUM_DATA_IN_FIFO - number of struct stratix10_svc_data in the FIFO
@@ -29,19 +43,116 @@
  * from the secure world for FPGA manager to reuse, or to free the buffer(s)
  * when all bit-stream data had be send.
  *
- * FPGA_CONFIG_STATUS_TIMEOUT_SEC - poll the FPGA configuration status,
- * service layer will return error to FPGA manager when timeout occurs,
- * timeout is set to 30 seconds (30 * 1000) at Intel Stratix10 SoC.
+ * FPGA_CONFIG_STATUS_TIMEOUT_SEC - overall poll budget for FPGA
+ * configuration / service completion status. Service layer returns
+ * error to the client when this timeout expires (30 seconds).
+ *
+ * SVC_POLL_INTERVAL_MS_FAST / SVC_POLL_INTERVAL_MS_SLOW - sleep between
+ * SMC status polls for the fast and slow phases.
+ *
+ * SVC_POLL_FAST_WINDOW_MS - duration of the fast-poll phase before
+ * switching to the slower interval (1 second).
+ *
+ * SVC_POLL_COUNT_FAST / SVC_POLL_COUNT_SLOW - iteration budgets derived
+ * from the intervals and overall timeout so the two phases still sum to
+ * FPGA_CONFIG_STATUS_TIMEOUT_SEC.
  */
-#define SVC_NUM_DATA_IN_FIFO			32
-#define SVC_NUM_CHANNEL				3
-#define FPGA_CONFIG_DATA_CLAIM_TIMEOUT_MS	200
+#define SVC_NUM_DATA_IN_FIFO			8
+#define SVC_NUM_CHANNEL				4
+#define FPGA_CONFIG_DATA_CLAIM_TIMEOUT_MS	2000
 #define FPGA_CONFIG_STATUS_TIMEOUT_SEC		30
+#define SVC_POLL_INTERVAL_MS_FAST		20
+#define SVC_POLL_INTERVAL_MS_SLOW		500
+#define SVC_POLL_FAST_WINDOW_MS			1000
+#define SVC_POLL_COUNT_FAST			\
+	(SVC_POLL_FAST_WINDOW_MS / SVC_POLL_INTERVAL_MS_FAST)
+#define SVC_POLL_COUNT_SLOW			\
+	(((FPGA_CONFIG_STATUS_TIMEOUT_SEC * MSEC_PER_SEC) -	\
+	  SVC_POLL_FAST_WINDOW_MS) / SVC_POLL_INTERVAL_MS_SLOW)
 #define BYTE_TO_WORD_SIZE              4
+
+/*
+ * SVC_SDM_DMA_ADDR_BITS - constrains the IOVA allocated by
+ * dma_alloc_coherent() to 29 bits (0x0000_0000 - 0x1FFF_FFFF)
+ * when SMMU is active on Agilex5. The SDM accesses these buffers
+ * via the SMMU using IOVAs, so the 29-bit limit keeps IOVAs within
+ * the SDM's addressable window.
+ *
+ * SVC_SDM_DMA_ADDR_OFFSET - ATF on Agilex5 distinguishes
+ * SMMU-mapped buffers from direct physical addresses by the
+ * presence of this offset. The driver adds it to the IOVA before
+ * passing the address to ATF via SMC; ATF strips it, translates
+ * the remaining IOVA through the SMMU, and the SDM accesses the
+ * underlying physical memory.
+ */
+#define SVC_SDM_DMA_ADDR_BITS			29
+#define SVC_SDM_DMA_ADDR_OFFSET			0x80000000UL
 
 /* stratix10 service layer clients */
 #define STRATIX10_RSU				"stratix10-rsu"
-#define INTEL_FCS				"intel-fcs"
+#define SOCFPGA_HWMON				"socfpga-hwmon"
+
+/* Maximum number of SDM client IDs. */
+#define MAX_SDM_CLIENT_IDS			16
+/* Client ID for SIP Service Version 1. */
+#define SIP_SVC_V1_CLIENT_ID			0x1
+/* Maximum number of SDM job IDs. */
+#define MAX_SDM_JOB_IDS				16
+/* Number of bits used for asynchronous transaction hashing. */
+#define ASYNC_TRX_HASH_BITS			3
+/*
+ * Total number of transaction IDs, which is a combination of
+ * client ID and job ID.
+ */
+#define TOTAL_TRANSACTION_IDS \
+	(MAX_SDM_CLIENT_IDS * MAX_SDM_JOB_IDS)
+
+/* Minimum major version of the ATF for Asynchronous transactions. */
+#define ASYNC_ATF_MINIMUM_MAJOR_VERSION		0x3
+/* Minimum minor version of the ATF for Asynchronous transactions.*/
+#define ASYNC_ATF_MINIMUM_MINOR_VERSION		0x0
+
+/* Job ID field in the transaction ID */
+#define STRATIX10_JOB_FIELD			GENMASK(3, 0)
+/* Client ID field in the transaction ID */
+#define STRATIX10_CLIENT_FIELD			GENMASK(7, 4)
+/* Transaction ID mask for Stratix10 service layer */
+#define STRATIX10_TRANS_ID_FIELD		GENMASK(7, 0)
+
+/* Macro to extract the job ID from a transaction ID. */
+#define STRATIX10_GET_JOBID(transaction_id) \
+	(FIELD_GET(STRATIX10_JOB_FIELD, transaction_id))
+/* Macro to set the job ID in a transaction ID. */
+#define STRATIX10_SET_JOBID(jobid) \
+	(FIELD_PREP(STRATIX10_JOB_FIELD, jobid))
+/* Macro to set the client ID in a transaction ID. */
+#define STRATIX10_SET_CLIENTID(clientid) \
+	(FIELD_PREP(STRATIX10_CLIENT_FIELD, clientid))
+/* Macro to set a transaction ID using a client ID and a job ID. */
+#define STRATIX10_SET_TRANSACTIONID(clientid, jobid) \
+	(STRATIX10_SET_CLIENTID(clientid) | STRATIX10_SET_JOBID(jobid))
+/* Macro to set a transaction ID for SIP SMC Async transactions */
+#define STRATIX10_SIP_SMC_SET_TRANSACTIONID_X1(transaction_id) \
+	(FIELD_PREP(STRATIX10_TRANS_ID_FIELD, transaction_id))
+
+/* 10-bit mask for extracting the SDM status code */
+#define STRATIX10_SDM_STATUS_MASK GENMASK(9, 0)
+/* Macro to get the SDM mailbox error status */
+#define STRATIX10_GET_SDM_STATUS_CODE(status) \
+	(FIELD_GET(STRATIX10_SDM_STATUS_MASK, status))
+
+struct stratix10_svc_pdata {
+	bool needs_psci_cpu_off;
+	bool use_dma_mem;
+};
+
+static const struct stratix10_svc_pdata psci_cpu_off_pdata = {
+	.needs_psci_cpu_off = true,
+};
+
+static const struct stratix10_svc_pdata agilex5_pdata = {
+	.use_dma_mem = true,
+};
 
 typedef void (svc_invoke_fn)(unsigned long, unsigned long, unsigned long,
 			     unsigned long, unsigned long, unsigned long,
@@ -52,10 +163,11 @@ struct stratix10_svc_chan;
 /**
  * struct stratix10_svc - svc private data
  * @stratix10_svc_rsu: pointer to stratix10 RSU device
+ * @stratix10_svc_hwmon: pointer to stratix10 HWMON device
  */
 struct stratix10_svc {
 	struct platform_device *stratix10_svc_rsu;
-	struct platform_device *intel_svc_fcs;
+	struct platform_device *stratix10_svc_hwmon;
 };
 
 /**
@@ -63,7 +175,7 @@ struct stratix10_svc {
  * @sync_complete: state for a completion
  * @addr: physical address of shared memory block
  * @size: size of shared memory block
- * @invoke_fn: function to issue secure monitor or hypervisor call
+ * @invoke_fn: service clients to handle secure monitor or hypervisor calls
  *
  * This struct is used to save physical address and size of shared memory
  * block. The shared memory blocked is allocated by secure monitor software
@@ -82,18 +194,25 @@ struct stratix10_svc_sh_memory {
 /**
  * struct stratix10_svc_data_mem - service memory structure
  * @vaddr: virtual address
- * @paddr: physical address
+ * @paddr: address passed to ATF via SMC and echoed back in completion
+ *         notifications; used as the lookup key in svc_pa_to_va().
+ *         On the SMMU path this is (IOVA + %SVC_SDM_DMA_ADDR_OFFSET);
+ *         on the gen_pool path this equals the raw physical address.
  * @size: size of memory
+ * @dma_addr: IOVA returned by dma_alloc_coherent(); used to free the
+ *            mapping via dma_free_coherent() on the SMMU path.
  * @node: link list head node
  *
  * This struct is used in a list that keeps track of buffers which have
  * been allocated or freed from the memory pool. Service layer driver also
- * uses this struct to transfer physical address to virtual address.
+ * uses this struct to map the address returned by ATF back to a virtual
+ * address.
  */
 struct stratix10_svc_data_mem {
 	void *vaddr;
 	phys_addr_t paddr;
 	size_t size;
+	dma_addr_t dma_addr;
 	struct list_head node;
 };
 
@@ -122,36 +241,77 @@ struct stratix10_svc_data {
 };
 
 /**
- * struct stratix10_svc_controller - service controller
- * @dev: device
- * @chans: array of service channels
- * @num_chans: number of channels in 'chans' array
- * @num_active_client: number of active service client
- * @node: list management
- * @genpool: memory pool pointing to the memory region
- * @task: pointer to the thread task which handles SMC or HVC call
- * @svc_fifo: a queue for storing service message data
- * @complete_status: state for completion
- * @svc_fifo_lock: protect access to service message data queue
- * @invoke_fn: function to issue secure monitor call or hypervisor call
- * @svc: manages the list of client svc drivers
+ * struct stratix10_svc_async_handler - Asynchronous handler for Stratix10
+ *                                      service layer
+ * @transaction_id: Unique identifier for the transaction
+ * @achan: Pointer to the asynchronous channel structure
+ * @cb_arg: Argument to be passed to the callback function
+ * @cb: Callback function to be called upon completion
+ * @msg: Pointer to the client message structure
+ * @next: Node in the hash list
+ * @res: Response structure to store result from the secure firmware
  *
- * This struct is used to create communication channels for service clients, to
- * handle secure monitor or hypervisor call.
+ * This structure is used to handle asynchronous transactions in the
+ * Stratix10 service layer. It maintains the necessary information
+ * for processing and completing asynchronous requests.
  */
-struct stratix10_svc_controller {
-	struct device *dev;
-	struct stratix10_svc_chan *chans;
-	int num_chans;
-	int num_active_client;
-	struct list_head node;
-	struct gen_pool *genpool;
-	struct task_struct *task;
-	struct kfifo svc_fifo;
-	struct completion complete_status;
-	spinlock_t svc_fifo_lock;
-	svc_invoke_fn *invoke_fn;
-	struct stratix10_svc *svc;
+
+struct stratix10_svc_async_handler {
+	u8 transaction_id;
+	struct stratix10_async_chan *achan;
+	void *cb_arg;
+	async_callback_t cb;
+	struct stratix10_svc_client_msg *msg;
+	struct hlist_node next;
+	struct arm_smccc_1_2_regs res;
+};
+
+/**
+ * struct stratix10_async_chan - Structure representing an asynchronous channel
+ * @async_client_id: Unique client identifier for the asynchronous operation
+ * @job_id_pool: Pointer to the job ID pool associated with this channel
+ */
+
+struct stratix10_async_chan {
+	unsigned long async_client_id;
+	struct ida job_id_pool;
+};
+
+/**
+ * struct stratix10_async_ctrl - Control structure for Stratix10
+ *                               asynchronous operations
+ * @supported: Flag indicating whether the system supports async operations
+ * @initialized: Flag indicating whether the control structure has
+ *               been initialized
+ * @irq: Interrupt request number associated with the asynchronous control
+ * @invoke_fn: Function pointer for invoking Stratix10 service calls
+ *             to EL3 secure firmware
+ * @async_id_pool: Pointer to the ID pool used for asynchronous
+ *                 operations
+ * @common_achan_refcount: Atomic reference count for the common
+ *                         asynchronous channel usage
+ * @common_async_chan: Pointer to the common asynchronous channel
+ *                     structure
+ * @trx_list_lock: Spinlock for protecting the transaction list
+ *                     operations
+ * @async_work: Work structure for scheduling asynchronous work
+ * @trx_list: Hash table for managing asynchronous transactions
+ */
+
+struct stratix10_async_ctrl {
+	bool supported;
+	bool initialized;
+	int irq;
+	void (*invoke_fn)(struct stratix10_async_ctrl *actrl,
+			  const struct arm_smccc_1_2_regs *args,
+			  struct arm_smccc_1_2_regs *res);
+	struct ida async_id_pool;
+	atomic_t common_achan_refcount;
+	struct stratix10_async_chan *common_async_chan;
+	/* spinlock to protect trx_list hash table */
+	spinlock_t trx_list_lock;
+	struct work_struct async_work;
+	DECLARE_HASHTABLE(trx_list, ASYNC_TRX_HASH_BITS);
 };
 
 /**
@@ -159,20 +319,78 @@ struct stratix10_svc_controller {
  * @ctrl: pointer to service controller which is the provider of this channel
  * @scl: pointer to service client which owns the channel
  * @name: service client name associated with the channel
+ * @task: pointer to the thread task which handles SMC or HVC call
+ * @svc_fifo: a queue for storing service message data (separate fifo for every channel)
+ * @svc_fifo_lock: protect access to service message data queue (locking pending fifo)
  * @lock: protect access to the channel
+ * @async_chan: reference to asynchronous channel object for this channel
  *
- * This struct is used by service client to communicate with service layer, each
- * service client has its own channel created by service controller.
+ * This struct is used by service client to communicate with service layer.
+ * Each service client has its own channel created by service controller.
  */
 struct stratix10_svc_chan {
 	struct stratix10_svc_controller *ctrl;
 	struct stratix10_svc_client *scl;
 	char *name;
+	struct task_struct *task;
+	struct kfifo svc_fifo;
+	spinlock_t svc_fifo_lock;
 	spinlock_t lock;
+	struct stratix10_async_chan *async_chan;
+};
+
+/**
+ * struct stratix10_svc_controller - service controller
+ * @dev: device
+ * @num_chans: number of channels in 'chans' array
+ * @num_active_client: number of active service client
+ * @node: list management
+ * @genpool: memory pool pointing to the memory region
+ * @complete_status: state for completion
+ * @invoke_fn: function to issue secure monitor call or hypervisor call
+ * @svc: manages the list of client svc drivers
+ * @sdm_lock: only allows a single command single response to SDM
+ * @actrl: async control structure
+ * @psci_reboot_nb: reboot notifier for PSCI secondary CPU offlining
+ * @use_dma_mem: when true, buffers are allocated via dma_alloc_coherent()
+ *               instead of the ATF reserved-memory gen_pool.
+ * @dma_addr_offset: value added to the DMA address (IOVA) before passing it
+ *                   to ATF via SMC. ATF uses this offset to distinguish
+ *                   SMMU-mapped buffers from direct physical addresses; it
+ *                   strips the offset, translates the remaining IOVA through
+ *                   the SMMU, and the SDM accesses the underlying memory.
+ *                   Set to %SVC_SDM_DMA_ADDR_OFFSET on Agilex5 when SMMU is
+ *                   active; zero otherwise.
+ * @chans: array of service channels
+ *
+ * This struct is used to create communication channels for service clients, to
+ * handle secure monitor or hypervisor call.
+ */
+struct stratix10_svc_controller {
+	struct device *dev;
+	int num_chans;
+	int num_active_client;
+	struct list_head node;
+	struct gen_pool *genpool;
+	struct completion complete_status;
+	svc_invoke_fn *invoke_fn;
+	struct stratix10_svc *svc;
+	struct mutex sdm_lock;
+	struct stratix10_async_ctrl actrl;
+	struct notifier_block psci_reboot_nb;
+	bool use_dma_mem;
+	unsigned long dma_addr_offset;
+	struct stratix10_svc_chan chans[] __counted_by(num_chans);
 };
 
 static LIST_HEAD(svc_ctrl);
 static LIST_HEAD(svc_data_mem);
+
+/*
+ * svc_mem_lock protects access to the svc_data_mem list for
+ * concurrent multi-client operations
+ */
+static DEFINE_MUTEX(svc_mem_lock);
 
 /**
  * svc_pa_to_va() - translate physical address to virtual address
@@ -186,11 +404,13 @@ static void *svc_pa_to_va(unsigned long addr)
 	struct stratix10_svc_data_mem *pmem;
 
 	pr_debug("claim back P-addr=0x%016x\n", (unsigned int)addr);
-	list_for_each_entry(pmem, &svc_data_mem, node)
+	guard(mutex)(&svc_mem_lock);
+	list_for_each_entry(pmem, &svc_data_mem, node) {
 		if (pmem->paddr == addr)
 			return pmem->vaddr;
+	}
 
-	/* physical address is not found */
+	/* address is not found */
 	return NULL;
 }
 
@@ -224,11 +444,17 @@ static void svc_thread_cmd_data_claim(struct stratix10_svc_controller *ctrl,
 				break;
 			}
 			cb_data->status = BIT(SVC_STATUS_BUFFER_DONE);
-			cb_data->kaddr1 = svc_pa_to_va(res.a1);
+			/*
+			 * The firmware COMPLETED_WRITE response returns the
+			 * raw IOVA (without dma_addr_offset). Add it back to
+			 * match the key stored in pmem->paddr at allocation
+			 * time. dma_addr_offset is zero on non-SMMU paths.
+			 */
+			cb_data->kaddr1 = svc_pa_to_va(res.a1 + ctrl->dma_addr_offset);
 			cb_data->kaddr2 = (res.a2) ?
-					  svc_pa_to_va(res.a2) : NULL;
+					  svc_pa_to_va(res.a2 + ctrl->dma_addr_offset) : NULL;
 			cb_data->kaddr3 = (res.a3) ?
-					  svc_pa_to_va(res.a3) : NULL;
+					  svc_pa_to_va(res.a3 + ctrl->dma_addr_offset) : NULL;
 			p_data->chan->scl->receive_cb(p_data->chan->scl,
 						      cb_data);
 		} else {
@@ -238,6 +464,52 @@ static void svc_thread_cmd_data_claim(struct stratix10_svc_controller *ctrl,
 	} while (res.a0 == INTEL_SIP_SMC_STATUS_OK ||
 		 res.a0 == INTEL_SIP_SMC_STATUS_BUSY ||
 		 wait_for_completion_timeout(&ctrl->complete_status, timeout));
+}
+
+/**
+ * svc_cmd_poll_status() - poll secure-world service completion status
+ * @p_data: pointer to service data structure
+ * @ctrl: pointer to service layer controller
+ * @res: pointer to store the latest SMC response
+ * @poll_count: maximum number of SMC polls for this phase
+ * @poll_interval_in_ms: sleep duration between polls while status is busy
+ *
+ * Invokes the appropriate ISDONE / SERVICE_COMPLETED SMC until the secure
+ * world returns a terminal status (OK, ERROR, or REJECTED), or until
+ * @poll_count attempts have been exhausted.
+ *
+ * Return: true if a terminal status was received, false on poll budget
+ * exhaustion.
+ */
+static bool svc_cmd_poll_status(struct stratix10_svc_data *p_data,
+				struct stratix10_svc_controller *ctrl,
+				struct arm_smccc_res *res,
+				int poll_count, int poll_interval_in_ms)
+{
+	unsigned long a0, a1, a2;
+
+	a0 = INTEL_SIP_SMC_FPGA_CONFIG_ISDONE;
+	a1 = (unsigned long)p_data->paddr;
+	a2 = (unsigned long)p_data->size;
+
+	if (p_data->command == COMMAND_POLL_SERVICE_STATUS)
+		a0 = INTEL_SIP_SMC_SERVICE_COMPLETED;
+
+	while (poll_count--) {
+		ctrl->invoke_fn(a0, a1, a2, 0, 0, 0, 0, 0, res);
+		if (res->a0 == INTEL_SIP_SMC_STATUS_OK ||
+		    res->a0 == INTEL_SIP_SMC_STATUS_ERROR ||
+		    res->a0 == INTEL_SIP_SMC_STATUS_REJECTED)
+			return true;
+
+		/*
+		 * request is still in progress, go to sleep then
+		 * poll again
+		 */
+		msleep(poll_interval_in_ms);
+	}
+
+	return false;
 }
 
 /**
@@ -254,8 +526,7 @@ static void svc_thread_cmd_config_status(struct stratix10_svc_controller *ctrl,
 					 struct stratix10_svc_cb_data *cb_data)
 {
 	struct arm_smccc_res res;
-	int count_in_sec;
-	unsigned long a0, a1, a2;
+	bool done;
 
 	cb_data->kaddr1 = NULL;
 	cb_data->kaddr2 = NULL;
@@ -264,34 +535,20 @@ static void svc_thread_cmd_config_status(struct stratix10_svc_controller *ctrl,
 
 	pr_debug("%s: polling config status\n", __func__);
 
-	a0 = INTEL_SIP_SMC_FPGA_CONFIG_ISDONE;
-	a1 = (unsigned long)p_data->paddr;
-	a2 = (unsigned long)p_data->size;
+	done = svc_cmd_poll_status(p_data, ctrl, &res, SVC_POLL_COUNT_FAST,
+				   SVC_POLL_INTERVAL_MS_FAST);
+	/* Fall back to a longer interval if still busy after the fast window */
+	if (!done)
+		done = svc_cmd_poll_status(p_data, ctrl, &res,
+					   SVC_POLL_COUNT_SLOW,
+					   SVC_POLL_INTERVAL_MS_SLOW);
 
-	if (p_data->command == COMMAND_POLL_SERVICE_STATUS)
-		a0 = INTEL_SIP_SMC_SERVICE_COMPLETED;
-
-	count_in_sec = FPGA_CONFIG_STATUS_TIMEOUT_SEC;
-	while (count_in_sec) {
-		ctrl->invoke_fn(a0, a1, a2, 0, 0, 0, 0, 0, &res);
-		if ((res.a0 == INTEL_SIP_SMC_STATUS_OK) ||
-		    (res.a0 == INTEL_SIP_SMC_STATUS_ERROR) ||
-		    (res.a0 == INTEL_SIP_SMC_STATUS_REJECTED))
-			break;
-
-		/*
-		 * request is still in progress, wait one second then
-		 * poll again
-		 */
-		msleep(1000);
-		count_in_sec--;
-	}
-
-	if (!count_in_sec) {
+	if (!done) {
 		pr_err("%s: poll status timeout\n", __func__);
 		cb_data->status = BIT(SVC_STATUS_BUSY);
 	} else if (res.a0 == INTEL_SIP_SMC_STATUS_OK) {
 		cb_data->status = BIT(SVC_STATUS_COMPLETED);
+		cb_data->kaddr1 = &res.a1;
 		cb_data->kaddr2 = (res.a2) ?
 				  svc_pa_to_va(res.a2) : NULL;
 		cb_data->kaddr3 = (res.a3) ? &res.a3 : NULL;
@@ -311,13 +568,15 @@ static void svc_thread_cmd_config_status(struct stratix10_svc_controller *ctrl,
  * svc_thread_recv_status_ok() - handle the successful status
  * @p_data: pointer to service data structure
  * @cb_data: pointer to callback data structure to service client
- * @res: result from SMC or HVC call
+ * @res: result from SMC or HVC call (a0-a3; used for routing and most commands)
+ * @res12: full v1.2 result for %COMMAND_RSU_GET_DEVICE_INFO, else NULL
  *
  * Send back the correspond status to the service clients.
  */
 static void svc_thread_recv_status_ok(struct stratix10_svc_data *p_data,
 				      struct stratix10_svc_cb_data *cb_data,
-				      struct arm_smccc_res res)
+				      struct arm_smccc_res res,
+				      struct arm_smccc_1_2_regs *res12)
 {
 	cb_data->kaddr1 = NULL;
 	cb_data->kaddr2 = NULL;
@@ -331,6 +590,7 @@ static void svc_thread_recv_status_ok(struct stratix10_svc_data *p_data,
 	case COMMAND_FCS_SEND_CERTIFICATE:
 	case COMMAND_FCS_DATA_ENCRYPTION:
 	case COMMAND_FCS_DATA_DECRYPTION:
+	case COMMAND_FCS_GET_PROVISION_DATA:
 		cb_data->status = BIT(SVC_STATUS_OK);
 		break;
 	case COMMAND_RECONFIG_DATA_SUBMIT:
@@ -343,6 +603,8 @@ static void svc_thread_recv_status_ok(struct stratix10_svc_data *p_data,
 	case COMMAND_RSU_MAX_RETRY:
 	case COMMAND_RSU_DCMF_STATUS:
 	case COMMAND_FIRMWARE_VERSION:
+	case COMMAND_HWMON_READTEMP:
+	case COMMAND_HWMON_READVOLT:
 		cb_data->status = BIT(SVC_STATUS_OK);
 		cb_data->kaddr1 = &res.a1;
 		break;
@@ -351,13 +613,18 @@ static void svc_thread_recv_status_ok(struct stratix10_svc_data *p_data,
 		cb_data->kaddr1 = &res.a1;
 		cb_data->kaddr2 = &res.a2;
 		break;
+	case COMMAND_SMC_ATF_BUILD_VER:
+		cb_data->status = BIT(SVC_STATUS_OK);
+		cb_data->kaddr1 = &res.a1;
+		cb_data->kaddr2 = &res.a2;
+		cb_data->kaddr3 = &res.a3;
+		break;
 	case COMMAND_RSU_DCMF_VERSION:
 		cb_data->status = BIT(SVC_STATUS_OK);
 		cb_data->kaddr1 = &res.a1;
 		cb_data->kaddr2 = &res.a2;
 		break;
 	case COMMAND_FCS_RANDOM_NUMBER_GEN:
-	case COMMAND_FCS_GET_PROVISION_DATA:
 	case COMMAND_POLL_SERVICE_STATUS:
 		cb_data->status = BIT(SVC_STATUS_OK);
 		cb_data->kaddr1 = &res.a1;
@@ -371,6 +638,16 @@ static void svc_thread_recv_status_ok(struct stratix10_svc_data *p_data,
 		res.a2 = res.a2 * BYTE_TO_WORD_SIZE;
 		cb_data->kaddr2 = &res.a2;
 		break;
+	case COMMAND_RSU_GET_DEVICE_INFO:
+		if (WARN_ON(!res12)) {
+			cb_data->status = BIT(SVC_STATUS_ERROR);
+			break;
+		}
+		cb_data->status = BIT(SVC_STATUS_OK);
+		cb_data->kaddr1 = res12;
+		cb_data->kaddr2 = NULL;
+		cb_data->kaddr3 = NULL;
+		break;
 	default:
 		pr_warn("it shouldn't happen\n");
 		break;
@@ -379,6 +656,10 @@ static void svc_thread_recv_status_ok(struct stratix10_svc_data *p_data,
 	pr_debug("%s: call receive_cb\n", __func__);
 	p_data->chan->scl->receive_cb(p_data->chan->scl, cb_data);
 }
+
+static void svc_smccc_1_2_full(struct stratix10_svc_controller *ctrl,
+			       const struct arm_smccc_1_2_regs *args,
+			       struct arm_smccc_1_2_regs *res);
 
 /**
  * svc_normal_to_secure_thread() - the function to run in the kthread
@@ -392,19 +673,20 @@ static void svc_thread_recv_status_ok(struct stratix10_svc_data *p_data,
  */
 static int svc_normal_to_secure_thread(void *data)
 {
-	struct stratix10_svc_controller
-			*ctrl = (struct stratix10_svc_controller *)data;
-	struct stratix10_svc_data *pdata;
-	struct stratix10_svc_cb_data *cbdata;
+	struct stratix10_svc_chan *chan = (struct stratix10_svc_chan *)data;
+	struct stratix10_svc_controller *ctrl = chan->ctrl;
+	struct stratix10_svc_data *pdata = NULL;
+	struct stratix10_svc_cb_data *cbdata = NULL;
 	struct arm_smccc_res res;
+	struct arm_smccc_1_2_regs res12 = { 0 };
 	unsigned long a0, a1, a2, a3, a4, a5, a6, a7;
 	int ret_fifo = 0;
 
-	pdata =  kmalloc(sizeof(*pdata), GFP_KERNEL);
+	pdata = kmalloc_obj(*pdata);
 	if (!pdata)
 		return -ENOMEM;
 
-	cbdata = kmalloc(sizeof(*cbdata), GFP_KERNEL);
+	cbdata = kmalloc_obj(*cbdata);
 	if (!cbdata) {
 		kfree(pdata);
 		return -ENOMEM;
@@ -420,12 +702,12 @@ static int svc_normal_to_secure_thread(void *data)
 	a6 = 0;
 	a7 = 0;
 
-	pr_debug("smc_hvc_shm_thread is running\n");
+	pr_debug("%s: %s: Thread is running!\n", __func__, chan->name);
 
 	while (!kthread_should_stop()) {
-		ret_fifo = kfifo_out_spinlocked(&ctrl->svc_fifo,
+		ret_fifo = kfifo_out_spinlocked(&chan->svc_fifo,
 						pdata, sizeof(*pdata),
-						&ctrl->svc_fifo_lock);
+						&chan->svc_fifo_lock);
 
 		if (!ret_fifo)
 			continue;
@@ -434,9 +716,25 @@ static int svc_normal_to_secure_thread(void *data)
 			 (unsigned int)pdata->paddr, pdata->command,
 			 (unsigned int)pdata->size);
 
+		/* SDM can only process one command at a time */
+		pr_debug("%s: %s: Thread is waiting for mutex!\n",
+			 __func__, chan->name);
+		if (mutex_lock_interruptible(&ctrl->sdm_lock)) {
+			/* item already dequeued; notify client to unblock it */
+			cbdata->status = BIT(SVC_STATUS_ERROR);
+			cbdata->kaddr1 = NULL;
+			cbdata->kaddr2 = NULL;
+			cbdata->kaddr3 = NULL;
+			if (pdata->chan->scl)
+				pdata->chan->scl->receive_cb(pdata->chan->scl,
+							     cbdata);
+			break;
+		}
+
 		switch (pdata->command) {
 		case COMMAND_RECONFIG_DATA_CLAIM:
 			svc_thread_cmd_data_claim(ctrl, pdata, cbdata);
+			mutex_unlock(&ctrl->sdm_lock);
 			continue;
 		case COMMAND_RECONFIG:
 			a0 = INTEL_SIP_SMC_FPGA_CONFIG_START;
@@ -524,10 +822,20 @@ static int svc_normal_to_secure_thread(void *data)
 			break;
 		case COMMAND_FCS_GET_PROVISION_DATA:
 			a0 = INTEL_SIP_SMC_FCS_GET_PROVISION_DATA;
-			a1 = (unsigned long)pdata->paddr;
+			a1 = 0;
 			a2 = 0;
 			break;
-
+		/* for HWMON */
+		case COMMAND_HWMON_READTEMP:
+			a0 = INTEL_SIP_SMC_HWMON_READTEMP;
+			a1 = pdata->arg[0];
+			a2 = 0;
+			break;
+		case COMMAND_HWMON_READVOLT:
+			a0 = INTEL_SIP_SMC_HWMON_READVOLT;
+			a1 = pdata->arg[0];
+			a2 = 0;
+			break;
 		/* for polling */
 		case COMMAND_POLL_SERVICE_STATUS:
 			a0 = INTEL_SIP_SMC_SERVICE_COMPLETED;
@@ -544,6 +852,12 @@ static int svc_normal_to_secure_thread(void *data)
 			a1 = 0;
 			a2 = 0;
 			break;
+		case COMMAND_SMC_ATF_BUILD_VER:
+			a0 = INTEL_SIP_SMC_ATF_BUILD_VER;
+			a1 = 0;
+			a2 = 0;
+			a3 = 0;
+			break;
 		case COMMAND_MBOX_SEND_CMD:
 			a0 = INTEL_SIP_SMC_MBOX_SEND_CMD;
 			a1 = pdata->arg[0];
@@ -553,22 +867,44 @@ static int svc_normal_to_secure_thread(void *data)
 			a5 = (unsigned long)pdata->paddr_output;
 			a6 = (unsigned long)pdata->size_output / BYTE_TO_WORD_SIZE;
 			break;
+		case COMMAND_RSU_GET_DEVICE_INFO:
+			a0 = INTEL_SIP_SMC_RSU_GET_DEVICE_INFO;
+			a1 = 0;
+			a2 = 0;
+			a3 = 0;
+			a4 = 0;
+			a5 = 0;
+			a6 = 0;
+			a7 = 0;
+			break;
 		default:
 			pr_warn("it shouldn't happen\n");
-			break;
+			mutex_unlock(&ctrl->sdm_lock);
+			continue;
 		}
-		pr_debug("%s: before SMC call -- a0=0x%016x a1=0x%016x",
-			 __func__,
+		pr_debug("%s: %s: before SMC call -- a0=0x%016x a1=0x%016x",
+			 __func__, chan->name,
 			 (unsigned int)a0,
 			 (unsigned int)a1);
 		pr_debug(" a2=0x%016x\n", (unsigned int)a2);
 		pr_debug(" a3=0x%016x\n", (unsigned int)a3);
 		pr_debug(" a4=0x%016x\n", (unsigned int)a4);
 		pr_debug(" a5=0x%016x\n", (unsigned int)a5);
-		ctrl->invoke_fn(a0, a1, a2, a3, a4, a5, a6, a7, &res);
+		if (pdata->command == COMMAND_RSU_GET_DEVICE_INFO) {
+			struct arm_smccc_1_2_regs args12 = { 0 };
 
-		pr_debug("%s: after SMC call -- res.a0=0x%016x",
-			 __func__, (unsigned int)res.a0);
+			args12.a0 = INTEL_SIP_SMC_RSU_GET_DEVICE_INFO;
+			svc_smccc_1_2_full(ctrl, &args12, &res12);
+			res.a0 = res12.a0;
+			res.a1 = res12.a1;
+			res.a2 = res12.a2;
+			res.a3 = res12.a3;
+		} else {
+			ctrl->invoke_fn(a0, a1, a2, a3, a4, a5, a6, a7, &res);
+		}
+
+		pr_debug("%s: %s: after SMC call -- res.a0=0x%016x",
+			 __func__, chan->name, (unsigned int)res.a0);
 		pr_debug(" res.a1=0x%016x, res.a2=0x%016x",
 			 (unsigned int)res.a1, (unsigned int)res.a2);
 		pr_debug(" res.a3=0x%016x\n", (unsigned int)res.a3);
@@ -583,13 +919,20 @@ static int svc_normal_to_secure_thread(void *data)
 			cbdata->kaddr2 = NULL;
 			cbdata->kaddr3 = NULL;
 			pdata->chan->scl->receive_cb(pdata->chan->scl, cbdata);
+			mutex_unlock(&ctrl->sdm_lock);
 			continue;
 		}
 
 		switch (res.a0) {
-		case INTEL_SIP_SMC_STATUS_OK:
-			svc_thread_recv_status_ok(pdata, cbdata, res);
+		case INTEL_SIP_SMC_STATUS_OK: {
+			struct arm_smccc_1_2_regs *devinfo_res =
+				(pdata->command == COMMAND_RSU_GET_DEVICE_INFO) ?
+				&res12 : NULL;
+
+			svc_thread_recv_status_ok(pdata, cbdata, res,
+						  devinfo_res);
 			break;
+		}
 		case INTEL_SIP_SMC_STATUS_BUSY:
 			switch (pdata->command) {
 			case COMMAND_RECONFIG_DATA_SUBMIT:
@@ -630,32 +973,31 @@ static int svc_normal_to_secure_thread(void *data)
 		case INTEL_SIP_SMC_RSU_ERROR:
 			pr_err("%s: STATUS_ERROR\n", __func__);
 			cbdata->status = BIT(SVC_STATUS_ERROR);
-			cbdata->kaddr1 = &res.a1;
-			cbdata->kaddr2 = (res.a2) ?
-				svc_pa_to_va(res.a2) : NULL;
-			cbdata->kaddr3 = (res.a3) ? &res.a3 : NULL;
+			if (pdata->command == COMMAND_RSU_GET_DEVICE_INFO) {
+				cbdata->kaddr1 = &res12;
+				cbdata->kaddr2 = NULL;
+				cbdata->kaddr3 = NULL;
+			} else {
+				cbdata->kaddr1 = &res.a1;
+				cbdata->kaddr2 = (res.a2) ?
+					svc_pa_to_va(res.a2) : NULL;
+				cbdata->kaddr3 = (res.a3) ? &res.a3 : NULL;
+			}
 			pdata->chan->scl->receive_cb(pdata->chan->scl, cbdata);
 			break;
 		default:
 			pr_warn("Secure firmware doesn't support...\n");
 
-			/*
-			 * be compatible with older version firmware which
-			 * doesn't support newer RSU commands
-			 */
-			if ((pdata->command != COMMAND_RSU_UPDATE) &&
-				(pdata->command != COMMAND_RSU_STATUS)) {
-				cbdata->status =
-					BIT(SVC_STATUS_NO_SUPPORT);
-				cbdata->kaddr1 = NULL;
-				cbdata->kaddr2 = NULL;
-				cbdata->kaddr3 = NULL;
-				pdata->chan->scl->receive_cb(
-					pdata->chan->scl, cbdata);
-			}
+			cbdata->status = BIT(SVC_STATUS_NO_SUPPORT);
+			cbdata->kaddr1 = NULL;
+			cbdata->kaddr2 = NULL;
+			cbdata->kaddr3 = NULL;
+			pdata->chan->scl->receive_cb(pdata->chan->scl, cbdata);
 			break;
 
 		}
+
+		mutex_unlock(&ctrl->sdm_lock);
 	}
 
 	kfree(cbdata);
@@ -806,6 +1148,38 @@ svc_create_memory_pool(struct platform_device *pdev,
 }
 
 /**
+ * svc_setup_dma_memory() - configure the device for dynamic DMA allocation
+ * @pdev: pointer to service layer device
+ *
+ * Called instead of svc_get_sh_memory() + svc_create_memory_pool() when
+ * the device is behind an SMMU. Sets a 29-bit coherent DMA mask so that
+ * every subsequent dma_alloc_coherent() call yields an IOVA within the
+ * first 512MB (0x0000_0000 - 0x1FFF_FFFF). The driver then adds
+ * %SVC_SDM_DMA_ADDR_OFFSET to the IOVA before passing it to ATF; ATF
+ * strips the offset and uses the SMMU to translate the IOVA to the
+ * underlying physical memory for SDM access.
+ *
+ * Return: 0 on success, or a negative error code on failure.
+ */
+static int svc_setup_dma_memory(struct platform_device *pdev)
+{
+	struct device *dev = &pdev->dev;
+	int ret;
+
+	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(SVC_SDM_DMA_ADDR_BITS));
+	if (ret) {
+		dev_err(dev,
+			"failed to set %u-bit DMA mask: %d\n",
+			SVC_SDM_DMA_ADDR_BITS, ret);
+		return ret;
+	}
+
+	dev_info(dev,
+		 "SMMU enabled: using dynamic DMA allocation (IOVA range 0-512MB)\n");
+	return 0;
+}
+
+/**
  * svc_smccc_smc() - secure monitor call between normal and secure world
  * @a0: argument passed in registers 0
  * @a1: argument passed in registers 1
@@ -845,6 +1219,31 @@ static void svc_smccc_hvc(unsigned long a0, unsigned long a1,
 			  struct arm_smccc_res *res)
 {
 	arm_smccc_hvc(a0, a1, a2, a3, a4, a5, a6, a7, res);
+}
+
+/**
+ * svc_smccc_1_2_full() - SMC/HVC v1.2 call matching the sync channel method
+ * @ctrl: service controller (selects SMC vs HVC)
+ * @args: arguments
+ * @res: full register-file result (a0-a17)
+ */
+static void svc_smccc_1_2_full(struct stratix10_svc_controller *ctrl,
+			       const struct arm_smccc_1_2_regs *args,
+			       struct arm_smccc_1_2_regs *res)
+{
+	if (ctrl->invoke_fn == svc_smccc_smc) {
+		arm_smccc_1_2_smc(args, res);
+	} else if (ctrl->invoke_fn == svc_smccc_hvc) {
+		arm_smccc_1_2_hvc(args, res);
+	} else {
+		WARN_ON_ONCE(1);
+		/*
+		 * INTEL_SIP_SMC_STATUS_OK is 0; zero-filled res would be misrouted
+		 * as success. Force an error path and clear fabricated payload.
+		 */
+		memset(res, 0, sizeof(*res));
+		res->a0 = INTEL_SIP_SMC_STATUS_ERROR;
+	}
 }
 
 /**
@@ -925,6 +1324,717 @@ struct stratix10_svc_chan *stratix10_svc_request_channel_byname(
 EXPORT_SYMBOL_GPL(stratix10_svc_request_channel_byname);
 
 /**
+ * stratix10_svc_add_async_client - Add an asynchronous client to the
+ * Stratix10 service channel.
+ * @chan: Pointer to the Stratix10 service channel structure.
+ * @use_unique_clientid: Boolean flag indicating whether to use a
+ * unique client ID.
+ *
+ * This function adds an asynchronous client to the specified
+ * Stratix10 service channel. If the `use_unique_clientid` flag is
+ * set to true, a unique client ID is allocated for the asynchronous
+ * channel. Otherwise, a common asynchronous channel is used.
+ *
+ * Return: 0 on success, or a negative error code on failure:
+ *         -EINVAL if the channel is NULL or the async controller is
+ *         not initialized.
+ *         -EOPNOTSUPP if async operations are not supported.
+ *         -EALREADY if the async channel is already allocated.
+ *         -ENOMEM if memory allocation fails.
+ *         Other negative values if ID allocation fails.
+ */
+int stratix10_svc_add_async_client(struct stratix10_svc_chan *chan,
+				   bool use_unique_clientid)
+{
+	struct stratix10_svc_controller *ctrl;
+	struct stratix10_async_ctrl *actrl;
+	struct stratix10_async_chan *achan;
+	int ret = 0;
+
+	if (!chan)
+		return -EINVAL;
+
+	ctrl = chan->ctrl;
+	actrl = &ctrl->actrl;
+
+	if (!actrl->supported)
+		return -EOPNOTSUPP;
+
+	if (!actrl->initialized) {
+		dev_err(ctrl->dev, "Async controller not initialized\n");
+		return -EINVAL;
+	}
+
+	if (chan->async_chan) {
+		dev_err(ctrl->dev, "async channel already allocated\n");
+		return -EALREADY;
+	}
+
+	if (use_unique_clientid &&
+	    atomic_read(&actrl->common_achan_refcount) > 0) {
+		chan->async_chan = actrl->common_async_chan;
+		atomic_inc(&actrl->common_achan_refcount);
+		return 0;
+	}
+
+	achan = kzalloc_obj(*achan);
+	if (!achan)
+		return -ENOMEM;
+
+	ida_init(&achan->job_id_pool);
+
+	ret = ida_alloc_max(&actrl->async_id_pool, MAX_SDM_CLIENT_IDS,
+			    GFP_KERNEL);
+	if (ret < 0) {
+		dev_err(ctrl->dev,
+			"Failed to allocate async client id\n");
+		ida_destroy(&achan->job_id_pool);
+		kfree(achan);
+		return ret;
+	}
+
+	achan->async_client_id = ret;
+	chan->async_chan = achan;
+
+	if (use_unique_clientid &&
+	    atomic_read(&actrl->common_achan_refcount) == 0) {
+		actrl->common_async_chan = achan;
+		atomic_inc(&actrl->common_achan_refcount);
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(stratix10_svc_add_async_client);
+
+/**
+ * stratix10_svc_remove_async_client - Remove an asynchronous client
+ *                                     from the Stratix10 service
+ *                                     channel.
+ * @chan: Pointer to the Stratix10 service channel structure.
+ *
+ * This function removes an asynchronous client associated with the
+ * given service channel. It checks if the channel and the
+ * asynchronous channel are valid, and then proceeds to decrement
+ * the reference count for the common asynchronous channel if
+ * applicable. If the reference count reaches zero, it destroys the
+ * job ID pool and deallocates the asynchronous client ID. For
+ * non-common asynchronous channels, it directly destroys the job ID
+ * pool, deallocates the asynchronous client ID, and frees the
+ * memory allocated for the asynchronous channel.
+ *
+ * Return: 0 on success, -EINVAL if the channel or asynchronous
+ *         channel is invalid.
+ */
+int stratix10_svc_remove_async_client(struct stratix10_svc_chan *chan)
+{
+	struct stratix10_svc_controller *ctrl;
+	struct stratix10_async_ctrl *actrl;
+	struct stratix10_async_chan *achan;
+
+	if (!chan)
+		return -EINVAL;
+
+	ctrl = chan->ctrl;
+	actrl = &ctrl->actrl;
+	achan = chan->async_chan;
+
+	if (!achan) {
+		dev_err(ctrl->dev, "async channel not allocated\n");
+		return -EINVAL;
+	}
+
+	if (achan == actrl->common_async_chan) {
+		atomic_dec(&actrl->common_achan_refcount);
+		if (atomic_read(&actrl->common_achan_refcount) == 0) {
+			ida_destroy(&achan->job_id_pool);
+			ida_free(&actrl->async_id_pool,
+				 achan->async_client_id);
+			kfree(achan);
+			actrl->common_async_chan = NULL;
+		}
+	} else {
+		ida_destroy(&achan->job_id_pool);
+		ida_free(&actrl->async_id_pool, achan->async_client_id);
+		kfree(achan);
+	}
+	chan->async_chan = NULL;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(stratix10_svc_remove_async_client);
+
+/**
+ * stratix10_svc_async_send - Send an asynchronous message to the
+ *                            Stratix10 service
+ * @chan: Pointer to the service channel structure
+ * @msg: Pointer to the message to be sent
+ * @handler: Pointer to the handler for the asynchronous message
+ *           used by caller for later reference.
+ * @cb: Callback function to be called upon completion
+ * @cb_arg: Argument to be passed to the callback function
+ *
+ * This function sends an asynchronous message to the SDM mailbox in
+ * EL3 secure firmware. It performs various checks and setups,
+ * including allocating a job ID, setting up the transaction ID and
+ * packaging it to El3 firmware. The function handles different
+ * commands by setting up the appropriate arguments for the SMC call.
+ * If the SMC call is successful, the handler is set up and the
+ * function returns 0. If the SMC call fails, appropriate error
+ * handling is performed along with cleanup of resources.
+ *
+ * Return: 0 on success, -EINVAL for invalid argument, -ENOMEM if
+ * memory is not available, -EAGAIN if EL3 firmware is busy, -EBADF
+ * if the message is rejected by EL3 firmware and -EIO on other
+ * errors from EL3 firmware.
+ */
+int stratix10_svc_async_send(struct stratix10_svc_chan *chan, void *msg,
+			     void **handler, async_callback_t cb, void *cb_arg)
+{
+	struct arm_smccc_1_2_regs args = { 0 }, res = { 0 };
+	struct stratix10_svc_async_handler *handle = NULL;
+	struct stratix10_svc_client_msg *p_msg =
+		(struct stratix10_svc_client_msg *)msg;
+	struct stratix10_svc_controller *ctrl;
+	struct stratix10_async_ctrl *actrl;
+	struct stratix10_async_chan *achan;
+	int ret = 0;
+
+	if (!chan || !msg || !handler)
+		return -EINVAL;
+
+	achan = chan->async_chan;
+	ctrl = chan->ctrl;
+	actrl = &ctrl->actrl;
+
+	if (!actrl->initialized) {
+		dev_err(ctrl->dev, "Async controller not initialized\n");
+		return -EINVAL;
+	}
+
+	if (!achan) {
+		dev_err(ctrl->dev, "Async channel not allocated\n");
+		return -EINVAL;
+	}
+
+	handle = kzalloc(sizeof(*handle), GFP_KERNEL);
+	if (!handle)
+		return -ENOMEM;
+
+	ret = ida_alloc_max(&achan->job_id_pool, MAX_SDM_JOB_IDS,
+			    GFP_KERNEL);
+	if (ret < 0) {
+		dev_err(ctrl->dev, "Failed to allocate job id\n");
+		kfree(handle);
+		return -ENOMEM;
+	}
+
+	handle->transaction_id =
+		STRATIX10_SET_TRANSACTIONID(achan->async_client_id, ret);
+	handle->cb = cb;
+	handle->msg = p_msg;
+	handle->cb_arg = cb_arg;
+	handle->achan = achan;
+
+	/*set the transaction jobid in args.a1*/
+	args.a1 =
+		STRATIX10_SIP_SMC_SET_TRANSACTIONID_X1(handle->transaction_id);
+
+	switch (p_msg->command) {
+	case COMMAND_RSU_GET_SPT_TABLE:
+		args.a0 = INTEL_SIP_SMC_ASYNC_RSU_GET_SPT;
+		break;
+	case COMMAND_RSU_STATUS:
+		args.a0 = INTEL_SIP_SMC_ASYNC_RSU_GET_ERROR_STATUS;
+		break;
+	case COMMAND_RSU_NOTIFY:
+		args.a0 = INTEL_SIP_SMC_ASYNC_RSU_NOTIFY;
+		args.a2 = p_msg->arg[0];
+		break;
+	case COMMAND_HWMON_READTEMP:
+		args.a0 = INTEL_SIP_SMC_ASYNC_HWMON_READTEMP;
+		args.a2 = p_msg->arg[0];
+		break;
+	case COMMAND_HWMON_READVOLT:
+		args.a0 = INTEL_SIP_SMC_ASYNC_HWMON_READVOLT;
+		args.a2 = p_msg->arg[0];
+		break;
+	default:
+		dev_err(ctrl->dev, "Invalid command ,%d\n", p_msg->command);
+		ret = -EINVAL;
+		goto deallocate_id;
+	}
+
+	/**
+	 * There is a chance that during the execution of async_send()
+	 * in one core, an interrupt might be received in another core;
+	 * to mitigate this we are adding the handle to the DB and then
+	 * send the smc call. If the smc call is rejected or busy then
+	 * we will deallocate the handle for the client to retry again.
+	 */
+	scoped_guard(spinlock_bh, &actrl->trx_list_lock) {
+		hash_add(actrl->trx_list, &handle->next,
+			 handle->transaction_id);
+	}
+
+	actrl->invoke_fn(actrl, &args, &res);
+
+	switch (res.a0) {
+	case INTEL_SIP_SMC_STATUS_OK:
+		dev_dbg(ctrl->dev,
+			"Async message sent with transaction_id 0x%02x\n",
+			handle->transaction_id);
+		*handler = handle;
+		return 0;
+	case INTEL_SIP_SMC_STATUS_BUSY:
+		dev_warn(ctrl->dev, "Mailbox is busy, try after some time\n");
+		ret = -EAGAIN;
+		break;
+	case INTEL_SIP_SMC_STATUS_REJECTED:
+		dev_err(ctrl->dev, "Async message rejected\n");
+		ret = -EBADF;
+		break;
+	default:
+		dev_err(ctrl->dev,
+			"Failed to send async message ,got status as %ld\n",
+			res.a0);
+		ret = -EIO;
+	}
+
+	scoped_guard(spinlock_bh, &actrl->trx_list_lock) {
+		hash_del(&handle->next);
+	}
+
+deallocate_id:
+	ida_free(&achan->job_id_pool,
+		 STRATIX10_GET_JOBID(handle->transaction_id));
+	kfree(handle);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(stratix10_svc_async_send);
+
+/**
+ * stratix10_svc_async_prepare_response - Prepare the response data for
+ * an asynchronous transaction.
+ * @chan: Pointer to the service channel structure.
+ * @handle: Pointer to the asynchronous handler structure.
+ * @data: Pointer to the callback data structure.
+ *
+ * This function prepares the response data for an asynchronous transaction. It
+ * extracts the response data from the SMC response structure and stores it in
+ * the callback data structure. The function also logs the completion of the
+ * asynchronous transaction.
+ *
+ * Return: 0 on success, -ENOENT if the command is invalid
+ */
+static int stratix10_svc_async_prepare_response(struct stratix10_svc_chan *chan,
+						struct stratix10_svc_async_handler *handle,
+						struct stratix10_svc_cb_data *data)
+{
+	struct stratix10_svc_client_msg *p_msg =
+		(struct stratix10_svc_client_msg *)handle->msg;
+	struct stratix10_svc_controller *ctrl = chan->ctrl;
+
+	data->status = STRATIX10_GET_SDM_STATUS_CODE(handle->res.a1);
+
+	switch (p_msg->command) {
+	case COMMAND_RSU_NOTIFY:
+		break;
+	case COMMAND_RSU_GET_SPT_TABLE:
+		data->kaddr1 = (void *)&handle->res.a2;
+		data->kaddr2 = (void *)&handle->res.a3;
+		break;
+	case COMMAND_RSU_STATUS:
+		/* COMMAND_RSU_STATUS has more elements than the cb_data
+		 * can acomodate, so passing the response structure to the
+		 * response function to be handled before done command is
+		 * executed by the client.
+		 */
+		data->kaddr1 = (void *)&handle->res;
+		break;
+	case COMMAND_HWMON_READTEMP:
+	case COMMAND_HWMON_READVOLT:
+		data->kaddr1 = (void *)&handle->res.a2;
+		break;
+
+	default:
+		dev_alert(ctrl->dev, "Invalid command\n ,%d", p_msg->command);
+		return -ENOENT;
+	}
+	dev_dbg(ctrl->dev, "Async message completed transaction_id 0x%02x\n",
+		handle->transaction_id);
+	return 0;
+}
+
+/**
+ * stratix10_svc_async_poll - Polls the status of an asynchronous
+ * transaction.
+ * @chan: Pointer to the service channel structure.
+ * @tx_handle: Handle to the transaction being polled.
+ * @data: Pointer to the callback data structure.
+ *
+ * This function polls the status of an asynchronous transaction
+ * identified by the given transaction handle. It ensures that the
+ * necessary structures are initialized and valid before proceeding
+ * with the poll operation. The function sets up the necessary
+ * arguments for the SMC call, invokes the call, and prepares the
+ * response data if the call is successful. If the call fails, the
+ * function returns the error mapped to the SVC status error.
+ *
+ * Return: 0 on success, -EINVAL if any input parameter is invalid,
+ *         -EAGAIN if the transaction is still in progress,
+ *         -EPERM if the command is invalid, or other negative
+ *         error codes on failure.
+ */
+int stratix10_svc_async_poll(struct stratix10_svc_chan *chan,
+			     void *tx_handle,
+			     struct stratix10_svc_cb_data *data)
+{
+	struct stratix10_svc_async_handler *handle;
+	struct arm_smccc_1_2_regs args = { 0 };
+	struct stratix10_svc_controller *ctrl;
+	struct stratix10_async_ctrl *actrl;
+	struct stratix10_async_chan *achan;
+	int ret;
+
+	if (!chan || !tx_handle || !data)
+		return -EINVAL;
+
+	ctrl = chan->ctrl;
+	actrl = &ctrl->actrl;
+	achan = chan->async_chan;
+
+	if (!achan) {
+		dev_err(ctrl->dev, "Async channel not allocated\n");
+		return -EINVAL;
+	}
+
+	handle = (struct stratix10_svc_async_handler *)tx_handle;
+	scoped_guard(spinlock_bh, &actrl->trx_list_lock) {
+		if (!hash_hashed(&handle->next)) {
+			dev_err(ctrl->dev, "Invalid transaction handler");
+			return -EINVAL;
+		}
+	}
+
+	args.a0 = INTEL_SIP_SMC_ASYNC_POLL;
+	args.a1 =
+		STRATIX10_SIP_SMC_SET_TRANSACTIONID_X1(handle->transaction_id);
+
+	actrl->invoke_fn(actrl, &args, &handle->res);
+
+	/*clear data for response*/
+	memset(data, 0, sizeof(*data));
+
+	if (handle->res.a0 == INTEL_SIP_SMC_STATUS_OK) {
+		ret = stratix10_svc_async_prepare_response(chan, handle, data);
+		if (ret) {
+			dev_err(ctrl->dev, "Error in preparation of response,%d\n", ret);
+			WARN_ON_ONCE(1);
+		}
+		return 0;
+	} else if (handle->res.a0 == INTEL_SIP_SMC_STATUS_BUSY ||
+		   handle->res.a0 == INTEL_SIP_SMC_STATUS_NO_RESPONSE) {
+		dev_dbg(ctrl->dev, "async message is not ready yet\n");
+		return -EAGAIN;
+	}
+
+	dev_dbg(ctrl->dev,
+		"Failed to poll async message ,got status as %ld\n",
+		handle->res.a0);
+	return -EINVAL;
+}
+EXPORT_SYMBOL_GPL(stratix10_svc_async_poll);
+
+/**
+ * stratix10_svc_async_done - Completes an asynchronous transaction.
+ * @chan: Pointer to the service channel structure.
+ * @tx_handle: Handle to the transaction being completed.
+ *
+ * This function completes an asynchronous transaction identified by
+ * the given transaction handle. It ensures that the necessary
+ * structures are initialized and valid before proceeding with the
+ * completion operation. The function deallocates the transaction ID,
+ * frees the memory allocated for the handler, and removes the handler
+ * from the transaction list.
+ *
+ * Return: 0 on success, -EINVAL if any input parameter is invalid,
+ * or other negative error codes on failure.
+ */
+int stratix10_svc_async_done(struct stratix10_svc_chan *chan, void *tx_handle)
+{
+	struct stratix10_svc_async_handler *handle;
+	struct stratix10_svc_controller *ctrl;
+	struct stratix10_async_chan *achan;
+	struct stratix10_async_ctrl *actrl;
+
+	if (!chan || !tx_handle)
+		return -EINVAL;
+
+	ctrl = chan->ctrl;
+	achan = chan->async_chan;
+	actrl = &ctrl->actrl;
+
+	if (!achan) {
+		dev_err(ctrl->dev, "async channel not allocated\n");
+		return -EINVAL;
+	}
+
+	handle = (struct stratix10_svc_async_handler *)tx_handle;
+	scoped_guard(spinlock_bh, &actrl->trx_list_lock) {
+		if (!hash_hashed(&handle->next)) {
+			dev_err(ctrl->dev, "Invalid transaction handle");
+			return -EINVAL;
+		}
+		hash_del(&handle->next);
+	}
+	ida_free(&achan->job_id_pool,
+		 STRATIX10_GET_JOBID(handle->transaction_id));
+	kfree(handle);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(stratix10_svc_async_done);
+
+static inline void stratix10_smc_1_2(struct stratix10_async_ctrl *actrl,
+				     const struct arm_smccc_1_2_regs *args,
+				     struct arm_smccc_1_2_regs *res)
+{
+	arm_smccc_1_2_smc(args, res);
+}
+
+static irqreturn_t stratix10_svc_async_irq_handler(int irq, void *dev_id)
+{
+	struct stratix10_svc_controller *ctrl = dev_id;
+	struct stratix10_async_ctrl *actrl = &ctrl->actrl;
+
+	/*
+	 * Only disable the IRQ when work is newly queued. If the work is
+	 * already pending/running, queue_work() returns false; an extra
+	 * disable_irq_nosync() would leave the IRQ disabled permanently
+	 * after enable_irq() in the work handler.
+	 */
+	if (queue_work(system_bh_wq, &actrl->async_work))
+		disable_irq_nosync(irq);
+	return IRQ_HANDLED;
+}
+
+/**
+ * stratix10_async_workqueue_handler - Handler for the asynchronous
+ * workqueue in Stratix10 service controller.
+ * @work: Pointer to the work structure that contains the asynchronous
+ *        workqueue handler.
+ *
+ * This function is the handler for the asynchronous workqueue. It performs
+ * the following tasks:
+ * - Invokes the asynchronous polling on interrupt supervisory call.
+ * - On success, it retrieves the bitmap of pending transactions from mailbox
+ *   fifo in ATF.
+ * - It processes each pending transaction by calling the corresponding
+ *   callback function.
+ *
+ * The function ensures that the IRQ is enabled after processing the
+ * transactions.
+ */
+static void stratix10_async_workqueue_handler(struct work_struct *work)
+{
+	struct stratix10_async_ctrl *actrl =
+		container_of(work, struct stratix10_async_ctrl, async_work);
+	struct arm_smccc_1_2_regs
+		args = { .a0 = INTEL_SIP_SMC_ASYNC_POLL_ON_IRQ }, res;
+	DECLARE_BITMAP(pend_on_irq, TOTAL_TRANSACTION_IDS);
+	struct stratix10_svc_async_handler *handler;
+	unsigned long transaction_id = 0;
+	u64 bitmap_array[4];
+	async_callback_t cb;
+	void *cb_arg;
+
+	actrl->invoke_fn(actrl, &args, &res);
+	if (res.a0 == INTEL_SIP_SMC_STATUS_OK) {
+		bitmap_array[0] = res.a1;
+		bitmap_array[1] = res.a2;
+		bitmap_array[2] = res.a3;
+		bitmap_array[3] = res.a4;
+		bitmap_from_arr64(pend_on_irq, bitmap_array, TOTAL_TRANSACTION_IDS);
+		do {
+			transaction_id = find_next_bit(pend_on_irq,
+						       TOTAL_TRANSACTION_IDS,
+						       transaction_id);
+			if (transaction_id >= TOTAL_TRANSACTION_IDS)
+				break;
+
+			cb = NULL;
+			cb_arg = NULL;
+			spin_lock(&actrl->trx_list_lock);
+			hash_for_each_possible(actrl->trx_list, handler,
+					       next, transaction_id) {
+				if (handler->transaction_id == transaction_id) {
+					cb = handler->cb;
+					cb_arg = handler->cb_arg;
+					break;
+				}
+			}
+			spin_unlock(&actrl->trx_list_lock);
+			if (cb)
+				cb(cb_arg);
+
+			transaction_id++;
+		} while (transaction_id < TOTAL_TRANSACTION_IDS);
+	}
+	enable_irq(actrl->irq);
+}
+
+/**
+ * stratix10_svc_async_init - Initialize the Stratix10 service
+ *                            controller for asynchronous operations.
+ * @controller: Pointer to the Stratix10 service controller structure.
+ *
+ * This function initializes the asynchronous service controller by
+ * setting up the necessary data structures ,initializing the
+ * transaction list and registering the IRQ handler for asynchronous
+ * transactions.
+ *
+ * Return: 0 on success, -EINVAL if the controller is NULL or already
+ *         initialized, -ENOMEM if memory allocation fails,
+ *         -EADDRINUSE if the client ID is already reserved, or other
+ *         negative error codes on failure.
+ *         -EOPNOTSUPP if system doesn't support async operations.
+ */
+static int stratix10_svc_async_init(struct stratix10_svc_controller *controller)
+{
+	struct stratix10_async_ctrl *actrl;
+	struct arm_smccc_res res;
+	struct device *dev;
+	int ret, irq;
+
+	if (!controller)
+		return -EINVAL;
+
+	actrl = &controller->actrl;
+
+	if (actrl->initialized)
+		return -EINVAL;
+
+	dev = controller->dev;
+
+	controller->invoke_fn(INTEL_SIP_SMC_SVC_VERSION, 0, 0, 0, 0, 0, 0, 0, &res);
+	if (res.a0 != INTEL_SIP_SMC_STATUS_OK ||
+	    !(res.a1 > ASYNC_ATF_MINIMUM_MAJOR_VERSION ||
+	      (res.a1 == ASYNC_ATF_MINIMUM_MAJOR_VERSION &&
+	       res.a2 >= ASYNC_ATF_MINIMUM_MINOR_VERSION))) {
+		dev_info(dev,
+			 "Intel Service Layer Driver: ATF version is not compatible for async operation\n");
+		actrl->supported = false;
+		return -EOPNOTSUPP;
+	}
+	actrl->supported = true;
+
+	actrl->invoke_fn = stratix10_smc_1_2;
+
+	ida_init(&actrl->async_id_pool);
+
+	/**
+	 * SIP_SVC_V1_CLIENT_ID is used by V1/stratix10_svc_send() clients
+	 * for communicating with SDM synchronously. We need to restrict
+	 * this in V3/stratix10_svc_async_send() usage to distinguish
+	 * between V1 and V3 messages in El3 firmware.
+	 */
+	ret = ida_alloc_range(&actrl->async_id_pool, SIP_SVC_V1_CLIENT_ID,
+			      SIP_SVC_V1_CLIENT_ID, GFP_KERNEL);
+	if (ret < 0) {
+		dev_err(dev,
+			"Intel Service Layer Driver: Error on reserving SIP_SVC_V1_CLIENT_ID\n");
+		ida_destroy(&actrl->async_id_pool);
+		actrl->invoke_fn = NULL;
+		return -EADDRINUSE;
+	}
+
+	spin_lock_init(&actrl->trx_list_lock);
+	hash_init(actrl->trx_list);
+	atomic_set(&actrl->common_achan_refcount, 0);
+
+	irq = of_irq_get(dev_of_node(dev), 0);
+	if (irq <= 0) {
+		dev_warn(dev, "Failed to get IRQ, falling back to polling mode\n");
+	} else {
+		ret = devm_request_any_context_irq(dev, irq, stratix10_svc_async_irq_handler,
+						   IRQF_NO_AUTOEN, "stratix10_svc", controller);
+		if (ret == 0) {
+			dev_info(dev,
+				 "Registered IRQ %d for sip async operations\n",
+				 irq);
+			actrl->irq = irq;
+			INIT_WORK(&actrl->async_work, stratix10_async_workqueue_handler);
+			enable_irq(actrl->irq);
+		}
+	}
+
+	actrl->initialized = true;
+	return 0;
+}
+
+/**
+ * stratix10_svc_async_exit - Clean up and exit the asynchronous
+ *                            service controller
+ * @ctrl: Pointer to the stratix10_svc_controller structure
+ *
+ * This function performs the necessary cleanup for the asynchronous service
+ * controller. It checks if the controller is valid and if it has been
+ * initialized. Also If the controller has an IRQ assigned, it frees the IRQ
+ * and flushes any pending asynchronous work. It then locks the transaction
+ * list and safely removes and deallocates each handler in the list.
+ * The function also removes any asynchronous clients associated with the
+ * controller's channels and destroys the asynchronous ID pool. Finally, it
+ * resets the asynchronous ID pool and invoke function pointers to NULL.
+ *
+ * Return: 0 on success, -EINVAL if the controller is invalid or not
+ *         initialized.
+ */
+static int stratix10_svc_async_exit(struct stratix10_svc_controller *ctrl)
+{
+	struct stratix10_svc_async_handler *handler;
+	struct stratix10_async_ctrl *actrl;
+	struct hlist_node *tmp;
+	int i;
+
+	if (!ctrl)
+		return -EINVAL;
+
+	actrl = &ctrl->actrl;
+
+	if (!actrl->initialized)
+		return -EINVAL;
+
+	actrl->initialized = false;
+
+	if (actrl->irq > 0) {
+		disable_irq(actrl->irq);
+		flush_work(&actrl->async_work);
+		devm_free_irq(ctrl->dev, actrl->irq, ctrl);
+		actrl->irq = 0;
+	}
+
+	scoped_guard(spinlock_bh, &actrl->trx_list_lock) {
+		hash_for_each_safe(actrl->trx_list, i, tmp, handler, next) {
+			ida_free(&handler->achan->job_id_pool,
+				 STRATIX10_GET_JOBID(handler->transaction_id));
+			hash_del(&handler->next);
+			kfree(handler);
+		}
+	}
+
+	for (i = 0; i < SVC_NUM_CHANNEL; i++) {
+		if (ctrl->chans[i].async_chan) {
+			stratix10_svc_remove_async_client(&ctrl->chans[i]);
+			ctrl->chans[i].async_chan = NULL;
+		}
+	}
+
+	ida_destroy(&actrl->async_id_pool);
+	actrl->invoke_fn = NULL;
+
+	return 0;
+}
+
+/**
  * stratix10_svc_free_channel() - free service channel
  * @chan: service channel to be freed
  *
@@ -962,26 +2072,37 @@ int stratix10_svc_send(struct stratix10_svc_chan *chan, void *msg)
 	int ret = 0;
 	unsigned int cpu = 0;
 
-	p_data = kzalloc(sizeof(*p_data), GFP_KERNEL);
+	p_data = kzalloc_obj(*p_data);
 	if (!p_data)
 		return -ENOMEM;
 
-	/* first client will create kernel thread */
-	if (!chan->ctrl->task) {
-		chan->ctrl->task =
-			kthread_run_on_cpu(svc_normal_to_secure_thread,
-					   (void *)chan->ctrl,
-					   cpu, "svc_smc_hvc_thread");
-			if (IS_ERR(chan->ctrl->task)) {
-				dev_err(chan->ctrl->dev,
-					"failed to create svc_smc_hvc_thread\n");
-				kfree(p_data);
-				return -EINVAL;
-			}
+	/* first caller creates the per-channel kthread */
+	if (!chan->task) {
+		struct task_struct *task;
+
+		task = kthread_run_on_cpu(svc_normal_to_secure_thread,
+					  (void *)chan,
+					  cpu, "svc_smc_hvc_thread");
+		if (IS_ERR(task)) {
+			dev_err(chan->ctrl->dev,
+				"failed to create svc_smc_hvc_thread\n");
+			kfree(p_data);
+			return -EINVAL;
+		}
+
+		spin_lock(&chan->lock);
+		if (chan->task) {
+			/* another caller won the race; discard our thread */
+			spin_unlock(&chan->lock);
+			kthread_stop(task);
+		} else {
+			chan->task = task;
+			spin_unlock(&chan->lock);
+		}
 	}
 
-	pr_debug("%s: sent P-va=%p, P-com=%x, P-size=%u\n", __func__,
-		 p_msg->payload, p_msg->command,
+	pr_debug("%s: %s: sent P-va=%p, P-com=%x, P-size=%u\n", __func__,
+		 chan->name, p_msg->payload, p_msg->command,
 		 (unsigned int)p_msg->payload_length);
 
 	if (list_empty(&svc_data_mem)) {
@@ -992,6 +2113,7 @@ int stratix10_svc_send(struct stratix10_svc_chan *chan, void *msg)
 			p_data->flag = ct->flags;
 		}
 	} else {
+		guard(mutex)(&svc_mem_lock);
 		list_for_each_entry(p_mem, &svc_data_mem, node)
 			if (p_mem->vaddr == p_msg->payload) {
 				p_data->paddr = p_mem->paddr;
@@ -1016,12 +2138,16 @@ int stratix10_svc_send(struct stratix10_svc_chan *chan, void *msg)
 	p_data->arg[2] = p_msg->arg[2];
 	p_data->size = p_msg->payload_length;
 	p_data->chan = chan;
-	pr_debug("%s: put to FIFO pa=0x%016x, cmd=%x, size=%u\n", __func__,
-	       (unsigned int)p_data->paddr, p_data->command,
-	       (unsigned int)p_data->size);
-	ret = kfifo_in_spinlocked(&chan->ctrl->svc_fifo, p_data,
+	pr_debug("%s: %s: put to FIFO pa=0x%016x, cmd=%x, size=%u\n",
+		 __func__,
+		 chan->name,
+		 (unsigned int)p_data->paddr,
+		 p_data->command,
+		 (unsigned int)p_data->size);
+
+	ret = kfifo_in_spinlocked(&chan->svc_fifo, p_data,
 				  sizeof(*p_data),
-				  &chan->ctrl->svc_fifo_lock);
+				  &chan->svc_fifo_lock);
 
 	kfree(p_data);
 
@@ -1042,11 +2168,12 @@ EXPORT_SYMBOL_GPL(stratix10_svc_send);
  */
 void stratix10_svc_done(struct stratix10_svc_chan *chan)
 {
-	/* stop thread when thread is running AND only one active client */
-	if (chan->ctrl->task && chan->ctrl->num_active_client <= 1) {
-		pr_debug("svc_smc_hvc_shm_thread is stopped\n");
-		kthread_stop(chan->ctrl->task);
-		chan->ctrl->task = NULL;
+	/* stop thread when thread is running */
+	if (chan->task) {
+		pr_debug("%s: %s: svc_smc_hvc_shm_thread is stopping\n",
+			 __func__, chan->name);
+		kthread_stop(chan->task);
+		chan->task = NULL;
 	}
 }
 EXPORT_SYMBOL_GPL(stratix10_svc_done);
@@ -1064,31 +2191,50 @@ EXPORT_SYMBOL_GPL(stratix10_svc_done);
 void *stratix10_svc_allocate_memory(struct stratix10_svc_chan *chan,
 				    size_t size)
 {
+	struct stratix10_svc_controller *ctrl = chan->ctrl;
 	struct stratix10_svc_data_mem *pmem;
-	unsigned long va;
-	phys_addr_t pa;
-	struct gen_pool *genpool = chan->ctrl->genpool;
-	size_t s = roundup(size, 1 << genpool->min_alloc_order);
+	struct gen_pool *genpool;
+	dma_addr_t dma_addr;
+	size_t s;
+	void *va;
 
-	pmem = devm_kzalloc(chan->ctrl->dev, sizeof(*pmem), GFP_KERNEL);
+	pmem = kzalloc_obj(*pmem);
 	if (!pmem)
 		return ERR_PTR(-ENOMEM);
 
-	va = gen_pool_alloc(genpool, s);
-	if (!va)
-		return ERR_PTR(-ENOMEM);
+	if (ctrl->use_dma_mem) {
+		va = dma_alloc_coherent(ctrl->dev, size, &dma_addr, GFP_KERNEL);
+		if (!va) {
+			kfree(pmem);
+			return ERR_PTR(-ENOMEM);
+		}
 
-	memset((void *)va, 0, s);
-	pa = gen_pool_virt_to_phys(genpool, va);
+		pmem->vaddr = va;
+		pmem->paddr = dma_addr + ctrl->dma_addr_offset;
+		pmem->dma_addr = dma_addr;
+		pmem->size = size;
+	} else {
+		genpool = ctrl->genpool;
+		s = roundup(size, 1 << genpool->min_alloc_order);
 
-	pmem->vaddr = (void *)va;
-	pmem->paddr = pa;
-	pmem->size = s;
+		va = (void *)gen_pool_alloc(genpool, s);
+		if (!va) {
+			kfree(pmem);
+			return ERR_PTR(-ENOMEM);
+		}
+
+		memset(va, 0, s);
+		pmem->vaddr = va;
+		pmem->paddr = gen_pool_virt_to_phys(genpool, (unsigned long)va);
+		pmem->size = s;
+	}
+
+	guard(mutex)(&svc_mem_lock);
 	list_add_tail(&pmem->node, &svc_data_mem);
-	pr_debug("%s: va=%p, pa=0x%016x\n", __func__,
-		 pmem->vaddr, (unsigned int)pmem->paddr);
+	pr_debug("%s: %s: va=%p, addr=0x%016llx\n", __func__,
+		 chan->name, pmem->vaddr, (unsigned long long)pmem->paddr);
 
-	return (void *)va;
+	return va;
 }
 EXPORT_SYMBOL_GPL(stratix10_svc_allocate_memory);
 
@@ -1101,103 +2247,234 @@ EXPORT_SYMBOL_GPL(stratix10_svc_allocate_memory);
  */
 void stratix10_svc_free_memory(struct stratix10_svc_chan *chan, void *kaddr)
 {
+	struct stratix10_svc_controller *ctrl = chan->ctrl;
 	struct stratix10_svc_data_mem *pmem;
 
-	list_for_each_entry(pmem, &svc_data_mem, node)
-		if (pmem->vaddr == kaddr) {
-			gen_pool_free(chan->ctrl->genpool,
-				       (unsigned long)kaddr, pmem->size);
-			pmem->vaddr = NULL;
-			list_del(&pmem->node);
-			return;
-		}
+	guard(mutex)(&svc_mem_lock);
 
-	list_del(&svc_data_mem);
+	list_for_each_entry(pmem, &svc_data_mem, node) {
+		if (pmem->vaddr != kaddr)
+			continue;
+
+		if (ctrl->use_dma_mem) {
+			dma_free_coherent(ctrl->dev, pmem->size,
+					  pmem->vaddr, pmem->dma_addr);
+		} else {
+			gen_pool_free(ctrl->genpool,
+				      (unsigned long)kaddr, pmem->size);
+		}
+		list_del(&pmem->node);
+		kfree(pmem);
+		return;
+	}
+
+	dev_warn(ctrl->dev, "free of unknown buffer %p\n", kaddr);
 }
 EXPORT_SYMBOL_GPL(stratix10_svc_free_memory);
 
+static void psci_offline_secondary_cpus(struct stratix10_svc_controller *ctrl)
+{
+	cpumask_var_t mask;
+	int cpu, ret;
+
+	if (!alloc_cpumask_var(&mask, GFP_KERNEL))
+		return;
+
+	/*
+	 * Snapshot cpu_online_mask before the loop; remove_cpu() modifies it
+	 * as each CPU is brought down. Always preserve CPU 0 (boot CPU) to
+	 * run the reboot.
+	 */
+	cpumask_copy(mask, cpu_online_mask);
+	cpumask_clear_cpu(0, mask);
+
+	/*
+	 * Offlining is best-effort: if a CPU refuses to go down we log the
+	 * error and continue so the remaining secondaries are still attempted
+	 * and the warm reboot can proceed.
+	 */
+	for_each_cpu(cpu, mask) {
+		ret = remove_cpu(cpu);
+		if (ret)
+			dev_err(ctrl->dev,
+				"psci_cpu_off: failed to offline CPU%d: %d\n",
+				cpu, ret);
+	}
+
+	free_cpumask_var(mask);
+}
+
+static int psci_cpu_off_reboot_notifier(struct notifier_block *nb,
+					unsigned long action, void *data)
+{
+	struct stratix10_svc_controller *ctrl =
+		container_of(nb, struct stratix10_svc_controller, psci_reboot_nb);
+
+	if (reboot_mode != REBOOT_WARM)
+		return NOTIFY_DONE;
+
+	if (action == SYS_RESTART)
+		psci_offline_secondary_cpus(ctrl);
+
+	return NOTIFY_OK;
+}
+
+static void psci_cpu_off_teardown(struct stratix10_svc_controller *ctrl)
+{
+	unregister_reboot_notifier(&ctrl->psci_reboot_nb);
+}
+
 static const struct of_device_id stratix10_svc_drv_match[] = {
-	{.compatible = "intel,stratix10-svc"},
-	{.compatible = "intel,agilex-svc"},
+	{ .compatible = "intel,stratix10-svc", .data = &psci_cpu_off_pdata },
+	{ .compatible = "intel,agilex-svc",    .data = &psci_cpu_off_pdata },
+	{ .compatible = "intel,agilex5-svc",   .data = &agilex5_pdata },
 	{},
 };
+
+static const char * const chan_names[SVC_NUM_CHANNEL] = {
+	SVC_CLIENT_FPGA,
+	SVC_CLIENT_RSU,
+	SVC_CLIENT_FCS,
+	SVC_CLIENT_HWMON
+};
+
+static void svc_data_mem_cleanup(void *data)
+{
+	struct stratix10_svc_controller *ctrl = data;
+	struct stratix10_svc_data_mem *pmem, *tmp;
+
+	guard(mutex)(&svc_mem_lock);
+
+	list_for_each_entry_safe(pmem, tmp, &svc_data_mem, node) {
+		dev_warn(ctrl->dev, "leaked svc buffer %p, freeing on unbind\n",
+			 pmem->vaddr);
+		if (ctrl->use_dma_mem) {
+			dma_free_coherent(ctrl->dev, pmem->size,
+					  pmem->vaddr, pmem->dma_addr);
+		} else {
+			gen_pool_free(ctrl->genpool,
+				      (unsigned long)pmem->vaddr, pmem->size);
+		}
+		list_del(&pmem->node);
+		kfree(pmem);
+	}
+}
 
 static int stratix10_svc_drv_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct stratix10_svc_controller *controller;
-	struct stratix10_svc_chan *chans;
-	struct gen_pool *genpool;
+	struct gen_pool *genpool = NULL;
 	struct stratix10_svc_sh_memory *sh_memory;
-	struct stratix10_svc *svc;
+	struct stratix10_svc *svc = NULL;
+	const struct stratix10_svc_pdata *pdata = of_device_get_match_data(dev);
+	struct arm_smccc_res res;
+	bool use_dma_mem = false;
 
 	svc_invoke_fn *invoke_fn;
 	size_t fifo_size;
-	int ret;
+	int ret, i = 0;
 
 	/* get SMC or HVC function */
 	invoke_fn = get_invoke_func(dev);
 	if (IS_ERR(invoke_fn))
 		return -EINVAL;
 
-	sh_memory = devm_kzalloc(dev, sizeof(*sh_memory), GFP_KERNEL);
-	if (!sh_memory)
-		return -ENOMEM;
+	use_dma_mem = pdata && pdata->use_dma_mem;
 
-	sh_memory->invoke_fn = invoke_fn;
-	ret = svc_get_sh_memory(pdev, sh_memory);
-	if (ret)
-		return ret;
+	if (use_dma_mem) {
+		if (!iommu_get_domain_for_dev(dev)) {
+			dev_err(dev,
+				"SMMU is required for agilex5-svc but no IOMMU domain found\n");
+			dev_err(dev,
+				"Ensure the SMMU node is enabled in the device tree and 'iommus' is set for this node\n");
+			return -ENODEV;
+		}
 
-	genpool = svc_create_memory_pool(pdev, sh_memory);
-	if (IS_ERR(genpool))
-		return PTR_ERR(genpool);
+		invoke_fn(INTEL_SIP_SMC_SDM_REMAPPER_CONFIG,
+			  INTEL_SIP_SMC_SDM_REMAPPER_BYPASS,
+			  0, 0, 0, 0, 0, 0, &res);
+
+		ret = svc_setup_dma_memory(pdev);
+		if (ret)
+			return ret;
+	} else {
+		sh_memory = devm_kzalloc(dev, sizeof(*sh_memory), GFP_KERNEL);
+		if (!sh_memory)
+			return -ENOMEM;
+
+		sh_memory->invoke_fn = invoke_fn;
+		ret = svc_get_sh_memory(pdev, sh_memory);
+		if (ret)
+			return ret;
+
+		genpool = svc_create_memory_pool(pdev, sh_memory);
+		if (IS_ERR(genpool))
+			return PTR_ERR(genpool);
+	}
 
 	/* allocate service controller and supporting channel */
-	controller = devm_kzalloc(dev, sizeof(*controller), GFP_KERNEL);
+	controller = devm_kzalloc(dev, struct_size(controller, chans, SVC_NUM_CHANNEL),
+				GFP_KERNEL);
 	if (!controller) {
 		ret = -ENOMEM;
 		goto err_destroy_pool;
 	}
 
-	chans = devm_kmalloc_array(dev, SVC_NUM_CHANNEL,
-				   sizeof(*chans), GFP_KERNEL | __GFP_ZERO);
-	if (!chans) {
-		ret = -ENOMEM;
-		goto err_destroy_pool;
-	}
-
-	controller->dev = dev;
 	controller->num_chans = SVC_NUM_CHANNEL;
+	controller->dev = dev;
 	controller->num_active_client = 0;
-	controller->chans = chans;
 	controller->genpool = genpool;
-	controller->task = NULL;
 	controller->invoke_fn = invoke_fn;
+	controller->use_dma_mem = use_dma_mem;
+	controller->dma_addr_offset = use_dma_mem ? SVC_SDM_DMA_ADDR_OFFSET : 0;
+	INIT_LIST_HEAD(&controller->node);
 	init_completion(&controller->complete_status);
 
-	fifo_size = sizeof(struct stratix10_svc_data) * SVC_NUM_DATA_IN_FIFO;
-	ret = kfifo_alloc(&controller->svc_fifo, fifo_size, GFP_KERNEL);
-	if (ret) {
-		dev_err(dev, "failed to allocate FIFO\n");
-		goto err_destroy_pool;
+	if (use_dma_mem) {
+		ret = devm_add_action_or_reset(dev, svc_data_mem_cleanup, controller);
+		if (ret)
+			goto err_destroy_pool;
 	}
-	spin_lock_init(&controller->svc_fifo_lock);
 
-	chans[0].scl = NULL;
-	chans[0].ctrl = controller;
-	chans[0].name = SVC_CLIENT_FPGA;
-	spin_lock_init(&chans[0].lock);
+	if (pdata && pdata->needs_psci_cpu_off) {
+		controller->psci_reboot_nb.notifier_call =
+			psci_cpu_off_reboot_notifier;
+		controller->psci_reboot_nb.priority = INT_MAX;
 
-	chans[1].scl = NULL;
-	chans[1].ctrl = controller;
-	chans[1].name = SVC_CLIENT_RSU;
-	spin_lock_init(&chans[1].lock);
+		ret = register_reboot_notifier(&controller->psci_reboot_nb);
+		if (ret) {
+			dev_err(dev, "failed to register reboot notifier: %d\n", ret);
+			goto err_destroy_pool;
+		}
+	}
 
-	chans[2].scl = NULL;
-	chans[2].ctrl = controller;
-	chans[2].name = SVC_CLIENT_FCS;
-	spin_lock_init(&chans[2].lock);
+	ret = stratix10_svc_async_init(controller);
+	if (ret == -EOPNOTSUPP) {
+		dev_info(dev, "Intel Service Layer Driver Initialized (sync-only mode)\n");
+	} else if (ret) {
+		dev_dbg(dev, "Intel Service Layer Driver: Error on stratix10_svc_async_init %d\n",
+			ret);
+		goto err_free_notifier;
+	} else {
+		dev_info(dev, "Intel Service Layer Driver Initialized\n");
+	}
+
+	fifo_size = sizeof(struct stratix10_svc_data) * SVC_NUM_DATA_IN_FIFO;
+	mutex_init(&controller->sdm_lock);
+
+	for (i = 0; i < SVC_NUM_CHANNEL; i++) {
+		controller->chans[i].scl = NULL;
+		controller->chans[i].ctrl = controller;
+		controller->chans[i].name = (char *)chan_names[i];
+		spin_lock_init(&controller->chans[i].lock);
+		ret = kfifo_alloc(&controller->chans[i].svc_fifo, fifo_size, GFP_KERNEL);
+		if (ret) {
+			dev_err(dev, "failed to allocate FIFO %d\n", i);
+			goto err_free_fifos;
+		}
+		spin_lock_init(&controller->chans[i].svc_fifo_lock);
+	}
 
 	list_add_tail(&controller->node, &svc_ctrl);
 	platform_set_drvdata(pdev, controller);
@@ -1206,7 +2483,7 @@ static int stratix10_svc_drv_probe(struct platform_device *pdev)
 	svc = devm_kzalloc(dev, sizeof(*svc), GFP_KERNEL);
 	if (!svc) {
 		ret = -ENOMEM;
-		goto err_free_kfifo;
+		goto err_free_fifos;
 	}
 	controller->svc = svc;
 
@@ -1214,62 +2491,89 @@ static int stratix10_svc_drv_probe(struct platform_device *pdev)
 	if (!svc->stratix10_svc_rsu) {
 		dev_err(dev, "failed to allocate %s device\n", STRATIX10_RSU);
 		ret = -ENOMEM;
-		goto err_free_kfifo;
+		goto err_free_fifos;
 	}
 
 	ret = platform_device_add(svc->stratix10_svc_rsu);
-	if (ret) {
-		platform_device_put(svc->stratix10_svc_rsu);
-		goto err_free_kfifo;
-	}
+	if (ret)
+		goto err_put_device;
 
-	svc->intel_svc_fcs = platform_device_alloc(INTEL_FCS, 1);
-	if (!svc->intel_svc_fcs) {
-		dev_err(dev, "failed to allocate %s device\n", INTEL_FCS);
-		ret = -ENOMEM;
-		goto err_unregister_rsu_dev;
-	}
+	if (IS_ENABLED(CONFIG_SENSORS_ALTERA_SOCFPGA_HWMON)) {
+		svc->stratix10_svc_hwmon =
+			platform_device_alloc(SOCFPGA_HWMON, 0);
+		if (!svc->stratix10_svc_hwmon) {
+			dev_err(dev, "failed to allocate %s device\n",
+				SOCFPGA_HWMON);
+		} else {
+			svc->stratix10_svc_hwmon->dev.parent = dev;
 
-	ret = platform_device_add(svc->intel_svc_fcs);
-	if (ret) {
-		platform_device_put(svc->intel_svc_fcs);
-		goto err_unregister_rsu_dev;
+			ret = platform_device_add(svc->stratix10_svc_hwmon);
+			if (ret) {
+				dev_err(dev, "failed to add %s device: %d\n",
+					SOCFPGA_HWMON, ret);
+				platform_device_put(svc->stratix10_svc_hwmon);
+				svc->stratix10_svc_hwmon = NULL;
+			}
+		}
 	}
 
 	ret = of_platform_default_populate(dev_of_node(dev), NULL, dev);
 	if (ret)
-		goto err_unregister_fcs_dev;
+		goto err_unregister_clients;
 
 	pr_info("Intel Service Layer Driver Initialized\n");
 
 	return 0;
 
-err_unregister_fcs_dev:
-	platform_device_unregister(svc->intel_svc_fcs);
-err_unregister_rsu_dev:
-	platform_device_unregister(svc->stratix10_svc_rsu);
-err_free_kfifo:
-	kfifo_free(&controller->svc_fifo);
+err_unregister_clients:
+	if (svc->stratix10_svc_hwmon)
+		platform_device_unregister(svc->stratix10_svc_hwmon);
+	if (svc->stratix10_svc_rsu)
+		platform_device_unregister(svc->stratix10_svc_rsu);
+	goto err_free_fifos;
+err_put_device:
+	platform_device_put(svc->stratix10_svc_rsu);
+err_free_fifos:
+	/* only remove from list if list_add_tail() was reached */
+	if (!list_empty(&controller->node))
+		list_del(&controller->node);
+	/* free only the FIFOs that were successfully allocated */
+	while (i--)
+		kfifo_free(&controller->chans[i].svc_fifo);
+	stratix10_svc_async_exit(controller);
+err_free_notifier:
+	psci_cpu_off_teardown(controller);
 err_destroy_pool:
-	gen_pool_destroy(genpool);
+	if (genpool)
+		gen_pool_destroy(genpool);
+
 	return ret;
 }
 
 static void stratix10_svc_drv_remove(struct platform_device *pdev)
 {
+	int i;
 	struct stratix10_svc_controller *ctrl = platform_get_drvdata(pdev);
 	struct stratix10_svc *svc = ctrl->svc;
 
+	platform_device_unregister(svc->stratix10_svc_rsu);
+	if (svc->stratix10_svc_hwmon)
+		platform_device_unregister(svc->stratix10_svc_hwmon);
+
+	psci_cpu_off_teardown(ctrl);
+
+	stratix10_svc_async_exit(ctrl);
+
 	of_platform_depopulate(ctrl->dev);
 
-	platform_device_unregister(svc->intel_svc_fcs);
-	platform_device_unregister(svc->stratix10_svc_rsu);
-
-	kfifo_free(&ctrl->svc_fifo);
-	if (ctrl->task) {
-		kthread_stop(ctrl->task);
-		ctrl->task = NULL;
+	for (i = 0; i < SVC_NUM_CHANNEL; i++) {
+		if (ctrl->chans[i].task) {
+			kthread_stop(ctrl->chans[i].task);
+			ctrl->chans[i].task = NULL;
+		}
+		kfifo_free(&ctrl->chans[i].svc_fifo);
 	}
+
 	if (ctrl->genpool)
 		gen_pool_destroy(ctrl->genpool);
 	list_del(&ctrl->node);

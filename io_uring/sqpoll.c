@@ -13,12 +13,14 @@
 #include <linux/cpuset.h>
 #include <linux/sched/cputime.h>
 #include <linux/io_uring.h>
+#include <linux/kcov.h>
 
 #include <uapi/linux/io_uring.h>
 
 #include "io_uring.h"
 #include "tctx.h"
 #include "napi.h"
+#include "cancel.h"
 #include "sqpoll.h"
 
 #define IORING_SQPOLL_CAP_ENTRIES_VALUE 8
@@ -61,6 +63,24 @@ void io_sq_thread_park(struct io_sq_data *sqd)
 	}
 }
 
+/*
+ * The sqd has two holders: its rings, as one, and its thread. Neither waits
+ * for the other to let go. The one that lets go last frees the sqd.
+ */
+static void io_sq_data_release(struct io_sq_data *sqd)
+{
+	if (refcount_dec_and_test(&sqd->free_refs))
+		kfree(sqd);
+}
+
+/*
+ * Ask the thread to exit, and don't wait for it. A thread that is stopped or
+ * frozen exits only when a user lets it run again, and the exit work of the
+ * ring would keep its place in the workqueue until then. All rings have left
+ * ctx_list by now and have no request left, so the thread can reach none of
+ * them. What it still uses is its own or counted: the sqd by free_refs, the
+ * hash of its io-wq by hash->refs.
+ */
 void io_sq_thread_stop(struct io_sq_data *sqd)
 {
 	struct task_struct *tsk;
@@ -75,7 +95,6 @@ void io_sq_thread_stop(struct io_sq_data *sqd)
 		wake_up_process(tsk);
 	}
 	mutex_unlock(&sqd->lock);
-	wait_for_completion(&sqd->exited);
 }
 
 void io_put_sq_data(struct io_sq_data *sqd)
@@ -84,7 +103,7 @@ void io_put_sq_data(struct io_sq_data *sqd)
 		WARN_ON_ONCE(atomic_read(&sqd->park_pending));
 
 		io_sq_thread_stop(sqd);
-		kfree(sqd);
+		io_sq_data_release(sqd);
 	}
 }
 
@@ -152,16 +171,16 @@ static struct io_sq_data *io_get_sq_data(struct io_uring_params *p,
 			return sqd;
 	}
 
-	sqd = kzalloc(sizeof(*sqd), GFP_KERNEL);
+	sqd = kzalloc_obj(*sqd);
 	if (!sqd)
 		return ERR_PTR(-ENOMEM);
 
 	atomic_set(&sqd->park_pending, 0);
 	refcount_set(&sqd->refs, 1);
+	refcount_set(&sqd->free_refs, 2);
 	INIT_LIST_HEAD(&sqd->ctx_list);
 	mutex_init(&sqd->lock);
 	init_waitqueue_head(&sqd->wait);
-	init_completion(&sqd->exited);
 	return sqd;
 }
 
@@ -211,7 +230,7 @@ static int __io_sq_thread(struct io_ring_ctx *ctx, struct io_sq_data *sqd,
 	if (cap_entries && to_submit > IORING_SQPOLL_CAP_ENTRIES_VALUE)
 		to_submit = IORING_SQPOLL_CAP_ENTRIES_VALUE;
 
-	if (to_submit || !wq_list_empty(&ctx->iopoll_list)) {
+	if (to_submit || !list_empty(&ctx->iopoll_list)) {
 		const struct cred *creds = NULL;
 
 		io_sq_start_worktime(ist);
@@ -220,7 +239,7 @@ static int __io_sq_thread(struct io_ring_ctx *ctx, struct io_sq_data *sqd,
 			creds = override_creds(ctx->sq_creds);
 
 		mutex_lock(&ctx->uring_lock);
-		if (!wq_list_empty(&ctx->iopoll_list))
+		if (!list_empty(&ctx->iopoll_list))
 			io_do_iopoll(ctx, true);
 
 		/*
@@ -259,39 +278,29 @@ static bool io_sqd_handle_event(struct io_sq_data *sqd)
 }
 
 /*
- * Run task_work, processing the retry_list first. The retry_list holds
- * entries that we passed on in the previous run, if we had more task_work
- * than we were asked to process. Newly queued task_work isn't run until the
- * retry list has been fully processed.
+ * Run task_work, processing no more than max_entries at a time. If more
+ * than that is pending, it simply stays on the queue for the next run.
  */
-static unsigned int io_sq_tw(struct llist_node **retry_list, int max_entries)
+static unsigned int io_sq_tw(int max_entries)
 {
 	struct io_uring_task *tctx = current->io_uring;
 	unsigned int count = 0;
 
-	if (*retry_list) {
-		*retry_list = io_handle_tw_list(*retry_list, &count, max_entries);
-		if (count >= max_entries)
-			goto out;
-		max_entries -= count;
-	}
-	*retry_list = tctx_task_work_run(tctx, max_entries, &count);
-out:
+	tctx_task_work_run(tctx, max_entries, &count);
 	if (task_work_pending(current))
 		task_work_run();
 	return count;
 }
 
-static bool io_sq_tw_pending(struct llist_node *retry_list)
+static bool io_sq_tw_pending(void)
 {
 	struct io_uring_task *tctx = current->io_uring;
 
-	return retry_list || !llist_empty(&tctx->task_list);
+	return !mpscq_empty(&tctx->task_list);
 }
 
 static int io_sq_thread(void *data)
 {
-	struct llist_node *retry_list = NULL;
 	struct io_sq_data *sqd = data;
 	struct io_ring_ctx *ctx;
 	unsigned long timeout = 0;
@@ -341,12 +350,16 @@ static int io_sq_thread(void *data)
 
 		cap_entries = !list_is_singular(&sqd->ctx_list);
 		list_for_each_entry(ctx, &sqd->ctx_list, sqd_list) {
-			int ret = __io_sq_thread(ctx, sqd, cap_entries, &ist);
+			int ret;
 
-			if (!sqt_spin && (ret > 0 || !wq_list_empty(&ctx->iopoll_list)))
+			kcov_remote_start_common(ctx->kcov_handle);
+			ret = __io_sq_thread(ctx, sqd, cap_entries, &ist);
+
+			if (!sqt_spin && (ret > 0 || !list_empty(&ctx->iopoll_list)))
 				sqt_spin = true;
+			kcov_remote_stop();
 		}
-		if (io_sq_tw(&retry_list, IORING_TW_CAP_ENTRIES_VALUE))
+		if (io_sq_tw(IORING_TW_CAP_ENTRIES_VALUE))
 			sqt_spin = true;
 
 		list_for_each_entry(ctx, &sqd->ctx_list, sqd_list) {
@@ -371,14 +384,14 @@ static int io_sq_thread(void *data)
 		}
 
 		prepare_to_wait(&sqd->wait, &wait, TASK_INTERRUPTIBLE);
-		if (!io_sqd_events_pending(sqd) && !io_sq_tw_pending(retry_list)) {
+		if (!io_sqd_events_pending(sqd) && !io_sq_tw_pending()) {
 			bool needs_sched = true;
 
 			list_for_each_entry(ctx, &sqd->ctx_list, sqd_list) {
 				atomic_or(IORING_SQ_NEED_WAKEUP,
 						&ctx->rings->sq_flags);
 				if ((ctx->flags & IORING_SETUP_IOPOLL) &&
-				    !wq_list_empty(&ctx->iopoll_list)) {
+				    !list_empty(&ctx->iopoll_list)) {
 					needs_sched = false;
 					break;
 				}
@@ -388,6 +401,13 @@ static int io_sq_thread(void *data)
 				 * reordered with the load of the SQ tail
 				 */
 				smp_mb__after_atomic();
+
+				/*
+				 * Nothing gets submitted before the ring is
+				 * enabled, which comes with a wake up.
+				 */
+				if (READ_ONCE(ctx->flags) & IORING_SETUP_R_DISABLED)
+					continue;
 
 				if (io_sqring_entries(ctx)) {
 					needs_sched = false;
@@ -410,9 +430,15 @@ static int io_sq_thread(void *data)
 		timeout = jiffies + sqd->sq_thread_idle;
 	}
 
-	if (retry_list)
-		io_sq_tw(&retry_list, UINT_MAX);
+	if (io_sq_tw_pending())
+		io_sq_tw(UINT_MAX);
 
+	/*
+	 * Cancelation drops sqd->lock while it waits, and a ring could attach
+	 * to a thread that is on its way out. A fatal signal doesn't set the
+	 * bit, so set it here for io_sq_offload_create() to see.
+	 */
+	set_bit(IO_SQ_THREAD_SHOULD_STOP, &sqd->state);
 	io_uring_cancel_generic(true, sqd);
 	rcu_assign_pointer(sqd->thread, NULL);
 	put_task_struct(current);
@@ -421,7 +447,7 @@ static int io_sq_thread(void *data)
 	io_run_task_work();
 	mutex_unlock(&sqd->lock);
 err_out:
-	complete(&sqd->exited);
+	io_sq_data_release(sqd);
 	do_exit(0);
 }
 
@@ -457,6 +483,7 @@ __cold int io_sq_offload_create(struct io_ring_ctx *ctx,
 			return -EINVAL;
 	}
 	if (ctx->flags & IORING_SETUP_SQPOLL) {
+		struct io_uring_task *tctx;
 		struct task_struct *tsk;
 		struct io_sq_data *sqd;
 		bool attached;
@@ -481,7 +508,10 @@ __cold int io_sq_offload_create(struct io_ring_ctx *ctx,
 		list_add(&ctx->sqd_list, &sqd->ctx_list);
 		io_sqd_update_thread_idle(sqd);
 		/* don't attach to a dying SQPOLL thread, would be racy */
-		ret = (attached && !sqd->thread) ? -ENXIO : 0;
+		ret = 0;
+		if (attached && (!sqd->thread ||
+		    test_bit(IO_SQ_THREAD_SHOULD_STOP, &sqd->state)))
+			ret = -ENXIO;
 		io_sq_thread_unpark(sqd);
 
 		if (ret < 0)
@@ -523,8 +553,13 @@ __cold int io_sq_offload_create(struct io_ring_ctx *ctx,
 		rcu_assign_pointer(sqd->thread, tsk);
 		mutex_unlock(&sqd->lock);
 
+		ret = 0;
 		get_task_struct(tsk);
-		ret = io_uring_alloc_task_context(tsk, ctx);
+		tctx = io_uring_alloc_task_context(tsk, ctx);
+		if (!IS_ERR(tctx))
+			tsk->io_uring = tctx;
+		else
+			ret = PTR_ERR(tctx);
 		wake_up_new_task(tsk);
 		if (ret)
 			goto err;
@@ -535,7 +570,8 @@ __cold int io_sq_offload_create(struct io_ring_ctx *ctx,
 	}
 	return 0;
 err_sqpoll:
-	complete(&ctx->sq_data->exited);
+	/* no thread was made: let go of its share */
+	io_sq_data_release(ctx->sq_data);
 err:
 	io_sq_thread_finish(ctx);
 	return ret;

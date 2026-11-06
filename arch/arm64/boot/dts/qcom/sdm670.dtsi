@@ -626,6 +626,7 @@
 			#clock-cells = <1>;
 			#reset-cells = <1>;
 			#power-domain-cells = <1>;
+			power-domains = <&rpmhpd SDM670_CX>;
 		};
 
 		qfprom: qfprom@784000 {
@@ -634,7 +635,7 @@
 			#address-cells = <1>;
 			#size-cells = <1>;
 
-			gpu_speed_bin: gpu_speed_bin@1a2 {
+			gpu_speed_bin: gpu-speed-bin@1a2 {
 				reg = <0x1a2 0x2>;
 				bits = <5 8>;
 			};
@@ -1060,6 +1061,21 @@
 				status = "disabled";
 			};
 
+			uart12: serial@a90000 {
+				compatible = "qcom,geni-debug-uart";
+				reg = <0 0x00a90000 0 0x4000>;
+				clock-names = "se";
+				clocks = <&gcc GCC_QUPV3_WRAP1_S4_CLK>;
+				pinctrl-names = "default";
+				pinctrl-0 = <&qup_uart12_default>;
+				interrupts = <GIC_SPI 357 IRQ_TYPE_LEVEL_HIGH>;
+				power-domains = <&rpmhpd SDM670_CX>;
+				interconnects = <&aggre2_noc MASTER_BLSP_2 0 &config_noc SLAVE_BLSP_2 0>,
+						<&gladiator_noc MASTER_AMPSS_M0 0 &config_noc SLAVE_BLSP_2 0>;
+				interconnect-names = "qup-core", "qup-config";
+				status = "disabled";
+			};
+
 			i2c13: i2c@a94000 {
 				compatible = "qcom,geni-i2c";
 				reg = <0 0x00a94000 0 0x4000>;
@@ -1122,6 +1138,23 @@
 				dma-names = "tx", "rx";
 				status = "disabled";
 			};
+		};
+
+		refgen: regulator@ff1000 {
+			compatible = "qcom,sdm670-refgen-regulator",
+				     "qcom,sdm845-refgen-regulator";
+			reg = <0x0 0x00ff1000 0x0 0x60>;
+		};
+
+		llcc: system-cache-controller@1100000 {
+			compatible = "qcom,sdm670-llcc";
+			reg = <0 0x01100000 0 0x50000>,
+			      <0 0x01180000 0 0x50000>,
+			      <0 0x01300000 0 0x50000>;
+			reg-names = "llcc0_base",
+				    "llcc1_base",
+				    "llcc_broadcast_base";
+			interrupts = <GIC_SPI 582 IRQ_TYPE_LEVEL_HIGH>;
 		};
 
 		mem_noc: interconnect@1380000 {
@@ -1189,6 +1222,34 @@
 			#interrupt-cells = <2>;
 			gpio-ranges = <&tlmm 0 0 151>;
 			wakeup-parent = <&pdc>;
+
+			cam_mclk0_default: cam-mclk0-default-state {
+				pins = "gpio13";
+				function = "cam_mclk";
+				drive-strength = <2>;
+				bias-disable;
+			};
+
+			cam_mclk1_default: cam-mclk1-default-state {
+				pins = "gpio14";
+				function = "cam_mclk";
+				drive-strength = <2>;
+				bias-disable;
+			};
+
+			cam_mclk2_default: cam-mclk2-default-state {
+				pins = "gpio15";
+				function = "cam_mclk";
+				drive-strength = <2>;
+				bias-disable;
+			};
+
+			cam_mclk3_default: cam-mclk3-default-state {
+				pins = "gpio16";
+				function = "cam_mclk";
+				drive-strength = <2>;
+				bias-disable;
+			};
 
 			cci0_default: cci0-default-state {
 				pins = "gpio17", "gpio18";
@@ -1298,6 +1359,262 @@
 				function = "qup15";
 			};
 
+			qup_uart0_default: qup-uart0-default-state {
+				tx-pins {
+					pins = "gpio2";
+					function = "qup0";
+					drive-strength = <2>;
+					bias-disable;
+				};
+
+				rx-pins {
+					pins = "gpio3";
+					function = "qup0";
+					drive-strength = <2>;
+					bias-disable;
+				};
+			};
+
+			qup_uart1_default: qup-uart1-default-state {
+				tx-pins {
+					pins = "gpio19";
+					function = "qup1";
+					drive-strength = <2>;
+					bias-disable;
+				};
+
+				rx-pins {
+					pins = "gpio20";
+					function = "qup1";
+					drive-strength = <2>;
+					bias-disable;
+				};
+			};
+
+			qup_uart2_default: qup-uart2-default-state {
+				tx-pins {
+					pins = "gpio29";
+					function = "qup2";
+					drive-strength = <2>;
+					bias-disable;
+				};
+
+				rx-pins {
+					pins = "gpio30";
+					function = "qup2";
+					drive-strength = <2>;
+					bias-disable;
+				};
+			};
+
+			qup_uart3_default: qup-uart3-default-state {
+				tx-pins {
+					pins = "gpio43";
+					function = "qup3";
+					drive-strength = <2>;
+					bias-disable;
+				};
+
+				rx-pins {
+					pins = "gpio44";
+					function = "qup3";
+					drive-strength = <2>;
+					bias-disable;
+				};
+			};
+
+			qup_uart4_default: qup-uart4-default-state {
+				tx-pins {
+					pins = "gpio91";
+					function = "qup4";
+					drive-strength = <2>;
+					bias-disable;
+				};
+
+				rx-pins {
+					pins = "gpio92";
+					function = "qup4";
+					drive-strength = <2>;
+					bias-disable;
+				};
+			};
+
+			qup_uart5_default: qup-uart5-default-state {
+				tx-pins {
+					pins = "gpio87";
+					function = "qup5";
+					drive-strength = <2>;
+					bias-disable;
+				};
+
+				rx-pins {
+					pins = "gpio88";
+					function = "qup5";
+					drive-strength = <2>;
+					bias-disable;
+				};
+			};
+
+			qup_uart6_default: qup-uart6-default-state {
+				tx-pins {
+					pins = "gpio47";
+					function = "qup6";
+					drive-strength = <2>;
+					bias-disable;
+				};
+
+				rx-pins {
+					pins = "gpio48";
+					function = "qup6";
+					drive-strength = <2>;
+					bias-disable;
+				};
+			};
+
+			qup_uart7_default: qup-uart7-default-state {
+				tx-pins {
+					pins = "gpio95";
+					function = "qup7";
+					drive-strength = <2>;
+					bias-disable;
+				};
+
+				rx-pins {
+					pins = "gpio96";
+					function = "qup7";
+					drive-strength = <2>;
+					bias-disable;
+				};
+			};
+
+			qup_uart8_default: qup-uart8-default-state {
+				tx-pins {
+					pins = "gpio67";
+					function = "qup8";
+					drive-strength = <2>;
+					bias-disable;
+				};
+
+				rx-pins {
+					pins = "gpio68";
+					function = "qup8";
+					drive-strength = <2>;
+					bias-disable;
+				};
+			};
+
+			qup_uart9_default: qup-uart9-default-state {
+				tx-pins {
+					pins = "gpio4";
+					function = "qup9";
+					drive-strength = <2>;
+					bias-disable;
+				};
+
+				rx-pins {
+					pins = "gpio5";
+					function = "qup9";
+					drive-strength = <2>;
+					bias-disable;
+				};
+			};
+
+			qup_uart10_default: qup-uart10-default-state {
+				tx-pins {
+					pins = "gpio53";
+					function = "qup10";
+					drive-strength = <2>;
+					bias-disable;
+				};
+
+				rx-pins {
+					pins = "gpio54";
+					function = "qup10";
+					drive-strength = <2>;
+					bias-disable;
+				};
+			};
+
+			qup_uart11_default: qup-uart11-default-state {
+				tx-pins {
+					pins = "gpio33";
+					function = "qup11";
+					drive-strength = <2>;
+					bias-disable;
+				};
+
+				rx-pins {
+					pins = "gpio34";
+					function = "qup11";
+					drive-strength = <2>;
+					bias-disable;
+				};
+			};
+
+			qup_uart12_default: qup-uart12-default-state {
+				tx-pins {
+					pins = "gpio51";
+					function = "qup12";
+					drive-strength = <2>;
+					bias-disable;
+				};
+
+				rx-pins {
+					pins = "gpio52";
+					function = "qup12";
+					drive-strength = <2>;
+					bias-disable;
+				};
+			};
+
+			qup_uart13_default: qup-uart13-default-state {
+				tx-pins {
+					pins = "gpio107";
+					function = "qup13";
+					drive-strength = <2>;
+					bias-disable;
+				};
+
+				rx-pins {
+					pins = "gpio108";
+					function = "qup13";
+					drive-strength = <2>;
+					bias-disable;
+				};
+			};
+
+			qup_uart14_default: qup-uart14-default-state {
+				tx-pins {
+					pins = "gpio31";
+					function = "qup14";
+					drive-strength = <2>;
+					bias-disable;
+				};
+
+				rx-pins {
+					pins = "gpio32";
+					function = "qup14";
+					drive-strength = <2>;
+					bias-disable;
+				};
+			};
+
+			qup_uart15_default: qup-uart15-default-state {
+				tx-pins {
+					pins = "gpio83";
+					function = "qup15";
+					drive-strength = <2>;
+					bias-disable;
+				};
+
+				rx-pins {
+					pins = "gpio84";
+					function = "qup15";
+					drive-strength = <2>;
+					bias-disable;
+				};
+			};
+
 			sdc1_state_on: sdc1-on-state {
 				clk-pins {
 					pins = "sdc1_clk";
@@ -1375,6 +1692,10 @@
 			nvmem-cell-names = "speed_bin";
 
 			status = "disabled";
+
+			gpu_zap_shader: zap-shader {
+				memory-region = <&gpu_mem>;
+			};
 
 			gpu_opp_table: opp-table {
 				compatible = "operating-points-v2";
@@ -1597,7 +1918,7 @@
 
 		pdc: interrupt-controller@b220000 {
 			compatible = "qcom,sdm670-pdc", "qcom,pdc";
-			reg = <0 0x0b220000 0 0x30000>;
+			reg = <0 0x0b220000 0 0x10000>;
 			qcom,pdc-ranges = <0 480 40>, <41 521 7>, <49 529 4>,
 					  <54 534 24>, <79 559 15>, <94 609 15>,
 					  <115 630 7>;
@@ -1766,28 +2087,16 @@
 				#address-cells = <1>;
 				#size-cells = <0>;
 
-				port@0 {
+				camss_port0: port@0 {
 					reg = <0>;
-
-					camss_endpoint0: endpoint {
-						status = "disabled";
-					};
 				};
 
-				port@1 {
+				camss_port1: port@1 {
 					reg = <1>;
-
-					camss_endpoint1: endpoint {
-						status = "disabled";
-					};
 				};
 
-				port@2 {
+				camss_port2: port@2 {
 					reg = <2>;
-
-					camss_endpoint2: endpoint {
-						status = "disabled";
-					};
 				};
 			};
 		};
@@ -1926,6 +2235,8 @@
 
 				phys = <&mdss_dsi0_phy>;
 
+				refgen-supply = <&refgen>;
+
 				#address-cells = <1>;
 				#size-cells = <0>;
 
@@ -1999,6 +2310,8 @@
 				power-domains = <&rpmhpd SDM670_CX>;
 
 				phys = <&mdss_dsi1_phy>;
+
+				refgen-supply = <&refgen>;
 
 				#address-cells = <1>;
 				#size-cells = <0>;
@@ -2258,6 +2571,79 @@
 			clock-names = "xo", "alternate";
 
 			#freq-domain-cells = <1>;
+		};
+
+		lpi_tlmm: pinctrl@62b40000 {
+			compatible = "qcom,sdm670-lpass-lpi-pinctrl";
+			reg = <0 0x62b40000 0 0x20000>;
+			gpio-controller;
+			#gpio-cells = <2>;
+			gpio-ranges = <&lpi_tlmm 0 0 32>;
+
+			cdc_pdm_default: cdc-pdm-default-state {
+				clk-pins {
+					pins = "gpio18";
+					function = "slimbus_clk";
+					drive-strength = <4>;
+					output-low;
+				};
+
+				sync-pins {
+					pins = "gpio19";
+					function = "pdm_sync";
+					drive-strength = <4>;
+					output-low;
+				};
+
+				tx-pins {
+					pins = "gpio20";
+					function = "pdm_tx";
+					drive-strength = <8>;
+				};
+
+				rx-pins {
+					pins = "gpio21", "gpio23", "gpio25";
+					function = "pdm_rx";
+					drive-strength = <4>;
+					output-low;
+				};
+			};
+
+			cdc_comp_default: cdc-comp-default-state {
+				pins = "gpio22", "gpio24";
+				function = "comp_rx";
+				drive-strength = <4>;
+			};
+
+			cdc_dmic_default: cdc-dmic-default-state {
+				clk1-pins {
+					pins = "gpio26";
+					function = "dmic1_clk";
+					drive-strength = <8>;
+					output-high;
+				};
+
+				clk2-pins {
+					pins = "gpio28";
+					function = "dmic2_clk";
+					drive-strength = <8>;
+					output-high;
+				};
+
+				data1-pins {
+					pins = "gpio27";
+					function = "dmic1_data";
+					drive-strength = <8>;
+					input-enable;
+				};
+
+				data2-pins {
+					pins = "gpio29";
+					function = "dmic2_data";
+					drive-strength = <8>;
+					input-enable;
+				};
+			};
 		};
 	};
 };

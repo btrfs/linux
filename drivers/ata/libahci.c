@@ -30,6 +30,7 @@
 #include <scsi/scsi_cmnd.h>
 #include <linux/libata.h>
 #include <linux/pci.h>
+#include <linux/pm_runtime.h>
 #include "ahci.h"
 #include "libata.h"
 
@@ -552,11 +553,7 @@ void ahci_save_initial_config(struct device *dev, struct ahci_host_priv *hpriv)
 
 	/* cross check port_map and cap.n_ports */
 	if (port_map) {
-		int map_ports = 0;
-
-		for (i = 0; i < AHCI_MAX_PORTS; i++)
-			if (port_map & (1 << i))
-				map_ports++;
+		int map_ports = hweight_long(port_map);
 
 		/* If PI has more ports than n_ports, whine, clear
 		 * port_map and let it be generated from n_ports.
@@ -748,15 +745,28 @@ void ahci_start_fis_rx(struct ata_port *ap)
 	struct ahci_port_priv *pp = ap->private_data;
 	u32 tmp;
 
-	/* set FIS registers */
+	/*
+	 * On HBAs that only support 32-bit addressing PxCLBU is read only '0'.
+	 * When applying the AHCI_HFLAG_32BIT_ONLY quirk, PxCLBU is RW, and the
+	 * reset value is Implementation Specific, so we need to clear it to 0.
+	 */
 	if (hpriv->cap & HOST_CAP_64)
 		writel((pp->cmd_slot_dma >> 16) >> 16,
 		       port_mmio + PORT_LST_ADDR_HI);
+	else if (hpriv->flags & AHCI_HFLAG_32BIT_ONLY)
+		writel(0, port_mmio + PORT_LST_ADDR_HI);
 	writel(pp->cmd_slot_dma & 0xffffffff, port_mmio + PORT_LST_ADDR);
 
+	/*
+	 * On HBAs that only support 32-bit addressing PxFBU is read only '0'.
+	 * When applying the AHCI_HFLAG_32BIT_ONLY quirk, PxFBU is RW, and the
+	 * reset value is Implementation Specific, so we need to clear it to 0.
+	 */
 	if (hpriv->cap & HOST_CAP_64)
 		writel((pp->rx_fis_dma >> 16) >> 16,
 		       port_mmio + PORT_FIS_ADDR_HI);
+	else if (hpriv->flags & AHCI_HFLAG_32BIT_ONLY)
+		writel(0, port_mmio + PORT_FIS_ADDR_HI);
 	writel(pp->rx_fis_dma & 0xffffffff, port_mmio + PORT_FIS_ADDR);
 
 	/* enable FIS reception */
@@ -1527,6 +1537,7 @@ int ahci_do_softreset(struct ata_link *link, unsigned int *class,
 	ata_link_err(link, "softreset failed (%s)\n", reason);
 	return rc;
 }
+EXPORT_SYMBOL_GPL(ahci_do_softreset);
 
 int ahci_check_ready(struct ata_link *link)
 {
@@ -1544,7 +1555,6 @@ static int ahci_softreset(struct ata_link *link, unsigned int *class,
 
 	return ahci_do_softreset(link, class, pmp, deadline, ahci_check_ready);
 }
-EXPORT_SYMBOL_GPL(ahci_do_softreset);
 
 static int ahci_bad_pmp_check_ready(struct ata_link *link)
 {
@@ -2212,6 +2222,7 @@ static void ahci_thaw(struct ata_port *ap)
 }
 
 void ahci_error_handler(struct ata_port *ap)
+	__must_hold(&ap->host->eh_mutex)
 {
 	struct ahci_host_priv *hpriv = ap->host->private_data;
 
@@ -2222,6 +2233,21 @@ void ahci_error_handler(struct ata_port *ap)
 	}
 
 	sata_pmp_error_handler(ap);
+
+	/*
+	 * ahci_do_softreset() turns FBS off before resetting a fan-out link
+	 * and turns it back on only if that reset succeeds. When it fails
+	 * (e.g. a hot-plugged drive is still spinning up), EH escalates to a
+	 * PMP hardreset, which never re-enables FBS, so the port would keep
+	 * command-based switching until the PMP is attached again (reboot).
+	 * Restore FBS once recovery is done and the PMP is still attached.
+	 */
+	if (sata_pmp_attached(ap) && ata_dev_enabled(ap->link.device)) {
+		struct ahci_port_priv *pp = ap->private_data;
+
+		if (pp->fbs_supported && !pp->fbs_enabled)
+			ahci_enable_fbs(ap);
+	}
 
 	if (!ata_dev_enabled(ap->link.device))
 		hpriv->stop_engine(ap);
@@ -2636,7 +2662,7 @@ void ahci_print_info(struct ata_host *host, const char *scc_s)
 		,
 
 		hweight32(impl),
-		(cap & 0x1f) + 1,
+		ahci_nr_ports(cap),
 		impl);
 
 	dev_info(host->dev,
@@ -2726,11 +2752,35 @@ static int ahci_host_activate_multi_irqs(struct ata_host *host,
 				0, pp->irq_desc, host->ports[i]);
 
 		if (rc)
-			return rc;
+			goto free_irqs;
 		ata_port_desc_misc(host->ports[i], irq);
 	}
 
-	return ata_host_register(host, sht);
+	rc = ata_host_register(host, sht);
+	if (rc)
+		goto free_irqs;
+
+	return 0;
+
+free_irqs:
+	/*
+	 * Free the IRQs which have been requested, so that the handlers can no
+	 * longer access the MMIO of the host once we return, e.g. after the
+	 * caller has disabled the clocks of the host.
+	 */
+	while (--i >= 0) {
+		struct ahci_port_priv *pp = host->ports[i]->private_data;
+
+		if (!pp)
+			continue;
+
+		devm_free_irq(host->dev, hpriv->get_irq_vector(host, i),
+			      host->ports[i]);
+	}
+
+	ata_host_undo_start(host);
+
+	return rc;
 }
 
 /**

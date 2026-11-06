@@ -33,7 +33,10 @@
 #include "amdgpu_gmc.h"
 #include "amdgpu_ras.h"
 #include "amdgpu_reset.h"
+#include "amdgpu_ring.h"
+#include "amdgpu_sdma.h"
 #include "amdgpu_xgmi.h"
+#include "amdgpu_atomfirmware.h"
 
 #include <drm/drm_drv.h>
 #include <drm/ttm/ttm_tt.h>
@@ -119,6 +122,11 @@ void amdgpu_gmc_get_pde_for_bo(struct amdgpu_bo *bo, int level,
 		break;
 	case TTM_PL_VRAM:
 		*addr = amdgpu_bo_gpu_offset(bo);
+		/* For SPM-backed VRAM, convert the MC address to a physical
+		 * address for system memory path access.
+		 */
+		if (amdgpu_virt_vram_is_spm(adev))
+			*addr = amdgpu_gmc_vram_mc2pa(adev, *addr);
 		break;
 	default:
 		*addr = 0;
@@ -169,7 +177,7 @@ int amdgpu_gmc_set_pte_pde(struct amdgpu_device *adev, void *cpu_pt_addr,
 	/*
 	 * The following is for PTE only. GART does not have PDEs.
 	*/
-	value = addr & 0x0000FFFFFFFFF000ULL;
+	value = addr & adev->gmc.pte_addr_mask;
 	value |= flags;
 	writeq(value, ptr + (gpu_page_idx * 8));
 
@@ -279,6 +287,15 @@ void amdgpu_gmc_sysvm_location(struct amdgpu_device *adev, struct amdgpu_gmc *mc
 			mc->gart_size >> 20, mc->gart_start, mc->gart_end);
 }
 
+void amdgpu_gmc_set_gart_size(struct amdgpu_device *adev, u64 default_size)
+{
+	if (amdgpu_gart_size == -1)
+		adev->gmc.gart_size =
+			default_size + adev->pm.smu_prv_buffer_size;
+	else
+		adev->gmc.gart_size = (u64)amdgpu_gart_size << 20;
+}
+
 /**
  * amdgpu_gmc_gart_location - try to find GART location
  *
@@ -313,7 +330,10 @@ void amdgpu_gmc_gart_location(struct amdgpu_device *adev, struct amdgpu_gmc *mc,
 		mc->gart_start = max_mc_address - mc->gart_size + 1;
 		break;
 	case AMDGPU_GART_PLACEMENT_LOW:
-		mc->gart_start = 0;
+		if (size_bf >= mc->gart_size)
+			mc->gart_start = 0;
+		else
+			mc->gart_start = ALIGN(mc->fb_end, four_gb);
 		break;
 	case AMDGPU_GART_PLACEMENT_BEST_FIT:
 	default:
@@ -498,8 +518,13 @@ void amdgpu_gmc_filter_faults_remove(struct amdgpu_device *adev, uint64_t addr,
 
 	if (adev->irq.retry_cam_enabled)
 		return;
+	else if (adev->irq.ih1.ring_size)
+		ih = &adev->irq.ih1;
+	else if (adev->irq.ih_soft.enabled)
+		ih = &adev->irq.ih_soft;
+	else
+		return;
 
-	ih = &adev->irq.ih1;
 	/* Get the WPTR of the last entry in IH ring */
 	last_wptr = amdgpu_ih_get_wptr(adev, ih);
 	/* Order wptr with ring data. */
@@ -522,6 +547,54 @@ void amdgpu_gmc_filter_faults_remove(struct amdgpu_device *adev, uint64_t addr,
 		tmp = fault->timestamp;
 		fault = &gmc->fault_ring[fault->next];
 	} while (fault->timestamp < tmp);
+}
+
+int amdgpu_gmc_handle_retry_fault(struct amdgpu_device *adev,
+				  struct amdgpu_iv_entry *entry,
+				  u64 addr,
+				  u32 cam_index,
+				  u32 node_id,
+				  bool write_fault)
+{
+	int ret;
+
+	if (adev->irq.retry_cam_enabled) {
+		/* Delegate it to a different ring if the hardware hasn't
+		 * already done it.
+		 */
+		if (entry->ih == &adev->irq.ih) {
+			amdgpu_irq_delegate(adev, entry, 8);
+			return 1;
+		}
+
+		ret = amdgpu_vm_handle_fault(adev, entry->pasid, entry->vmid, node_id,
+					     addr, entry->timestamp, write_fault);
+		WDOORBELL32(adev->irq.retry_cam_doorbell_index, cam_index);
+		if (ret)
+			return 1;
+	} else {
+		/* Process it only if it's the first fault for this address */
+		if (entry->ih != &adev->irq.ih_soft &&
+		    amdgpu_gmc_filter_faults(adev, entry->ih, addr, entry->pasid,
+					     entry->timestamp))
+			return 1;
+
+		/* Delegate it to a different ring if the hardware hasn't
+		 * already done it.
+		 */
+		if (entry->ih == &adev->irq.ih) {
+			amdgpu_irq_delegate(adev, entry, 8);
+			return 1;
+		}
+
+		/* Try to handle the recoverable page faults by filling page
+		 * tables
+		 */
+		if (amdgpu_vm_handle_fault(adev, entry->pasid, entry->vmid, node_id,
+					   addr, entry->timestamp, write_fault))
+			return 1;
+	}
+	return 0;
 }
 
 int amdgpu_gmc_ras_sw_init(struct amdgpu_device *adev)
@@ -562,16 +635,6 @@ int amdgpu_gmc_ras_sw_init(struct amdgpu_device *adev)
 		return r;
 
 	return 0;
-}
-
-int amdgpu_gmc_ras_late_init(struct amdgpu_device *adev)
-{
-	return 0;
-}
-
-void amdgpu_gmc_ras_fini(struct amdgpu_device *adev)
-{
-
 }
 
 	/*
@@ -616,7 +679,8 @@ int amdgpu_gmc_allocate_vm_inv_eng(struct amdgpu_device *adev)
 			continue;
 
 		/* Skip if the ring is a shared ring */
-		if (amdgpu_sdma_is_shared_inv_eng(adev, ring))
+		if (amdgpu_sdma_is_shared_inv_eng(adev, ring) ||
+		    amdgpu_jpeg_is_shared_inv_eng(adev, ring))
 			continue;
 
 		inv_eng = ffs(vm_inv_engs[vmhub]);
@@ -646,6 +710,12 @@ int amdgpu_gmc_allocate_vm_inv_eng(struct amdgpu_device *adev)
 					ring->name, ring->vm_inv_eng, shared_ring->name, ring->vm_hub);
 			continue;
 		}
+
+		/* All decode rings within one JPEG instance share one VM
+		 * invalidation engine (no-op unless ring is a JPEG instance's
+		 * first ring).
+		 */
+		amdgpu_jpeg_set_shared_inv_eng(adev, ring);
 	}
 
 	return 0;
@@ -654,11 +724,13 @@ int amdgpu_gmc_allocate_vm_inv_eng(struct amdgpu_device *adev)
 void amdgpu_gmc_flush_gpu_tlb(struct amdgpu_device *adev, uint32_t vmid,
 			      uint32_t vmhub, uint32_t flush_type)
 {
-	struct amdgpu_ring *ring = adev->mman.buffer_funcs_ring;
+	struct amdgpu_ring *ring;
 	struct amdgpu_vmhub *hub = &adev->vmhub[vmhub];
 	struct dma_fence *fence;
 	struct amdgpu_job *job;
 	int r;
+
+	ring = to_amdgpu_ring(adev->mman.buffer_funcs_scheds[0]);
 
 	if (!hub->sdma_invalidation_workaround || vmid ||
 	    !adev->mman.buffer_funcs_enabled || !adev->ib_pool_ready ||
@@ -689,11 +761,12 @@ void amdgpu_gmc_flush_gpu_tlb(struct amdgpu_device *adev, uint32_t vmid,
 	 * translation. Avoid this by doing the invalidation from the SDMA
 	 * itself at least for GART.
 	 */
-	mutex_lock(&adev->mman.gtt_window_lock);
-	r = amdgpu_job_alloc_with_ib(ring->adev, &adev->mman.high_pr,
+	mutex_lock(&adev->mman.default_entity.lock);
+	r = amdgpu_job_alloc_with_ib(ring->adev, &adev->mman.default_entity.base,
 				     AMDGPU_FENCE_OWNER_UNDEFINED,
 				     16 * 4, AMDGPU_IB_POOL_IMMEDIATE,
-				     &job, AMDGPU_KERNEL_JOB_ID_FLUSH_GPU_TLB);
+				     AMDGPU_KERNEL_JOB_ID_FLUSH_GPU_TLB,
+				     &job);
 	if (r)
 		goto error_alloc;
 
@@ -702,7 +775,7 @@ void amdgpu_gmc_flush_gpu_tlb(struct amdgpu_device *adev, uint32_t vmid,
 	job->ibs->ptr[job->ibs->length_dw++] = ring->funcs->nop;
 	amdgpu_ring_pad_ib(ring, &job->ibs[0]);
 	fence = amdgpu_job_submit(job);
-	mutex_unlock(&adev->mman.gtt_window_lock);
+	mutex_unlock(&adev->mman.default_entity.lock);
 
 	dma_fence_wait(fence, false);
 	dma_fence_put(fence);
@@ -710,94 +783,199 @@ void amdgpu_gmc_flush_gpu_tlb(struct amdgpu_device *adev, uint32_t vmid,
 	return;
 
 error_alloc:
-	mutex_unlock(&adev->mman.gtt_window_lock);
+	mutex_unlock(&adev->mman.default_entity.lock);
 	dev_err(adev->dev, "Error flushing GPU TLB using the SDMA (%d)!\n", r);
 }
 
-int amdgpu_gmc_flush_gpu_tlb_pasid(struct amdgpu_device *adev, uint16_t pasid,
-				   uint32_t flush_type, bool all_hub,
-				   uint32_t inst)
+static void amdgpu_gmc_flush_pasid_regs(struct amdgpu_device *adev, u16 pasid,
+					u32 flush_type, bool all_hub,
+					u32 inst)
+{
+	if (!adev->gmc.gmc_funcs->flush_gpu_tlb_pasid)
+		return;
+
+	if (adev->gmc.flush_tlb_needs_extra_type_2)
+		adev->gmc.gmc_funcs->flush_gpu_tlb_pasid(adev, pasid, 2, all_hub,
+							 inst);
+
+	if (adev->gmc.flush_tlb_needs_extra_type_0 && flush_type == 2)
+		adev->gmc.gmc_funcs->flush_gpu_tlb_pasid(adev, pasid, 0, all_hub,
+							 inst);
+
+	adev->gmc.gmc_funcs->flush_gpu_tlb_pasid(adev, pasid, flush_type, all_hub,
+						 inst);
+}
+
+/*
+ * Queue the invalidation on one XCC and return its fence without waiting, so
+ * that a caller flushing several XCCs can have them in flight together.  The
+ * KIQ ring, its lock and its fence sequence are per XCC, so the submissions do
+ * not interfere with each other.
+ */
+static int amdgpu_gmc_flush_pasid_kiq_submit(struct amdgpu_device *adev,
+					     u16 pasid, u32 flush_type,
+					     bool all_hub, u32 inst,
+					     u32 *seq)
+{
+	struct amdgpu_kiq *kiq = &adev->gfx.kiq[inst];
+	struct amdgpu_ring *ring = &kiq->ring;
+	unsigned int ndw;
+	int r;
+
+	/* one flush + 8 dwords fence */
+	ndw = kiq->pmf->invalidate_tlbs_size + 8;
+
+	if (adev->gmc.flush_tlb_needs_extra_type_2)
+		ndw += kiq->pmf->invalidate_tlbs_size;
+
+	if (adev->gmc.flush_tlb_needs_extra_type_0 && flush_type == 2)
+		ndw += kiq->pmf->invalidate_tlbs_size;
+
+	spin_lock(&kiq->ring_lock);
+	r = amdgpu_ring_alloc(ring, ndw);
+	if (r) {
+		spin_unlock(&kiq->ring_lock);
+		return r;
+	}
+
+	if (adev->gmc.flush_tlb_needs_extra_type_2)
+		kiq->pmf->kiq_invalidate_tlbs(ring, pasid, 2, all_hub);
+
+	if (flush_type == 2 && adev->gmc.flush_tlb_needs_extra_type_0)
+		kiq->pmf->kiq_invalidate_tlbs(ring, pasid, 0, all_hub);
+
+	kiq->pmf->kiq_invalidate_tlbs(ring, pasid, flush_type, all_hub);
+	r = amdgpu_fence_emit_polling(ring, seq, MAX_KIQ_REG_WAIT);
+	if (r) {
+		amdgpu_ring_undo(ring);
+		spin_unlock(&kiq->ring_lock);
+		return r;
+	}
+
+	amdgpu_ring_commit(ring);
+	spin_unlock(&kiq->ring_lock);
+
+	return 0;
+}
+
+/*
+ * Wait for an invalidation queued by amdgpu_gmc_flush_pasid_kiq_submit().
+ *
+ * Bailing out because a reset became pending is reported as success: the reset
+ * flushes all TLBs anyway, so the invalidation no longer has to complete.  Only
+ * running out of tries is an error.
+ */
+static int amdgpu_gmc_flush_pasid_kiq_wait(struct amdgpu_device *adev,
+					   u32 inst, u32 seq)
 {
 	struct amdgpu_ring *ring = &adev->gfx.kiq[inst].ring;
-	struct amdgpu_kiq *kiq = &adev->gfx.kiq[inst];
-	unsigned int ndw;
-	int r, cnt = 0;
-	uint32_t seq;
+	int cnt = 0;
+	signed long r;
+
+	r = amdgpu_fence_wait_polling(ring, seq, MAX_KIQ_REG_WAIT);
+
+	might_sleep();
+	while (r < 1 && cnt++ < MAX_KIQ_REG_TRY &&
+	       !amdgpu_reset_pending(adev->reset_domain)) {
+		msleep(MAX_KIQ_REG_BAILOUT_INTERVAL);
+		r = amdgpu_fence_wait_polling(ring, seq, MAX_KIQ_REG_WAIT);
+	}
+
+	if (cnt > MAX_KIQ_REG_TRY) {
+		dev_err(adev->dev, "timeout waiting for kiq fence\n");
+		return -ETIME;
+	}
+
+	return 0;
+}
+
+/**
+ * amdgpu_gmc_flush_gpu_tlb_pasid_xccs - flush a pasid on several XCCs at once
+ *
+ * @adev: amdgpu_device pointer
+ * @pasid: pasid to be flushed
+ * @flush_type: the flush type
+ * @all_hub: flush all hubs
+ * @xcc_mask: mask of the XCCs to flush
+ *
+ * Submits the invalidation to every XCC in @xcc_mask before waiting for any of
+ * them, so the round trips overlap instead of running back to back.  Flushing
+ * one XCC at a time costs num_xcc times the latency of a single one, which on
+ * a partition holding every XCC of the device is most of the cost of a compute
+ * TLB flush.
+ *
+ * The XCCs are independent of each other here: the page tables are already
+ * updated before any invalidation is issued, and nothing in an invalidation
+ * depends on another XCC having completed its own.
+ *
+ * Returns:
+ * 0 for success, the first error otherwise.  Every XCC is flushed even if one
+ * of them fails.
+ */
+int amdgpu_gmc_flush_gpu_tlb_pasid_xccs(struct amdgpu_device *adev, u16 pasid,
+					u32 flush_type, bool all_hub,
+					u32 xcc_mask)
+{
+	u32 seq[AMDGPU_MAX_GC_INSTANCES];
+	unsigned long pending = 0;
+	int xcc, r = 0, err;
 
 	/*
 	 * A GPU reset should flush all TLBs anyway, so no need to do
 	 * this while one is ongoing.
+	 *
+	 * Unlike the one XCC at a time flush this holds the read side across
+	 * every submit and every wait, so a reset's down_write() can only get
+	 * in once the whole mask is done.  The waits are sequential, which
+	 * bounds that at num_xcc * MAX_KIQ_REG_TRY * MAX_KIQ_REG_BAILOUT_INTERVAL
+	 * in the worst case, and amdgpu_gmc_flush_pasid_kiq_wait() cuts each
+	 * wait short as soon as a reset becomes pending.
 	 */
 	if (!down_read_trylock(&adev->reset_domain->sem))
 		return 0;
 
-	if (!adev->gmc.flush_pasid_uses_kiq || !ring->sched.ready) {
-		if (adev->gmc.flush_tlb_needs_extra_type_2)
-			adev->gmc.gmc_funcs->flush_gpu_tlb_pasid(adev, pasid,
-								 2, all_hub,
-								 inst);
+	for_each_inst(xcc, xcc_mask) {
+		struct amdgpu_ring *ring;
 
-		if (adev->gmc.flush_tlb_needs_extra_type_0 && flush_type == 2)
-			adev->gmc.gmc_funcs->flush_gpu_tlb_pasid(adev, pasid,
-								 0, all_hub,
-								 inst);
-
-		adev->gmc.gmc_funcs->flush_gpu_tlb_pasid(adev, pasid,
-							 flush_type, all_hub,
-							 inst);
-		r = 0;
-	} else {
-		/* 2 dwords flush + 8 dwords fence */
-		ndw = kiq->pmf->invalidate_tlbs_size + 8;
-
-		if (adev->gmc.flush_tlb_needs_extra_type_2)
-			ndw += kiq->pmf->invalidate_tlbs_size;
-
-		if (adev->gmc.flush_tlb_needs_extra_type_0)
-			ndw += kiq->pmf->invalidate_tlbs_size;
-
-		spin_lock(&adev->gfx.kiq[inst].ring_lock);
-		r = amdgpu_ring_alloc(ring, ndw);
-		if (r) {
-			spin_unlock(&adev->gfx.kiq[inst].ring_lock);
-			goto error_unlock_reset;
-		}
-		if (adev->gmc.flush_tlb_needs_extra_type_2)
-			kiq->pmf->kiq_invalidate_tlbs(ring, pasid, 2, all_hub);
-
-		if (flush_type == 2 && adev->gmc.flush_tlb_needs_extra_type_0)
-			kiq->pmf->kiq_invalidate_tlbs(ring, pasid, 0, all_hub);
-
-		kiq->pmf->kiq_invalidate_tlbs(ring, pasid, flush_type, all_hub);
-		r = amdgpu_fence_emit_polling(ring, &seq, MAX_KIQ_REG_WAIT);
-		if (r) {
-			amdgpu_ring_undo(ring);
-			spin_unlock(&adev->gfx.kiq[inst].ring_lock);
-			goto error_unlock_reset;
+		if (WARN_ON_ONCE(xcc >= AMDGPU_MAX_GC_INSTANCES)) {
+			if (!r)
+				r = -EINVAL;
+			break;
 		}
 
-		amdgpu_ring_commit(ring);
-		spin_unlock(&adev->gfx.kiq[inst].ring_lock);
-
-		r = amdgpu_fence_wait_polling(ring, seq, MAX_KIQ_REG_WAIT);
-
-		might_sleep();
-		while (r < 1 && cnt++ < MAX_KIQ_REG_TRY &&
-		       !amdgpu_reset_pending(adev->reset_domain)) {
-			msleep(MAX_KIQ_REG_BAILOUT_INTERVAL);
-			r = amdgpu_fence_wait_polling(ring, seq, MAX_KIQ_REG_WAIT);
+		ring = &adev->gfx.kiq[xcc].ring;
+		if (!adev->gmc.flush_pasid_uses_kiq || !ring->sched.ready) {
+			amdgpu_gmc_flush_pasid_regs(adev, pasid, flush_type,
+						    all_hub, xcc);
+			continue;
 		}
 
-		if (cnt > MAX_KIQ_REG_TRY) {
-			dev_err(adev->dev, "timeout waiting for kiq fence\n");
-			r = -ETIME;
-		} else
-			r = 0;
+		err = amdgpu_gmc_flush_pasid_kiq_submit(adev, pasid, flush_type,
+							all_hub, xcc, &seq[xcc]);
+		if (err) {
+			if (!r)
+				r = err;
+			continue;
+		}
+
+		pending |= BIT(xcc);
 	}
 
-error_unlock_reset:
+	for_each_set_bit(xcc, &pending, AMDGPU_MAX_GC_INSTANCES) {
+		err = amdgpu_gmc_flush_pasid_kiq_wait(adev, xcc, seq[xcc]);
+		if (err && !r)
+			r = err;
+	}
+
 	up_read(&adev->reset_domain->sem);
 	return r;
+}
+
+int amdgpu_gmc_flush_gpu_tlb_pasid(struct amdgpu_device *adev, u16 pasid,
+				   u32 flush_type, bool all_hub, u32 inst)
+{
+	return amdgpu_gmc_flush_gpu_tlb_pasid_xccs(adev, pasid, flush_type,
+						   all_hub, BIT(inst));
 }
 
 void amdgpu_gmc_fw_reg_write_reg_wait(struct amdgpu_device *adev,
@@ -811,9 +989,9 @@ void amdgpu_gmc_fw_reg_write_reg_wait(struct amdgpu_device *adev,
 	unsigned long flags;
 	uint32_t seq;
 
-	if (adev->mes.ring[0].sched.ready) {
+	if (adev->mes.ring[MES_PIPE_INST(xcc_inst, 0)].sched.ready) {
 		amdgpu_mes_reg_write_reg_wait(adev, reg0, reg1,
-					      ref, mask);
+					      ref, mask, xcc_inst);
 		return;
 	}
 
@@ -901,6 +1079,10 @@ void amdgpu_gmc_tmz_set(struct amdgpu_device *adev)
 	case IP_VERSION(11, 5, 1):
 	case IP_VERSION(11, 5, 2):
 	case IP_VERSION(11, 5, 3):
+	case IP_VERSION(11, 5, 4):
+	case IP_VERSION(11, 5, 6):
+	case IP_VERSION(11, 7, 0):
+	case IP_VERSION(11, 7, 1):
 		/* Don't enable it by default yet.
 		 */
 		if (amdgpu_tmz < 1) {
@@ -939,7 +1121,7 @@ void amdgpu_gmc_noretry_set(struct amdgpu_device *adev)
 				gc_ver == IP_VERSION(9, 4, 3) ||
 				gc_ver == IP_VERSION(9, 4, 4) ||
 				gc_ver == IP_VERSION(9, 5, 0) ||
-				gc_ver >= IP_VERSION(10, 3, 0));
+				gc_ver >= IP_VERSION(10, 1, 0));
 
 	if (!amdgpu_sriov_xnack_support(adev))
 		gmc->noretry = 1;
@@ -972,17 +1154,17 @@ void amdgpu_gmc_set_vm_fault_masks(struct amdgpu_device *adev, int hub_type,
 	}
 }
 
-void amdgpu_gmc_get_vbios_allocations(struct amdgpu_device *adev)
+void amdgpu_gmc_init_vga_resv_regions(struct amdgpu_device *adev)
 {
 	unsigned size;
+
+	if (adev->gmc.is_app_apu)
+		return;
 
 	/*
 	 * Some ASICs need to reserve a region of video memory to avoid access
 	 * from driver
 	 */
-	adev->mman.stolen_reserved_offset = 0;
-	adev->mman.stolen_reserved_size = 0;
-
 	/*
 	 * TODO:
 	 * Currently there is a bug where some memory client outside
@@ -999,8 +1181,8 @@ void amdgpu_gmc_get_vbios_allocations(struct amdgpu_device *adev)
 		 */
 #ifdef CONFIG_X86
 		if (amdgpu_sriov_vf(adev) && hypervisor_is_type(X86_HYPER_MS_HYPERV)) {
-			adev->mman.stolen_reserved_offset = 0x500000;
-			adev->mman.stolen_reserved_size = 0x200000;
+			amdgpu_ttm_init_vram_resv(adev, AMDGPU_RESV_STOLEN_RESERVED,
+						  0x500000, 0x200000, false);
 		}
 #endif
 		break;
@@ -1012,6 +1194,13 @@ void amdgpu_gmc_get_vbios_allocations(struct amdgpu_device *adev)
 		adev->mman.keep_stolen_vga_memory = false;
 		break;
 	}
+	/* MacBookPros with switchable graphics put VRAM at 0 when
+	 * the iGPU is enabled which results in cursor issues if
+	 * the cursor ends up at 0.  Reserve vram at 0 in that case.
+	 */
+	if ((adev->pdev->subsystem_vendor == PCI_VENDOR_ID_APPLE) &&
+	    (adev->gmc.vram_start == 0))
+		adev->mman.keep_stolen_vga_memory = true;
 
 	if (amdgpu_sriov_vf(adev) ||
 	    !amdgpu_device_has_display_hardware(adev)) {
@@ -1028,11 +1217,14 @@ void amdgpu_gmc_get_vbios_allocations(struct amdgpu_device *adev)
 		size = 0;
 
 	if (size > AMDGPU_VBIOS_VGA_ALLOCATION) {
-		adev->mman.stolen_vga_size = AMDGPU_VBIOS_VGA_ALLOCATION;
-		adev->mman.stolen_extended_size = size - adev->mman.stolen_vga_size;
+		amdgpu_ttm_init_vram_resv(adev, AMDGPU_RESV_STOLEN_VGA,
+					  0, AMDGPU_VBIOS_VGA_ALLOCATION, false);
+		amdgpu_ttm_init_vram_resv(adev, AMDGPU_RESV_STOLEN_EXTENDED,
+					  AMDGPU_VBIOS_VGA_ALLOCATION,
+					  size - AMDGPU_VBIOS_VGA_ALLOCATION, false);
 	} else {
-		adev->mman.stolen_vga_size = size;
-		adev->mman.stolen_extended_size = 0;
+		amdgpu_ttm_init_vram_resv(adev, AMDGPU_RESV_STOLEN_VGA,
+					  0, size, false);
 	}
 }
 
@@ -1070,6 +1262,8 @@ void amdgpu_gmc_init_pdb0(struct amdgpu_device *adev)
 	flags |= AMDGPU_PTE_VALID | AMDGPU_PTE_READABLE;
 	flags |= AMDGPU_PTE_WRITEABLE;
 	flags |= AMDGPU_PTE_SNOOPED;
+	if (amdgpu_virt_vram_is_spm(adev))
+		flags |= AMDGPU_PTE_SYSTEM;
 	flags |= AMDGPU_PTE_FRAG((adev->gmc.vmid0_page_table_block_size + 9*1));
 	flags |= AMDGPU_PDE_PTE_FLAG(adev);
 
@@ -1089,6 +1283,8 @@ void amdgpu_gmc_init_pdb0(struct amdgpu_device *adev)
 	 * pointing to a 4K system page
 	 */
 	flags = AMDGPU_PTE_VALID;
+	if (amdgpu_virt_vram_is_spm(adev))
+		flags |= AMDGPU_PTE_SYSTEM;
 	flags |= AMDGPU_PTE_SNOOPED | AMDGPU_PDE_BFS_FLAG(adev, 0);
 	/* Requires gart_ptb_gpu_pa to be 4K aligned */
 	amdgpu_gmc_set_pte_pde(adev, adev->gmc.ptr_pdb0, i, gart_ptb_gpu_pa, flags);
@@ -1275,7 +1471,8 @@ int amdgpu_gmc_sysfs_init(struct amdgpu_device *adev)
 	if (!adev->gmc.gmc_funcs->query_mem_partition_mode)
 		return 0;
 
-	nps_switch_support = (hweight32(adev->gmc.supported_nps_modes &
+	nps_switch_support = !adev->gmc.xgmi.connected_to_cpu &&
+			     (hweight32(adev->gmc.supported_nps_modes &
 					AMDGPU_ALL_NPS_MASK) > 1);
 	if (!nps_switch_support)
 		dev_attr_current_memory_partition.attr.mode &=
@@ -1304,18 +1501,18 @@ int amdgpu_gmc_get_nps_memranges(struct amdgpu_device *adev,
 				 struct amdgpu_mem_partition_info *mem_ranges,
 				 uint8_t *exp_ranges)
 {
-	struct amdgpu_gmc_memrange *ranges;
+	struct amdgpu_gmc_memrange ranges[AMDGPU_MAX_MEM_RANGES];
 	int range_cnt, ret, i, j;
 	uint32_t nps_type;
 	bool refresh;
 
 	if (!mem_ranges || !exp_ranges)
 		return -EINVAL;
-
+	range_cnt = AMDGPU_MAX_MEM_RANGES;
 	refresh = (adev->init_lvl->level != AMDGPU_INIT_LEVEL_MINIMAL_XGMI) &&
 		  (adev->gmc.reset_flags & AMDGPU_GMC_INIT_RESET_NPS);
-	ret = amdgpu_discovery_get_nps_info(adev, &nps_type, &ranges,
-					    &range_cnt, refresh);
+	ret = amdgpu_discovery_get_nps_info(adev, &nps_type, ranges, &range_cnt,
+					    refresh);
 
 	if (ret)
 		return ret;
@@ -1376,8 +1573,6 @@ int amdgpu_gmc_get_nps_memranges(struct amdgpu_device *adev,
 	if (!*exp_ranges)
 		*exp_ranges = range_cnt;
 err:
-	kfree(ranges);
-
 	return ret;
 }
 
@@ -1657,9 +1852,8 @@ int amdgpu_gmc_init_mem_ranges(struct amdgpu_device *adev)
 {
 	bool valid;
 
-	adev->gmc.mem_partitions = kcalloc(AMDGPU_MAX_MEM_RANGES,
-					   sizeof(struct amdgpu_mem_partition_info),
-					   GFP_KERNEL);
+	adev->gmc.mem_partitions = kzalloc_objs(struct amdgpu_mem_partition_info,
+						AMDGPU_MAX_MEM_RANGES);
 	if (!adev->gmc.mem_partitions)
 		return -ENOMEM;
 
@@ -1672,11 +1866,44 @@ int amdgpu_gmc_init_mem_ranges(struct amdgpu_device *adev)
 		valid = true;
 	else
 		valid = amdgpu_gmc_validate_partition_info(adev);
-	if (!valid) {
-		/* TODO: handle invalid case */
+	if (!valid)
 		dev_warn(adev->dev,
 			 "Mem ranges not matching with hardware config\n");
+
+	if (!adev->gmc.num_mem_partitions) {
+		dev_err(adev->dev, "num_mem_partitions is zero\n");
+		kfree(adev->gmc.mem_partitions);
+		adev->gmc.mem_partitions = NULL;
+		return -EINVAL;
 	}
 
+	return 0;
+}
+
+int amdgpu_gmc_get_vram_info(struct amdgpu_device *adev,
+		int *vram_width, int *vram_type, int *vram_vendor)
+{
+	int ret = 0;
+
+	if (adev->flags & AMD_IS_APU)
+		return amdgpu_atomfirmware_get_integrated_system_info(adev,
+							vram_width, vram_type, vram_vendor);
+	switch (amdgpu_ip_version(adev, GC_HWIP, 0)) {
+	case IP_VERSION(12, 0, 0):
+	case IP_VERSION(12, 0, 1):
+		return amdgpu_atomfirmware_get_umc_info(adev,
+								vram_width, vram_type, vram_vendor);
+	case IP_VERSION(9, 5, 0):
+	case IP_VERSION(9, 4, 4):
+	case IP_VERSION(9, 4, 3):
+		ret = amdgpu_atomfirmware_get_umc_info(adev,
+								vram_width, vram_type, vram_vendor);
+		if (vram_width && !ret)
+			*vram_width *= hweight32(adev->aid_mask);
+		return ret;
+	default:
+		return amdgpu_atomfirmware_get_vram_info(adev,
+								vram_width, vram_type, vram_vendor);
+	}
 	return 0;
 }

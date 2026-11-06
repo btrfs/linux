@@ -453,11 +453,11 @@ static struct clk *pll_register(const char *name, const char *parent_name,
 				struct pistachio_pll_rate_table *rates,
 				unsigned int nr_rates)
 {
+	struct clk_init_data init = {};
 	struct pistachio_clk_pll *pll;
-	struct clk_init_data init;
 	struct clk *clk;
 
-	pll = kzalloc(sizeof(*pll), GFP_KERNEL);
+	pll = kzalloc_obj(*pll);
 	if (!pll)
 		return ERR_PTR(-ENOMEM);
 

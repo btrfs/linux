@@ -1069,6 +1069,7 @@ static int rt5660_set_bias_level(struct snd_soc_component *component,
 			enum snd_soc_bias_level level)
 {
 	struct rt5660_priv *rt5660 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	int ret;
 
 	switch (level) {
@@ -1079,7 +1080,7 @@ static int rt5660_set_bias_level(struct snd_soc_component *component,
 		snd_soc_component_update_bits(component, RT5660_GEN_CTRL1,
 			RT5660_DIG_GATE_CTRL, RT5660_DIG_GATE_CTRL);
 
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_ON) {
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_ON) {
 			clk_disable_unprepare(rt5660->mclk);
 		} else {
 			ret = clk_prepare_enable(rt5660->mclk);
@@ -1089,7 +1090,7 @@ static int rt5660_set_bias_level(struct snd_soc_component *component,
 		break;
 
 	case SND_SOC_BIAS_STANDBY:
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_OFF) {
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF) {
 			snd_soc_component_update_bits(component, RT5660_PWR_ANLG1,
 				RT5660_PWR_VREF1 | RT5660_PWR_MB |
 				RT5660_PWR_BG | RT5660_PWR_VREF2,
@@ -1147,9 +1148,7 @@ static int rt5660_resume(struct snd_soc_component *component)
 		msleep(350);
 
 	regcache_cache_only(rt5660->regmap, false);
-	regcache_sync(rt5660->regmap);
-
-	return 0;
+	return regcache_sync(rt5660->regmap);
 }
 #else
 #define rt5660_suspend NULL
@@ -1160,11 +1159,21 @@ static int rt5660_resume(struct snd_soc_component *component)
 #define RT5660_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S20_3LE | \
 			SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S8)
 
+static const u64 rt5660_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF;
+
 static const struct snd_soc_dai_ops rt5660_aif_dai_ops = {
 	.hw_params = rt5660_hw_params,
 	.set_fmt = rt5660_set_dai_fmt,
 	.set_sysclk = rt5660_set_dai_sysclk,
 	.set_pll = rt5660_set_dai_pll,
+	.auto_selectable_formats	= &rt5660_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 static struct snd_soc_dai_driver rt5660_dai[] = {
@@ -1224,7 +1233,7 @@ static const struct regmap_config rt5660_regmap = {
 };
 
 static const struct i2c_device_id rt5660_i2c_id[] = {
-	{ "rt5660" },
+	{ .name = "rt5660" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rt5660_i2c_id);

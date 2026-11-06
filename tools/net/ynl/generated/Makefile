@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0
 
-CC=gcc
+include ../../../scripts/Makefile.include
+
 CFLAGS += -std=gnu11 -O2 -W -Wall -Wextra -Wno-unused-parameter -Wshadow \
 	-I../lib/ -idirafter $(UAPI_PATH)
 ifeq ("$(DEBUG)","1")
@@ -17,6 +18,7 @@ include ../Makefile.deps
 
 YNL_GEN_ARG_ethtool:=--user-header linux/ethtool_netlink.h \
 	--exclude-op stats-get
+YNL_GEN_ARG_rt-nexthop:=--exclude-op newnexthopbucket-ntf
 
 TOOL:=../pyynl/ynl_gen_c.py
 TOOL_RST:=../pyynl/ynl_gen_rst.py
@@ -37,7 +39,7 @@ all: protos.a $(HDRS) $(SRCS) $(KHDRS) $(KSRCS) $(UAPI) $(RSTS)
 
 protos.a: $(OBJS)
 	@echo -e "\tAR $@"
-	@ar rcs $@ $(OBJS)
+	@$(AR) rcs $@ $(OBJS)
 
 %-user.h: $(SPECS_DIR)/%.yaml $(TOOL)
 	@echo -e "\tGEN $@"

@@ -409,7 +409,7 @@ static int wm8996_get_retune_mobile_block(const char *name)
 static int wm8996_put_retune_mobile_enum(struct snd_kcontrol *kcontrol,
 					 struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct wm8996_priv *wm8996 = snd_soc_component_get_drvdata(component);
 	struct wm8996_pdata *pdata = &wm8996->pdata;
 	int block = wm8996_get_retune_mobile_block(kcontrol->id.name);
@@ -431,7 +431,7 @@ static int wm8996_put_retune_mobile_enum(struct snd_kcontrol *kcontrol,
 static int wm8996_get_retune_mobile_enum(struct snd_kcontrol *kcontrol,
 					 struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct wm8996_priv *wm8996 = snd_soc_component_get_drvdata(component);
 	int block = wm8996_get_retune_mobile_block(kcontrol->id.name);
 
@@ -1572,6 +1572,7 @@ static int wm8996_set_bias_level(struct snd_soc_component *component,
 				 enum snd_soc_bias_level level)
 {
 	struct wm8996_priv *wm8996 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	int ret;
 
 	switch (level) {
@@ -1586,7 +1587,7 @@ static int wm8996_set_bias_level(struct snd_soc_component *component,
 		break;
 
 	case SND_SOC_BIAS_STANDBY:
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_OFF) {
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF) {
 			ret = regulator_bulk_enable(ARRAY_SIZE(wm8996->supplies),
 						    wm8996->supplies);
 			if (ret != 0) {
@@ -2105,7 +2106,7 @@ static int wm8996_set_fll(struct snd_soc_component *component, int fll_id, int s
 	if (i2c->irq)
 		timeout *= 10;
 	else
-		/* ensure timeout of atleast 1 jiffies */
+		/* ensure timeout of at least 1 jiffies */
 		timeout = (timeout/2) ? : 1;
 
 	for (retry = 0; retry < 10; retry++) {
@@ -2238,7 +2239,7 @@ int wm8996_detect(struct snd_soc_component *component, struct snd_soc_jack *jack
 		  wm8996_polarity_fn polarity_cb)
 {
 	struct wm8996_priv *wm8996 = snd_soc_component_get_drvdata(component);
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 
 	wm8996->jack = jack;
 	wm8996->detecting = true;
@@ -2283,7 +2284,7 @@ EXPORT_SYMBOL_GPL(wm8996_detect);
 
 static void wm8996_hpdet_irq(struct snd_soc_component *component)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct wm8996_priv *wm8996 = snd_soc_component_get_drvdata(component);
 	int val, reg, report;
 
@@ -2343,7 +2344,7 @@ out:
 
 static void wm8996_hpdet_start(struct snd_soc_component *component)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 
 	/* Unclamp the output, we can't measure while we're shorting it */
 	snd_soc_component_update_bits(component, WM8996_ANALOGUE_HP_1,
@@ -2702,10 +2703,22 @@ static const struct snd_soc_component_driver soc_component_dev_wm8996 = {
 			SNDRV_PCM_FMTBIT_S20_3LE | SNDRV_PCM_FMTBIT_S24_LE |\
 			SNDRV_PCM_FMTBIT_S32_LE)
 
+static const u64 wm8996_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF;
+
 static const struct snd_soc_dai_ops wm8996_dai_ops = {
 	.set_fmt = wm8996_set_fmt,
 	.hw_params = wm8996_hw_params,
 	.set_sysclk = wm8996_set_sysclk,
+	.auto_selectable_formats = &wm8996_selectable_formats,
+	.num_auto_selectable_formats = 1,
 };
 
 static struct snd_soc_dai_driver wm8996_dai[] = {
@@ -3071,7 +3084,7 @@ static void wm8996_i2c_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id wm8996_i2c_id[] = {
-	{ "wm8996" },
+	{ .name = "wm8996" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wm8996_i2c_id);

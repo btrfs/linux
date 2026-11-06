@@ -43,23 +43,12 @@ static DEFINE_IDA(mlx4_adev_ida);
 
 static bool is_eth_supported(struct mlx4_dev *dev)
 {
-	for (int port = 1; port <= dev->caps.num_ports; port++)
-		if (dev->caps.port_type[port] == MLX4_PORT_TYPE_ETH)
-			return true;
-
-	return false;
+	return true;
 }
 
 static bool is_ib_supported(struct mlx4_dev *dev)
 {
-	for (int port = 1; port <= dev->caps.num_ports; port++)
-		if (dev->caps.port_type[port] == MLX4_PORT_TYPE_IB)
-			return true;
-
-	if (dev->caps.flags & MLX4_DEV_CAP_FLAG_IBOE)
-		return true;
-
-	return false;
+	return true;
 }
 
 static const struct mlx4_adev_device {
@@ -78,8 +67,8 @@ int mlx4_adev_init(struct mlx4_dev *dev)
 	if (priv->adev_idx < 0)
 		return priv->adev_idx;
 
-	priv->adev = kcalloc(ARRAY_SIZE(mlx4_adev_devices),
-			     sizeof(struct mlx4_adev *), GFP_KERNEL);
+	priv->adev = kzalloc_objs(struct mlx4_adev *,
+				  ARRAY_SIZE(mlx4_adev_devices));
 	if (!priv->adev) {
 		ida_free(&mlx4_adev_ida, priv->adev_idx);
 		return -ENOMEM;
@@ -115,7 +104,7 @@ static struct mlx4_adev *add_adev(struct mlx4_dev *dev, int idx)
 	struct mlx4_adev *madev;
 	int ret;
 
-	madev = kzalloc(sizeof(*madev), GFP_KERNEL);
+	madev = kzalloc_obj(*madev);
 	if (!madev)
 		return ERR_PTR(-ENOMEM);
 

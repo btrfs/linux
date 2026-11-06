@@ -2,6 +2,7 @@
 /* Do not edit directly, auto-generated from: */
 /*	Documentation/netlink/specs/handshake.yaml */
 /* YNL-GEN uapi header */
+/* To regenerate run: tools/net/ynl/ynl-regen.sh */
 
 #ifndef _UAPI_LINUX_HANDSHAKE_H
 #define _UAPI_LINUX_HANDSHAKE_H
@@ -12,7 +13,10 @@
 enum handshake_handler_class {
 	HANDSHAKE_HANDLER_CLASS_NONE,
 	HANDSHAKE_HANDLER_CLASS_TLSHD,
-	HANDSHAKE_HANDLER_CLASS_MAX,
+
+	/* private: */
+	__HANDSHAKE_HANDLER_CLASS_MAX,
+	HANDSHAKE_HANDLER_CLASS_MAX = (__HANDSHAKE_HANDLER_CLASS_MAX - 1)
 };
 
 enum handshake_msg_type {

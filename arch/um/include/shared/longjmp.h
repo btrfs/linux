@@ -2,12 +2,12 @@
 #ifndef __UML_LONGJMP_H
 #define __UML_LONGJMP_H
 
+#include <linux/compiler_types.h>
 #include <sysdep/archsetjmp.h>
 #include <os.h>
 
-extern int signals_enabled;
 extern int setjmp(jmp_buf);
-extern void longjmp(jmp_buf, int);
+extern void __noreturn longjmp(jmp_buf, int);
 
 #define UML_LONGJMP(buf, val) do { \
 	longjmp(*buf, val);	\
@@ -15,7 +15,7 @@ extern void longjmp(jmp_buf, int);
 
 #define UML_SETJMP(buf) ({				\
 	int n, enable;					\
-	enable = *(volatile int *)&signals_enabled;	\
+	enable = um_get_signals();			\
 	n = setjmp(*buf);				\
 	if(n != 0)					\
 		um_set_signals_trace(enable);		\

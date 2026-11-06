@@ -904,7 +904,7 @@ static struct clk_rcg2 gcc_sdcc5_apps_clk_src = {
 		.name = "gcc_sdcc5_apps_clk_src",
 		.parent_data = gcc_parent_data_8,
 		.num_parents = ARRAY_SIZE(gcc_parent_data_8),
-		.ops = &clk_rcg2_floor_ops,
+		.ops = &clk_rcg2_shared_floor_ops,
 	},
 };
 
@@ -923,7 +923,7 @@ static struct clk_rcg2 gcc_sdcc5_ice_core_clk_src = {
 		.name = "gcc_sdcc5_ice_core_clk_src",
 		.parent_data = gcc_parent_data_2,
 		.num_parents = ARRAY_SIZE(gcc_parent_data_2),
-		.ops = &clk_rcg2_floor_ops,
+		.ops = &clk_rcg2_shared_floor_ops,
 	},
 };
 
@@ -2689,17 +2689,7 @@ static struct platform_driver gcc_qdu1000_driver = {
 	},
 };
 
-static int __init gcc_qdu1000_init(void)
-{
-	return platform_driver_register(&gcc_qdu1000_driver);
-}
-subsys_initcall(gcc_qdu1000_init);
-
-static void __exit gcc_qdu1000_exit(void)
-{
-	platform_driver_unregister(&gcc_qdu1000_driver);
-}
-module_exit(gcc_qdu1000_exit);
+subsys_platform_driver(gcc_qdu1000_driver);
 
 MODULE_DESCRIPTION("QTI GCC QDU1000 Driver");
 MODULE_LICENSE("GPL");
