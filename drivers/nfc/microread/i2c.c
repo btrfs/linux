@@ -12,7 +12,6 @@
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
-#include <linux/gpio.h>
 
 #include <linux/nfc.h>
 #include <net/nfc/hci.h>
@@ -236,8 +235,7 @@ static int microread_i2c_probe(struct i2c_client *client)
 	struct microread_i2c_phy *phy;
 	int r;
 
-	phy = devm_kzalloc(&client->dev, sizeof(struct microread_i2c_phy),
-			   GFP_KERNEL);
+	phy = devm_kzalloc_obj(&client->dev, struct microread_i2c_phy);
 	if (!phy)
 		return -ENOMEM;
 
@@ -277,7 +275,7 @@ static void microread_i2c_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id microread_i2c_id[] = {
-	{ MICROREAD_I2C_DRIVER_NAME },
+	{ .name = MICROREAD_I2C_DRIVER_NAME },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, microread_i2c_id);

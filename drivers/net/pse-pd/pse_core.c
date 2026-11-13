@@ -162,7 +162,7 @@ static int of_load_pse_pis(struct pse_controller_dev *pcdev)
 	if (!np)
 		return -ENODEV;
 
-	pcdev->pi = kcalloc(pcdev->nr_lines, sizeof(*pcdev->pi), GFP_KERNEL);
+	pcdev->pi = kzalloc_objs(*pcdev->pi, pcdev->nr_lines);
 	if (!pcdev->pi)
 		return -ENOMEM;
 
@@ -210,7 +210,7 @@ static int of_load_pse_pis(struct pse_controller_dev *pcdev)
 			ret = of_load_pse_pi_pairsets(node, &pi, ret);
 			if (ret)
 				goto out;
-		} else if (ret != ENOENT) {
+		} else if (ret != -ENOENT) {
 			dev_err(pcdev->dev,
 				"error: wrong number of pairsets. Should be 1 or 2, got %d (%pOF)\n",
 				ret, node);
@@ -234,7 +234,7 @@ out:
 }
 
 /**
- * pse_control_find_net_by_id - Find net attached to the pse control id
+ * pse_control_find_by_id - Find pse_control from an id
  * @pcdev: a pointer to the PSE
  * @id: index of the PSE control
  *
@@ -835,12 +835,11 @@ devm_pse_pi_regulator_register(struct pse_controller_dev *pcdev,
 	struct regulator_desc *rdesc;
 	struct regulator_dev *rdev;
 
-	rinit_data = devm_kzalloc(pcdev->dev, sizeof(*rinit_data),
-				  GFP_KERNEL);
+	rinit_data = devm_kzalloc_obj(pcdev->dev, *rinit_data);
 	if (!rinit_data)
 		return -ENOMEM;
 
-	rdesc = devm_kzalloc(pcdev->dev, sizeof(*rdesc), GFP_KERNEL);
+	rdesc = devm_kzalloc_obj(pcdev->dev, *rdesc);
 	if (!rdesc)
 		return -ENOMEM;
 
@@ -922,7 +921,7 @@ static struct pse_power_domain *devm_pse_alloc_pw_d(struct device *dev)
 	struct pse_power_domain *pw_d;
 	int index, ret;
 
-	pw_d = devm_kzalloc(dev, sizeof(*pw_d), GFP_KERNEL);
+	pw_d = devm_kzalloc_obj(dev, *pw_d);
 	if (!pw_d)
 		return ERR_PTR(-ENOMEM);
 
@@ -1170,6 +1169,7 @@ struct pse_irq {
 	struct pse_controller_dev *pcdev;
 	struct pse_irq_desc desc;
 	unsigned long *notifs;
+	unsigned long *notifs_mask;
 };
 
 /**
@@ -1247,7 +1247,6 @@ static int pse_set_config_isr(struct pse_controller_dev *pcdev, int id,
 static irqreturn_t pse_isr(int irq, void *data)
 {
 	struct pse_controller_dev *pcdev;
-	unsigned long notifs_mask = 0;
 	struct pse_irq_desc *desc;
 	struct pse_irq *h = data;
 	int ret, i;
@@ -1257,14 +1256,15 @@ static irqreturn_t pse_isr(int irq, void *data)
 
 	/* Clear notifs mask */
 	memset(h->notifs, 0, pcdev->nr_lines * sizeof(*h->notifs));
+	bitmap_zero(h->notifs_mask, pcdev->nr_lines);
 	mutex_lock(&pcdev->lock);
-	ret = desc->map_event(irq, pcdev, h->notifs, &notifs_mask);
-	if (ret || !notifs_mask) {
+	ret = desc->map_event(irq, pcdev, h->notifs, h->notifs_mask);
+	if (ret || bitmap_empty(h->notifs_mask, pcdev->nr_lines)) {
 		mutex_unlock(&pcdev->lock);
 		return IRQ_NONE;
 	}
 
-	for_each_set_bit(i, &notifs_mask, pcdev->nr_lines) {
+	for_each_set_bit(i, h->notifs_mask, pcdev->nr_lines) {
 		unsigned long notifs, rnotifs;
 		struct pse_ntf ntf = {};
 
@@ -1319,7 +1319,7 @@ int devm_pse_irq_helper(struct pse_controller_dev *pcdev, int irq,
 	if (!d || !d->map_event || !d->name)
 		return -EINVAL;
 
-	h = devm_kzalloc(dev, sizeof(*h), GFP_KERNEL);
+	h = devm_kzalloc_obj(dev, *h);
 	if (!h)
 		return -ENOMEM;
 
@@ -1335,9 +1335,12 @@ int devm_pse_irq_helper(struct pse_controller_dev *pcdev, int irq,
 	snprintf(irq_name, irq_name_len, "pse-%s:%s", dev_name(pcdev->dev),
 		 d->name);
 
-	h->notifs = devm_kcalloc(dev, pcdev->nr_lines,
-				 sizeof(*h->notifs), GFP_KERNEL);
+	h->notifs = devm_kzalloc_objs(dev, *h->notifs, pcdev->nr_lines);
 	if (!h->notifs)
+		return -ENOMEM;
+
+	h->notifs_mask = devm_bitmap_zalloc(dev, pcdev->nr_lines, GFP_KERNEL);
+	if (!h->notifs_mask)
 		return -ENOMEM;
 
 	ret = devm_request_threaded_irq(dev, irq, NULL, pse_isr,
@@ -1362,7 +1365,7 @@ static void __pse_control_release(struct kref *kref)
 
 	if (psec->pcdev->pi[psec->id].admin_state_enabled)
 		regulator_disable(psec->ps);
-	devm_regulator_put(psec->ps);
+	regulator_put(psec->ps);
 
 	module_put(psec->pcdev->owner);
 
@@ -1408,7 +1411,7 @@ pse_control_get_internal(struct pse_controller_dev *pcdev, unsigned int index,
 		}
 	}
 
-	psec = kzalloc(sizeof(*psec), GFP_KERNEL);
+	psec = kzalloc_obj(*psec);
 	if (!psec)
 		return ERR_PTR(-ENOMEM);
 
@@ -1431,8 +1434,8 @@ pse_control_get_internal(struct pse_controller_dev *pcdev, unsigned int index,
 		goto free_psec;
 
 	pcdev->pi[index].admin_state_enabled = ret;
-	psec->ps = devm_regulator_get_exclusive(pcdev->dev,
-						rdev_get_name(pcdev->pi[index].rdev));
+	psec->ps = regulator_get_exclusive(pcdev->dev,
+					   rdev_get_name(pcdev->pi[index].rdev));
 	if (IS_ERR(psec->ps)) {
 		ret = PTR_ERR(psec->ps);
 		goto put_module;

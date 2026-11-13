@@ -25,6 +25,7 @@
 #include <net/ip6_route.h>
 #include <net/xfrm.h>
 #include <net/ipv6.h>
+#include <net/pptp.h>
 
 #include <net/netfilter/nf_conntrack_core.h>
 #include <net/netfilter/nf_conntrack.h>
@@ -75,23 +76,6 @@ static bool udp_manip_pkt(struct sk_buff *skb,
 	hdr = (struct udphdr *)(skb->data + hdroff);
 	__udp_manip_pkt(skb, iphdroff, hdr, tuple, maniptype, !!hdr->check);
 
-	return true;
-}
-
-static bool udplite_manip_pkt(struct sk_buff *skb,
-			      unsigned int iphdroff, unsigned int hdroff,
-			      const struct nf_conntrack_tuple *tuple,
-			      enum nf_nat_manip_type maniptype)
-{
-#ifdef CONFIG_NF_CT_PROTO_UDPLITE
-	struct udphdr *hdr;
-
-	if (skb_ensure_writable(skb, hdroff + sizeof(*hdr)))
-		return false;
-
-	hdr = (struct udphdr *)(skb->data + hdroff);
-	__udp_manip_pkt(skb, iphdroff, hdr, tuple, maniptype, true);
-#endif
 	return true;
 }
 
@@ -286,9 +270,6 @@ static bool l4proto_manip_pkt(struct sk_buff *skb,
 	case IPPROTO_UDP:
 		return udp_manip_pkt(skb, iphdroff, hdroff,
 				     tuple, maniptype);
-	case IPPROTO_UDPLITE:
-		return udplite_manip_pkt(skb, iphdroff, hdroff,
-					 tuple, maniptype);
 	case IPPROTO_SCTP:
 		return sctp_manip_pkt(skb, iphdroff, hdroff,
 				      tuple, maniptype);
@@ -789,6 +770,7 @@ static const struct nf_hook_ops nf_nat_ipv4_ops[] = {
 		.pf		= NFPROTO_IPV4,
 		.hooknum	= NF_INET_PRE_ROUTING,
 		.priority	= NF_IP_PRI_NAT_DST,
+		.hook_ops_type	= NF_HOOK_OP_NAT,
 	},
 	/* After packet filtering, change source */
 	{
@@ -796,6 +778,7 @@ static const struct nf_hook_ops nf_nat_ipv4_ops[] = {
 		.pf		= NFPROTO_IPV4,
 		.hooknum	= NF_INET_POST_ROUTING,
 		.priority	= NF_IP_PRI_NAT_SRC,
+		.hook_ops_type	= NF_HOOK_OP_NAT,
 	},
 	/* Before packet filtering, change destination */
 	{
@@ -803,6 +786,7 @@ static const struct nf_hook_ops nf_nat_ipv4_ops[] = {
 		.pf		= NFPROTO_IPV4,
 		.hooknum	= NF_INET_LOCAL_OUT,
 		.priority	= NF_IP_PRI_NAT_DST,
+		.hook_ops_type	= NF_HOOK_OP_NAT,
 	},
 	/* After packet filtering, change source */
 	{
@@ -810,6 +794,7 @@ static const struct nf_hook_ops nf_nat_ipv4_ops[] = {
 		.pf		= NFPROTO_IPV4,
 		.hooknum	= NF_INET_LOCAL_IN,
 		.priority	= NF_IP_PRI_NAT_SRC,
+		.hook_ops_type	= NF_HOOK_OP_NAT,
 	},
 };
 
@@ -1050,6 +1035,7 @@ static const struct nf_hook_ops nf_nat_ipv6_ops[] = {
 		.pf		= NFPROTO_IPV6,
 		.hooknum	= NF_INET_PRE_ROUTING,
 		.priority	= NF_IP6_PRI_NAT_DST,
+		.hook_ops_type	= NF_HOOK_OP_NAT,
 	},
 	/* After packet filtering, change source */
 	{
@@ -1057,6 +1043,7 @@ static const struct nf_hook_ops nf_nat_ipv6_ops[] = {
 		.pf		= NFPROTO_IPV6,
 		.hooknum	= NF_INET_POST_ROUTING,
 		.priority	= NF_IP6_PRI_NAT_SRC,
+		.hook_ops_type	= NF_HOOK_OP_NAT,
 	},
 	/* Before packet filtering, change destination */
 	{
@@ -1064,6 +1051,7 @@ static const struct nf_hook_ops nf_nat_ipv6_ops[] = {
 		.pf		= NFPROTO_IPV6,
 		.hooknum	= NF_INET_LOCAL_OUT,
 		.priority	= NF_IP6_PRI_NAT_DST,
+		.hook_ops_type	= NF_HOOK_OP_NAT,
 	},
 	/* After packet filtering, change source */
 	{
@@ -1071,6 +1059,7 @@ static const struct nf_hook_ops nf_nat_ipv6_ops[] = {
 		.pf		= NFPROTO_IPV6,
 		.hooknum	= NF_INET_LOCAL_IN,
 		.priority	= NF_IP6_PRI_NAT_SRC,
+		.hook_ops_type	= NF_HOOK_OP_NAT,
 	},
 };
 

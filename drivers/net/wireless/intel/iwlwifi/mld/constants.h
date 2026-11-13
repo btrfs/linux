@@ -1,11 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2024-2025 Intel Corporation
+ * Copyright (C) 2024-2026 Intel Corporation
  */
 #ifndef __iwl_mld_constants_h__
 #define __iwl_mld_constants_h__
 
-#define IWL_MLD_MISSED_BEACONS_SINCE_RX_THOLD			4
+#define IWL_MLD_MISSED_BEACONS_SINCE_RX_THOLD			6
 #define IWL_MLD_MISSED_BEACONS_THRESHOLD			8
 #define IWL_MLD_MISSED_BEACONS_THRESHOLD_LONG			19
 #define IWL_MLD_BCN_LOSS_EXIT_ESR_THRESH_2_LINKS		5
@@ -36,9 +36,12 @@
 #define IWL_MLD_PS_HEAVY_RX_THLD_PACKETS	8
 
 #define IWL_MLD_TRIGGER_LINK_SEL_TIME_SEC	30
-#define IWL_MLD_SCAN_EXPIRE_TIME_SEC		20
 
 #define IWL_MLD_TPT_COUNT_WINDOW (5 * HZ)
+
+#define IWL_MLD_TX_GP2_VALID_PERIOD	(10 * HZ)
+#define IWL_MLD_TX_GP2_REFRESH_MARGIN	(5 * HZ)
+#define IWL_MLD_TX_GP2_RETRY_PERIOD	HZ
 
 #define IWL_MLD_DIS_RANDOM_FW_ID                false
 #define IWL_MLD_D3_DEBUG                        false
@@ -75,5 +78,7 @@
 #define IWL_MLD_FTM_RESP_LMR_FEEDBACK_SUPPORT	true
 #define IWL_MLD_FTM_NON_TB_MIN_TIME_BETWEEN_MSR	7
 #define IWL_MLD_FTM_NON_TB_MAX_TIME_BETWEEN_MSR	1000
+#define IWL_MLD_STA_EXT_CAPA_SIZE		9
+#define IWL_MLD_EXT_CAPA_NUM_IFTYPES		1
 
 #endif /* __iwl_mld_constants_h__ */

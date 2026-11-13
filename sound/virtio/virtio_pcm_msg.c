@@ -135,7 +135,7 @@ int virtsnd_pcm_msg_alloc(struct virtio_pcm_substream *vss,
 	struct snd_pcm_runtime *runtime = vss->substream->runtime;
 	unsigned int i;
 
-	vss->msgs = kcalloc(periods, sizeof(*vss->msgs), GFP_KERNEL);
+	vss->msgs = kzalloc_objs(*vss->msgs, periods);
 	if (!vss->msgs)
 		return -ENOMEM;
 
@@ -146,7 +146,7 @@ int virtsnd_pcm_msg_alloc(struct virtio_pcm_substream *vss,
 		int sg_num = virtsnd_pcm_sg_num(data, period_bytes);
 		struct virtio_pcm_msg *msg;
 
-		msg = kzalloc(struct_size(msg, sgs, sg_num + 2), GFP_KERNEL);
+		msg = kzalloc_flex(*msg, sgs, sg_num + 2);
 		if (!msg)
 			return -ENOMEM;
 
@@ -180,6 +180,25 @@ void virtsnd_pcm_msg_free(struct virtio_pcm_substream *vss)
 
 	vss->msgs = NULL;
 	vss->nmsgs = 0;
+}
+
+/**
+ * virtsnd_pcm_msg_reset() - Reset the fill level of all I/O messages.
+ * @vss: VirtIO PCM substream.
+ *
+ * Messages that were only partially filled by the application when the
+ * substream was stopped are never sent to the device, so their length must be
+ * cleared before the substream is started again.
+ *
+ * Context: Any context. Takes and releases the VirtIO substream spinlock.
+ */
+void virtsnd_pcm_msg_reset(struct virtio_pcm_substream *vss)
+{
+	unsigned int i;
+
+	guard(spinlock_irqsave)(&vss->lock);
+	for (i = 0; vss->msgs && i < vss->nmsgs; ++i)
+		vss->msgs[i]->length = 0;
 }
 
 /**

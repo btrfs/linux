@@ -54,7 +54,7 @@ exynos_srom_alloc_reg_dump(const unsigned long *rdump,
 	struct exynos_srom_reg_dump *rd;
 	unsigned int i;
 
-	rd = kcalloc(nr_rdump, sizeof(*rd), GFP_KERNEL);
+	rd = kzalloc_objs(*rd, nr_rdump);
 	if (!rd)
 		return NULL;
 
@@ -115,8 +115,7 @@ static int exynos_srom_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	srom = devm_kzalloc(&pdev->dev,
-			    sizeof(struct exynos_srom), GFP_KERNEL);
+	srom = devm_kzalloc_obj(&pdev->dev, struct exynos_srom);
 	if (!srom)
 		return -ENOMEM;
 

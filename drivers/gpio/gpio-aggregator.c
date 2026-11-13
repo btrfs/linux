@@ -17,7 +17,6 @@
 #include <linux/kernel.h>
 #include <linux/list.h>
 #include <linux/lockdep.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/overflow.h>
@@ -32,8 +31,6 @@
 #include <linux/gpio/forwarder.h>
 #include <linux/gpio/machine.h>
 
-#include "dev-sync-probe.h"
-
 #define AGGREGATOR_MAX_GPIOS 512
 #define AGGREGATOR_LEGACY_PREFIX "_sysfs"
 
@@ -42,7 +39,7 @@
  */
 
 struct gpio_aggregator {
-	struct dev_sync_probe_data probe_data;
+	struct platform_device *pdev;
 	struct config_group group;
 	struct gpiod_lookup_table *lookups;
 	struct mutex lock;
@@ -135,7 +132,7 @@ static bool gpio_aggregator_is_active(struct gpio_aggregator *aggr)
 {
 	lockdep_assert_held(&aggr->lock);
 
-	return aggr->probe_data.pdev && platform_get_drvdata(aggr->probe_data.pdev);
+	return aggr->pdev && platform_get_drvdata(aggr->pdev);
 }
 
 /* Only aggregators created via legacy sysfs can be "activating". */
@@ -143,7 +140,7 @@ static bool gpio_aggregator_is_activating(struct gpio_aggregator *aggr)
 {
 	lockdep_assert_held(&aggr->lock);
 
-	return aggr->probe_data.pdev && !platform_get_drvdata(aggr->probe_data.pdev);
+	return aggr->pdev && !platform_get_drvdata(aggr->pdev);
 }
 
 static size_t gpio_aggregator_count_lines(struct gpio_aggregator *aggr)
@@ -159,7 +156,7 @@ gpio_aggregator_line_alloc(struct gpio_aggregator *parent, unsigned int idx,
 {
 	struct gpio_aggregator_line *line;
 
-	line = kzalloc(sizeof(*line), GFP_KERNEL);
+	line = kzalloc_obj(*line);
 	if (!line)
 		return ERR_PTR(-ENOMEM);
 
@@ -475,9 +472,8 @@ static int gpiochip_fwd_setup_delay_line(struct gpiochip_fwd *fwd)
 {
 	struct gpio_chip *chip = &fwd->chip;
 
-	fwd->delay_timings = devm_kcalloc(chip->parent, chip->ngpio,
-					  sizeof(*fwd->delay_timings),
-					  GFP_KERNEL);
+	fwd->delay_timings = devm_kzalloc_objs(chip->parent,
+					       *fwd->delay_timings, chip->ngpio);
 	if (!fwd->delay_timings)
 		return -ENOMEM;
 
@@ -698,11 +694,11 @@ struct gpiochip_fwd *devm_gpiochip_fwd_alloc(struct device *dev,
 	struct gpiochip_fwd *fwd;
 	struct gpio_chip *chip;
 
-	fwd = devm_kzalloc(dev, struct_size(fwd, tmp, fwd_tmp_size(ngpios)), GFP_KERNEL);
+	fwd = devm_kzalloc_flex(dev, *fwd, tmp, fwd_tmp_size(ngpios));
 	if (!fwd)
 		return ERR_PTR(-ENOMEM);
 
-	fwd->descs = devm_kcalloc(dev, ngpios, sizeof(*fwd->descs), GFP_KERNEL);
+	fwd->descs = devm_kzalloc_objs(dev, *fwd->descs, ngpios);
 	if (!fwd->descs)
 		return ERR_PTR(-ENOMEM);
 
@@ -889,8 +885,8 @@ gpio_aggregator_make_device_sw_node(struct gpio_aggregator *aggr)
 	if (num_lines == 0)
 		return NULL;
 
-	const char **line_names __free(kfree) = kcalloc(
-				num_lines, sizeof(*line_names), GFP_KERNEL);
+	const char **line_names __free(kfree) = kzalloc_objs(*line_names,
+							     num_lines);
 	if (!line_names)
 		return ERR_PTR(-ENOMEM);
 
@@ -909,6 +905,7 @@ static int gpio_aggregator_activate(struct gpio_aggregator *aggr)
 {
 	struct platform_device_info pdevinfo;
 	struct gpio_aggregator_line *line;
+	struct platform_device *pdev;
 	struct fwnode_handle *swnode;
 	unsigned int n = 0;
 	int ret = 0;
@@ -916,8 +913,7 @@ static int gpio_aggregator_activate(struct gpio_aggregator *aggr)
 	if (gpio_aggregator_count_lines(aggr) == 0)
 		return -EINVAL;
 
-	aggr->lookups = kzalloc(struct_size(aggr->lookups, table, 1),
-				GFP_KERNEL);
+	aggr->lookups = kzalloc_flex(*aggr->lookups, table, 1);
 	if (!aggr->lookups)
 		return -ENOMEM;
 
@@ -963,15 +959,29 @@ static int gpio_aggregator_activate(struct gpio_aggregator *aggr)
 
 	gpiod_add_lookup_table(aggr->lookups);
 
-	ret = dev_sync_probe_register(&aggr->probe_data, &pdevinfo);
-	if (ret)
+	pdev = platform_device_register_full(&pdevinfo);
+	if (IS_ERR(pdev)) {
+		ret = PTR_ERR(pdev);
 		goto err_remove_lookup_table;
+	}
 
+	wait_for_device_probe();
+
+	scoped_guard(device, &pdev->dev) {
+		if (!device_is_bound(&pdev->dev)) {
+			ret = -ENXIO;
+			goto err_unregister_pdev;
+		}
+	}
+
+	aggr->pdev = pdev;
 	return 0;
 
+err_unregister_pdev:
+	platform_device_unregister(pdev);
 err_remove_lookup_table:
-	kfree(aggr->lookups->dev_id);
 	gpiod_remove_lookup_table(aggr->lookups);
+	kfree(aggr->lookups->dev_id);
 err_remove_swnode:
 	fwnode_remove_software_node(swnode);
 err_remove_lookups:
@@ -982,10 +992,15 @@ err_remove_lookups:
 
 static void gpio_aggregator_deactivate(struct gpio_aggregator *aggr)
 {
-	dev_sync_probe_unregister(&aggr->probe_data);
+	struct fwnode_handle *swnode;
+
+	swnode = dev_fwnode(&aggr->pdev->dev);
+	platform_device_unregister(aggr->pdev);
+	aggr->pdev = NULL;
 	gpiod_remove_lookup_table(aggr->lookups);
 	kfree(aggr->lookups->dev_id);
 	kfree(aggr->lookups);
+	fwnode_remove_software_node(swnode);
 }
 
 static void gpio_aggregator_lockup_configfs(struct gpio_aggregator *aggr,
@@ -1146,7 +1161,7 @@ gpio_aggregator_device_dev_name_show(struct config_item *item, char *page)
 
 	guard(mutex)(&aggr->lock);
 
-	pdev = aggr->probe_data.pdev;
+	pdev = aggr->pdev;
 	if (pdev)
 		return sysfs_emit(page, "%s\n", dev_name(&pdev->dev));
 
@@ -1226,7 +1241,7 @@ gpio_aggregator_line_release(struct config_item *item)
 	kfree(line);
 }
 
-static struct configfs_item_operations gpio_aggregator_line_item_ops = {
+static const struct configfs_item_operations gpio_aggregator_line_item_ops = {
 	.release	= gpio_aggregator_line_release,
 };
 
@@ -1247,7 +1262,7 @@ static void gpio_aggregator_device_release(struct config_item *item)
 	gpio_aggregator_free(aggr);
 }
 
-static struct configfs_item_operations gpio_aggregator_device_item_ops = {
+static const struct configfs_item_operations gpio_aggregator_device_item_ops = {
 	.release	= gpio_aggregator_device_release,
 };
 
@@ -1292,7 +1307,7 @@ gpio_aggregator_device_make_group(struct config_group *group, const char *name)
 	return &line->group;
 }
 
-static struct configfs_group_operations gpio_aggregator_device_group_ops = {
+static const struct configfs_group_operations gpio_aggregator_device_group_ops = {
 	.make_group	= gpio_aggregator_device_make_group,
 };
 
@@ -1323,12 +1338,11 @@ gpio_aggregator_make_group(struct config_group *group, const char *name)
 		return ERR_PTR(ret);
 
 	config_group_init_type_name(&aggr->group, name, &gpio_aggregator_device_type);
-	dev_sync_probe_init(&aggr->probe_data);
 
 	return &aggr->group;
 }
 
-static struct configfs_group_operations gpio_aggregator_group_ops = {
+static const struct configfs_group_operations gpio_aggregator_group_ops = {
 	.make_group	= gpio_aggregator_make_group,
 };
 
@@ -1457,8 +1471,7 @@ static ssize_t gpio_aggregator_new_device_store(struct device_driver *driver,
 	memcpy(aggr->args, buf, count + 1);
 
 	aggr->init_via_sysfs = true;
-	aggr->lookups = kzalloc(struct_size(aggr->lookups, table, 1),
-				GFP_KERNEL);
+	aggr->lookups = kzalloc_flex(*aggr->lookups, table, 1);
 	if (!aggr->lookups) {
 		res = -ENOMEM;
 		goto free_ga;
@@ -1472,12 +1485,6 @@ static ssize_t gpio_aggregator_new_device_store(struct device_driver *driver,
 
 	scnprintf(name, sizeof(name), "%s.%d", AGGREGATOR_LEGACY_PREFIX, aggr->id);
 	config_group_init_type_name(&aggr->group, name, &gpio_aggregator_device_type);
-
-	/*
-	 * Since the device created by sysfs might be toggled via configfs
-	 * 'live' attribute later, this initialization is needed.
-	 */
-	dev_sync_probe_init(&aggr->probe_data);
 
 	/* Expose to configfs */
 	res = configfs_register_group(&gpio_aggregator_subsys.su_group,
@@ -1497,7 +1504,7 @@ static ssize_t gpio_aggregator_new_device_store(struct device_driver *driver,
 		goto remove_table;
 	}
 
-	aggr->probe_data.pdev = pdev;
+	aggr->pdev = pdev;
 	module_put(THIS_MODULE);
 	return count;
 
@@ -1596,7 +1603,7 @@ static int gpio_aggregator_probe(struct platform_device *pdev)
 	if (n < 0)
 		return n;
 
-	descs = devm_kmalloc_array(dev, n, sizeof(*descs), GFP_KERNEL);
+	descs = devm_kmalloc_objs(dev, *descs, n);
 	if (!descs)
 		return -ENOMEM;
 

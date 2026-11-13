@@ -159,7 +159,7 @@ static void nsp_gpio_irq_ack(struct irq_data *d)
 	u32 trigger_type;
 
 	trigger_type = irq_get_trigger_type(d->irq);
-	if (trigger_type & (IRQ_TYPE_EDGE_FALLING | IRQ_TYPE_EDGE_RISING))
+	if (trigger_type & IRQ_TYPE_EDGE_BOTH)
 		writel(val, chip->base + NSP_GPIO_EVENT);
 }
 
@@ -177,7 +177,7 @@ static void nsp_gpio_irq_set_mask(struct irq_data *d, bool unmask)
 	u32 trigger_type;
 
 	trigger_type = irq_get_trigger_type(d->irq);
-	if (trigger_type & (IRQ_TYPE_EDGE_FALLING | IRQ_TYPE_EDGE_RISING))
+	if (trigger_type & IRQ_TYPE_EDGE_BOTH)
 		nsp_set_bit(chip, REG, NSP_GPIO_EVENT_INT_MASK, gpio, unmask);
 	else
 		nsp_set_bit(chip, REG, NSP_GPIO_INT_MASK, gpio, unmask);
@@ -582,7 +582,7 @@ static int nsp_gpio_register_pinconf(struct nsp_gpio *chip)
 	struct gpio_chip *gc = &chip->gc;
 	int i;
 
-	pins = devm_kcalloc(chip->dev, gc->ngpio, sizeof(*pins), GFP_KERNEL);
+	pins = devm_kzalloc_objs(chip->dev, *pins, gc->ngpio);
 	if (!pins)
 		return -ENOMEM;
 	for (i = 0; i < gc->ngpio; i++) {
@@ -625,7 +625,7 @@ static int nsp_gpio_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
-	chip = devm_kzalloc(dev, sizeof(*chip), GFP_KERNEL);
+	chip = devm_kzalloc_obj(dev, *chip);
 	if (!chip)
 		return -ENOMEM;
 
@@ -671,11 +671,8 @@ static int nsp_gpio_probe(struct platform_device *pdev)
 		/* Install ISR for this GPIO controller. */
 		ret = devm_request_irq(dev, irq, nsp_gpio_irq_handler,
 				       IRQF_SHARED, "gpio-a", &chip->gc);
-		if (ret) {
-			dev_err(&pdev->dev, "Unable to request IRQ%d: %d\n",
-				irq, ret);
+		if (ret)
 			return ret;
-		}
 
 		girq = &chip->gc.irq;
 		gpio_irq_chip_set_chip(girq, &nsp_gpio_irq_chip);

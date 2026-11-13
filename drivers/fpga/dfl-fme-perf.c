@@ -183,7 +183,7 @@ static ssize_t cpumask_show(struct device *dev,
 
 	priv = to_fme_perf_priv(pmu);
 
-	return cpumap_print_to_pagebuf(true, buf, cpumask_of(priv->cpu));
+	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(cpumask_of(priv->cpu)));
 }
 static DEVICE_ATTR_RO(cpumask);
 
@@ -925,6 +925,8 @@ static int fme_perf_pmu_register(struct platform_device *pdev,
 				PERF_PMU_CAP_NO_EXCLUDE;
 
 	name = devm_kasprintf(priv->dev, GFP_KERNEL, "dfl_fme%d", pdev->id);
+	if (!name)
+		return -ENOMEM;
 
 	ret = perf_pmu_register(pmu, name, -1);
 	if (ret)
@@ -964,7 +966,7 @@ static int fme_perf_init(struct platform_device *pdev,
 	struct fme_perf_priv *priv;
 	int ret;
 
-	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&pdev->dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

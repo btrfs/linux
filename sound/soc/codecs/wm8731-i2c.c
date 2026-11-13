@@ -11,7 +11,6 @@
  */
 
 #include <linux/i2c.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 
 #include "wm8731.h"
@@ -28,8 +27,7 @@ static int wm8731_i2c_probe(struct i2c_client *i2c)
 	struct wm8731_priv *wm8731;
 	int ret;
 
-	wm8731 = devm_kzalloc(&i2c->dev, sizeof(struct wm8731_priv),
-			      GFP_KERNEL);
+	wm8731 = devm_kzalloc_obj(&i2c->dev, struct wm8731_priv);
 	if (wm8731 == NULL)
 		return -ENOMEM;
 
@@ -47,7 +45,7 @@ static int wm8731_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id wm8731_i2c_id[] = {
-	{ "wm8731" },
+	{ .name = "wm8731" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wm8731_i2c_id);

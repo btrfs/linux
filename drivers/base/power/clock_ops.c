@@ -201,7 +201,7 @@ static int __pm_clk_add(struct device *dev, const char *con_id,
 	if (!psd)
 		return -EINVAL;
 
-	ce = kzalloc(sizeof(*ce), GFP_KERNEL);
+	ce = kzalloc_obj(*ce);
 	if (!ce)
 		return -ENOMEM;
 
@@ -250,7 +250,7 @@ EXPORT_SYMBOL_GPL(pm_clk_add);
  *
  * Add the clock to the list of clocks used for the power management of @dev.
  * The power-management code will take control of the clock reference, so
- * callers should not call clk_put() on @clk after this function sucessfully
+ * callers should not call clk_put() on @clk after this function successfully
  * returned.
  */
 int pm_clk_add_clk(struct device *dev, struct clk *clk)
@@ -282,7 +282,7 @@ int of_pm_clk_add_clks(struct device *dev)
 	if (count <= 0)
 		return -ENODEV;
 
-	clks = kcalloc(count, sizeof(*clks), GFP_KERNEL);
+	clks = kzalloc_objs(*clks, count);
 	if (!clks)
 		return -ENOMEM;
 

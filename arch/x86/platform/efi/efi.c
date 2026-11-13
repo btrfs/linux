@@ -333,8 +333,7 @@ static void __init efi_remove_e820_mmio(void)
 			if (size >= 256*1024) {
 				pr_info("Remove mem%02u: MMIO range=[0x%08llx-0x%08llx] (%lluMB) from e820 map\n",
 					i, start, end, size >> 20);
-				e820__range_remove(start, size,
-						   E820_TYPE_RESERVED, 1);
+				e820__range_remove(start, size, E820_TYPE_RESERVED);
 			} else {
 				pr_info("Not removing mem%02u: MMIO range=[0x%08llx-0x%08llx] (%lluKB) from e820 map\n",
 					i, start, end, size >> 10);
@@ -837,7 +836,7 @@ static void __init __efi_enter_virtual_mode(void)
 	}
 
 	efi_check_for_embedded_firmwares();
-	efi_free_boot_services();
+	efi_unmap_boot_services();
 
 	if (!efi_is_mixed())
 		efi_native_runtime_setup();
@@ -892,20 +891,21 @@ bool efi_is_table_address(unsigned long phys_addr)
 
 #define EFI_ATTR_SHOW(name) \
 static ssize_t name##_show(struct kobject *kobj, \
-				struct kobj_attribute *attr, char *buf) \
+			   const struct kobj_attribute *attr, char *buf) \
 { \
-	return sprintf(buf, "0x%lx\n", EFI_FIELD(name)); \
+	return sysfs_emit(buf, "0x%lx\n", EFI_FIELD(name)); \
 }
 
 EFI_ATTR_SHOW(fw_vendor);
 EFI_ATTR_SHOW(runtime);
 EFI_ATTR_SHOW(config_table);
 
-struct kobj_attribute efi_attr_fw_vendor = __ATTR_RO(fw_vendor);
-struct kobj_attribute efi_attr_runtime = __ATTR_RO(runtime);
-struct kobj_attribute efi_attr_config_table = __ATTR_RO(config_table);
+const struct kobj_attribute efi_attr_fw_vendor = __KOBJ_ATTR_RO(fw_vendor);
+const struct kobj_attribute efi_attr_runtime = __KOBJ_ATTR_RO(runtime);
+const struct kobj_attribute efi_attr_config_table = __KOBJ_ATTR_RO(config_table);
 
-umode_t efi_attr_is_visible(struct kobject *kobj, struct attribute *attr, int n)
+umode_t efi_attr_is_visible(struct kobject *kobj, const struct attribute *attr,
+			    int n)
 {
 	if (attr == &efi_attr_fw_vendor.attr) {
 		if (efi_enabled(EFI_PARAVIRT) ||
@@ -921,7 +921,7 @@ umode_t efi_attr_is_visible(struct kobject *kobj, struct attribute *attr, int n)
 	return attr->mode;
 }
 
-enum efi_secureboot_mode __x86_ima_efi_boot_mode(void)
+enum efi_secureboot_mode __x86_efi_boot_mode(void)
 {
 	return boot_params.secure_boot;
 }

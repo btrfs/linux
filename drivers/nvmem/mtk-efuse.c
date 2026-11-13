@@ -6,7 +6,6 @@
 
 #include <linux/device.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/io.h>
 #include <linux/nvmem-provider.h>
 #include <linux/platform_device.h>
@@ -70,7 +69,7 @@ static int mtk_efuse_probe(struct platform_device *pdev)
 	const struct mtk_efuse_pdata *pdata;
 	struct platform_device *socinfo;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

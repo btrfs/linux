@@ -1024,9 +1024,8 @@ pci224_auto_attach(struct comedi_device *dev, unsigned long context_model)
 	irq = pci_dev->irq;
 
 	/* Allocate buffer to hold values for AO channel scan. */
-	devpriv->ao_scan_vals = kmalloc_array(board->ao_chans,
-					      sizeof(devpriv->ao_scan_vals[0]),
-					      GFP_KERNEL);
+	devpriv->ao_scan_vals = kmalloc_objs(devpriv->ao_scan_vals[0],
+					     board->ao_chans);
 	if (!devpriv->ao_scan_vals)
 		return -ENOMEM;
 
@@ -1122,9 +1121,9 @@ static int amplc_pci224_pci_probe(struct pci_dev *dev,
 }
 
 static const struct pci_device_id amplc_pci224_pci_table[] = {
-	{ PCI_VDEVICE(AMPLICON, 0x0007), pci224_model },
-	{ PCI_VDEVICE(AMPLICON, 0x0008), pci234_model },
-	{ 0 }
+	{ PCI_VDEVICE(AMPLICON, 0x0007), .driver_data = pci224_model },
+	{ PCI_VDEVICE(AMPLICON, 0x0008), .driver_data = pci234_model },
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, amplc_pci224_pci_table);
 

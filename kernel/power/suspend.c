@@ -306,20 +306,24 @@ static void platform_resume_finish(suspend_state_t state)
 
 static int platform_suspend_begin(suspend_state_t state)
 {
-	if (state == PM_SUSPEND_TO_IDLE && s2idle_ops && s2idle_ops->begin)
-		return s2idle_ops->begin();
-	else if (suspend_ops && suspend_ops->begin)
+	if (state == PM_SUSPEND_TO_IDLE) {
+		if (s2idle_ops && s2idle_ops->begin)
+			return s2idle_ops->begin();
+	} else if (suspend_ops && suspend_ops->begin) {
 		return suspend_ops->begin(state);
-	else
-		return 0;
+	}
+
+	return 0;
 }
 
 static void platform_resume_end(suspend_state_t state)
 {
-	if (state == PM_SUSPEND_TO_IDLE && s2idle_ops && s2idle_ops->end)
-		s2idle_ops->end();
-	else if (suspend_ops && suspend_ops->end)
+	if (state == PM_SUSPEND_TO_IDLE) {
+		if (s2idle_ops && s2idle_ops->end)
+			s2idle_ops->end();
+	} else if (suspend_ops && suspend_ops->end) {
 		suspend_ops->end();
+	}
 }
 
 static void platform_recover(suspend_state_t state)
@@ -344,10 +348,17 @@ MODULE_PARM_DESC(pm_test_delay,
 static int suspend_test(int level)
 {
 #ifdef CONFIG_PM_DEBUG
+	int i;
+
 	if (pm_test_level == level) {
 		pr_info("suspend debug: Waiting for %d second(s).\n",
 				pm_test_delay);
-		mdelay(pm_test_delay * 1000);
+		for (i = 0; i < pm_test_delay && !pm_wakeup_pending(); i++) {
+			if (level > TEST_CORE)
+				msleep(1000);
+			else
+				mdelay(1000);
+		}
 		return 1;
 	}
 #endif /* !CONFIG_PM_DEBUG */
@@ -589,7 +600,11 @@ static int enter_state(suspend_state_t state)
 
 	if (sync_on_suspend_enabled) {
 		trace_suspend_resume(TPS("sync_filesystems"), 0, true);
-		ksys_sync_helper();
+
+		error = pm_sleep_fs_sync();
+		if (error)
+			goto Unlock;
+
 		trace_suspend_resume(TPS("sync_filesystems"), 0, false);
 	}
 

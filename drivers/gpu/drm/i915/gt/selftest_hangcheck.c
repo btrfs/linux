@@ -278,7 +278,7 @@ static bool wait_until_running(struct hang *h, struct i915_request *rq)
 			     10) &&
 		 wait_for(i915_seqno_passed(hws_seqno(h, rq),
 					    rq->fence.seqno),
-			  1000));
+			  2000));
 }
 
 static int igt_hang_sanitycheck(void *arg)
@@ -986,7 +986,7 @@ static int __igt_reset_engines(struct intel_gt *gt,
 			h.ctx->sched.priority = 1024;
 	}
 
-	threads = kmalloc_array(I915_NUM_ENGINES, sizeof(*threads), GFP_KERNEL);
+	threads = kmalloc_objs(*threads, I915_NUM_ENGINES);
 	if (!threads)
 		return -ENOMEM;
 

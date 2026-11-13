@@ -11,6 +11,7 @@
 #include <linux/irqchip.h>
 #include <linux/kernel_stat.h>
 #include <linux/proc_fs.h>
+#include <linux/minmax.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/seq_file.h>
@@ -19,6 +20,7 @@
 
 #include <asm/irq.h>
 #include <asm/loongson.h>
+#include <asm/numa.h>
 #include <asm/setup.h>
 
 DEFINE_PER_CPU(unsigned long, irq_stack);
@@ -68,7 +70,7 @@ static int __init early_pci_mcfg_parse(struct acpi_table_header *header)
 
 	for (i = 0; i < n; i++, mptr++) {
 		msi_group[i].pci_segment = mptr->pci_segment;
-		pch_group[i].node = msi_group[i].node = (mptr->address >> 44) & 0xf;
+		pch_group[i].node = msi_group[i].node = pa_to_nid(mptr->address);
 	}
 
 	return 0;
@@ -97,6 +99,11 @@ int __init arch_probe_nr_irqs(void)
 		irq_set_nr_irqs(64 + NR_VECTORS * (nr_cpu_ids + nr_io_pics));
 
 	return NR_IRQS_LEGACY;
+}
+
+unsigned int arch_dynirq_lower_bound(unsigned int from)
+{
+	return MAX(from, NR_IRQS_LEGACY);
 }
 
 void __init init_IRQ(void)

@@ -9,7 +9,7 @@
 #include "stmmac_platform.h"
 
 static const char *const mgbe_clks[] = {
-	"rx-pcs", "tx", "tx-pcs", "mac-divider", "mac", "mgbe", "ptp-ref", "mac"
+	"rx-pcs", "tx", "tx-pcs", "mac-divider", "mac", "mgbe", "ptp_ref", "mac"
 };
 
 struct tegra_mgbe {
@@ -215,11 +215,12 @@ static int tegra_mgbe_probe(struct platform_device *pdev)
 {
 	struct plat_stmmacenet_data *plat;
 	struct stmmac_resources res;
+	bool use_legacy_ptp = false;
 	struct tegra_mgbe *mgbe;
 	int irq, err, i;
 	u32 value;
 
-	mgbe = devm_kzalloc(&pdev->dev, sizeof(*mgbe), GFP_KERNEL);
+	mgbe = devm_kzalloc_obj(&pdev->dev, *mgbe);
 	if (!mgbe)
 		return -ENOMEM;
 
@@ -252,13 +253,27 @@ static int tegra_mgbe_probe(struct platform_device *pdev)
 	res.addr = mgbe->regs;
 	res.irq = irq;
 
-	mgbe->clks = devm_kcalloc(&pdev->dev, ARRAY_SIZE(mgbe_clks),
-				  sizeof(*mgbe->clks), GFP_KERNEL);
+	mgbe->clks = devm_kzalloc_objs(&pdev->dev, *mgbe->clks,
+				       ARRAY_SIZE(mgbe_clks));
 	if (!mgbe->clks)
 		return -ENOMEM;
 
-	for (i = 0; i <  ARRAY_SIZE(mgbe_clks); i++)
+	/* Older device-trees use 'ptp-ref' rather than 'ptp_ref'.
+	 * Fall back when the legacy name is present.
+	 */
+	if (of_property_match_string(pdev->dev.of_node, "clock-names",
+				     "ptp-ref") >= 0)
+		use_legacy_ptp = true;
+
+	for (i = 0; i < ARRAY_SIZE(mgbe_clks); i++) {
 		mgbe->clks[i].id = mgbe_clks[i];
+
+		if (use_legacy_ptp && !strcmp(mgbe_clks[i], "ptp_ref")) {
+			dev_warn(mgbe->dev,
+				 "Device-tree update needed for PTP clock!\n");
+			mgbe->clks[i].id = "ptp-ref";
+		}
+	}
 
 	err = devm_clk_bulk_get(mgbe->dev, ARRAY_SIZE(mgbe_clks), mgbe->clks);
 	if (err < 0)
@@ -308,17 +323,17 @@ static int tegra_mgbe_probe(struct platform_device *pdev)
 		goto disable_clks;
 	}
 
-	plat->has_xgmac = 1;
+	plat->core_type = DWMAC_CORE_XGMAC;
 	plat->flags |= STMMAC_FLAG_TSO_EN;
-	plat->pmt = 1;
+	plat->pmt = true;
 	plat->bsp_priv = mgbe;
 
 	if (!plat->mdio_node)
 		plat->mdio_node = of_get_child_by_name(pdev->dev.of_node, "mdio");
 
 	if (!plat->mdio_bus_data) {
-		plat->mdio_bus_data = devm_kzalloc(&pdev->dev, sizeof(*plat->mdio_bus_data),
-						   GFP_KERNEL);
+		plat->mdio_bus_data = devm_kzalloc_obj(&pdev->dev,
+						       *plat->mdio_bus_data);
 		if (!plat->mdio_bus_data) {
 			err = -ENOMEM;
 			goto disable_clks;

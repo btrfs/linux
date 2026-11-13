@@ -7,6 +7,7 @@
 #define _CRYPTO_SHA1_H
 
 #include <linux/types.h>
+#include <linux/string.h>
 
 #define SHA1_DIGEST_SIZE        20
 #define SHA1_BLOCK_SIZE         64
@@ -25,16 +26,6 @@ struct sha1_state {
 	u64 count;
 	u8 buffer[SHA1_BLOCK_SIZE];
 };
-
-/*
- * An implementation of SHA-1's compression function.  Don't use in new code!
- * You shouldn't be using SHA-1, and even if you *have* to use SHA-1, this isn't
- * the correct way to hash something with SHA-1 (use crypto_shash instead).
- */
-#define SHA1_DIGEST_WORDS	(SHA1_DIGEST_SIZE / 4)
-#define SHA1_WORKSPACE_WORDS	16
-void sha1_init_raw(__u32 *buf);
-void sha1_transform(__u32 *digest, const char *data, __u32 *W);
 
 /* State for the SHA-1 compression function */
 struct sha1_block_state {
@@ -84,7 +75,7 @@ void sha1_update(struct sha1_ctx *ctx, const u8 *data, size_t len);
  *
  * Context: Any context.
  */
-void sha1_final(struct sha1_ctx *ctx, u8 out[SHA1_DIGEST_SIZE]);
+void sha1_final(struct sha1_ctx *ctx, u8 out[at_least SHA1_DIGEST_SIZE]);
 
 /**
  * sha1() - Compute SHA-1 message digest in one shot
@@ -94,7 +85,7 @@ void sha1_final(struct sha1_ctx *ctx, u8 out[SHA1_DIGEST_SIZE]);
  *
  * Context: Any context.
  */
-void sha1(const u8 *data, size_t len, u8 out[SHA1_DIGEST_SIZE]);
+void sha1(const u8 *data, size_t len, u8 out[at_least SHA1_DIGEST_SIZE]);
 
 /**
  * struct hmac_sha1_key - Prepared key for HMAC-SHA1
@@ -107,6 +98,15 @@ struct hmac_sha1_key {
 };
 
 /**
+ * hmac_sha1_zeroize_key() - Zeroize an hmac_sha1_key structure
+ * @key: The hmac_sha1_key to zeroize
+ */
+static inline void hmac_sha1_zeroize_key(struct hmac_sha1_key *key)
+{
+	memzero_explicit(key, sizeof(*key));
+}
+
+/**
  * struct hmac_sha1_ctx - Context for computing HMAC-SHA1 of a message
  * @sha_ctx: private
  * @ostate: private
@@ -115,6 +115,15 @@ struct hmac_sha1_ctx {
 	struct sha1_ctx sha_ctx;
 	struct sha1_block_state ostate;
 };
+
+/**
+ * hmac_sha1_zeroize_ctx() - Zeroize an hmac_sha1_ctx structure
+ * @ctx: The hmac_sha1_ctx context to zeroize
+ */
+static inline void hmac_sha1_zeroize_ctx(struct hmac_sha1_ctx *ctx)
+{
+	memzero_explicit(ctx, sizeof(*ctx));
+}
 
 /**
  * hmac_sha1_preparekey() - Prepare a key for HMAC-SHA1
@@ -181,7 +190,8 @@ static inline void hmac_sha1_update(struct hmac_sha1_ctx *ctx,
  *
  * Context: Any context.
  */
-void hmac_sha1_final(struct hmac_sha1_ctx *ctx, u8 out[SHA1_DIGEST_SIZE]);
+void hmac_sha1_final(struct hmac_sha1_ctx *ctx,
+		     u8 out[at_least SHA1_DIGEST_SIZE]);
 
 /**
  * hmac_sha1() - Compute HMAC-SHA1 in one shot, using a prepared key
@@ -195,7 +205,8 @@ void hmac_sha1_final(struct hmac_sha1_ctx *ctx, u8 out[SHA1_DIGEST_SIZE]);
  * Context: Any context.
  */
 void hmac_sha1(const struct hmac_sha1_key *key,
-	       const u8 *data, size_t data_len, u8 out[SHA1_DIGEST_SIZE]);
+	       const u8 *data, size_t data_len,
+	       u8 out[at_least SHA1_DIGEST_SIZE]);
 
 /**
  * hmac_sha1_usingrawkey() - Compute HMAC-SHA1 in one shot, using a raw key
@@ -212,6 +223,6 @@ void hmac_sha1(const struct hmac_sha1_key *key,
  */
 void hmac_sha1_usingrawkey(const u8 *raw_key, size_t raw_key_len,
 			   const u8 *data, size_t data_len,
-			   u8 out[SHA1_DIGEST_SIZE]);
+			   u8 out[at_least SHA1_DIGEST_SIZE]);
 
 #endif /* _CRYPTO_SHA1_H */

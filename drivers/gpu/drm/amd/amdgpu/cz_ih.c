@@ -157,6 +157,9 @@ static int cz_ih_irq_init(struct amdgpu_device *adev)
 	/* enable interrupts */
 	cz_ih_enable_interrupts(adev);
 
+	if (adev->irq.ih_soft.ring_size)
+		adev->irq.ih_soft.enabled = true;
+
 	return 0;
 }
 
@@ -193,6 +196,9 @@ static u32 cz_ih_get_wptr(struct amdgpu_device *adev,
 	u32 wptr, tmp;
 
 	wptr = le32_to_cpu(*ih->wptr_cpu);
+
+	if (ih == &adev->irq.ih_soft)
+		goto out;
 
 	if (!REG_GET_FIELD(wptr, IH_RB_WPTR, RB_OVERFLOW))
 		goto out;
@@ -297,6 +303,10 @@ static int cz_ih_sw_init(struct amdgpu_ip_block *ip_block)
 	if (r)
 		return r;
 
+	r = amdgpu_ih_ring_init(adev, &adev->irq.ih_soft, IH_SW_RING_SIZE, true);
+	if (r)
+		return r;
+
 	r = amdgpu_irq_init(adev);
 
 	return r;
@@ -341,17 +351,6 @@ static int cz_ih_resume(struct amdgpu_ip_block *ip_block)
 	return cz_ih_hw_init(ip_block);
 }
 
-static bool cz_ih_is_idle(struct amdgpu_ip_block *ip_block)
-{
-	struct amdgpu_device *adev = ip_block->adev;
-	u32 tmp = RREG32(mmSRBM_STATUS);
-
-	if (REG_GET_FIELD(tmp, SRBM_STATUS, IH_BUSY))
-		return false;
-
-	return true;
-}
-
 static int cz_ih_wait_for_idle(struct amdgpu_ip_block *ip_block)
 {
 	unsigned i;
@@ -366,36 +365,6 @@ static int cz_ih_wait_for_idle(struct amdgpu_ip_block *ip_block)
 		udelay(1);
 	}
 	return -ETIMEDOUT;
-}
-
-static int cz_ih_soft_reset(struct amdgpu_ip_block *ip_block)
-{
-	u32 srbm_soft_reset = 0;
-	struct amdgpu_device *adev = ip_block->adev;
-	u32 tmp = RREG32(mmSRBM_STATUS);
-
-	if (tmp & SRBM_STATUS__IH_BUSY_MASK)
-		srbm_soft_reset = REG_SET_FIELD(srbm_soft_reset, SRBM_SOFT_RESET,
-						SOFT_RESET_IH, 1);
-
-	if (srbm_soft_reset) {
-		tmp = RREG32(mmSRBM_SOFT_RESET);
-		tmp |= srbm_soft_reset;
-		dev_info(adev->dev, "SRBM_SOFT_RESET=0x%08X\n", tmp);
-		WREG32(mmSRBM_SOFT_RESET, tmp);
-		tmp = RREG32(mmSRBM_SOFT_RESET);
-
-		udelay(50);
-
-		tmp &= ~srbm_soft_reset;
-		WREG32(mmSRBM_SOFT_RESET, tmp);
-		tmp = RREG32(mmSRBM_SOFT_RESET);
-
-		/* Wait a little for things to settle down */
-		udelay(50);
-	}
-
-	return 0;
 }
 
 static int cz_ih_set_clockgating_state(struct amdgpu_ip_block *ip_block,
@@ -421,9 +390,7 @@ static const struct amd_ip_funcs cz_ih_ip_funcs = {
 	.hw_fini = cz_ih_hw_fini,
 	.suspend = cz_ih_suspend,
 	.resume = cz_ih_resume,
-	.is_idle = cz_ih_is_idle,
 	.wait_for_idle = cz_ih_wait_for_idle,
-	.soft_reset = cz_ih_soft_reset,
 	.set_clockgating_state = cz_ih_set_clockgating_state,
 	.set_powergating_state = cz_ih_set_powergating_state,
 };

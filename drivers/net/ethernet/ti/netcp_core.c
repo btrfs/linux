@@ -265,7 +265,7 @@ static int netcp_module_probe(struct netcp_device *netcp_device,
 		return NETCP_MOD_PROBE_SKIPPED;
 	}
 
-	inst_modpriv = devm_kzalloc(dev, sizeof(*inst_modpriv), GFP_KERNEL);
+	inst_modpriv = devm_kzalloc_obj(dev, *inst_modpriv);
 	if (!inst_modpriv) {
 		of_node_put(child);
 		return -ENOMEM;
@@ -300,8 +300,7 @@ static int netcp_module_probe(struct netcp_device *netcp_device,
 			    interface_list) {
 		struct netcp_intf_modpriv *intf_modpriv;
 
-		intf_modpriv = devm_kzalloc(dev, sizeof(*intf_modpriv),
-					    GFP_KERNEL);
+		intf_modpriv = devm_kzalloc_obj(dev, *intf_modpriv);
 		if (!intf_modpriv)
 			return -ENOMEM;
 
@@ -474,7 +473,7 @@ int netcp_register_txhook(struct netcp_intf *netcp_priv, int order,
 	struct netcp_hook_list *next;
 	unsigned long flags;
 
-	entry = devm_kzalloc(netcp_priv->dev, sizeof(*entry), GFP_KERNEL);
+	entry = devm_kzalloc_obj(netcp_priv->dev, *entry);
 	if (!entry)
 		return -ENOMEM;
 
@@ -523,7 +522,7 @@ int netcp_register_rxhook(struct netcp_intf *netcp_priv, int order,
 	struct netcp_hook_list *next;
 	unsigned long flags;
 
-	entry = devm_kzalloc(netcp_priv->dev, sizeof(*entry), GFP_KERNEL);
+	entry = devm_kzalloc_obj(netcp_priv->dev, *entry);
 	if (!entry)
 		return -ENOMEM;
 
@@ -759,8 +758,8 @@ static int netcp_process_one_rx_packet(struct netcp_intf *netcp)
 	knav_pool_desc_put(netcp->rx_pool, desc);
 
 	u64_stats_update_begin(&rx_stats->syncp_rx);
-	rx_stats->rx_packets++;
-	rx_stats->rx_bytes += skb->len;
+	u64_stats_inc(&rx_stats->rx_packets);
+	u64_stats_add(&rx_stats->rx_bytes, skb->len);
 	u64_stats_update_end(&rx_stats->syncp_rx);
 
 	/* push skb up the stack */
@@ -1045,8 +1044,8 @@ static int netcp_process_tx_compl_packets(struct netcp_intf *netcp,
 		}
 
 		u64_stats_update_begin(&tx_stats->syncp_tx);
-		tx_stats->tx_packets++;
-		tx_stats->tx_bytes += skb->len;
+		u64_stats_inc(&tx_stats->tx_packets);
+		u64_stats_add(&tx_stats->tx_bytes, skb->len);
 		u64_stats_update_end(&tx_stats->syncp_tx);
 		dev_kfree_skb(skb);
 		pkts++;
@@ -1401,7 +1400,7 @@ static struct netcp_addr *netcp_addr_add(struct netcp_intf *netcp,
 {
 	struct netcp_addr *naddr;
 
-	naddr = devm_kmalloc(netcp->dev, sizeof(*naddr), GFP_ATOMIC);
+	naddr = devm_kmalloc_obj(netcp->dev, *naddr, GFP_ATOMIC);
 	if (!naddr)
 		return NULL;
 
@@ -1781,6 +1780,62 @@ static int netcp_ndo_stop(struct net_device *ndev)
 	return 0;
 }
 
+static int netcp_ndo_hwtstamp_get(struct net_device *ndev,
+				  struct kernel_hwtstamp_config *config)
+{
+	struct netcp_intf *netcp = netdev_priv(ndev);
+	struct netcp_intf_modpriv *intf_modpriv;
+	struct netcp_module *module;
+	int err = -EOPNOTSUPP;
+
+	if (!netif_running(ndev))
+		return -EINVAL;
+
+	for_each_module(netcp, intf_modpriv) {
+		module = intf_modpriv->netcp_module;
+		if (!module->hwtstamp_get)
+			continue;
+
+		err = module->hwtstamp_get(intf_modpriv->module_priv, config);
+		break;
+	}
+
+	return err;
+}
+
+static int netcp_ndo_hwtstamp_set(struct net_device *ndev,
+				  struct kernel_hwtstamp_config *config,
+				  struct netlink_ext_ack *extack)
+{
+	struct netcp_intf *netcp = netdev_priv(ndev);
+	struct netcp_intf_modpriv *intf_modpriv;
+	struct netcp_module *module;
+	int ret = -1, err = -EOPNOTSUPP;
+
+	if (!netif_running(ndev))
+		return -EINVAL;
+
+	for_each_module(netcp, intf_modpriv) {
+		module = intf_modpriv->netcp_module;
+		if (!module->hwtstamp_set)
+			continue;
+
+		err = module->hwtstamp_set(intf_modpriv->module_priv, config,
+					   extack);
+		if ((err < 0) && (err != -EOPNOTSUPP)) {
+			NL_SET_ERR_MSG_WEAK_MOD(extack,
+						"At least one module failed to setup HW timestamps");
+			ret = err;
+			goto out;
+		}
+		if (err == 0)
+			ret = err;
+	}
+
+out:
+	return (ret == 0) ? 0 : err;
+}
+
 static int netcp_ndo_ioctl(struct net_device *ndev,
 			   struct ifreq *req, int cmd)
 {
@@ -1917,14 +1972,14 @@ netcp_get_stats(struct net_device *ndev, struct rtnl_link_stats64 *stats)
 
 	do {
 		start = u64_stats_fetch_begin(&p->syncp_rx);
-		rxpackets       = p->rx_packets;
-		rxbytes         = p->rx_bytes;
+		rxpackets       = u64_stats_read(&p->rx_packets);
+		rxbytes         = u64_stats_read(&p->rx_bytes);
 	} while (u64_stats_fetch_retry(&p->syncp_rx, start));
 
 	do {
 		start = u64_stats_fetch_begin(&p->syncp_tx);
-		txpackets       = p->tx_packets;
-		txbytes         = p->tx_bytes;
+		txpackets       = u64_stats_read(&p->tx_packets);
+		txbytes         = u64_stats_read(&p->tx_bytes);
 	} while (u64_stats_fetch_retry(&p->syncp_tx, start));
 
 	stats->rx_packets = rxpackets;
@@ -1952,6 +2007,8 @@ static const struct net_device_ops netcp_netdev_ops = {
 	.ndo_tx_timeout		= netcp_ndo_tx_timeout,
 	.ndo_select_queue	= dev_pick_tx_zero,
 	.ndo_setup_tc		= netcp_setup_tc,
+	.ndo_hwtstamp_get	= netcp_ndo_hwtstamp_get,
+	.ndo_hwtstamp_set	= netcp_ndo_hwtstamp_set,
 };
 
 static int netcp_create_interface(struct netcp_device *netcp_device,
@@ -2162,12 +2219,12 @@ static int netcp_probe(struct platform_device *pdev)
 	}
 
 	/* Allocate a new NETCP device instance */
-	netcp_device = devm_kzalloc(dev, sizeof(*netcp_device), GFP_KERNEL);
+	netcp_device = devm_kzalloc_obj(dev, *netcp_device);
 	if (!netcp_device)
 		return -ENOMEM;
 
 	pm_runtime_enable(&pdev->dev);
-	ret = pm_runtime_get_sync(&pdev->dev);
+	ret = pm_runtime_resume_and_get(&pdev->dev);
 	if (ret < 0) {
 		dev_err(dev, "Failed to enable NETCP power-domain\n");
 		pm_runtime_disable(&pdev->dev);

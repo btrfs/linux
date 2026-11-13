@@ -805,12 +805,10 @@ static int ms_lib_alloc_logicalmap(struct us_data *us)
 	u32  i;
 	struct ene_ub6250_info *info = (struct ene_ub6250_info *) us->extra;
 
-	info->MS_Lib.Phy2LogMap = kmalloc_array(info->MS_Lib.NumberOfPhyBlock,
-						sizeof(u16),
-						GFP_KERNEL);
-	info->MS_Lib.Log2PhyMap = kmalloc_array(info->MS_Lib.NumberOfLogBlock,
-						sizeof(u16),
-						GFP_KERNEL);
+	info->MS_Lib.Phy2LogMap = kmalloc_objs(u16,
+					       info->MS_Lib.NumberOfPhyBlock);
+	info->MS_Lib.Log2PhyMap = kmalloc_objs(u16,
+					       info->MS_Lib.NumberOfLogBlock);
 
 	if ((info->MS_Lib.Phy2LogMap == NULL) || (info->MS_Lib.Log2PhyMap == NULL)) {
 		ms_lib_free_logicalmap(us);
@@ -1119,9 +1117,8 @@ static int ms_lib_alloc_writebuf(struct us_data *us)
 	info->MS_Lib.blkpag = kmalloc_array(info->MS_Lib.PagesPerBlock,
 					    info->MS_Lib.BytesPerSector,
 					    GFP_KERNEL);
-	info->MS_Lib.blkext = kmalloc_array(info->MS_Lib.PagesPerBlock,
-					    sizeof(struct ms_lib_type_extdat),
-					    GFP_KERNEL);
+	info->MS_Lib.blkext = kmalloc_objs(struct ms_lib_type_extdat,
+					   info->MS_Lib.PagesPerBlock);
 
 	if ((info->MS_Lib.blkpag == NULL) || (info->MS_Lib.blkext == NULL)) {
 		ms_lib_free_writebuf(us);
@@ -2306,7 +2303,8 @@ static int ene_transport(struct scsi_cmnd *srb, struct us_data *us)
 
 	/*US_DEBUG(usb_stor_show_command(us, srb)); */
 	scsi_set_resid(srb, 0);
-	if (unlikely(!(info->SD_Status & SD_Ready) || (info->MS_Status & MS_Ready)))
+	if (unlikely(!(info->SD_Status & SD_Ready) &&
+		     !(info->MS_Status & MS_Ready)))
 		result = ene_init(us);
 	if (result == USB_STOR_XFER_GOOD) {
 		result = USB_STOR_TRANSPORT_ERROR;
@@ -2336,7 +2334,7 @@ static int ene_ub6250_probe(struct usb_interface *intf,
 		return result;
 
 	/* FIXME: where should the code alloc extra buf ? */
-	us->extra = kzalloc(sizeof(struct ene_ub6250_info), GFP_KERNEL);
+	us->extra = kzalloc_obj(struct ene_ub6250_info);
 	if (!us->extra)
 		return -ENOMEM;
 	us->extra_destructor = ene_ub6250_info_destructor;
@@ -2350,6 +2348,8 @@ static int ene_ub6250_probe(struct usb_interface *intf,
 
 	us->transport_name = "ene_ub6250";
 	us->transport = ene_transport;
+	/* get_transport() only sets this for the standard USB_PR_* protocols */
+	us->transport_reset = usb_stor_Bulk_reset;
 	us->max_lun = 0;
 
 	result = usb_stor_probe2(us);
@@ -2357,7 +2357,9 @@ static int ene_ub6250_probe(struct usb_interface *intf,
 		return result;
 
 	/* probe card type */
+	mutex_lock(&us->dev_mutex);
 	result = ene_get_card_type(us, REG_CARD_STATUS, info->bbuf);
+	mutex_unlock(&us->dev_mutex);
 	if (result != USB_STOR_XFER_GOOD) {
 		usb_stor_disconnect(intf);
 		return USB_STOR_TRANSPORT_ERROR;

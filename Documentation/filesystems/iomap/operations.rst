@@ -17,6 +17,12 @@ Supported File Operations
 Below are a discussion of the high level file operations that iomap
 implements.
 
+Each operation takes an ``iomap_iter_next_fn`` callback that supplies the file
+mappings, as described in the iomap design document.  The per-operation
+``flags`` documented below are passed to that callback; references to
+``begin`` and ``end`` name the two steps a typical callback is built from
+via ``iomap_iter_next``.
+
 Buffered I/O
 ============
 
@@ -90,10 +96,10 @@ iomap calls these functions:
     <https://lore.kernel.org/all/20180619164137.13720-6-hch@lst.de/>`_
     that was set up by ``->get_folio``.
 
-  - ``iomap_valid``: The filesystem may not hold locks between
-    ``->iomap_begin`` and ``->iomap_end`` because pagecache operations
-    can take folio locks, fault on userspace pages, initiate writeback
-    for memory reclamation, or engage in other time-consuming actions.
+  - ``iomap_valid``: The filesystem may not hold locks between ``begin`` and
+    ``end`` because pagecache operations can take folio locks, fault on
+    userspace pages, initiate writeback for memory reclamation, or engage in
+    other time-consuming actions.
     If a file's space mapping data are mutable, it is possible that the
     mapping for a particular pagecache folio can `change in the time it
     takes
@@ -114,12 +120,12 @@ iomap calls these functions:
     If the mapping is not valid, the mapping will be sampled again.
 
     To support making the validity decision, the filesystem's
-    ``->iomap_begin`` function may set ``struct iomap::validity_cookie``
+    ``begin`` function may set ``struct iomap::validity_cookie``
     at the same time that it populates the other iomap fields.
     A simple validation cookie implementation is a sequence counter.
     If the filesystem bumps the sequence counter every time it modifies
     the inode's extent map, it can be placed in the ``struct
-    iomap::validity_cookie`` during ``->iomap_begin``.
+    iomap::validity_cookie`` during ``begin``.
     If the value in the cookie is found to be different to the value
     the filesystem holds when the mapping is passed back to
     ``->iomap_valid``, then the iomap should considered stale and the
@@ -134,6 +140,27 @@ These ``struct kiocb`` flags are significant for buffered I/O with iomap:
  * ``IOCB_NOWAIT``: Turns on ``IOMAP_NOWAIT``.
 
  * ``IOCB_DONTCACHE``: Turns on ``IOMAP_DONTCACHE``.
+
+``struct iomap_read_ops``
+--------------------------
+
+.. code-block:: c
+
+ struct iomap_read_ops {
+     int (*read_folio_range)(const struct iomap_iter *iter,
+                             struct iomap_read_folio_ctx *ctx, size_t len);
+     void (*submit_read)(struct iomap_read_folio_ctx *ctx);
+ };
+
+iomap calls these functions:
+
+  - ``read_folio_range``: Called to read in the range. This must be provided
+    by the caller. If this succeeds, iomap_finish_folio_read() must be called
+    after the range is read in, regardless of whether the read succeeded or
+    failed.
+
+  - ``submit_read``: Submit any pending read requests. This function is
+    optional.
 
 Internal per-Folio State
 ------------------------
@@ -178,9 +205,31 @@ Buffered Readahead and Reads
 The ``iomap_readahead`` function initiates readahead to the pagecache.
 The ``iomap_read_folio`` function reads one folio's worth of data into
 the pagecache.
-The ``flags`` argument to ``->iomap_begin`` will be set to zero.
+The ``flags`` argument to ``begin`` will be set to zero.
 The pagecache takes whatever locks it needs before calling the
 filesystem.
+
+Both ``iomap_readahead`` and ``iomap_read_folio`` pass in a ``struct
+iomap_read_folio_ctx``:
+
+.. code-block:: c
+
+ struct iomap_read_folio_ctx {
+    const struct iomap_read_ops *ops;
+    struct folio *cur_folio;
+    struct readahead_control *rac;
+    void *read_ctx;
+ };
+
+``iomap_readahead`` must set:
+ * ``ops->read_folio_range()`` and ``rac``
+
+``iomap_read_folio`` must set:
+ * ``ops->read_folio_range()`` and ``cur_folio``
+
+``ops->submit_read()`` and ``read_ctx`` are optional. ``read_ctx`` is used to
+pass in any custom data the caller needs accessible in the ops callbacks for
+fulfilling reads.
 
 Buffered Writes
 ---------------
@@ -188,7 +237,7 @@ Buffered Writes
 The ``iomap_file_buffered_write`` function writes an ``iocb`` to the
 pagecache.
 ``IOMAP_WRITE`` or ``IOMAP_WRITE`` | ``IOMAP_NOWAIT`` will be passed as
-the ``flags`` argument to ``->iomap_begin``.
+the ``flags`` argument to ``begin``.
 Callers commonly take ``i_rwsem`` in either shared or exclusive mode
 before calling this function.
 
@@ -198,7 +247,7 @@ mmap Write Faults
 The ``iomap_page_mkwrite`` function handles a write fault to a folio in
 the pagecache.
 ``IOMAP_WRITE | IOMAP_FAULT`` will be passed as the ``flags`` argument
-to ``->iomap_begin``.
+to ``begin``.
 Callers commonly take the mmap ``invalidate_lock`` in shared or
 exclusive mode before calling this function.
 
@@ -213,7 +262,7 @@ such `reservations
 <https://lore.kernel.org/linux-xfs/20220817093627.GZ3600936@dread.disaster.area/>`_
 because writeback will not consume the reservation.
 The ``iomap_write_delalloc_release`` can be called from a
-``->iomap_end`` function to find all the clean areas of the folios
+``end`` function to find all the clean areas of the folios
 caching a fresh (``IOMAP_F_NEW``) delalloc mapping.
 It takes the ``invalidate_lock``.
 
@@ -231,7 +280,7 @@ Filesystems can call ``iomap_zero_range`` to perform zeroing of the
 pagecache for non-truncation file operations that are not aligned to
 the fsblock size.
 ``IOMAP_ZERO`` will be passed as the ``flags`` argument to
-``->iomap_begin``.
+``begin``.
 Callers typically hold ``i_rwsem`` and ``invalidate_lock`` in exclusive
 mode before calling this function.
 
@@ -242,7 +291,7 @@ Filesystems can call ``iomap_file_unshare`` to force a file sharing
 storage with another file to preemptively copy the shared data to newly
 allocate storage.
 ``IOMAP_WRITE | IOMAP_UNSHARE`` will be passed as the ``flags`` argument
-to ``->iomap_begin``.
+to ``begin``.
 Callers typically hold ``i_rwsem`` and ``invalidate_lock`` in exclusive
 mode before calling this function.
 
@@ -255,7 +304,7 @@ operation.
 ``truncate_setsize`` or ``truncate_pagecache`` will take care of
 everything after the EOF block.
 ``IOMAP_ZERO`` will be passed as the ``flags`` argument to
-``->iomap_begin``.
+``begin``.
 Callers typically hold ``i_rwsem`` and ``invalidate_lock`` in exclusive
 mode before calling this function.
 
@@ -298,8 +347,8 @@ The fields are as follows:
     though it will `reuse mappings
     <https://lore.kernel.org/all/20231207072710.176093-15-hch@lst.de/>`_
     for runs of contiguous dirty fsblocks within a folio.
-    Do not return ``IOMAP_INLINE`` mappings here; the ``->iomap_end``
-    function must deal with persisting written data.
+    Do not return ``IOMAP_INLINE`` mappings here; the ``end`` function must
+    deal with persisting written data.
     Do not return ``IOMAP_DELALLOC`` mappings here; iomap currently
     requires mapping to allocated space.
     Filesystems can skip a potentially expensive mapping lookup if the
@@ -317,6 +366,9 @@ The fields are as follows:
     delalloc reservations to avoid having delalloc reservations for
     clean pagecache.
     This function must be supplied by the filesystem.
+    If this succeeds, iomap_finish_folio_write() must be called once writeback
+    completes for the range, regardless of whether the writeback succeeded or
+    failed.
 
   - ``writeback_submit``: Submit the previous built writeback context.
     Block based file systems should use the iomap_ioend_writeback_submit
@@ -382,7 +434,7 @@ writes for files.
 .. code-block:: c
 
  ssize_t iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
-                      const struct iomap_ops *ops,
+                      iomap_iter_next_fn iomap_next,
                       const struct iomap_dio_ops *dops,
                       unsigned int dio_flags, void *private,
                       size_t done_before);
@@ -444,10 +496,6 @@ These ``struct kiocb`` flags are significant for direct I/O with iomap:
    Only meaningful for asynchronous I/O, and only if the entire I/O can
    be issued as a single ``struct bio``.
 
- * ``IOCB_DIO_CALLER_COMP``: Try to run I/O completion from the caller's
-   process context.
-   See ``linux/fs.h`` for more details.
-
 Filesystems should call ``iomap_dio_rw`` from ``->read_iter`` and
 ``->write_iter``, and set ``FMODE_CAN_ODIRECT`` in the ``->open``
 function for the file.
@@ -469,7 +517,7 @@ Return Values
  * ``-ENOTBLK``: Fall back to buffered I/O.
    iomap itself will return this value if it cannot invalidate the page
    cache before issuing the I/O to storage.
-   The ``->iomap_begin`` or ``->iomap_end`` functions may also return
+   The ``begin`` or ``end`` functions may also return
    this value.
 
  * ``-EIOCBQUEUED``: The asynchronous direct I/O request has been
@@ -484,7 +532,7 @@ A direct I/O read initiates a read I/O from the storage device to the
 caller's buffer.
 Dirty parts of the pagecache are flushed to storage before initiating
 the read io.
-The ``flags`` value for ``->iomap_begin`` will be ``IOMAP_DIRECT`` with
+The ``flags`` value for ``begin`` will be ``IOMAP_DIRECT`` with
 any combination of the following enhancements:
 
  * ``IOMAP_NOWAIT``, as defined previously.
@@ -500,7 +548,7 @@ caller's buffer.
 Dirty parts of the pagecache are flushed to storage before initiating
 the write io.
 The pagecache is invalidated both before and after the write io.
-The ``flags`` value for ``->iomap_begin`` will be ``IOMAP_DIRECT |
+The ``flags`` value for ``begin`` will be ``IOMAP_DIRECT |
 IOMAP_WRITE`` with any combination of the following enhancements:
 
  * ``IOMAP_NOWAIT``, as defined previously.
@@ -602,7 +650,7 @@ fsdax Reads
 
 A fsdax read performs a memcpy from storage device to the caller's
 buffer.
-The ``flags`` value for ``->iomap_begin`` will be ``IOMAP_DAX`` with any
+The ``flags`` value for ``begin`` will be ``IOMAP_DAX`` with any
 combination of the following enhancements:
 
  * ``IOMAP_NOWAIT``, as defined previously.
@@ -615,7 +663,7 @@ fsdax Writes
 
 A fsdax write initiates a memcpy to the storage device from the caller's
 buffer.
-The ``flags`` value for ``->iomap_begin`` will be ``IOMAP_DAX |
+The ``flags`` value for ``begin`` will be ``IOMAP_DAX |
 IOMAP_WRITE`` with any combination of the following enhancements:
 
  * ``IOMAP_NOWAIT``, as defined previously.
@@ -638,9 +686,9 @@ fsdax mmap Faults
 The ``dax_iomap_fault`` function handles read and write faults to fsdax
 storage.
 For a read fault, ``IOMAP_DAX | IOMAP_FAULT`` will be passed as the
-``flags`` argument to ``->iomap_begin``.
+``flags`` argument to ``begin``.
 For a write fault, ``IOMAP_DAX | IOMAP_FAULT | IOMAP_WRITE`` will be
-passed as the ``flags`` argument to ``->iomap_begin``.
+passed as the ``flags`` argument to ``begin``.
 
 Callers commonly hold the same locks as they do to call their iomap
 pagecache counterparts.
@@ -650,8 +698,8 @@ fsdax Truncation, fallocate, and Unsharing
 
 For fsdax files, the following functions are provided to replace their
 iomap pagecache I/O counterparts.
-The ``flags`` argument to ``->iomap_begin`` are the same as the
-pagecache counterparts, with ``IOMAP_DAX`` added.
+The ``flags`` argument to ``begin`` are the same as the pagecache counterparts,
+with ``IOMAP_DAX`` added.
 
  * ``dax_file_unshare``
  * ``dax_zero_range``
@@ -677,8 +725,7 @@ SEEK_DATA
 
 The ``iomap_seek_data`` function implements the SEEK_DATA "whence" value
 for llseek.
-``IOMAP_REPORT`` will be passed as the ``flags`` argument to
-``->iomap_begin``.
+``IOMAP_REPORT`` will be passed as the ``flags`` argument to ``begin``.
 
 For unwritten mappings, the pagecache will be searched.
 Regions of the pagecache with a folio mapped and uptodate fsblocks
@@ -692,8 +739,7 @@ SEEK_HOLE
 
 The ``iomap_seek_hole`` function implements the SEEK_HOLE "whence" value
 for llseek.
-``IOMAP_REPORT`` will be passed as the ``flags`` argument to
-``->iomap_begin``.
+``IOMAP_REPORT`` will be passed as the ``flags`` argument to ``begin``.
 
 For unwritten mappings, the pagecache will be searched.
 Regions of the pagecache with no folio mapped, or a !uptodate fsblock
@@ -708,8 +754,7 @@ Swap File Activation
 The ``iomap_swapfile_activate`` function finds all the base-page aligned
 regions in a file and sets them up as swap space.
 The file will be ``fsync()``'d before activation.
-``IOMAP_REPORT`` will be passed as the ``flags`` argument to
-``->iomap_begin``.
+``IOMAP_REPORT`` will be passed as the ``flags`` argument to ``begin``.
 All mappings must be mapped or unwritten; cannot be dirty or shared, and
 cannot span multiple block devices.
 Callers must hold ``i_rwsem`` in exclusive mode; this is already
@@ -725,8 +770,7 @@ FS_IOC_FIEMAP
 
 The ``iomap_fiemap`` function exports file extent mappings to userspace
 in the format specified by the ``FS_IOC_FIEMAP`` ioctl.
-``IOMAP_REPORT`` will be passed as the ``flags`` argument to
-``->iomap_begin``.
+``IOMAP_REPORT`` will be passed as the ``flags`` argument to ``begin``.
 Callers commonly hold ``i_rwsem`` in shared mode before calling this
 function.
 

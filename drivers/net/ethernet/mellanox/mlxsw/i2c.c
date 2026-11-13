@@ -8,7 +8,6 @@
 #include <linux/kernel.h>
 #include <linux/mutex.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_data/mlxreg.h>
 #include <linux/slab.h>
 
@@ -639,7 +638,7 @@ static int mlxsw_i2c_probe(struct i2c_client *client)
 	u8 status;
 	int err;
 
-	mlxsw_i2c = devm_kzalloc(&client->dev, sizeof(*mlxsw_i2c), GFP_KERNEL);
+	mlxsw_i2c = devm_kzalloc_obj(&client->dev, *mlxsw_i2c);
 	if (!mlxsw_i2c)
 		return -ENOMEM;
 

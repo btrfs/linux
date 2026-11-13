@@ -403,15 +403,12 @@ static int ixp4xx_hwtstamp_set(struct net_device *netdev,
 	int ret;
 	int ch;
 
-	if (!cpu_is_ixp46x())
-		return -EOPNOTSUPP;
-
 	if (!netif_running(netdev))
 		return -EINVAL;
 
 	ret = ixp46x_ptp_find(&port->timesync_regs, &port->phc_index);
 	if (ret)
-		return ret;
+		return -EOPNOTSUPP;
 
 	ch = PORT2CHANNEL(port);
 	regs = port->timesync_regs;
@@ -1445,7 +1442,7 @@ static struct eth_plat_info *ixp4xx_of_get_platdata(struct device *dev)
 	u8 mac[ETH_ALEN];
 	int ret;
 
-	plat = devm_kzalloc(dev, sizeof(*plat), GFP_KERNEL);
+	plat = devm_kzalloc_obj(dev, *plat);
 	if (!plat)
 		return NULL;
 

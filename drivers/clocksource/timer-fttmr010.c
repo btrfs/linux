@@ -292,10 +292,11 @@ static int __init fttmr010_common_init(struct device_node *np,
 	ret = clk_prepare_enable(clk);
 	if (ret) {
 		pr_err("failed to enable PCLK\n");
+		clk_put(clk);
 		return ret;
 	}
 
-	fttmr010 = kzalloc(sizeof(*fttmr010), GFP_KERNEL);
+	fttmr010 = kzalloc_obj(*fttmr010);
 	if (!fttmr010) {
 		ret = -ENOMEM;
 		goto out_disable_clock;
@@ -432,6 +433,7 @@ out_free:
 	kfree(fttmr010);
 out_disable_clock:
 	clk_disable_unprepare(clk);
+	clk_put(clk);
 
 	return ret;
 }

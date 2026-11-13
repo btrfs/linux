@@ -521,7 +521,7 @@ static int max31760_probe(struct i2c_client *client)
 	struct device *hwmon_dev;
 	int ret;
 
-	state = devm_kzalloc(dev, sizeof(*state), GFP_KERNEL);
+	state = devm_kzalloc_obj(dev, *state);
 	if (!state)
 		return -ENOMEM;
 
@@ -555,7 +555,7 @@ static const struct of_device_id max31760_of_match[] = {
 MODULE_DEVICE_TABLE(of, max31760_of_match);
 
 static const struct i2c_device_id max31760_id[] = {
-	{"max31760"},
+	{ .name = "max31760" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max31760_id);

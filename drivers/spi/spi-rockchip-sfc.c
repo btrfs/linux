@@ -622,7 +622,6 @@ static int rockchip_sfc_probe(struct platform_device *pdev)
 	host->flags = SPI_CONTROLLER_HALF_DUPLEX;
 	host->mem_ops = &rockchip_sfc_mem_ops;
 	host->mem_caps = &rockchip_sfc_mem_caps;
-	host->dev.of_node = pdev->dev.of_node;
 	host->mode_bits = SPI_TX_QUAD | SPI_TX_DUAL | SPI_RX_QUAD | SPI_RX_DUAL;
 	host->max_speed_hz = SFC_MAX_SPEED;
 	host->num_chipselect = SFC_MAX_CHIPSELECT_NUM;
@@ -712,7 +711,7 @@ static int rockchip_sfc_probe(struct platform_device *pdev)
 		}
 	}
 
-	ret = devm_spi_register_controller(dev, host);
+	ret = spi_register_controller(host);
 	if (ret)
 		goto err_register;
 
@@ -720,10 +719,12 @@ static int rockchip_sfc_probe(struct platform_device *pdev)
 
 	return 0;
 err_register:
-	dma_unmap_single(dev, sfc->dma_buffer, sfc->max_iosize,
-			 DMA_BIDIRECTIONAL);
+	if (sfc->use_dma)
+		dma_unmap_single(dev, sfc->dma_buffer, sfc->max_iosize,
+				 DMA_BIDIRECTIONAL);
 err_dma_map:
-	free_pages((unsigned long)sfc->buffer, get_order(sfc->max_iosize));
+	if (sfc->use_dma)
+		free_pages((unsigned long)sfc->buffer, get_order(sfc->max_iosize));
 err_dma:
 	pm_runtime_get_sync(dev);
 	pm_runtime_put_noidle(dev);
@@ -744,15 +745,21 @@ static void rockchip_sfc_remove(struct platform_device *pdev)
 	struct spi_controller *host = sfc->host;
 
 	spi_unregister_controller(host);
-	dma_unmap_single(&pdev->dev, sfc->dma_buffer, sfc->max_iosize,
-			 DMA_BIDIRECTIONAL);
-	free_pages((unsigned long)sfc->buffer, get_order(sfc->max_iosize));
+	pm_runtime_get_sync(&pdev->dev);
+	pm_runtime_put_noidle(&pdev->dev);
+	pm_runtime_disable(&pdev->dev);
+	pm_runtime_set_suspended(&pdev->dev);
+	pm_runtime_dont_use_autosuspend(&pdev->dev);
+	if (sfc->use_dma) {
+		dma_unmap_single(&pdev->dev, sfc->dma_buffer, sfc->max_iosize,
+				 DMA_BIDIRECTIONAL);
+		free_pages((unsigned long)sfc->buffer, get_order(sfc->max_iosize));
+	}
 
 	clk_disable_unprepare(sfc->clk);
 	clk_disable_unprepare(sfc->hclk);
 }
 
-#ifdef CONFIG_PM
 static int rockchip_sfc_runtime_suspend(struct device *dev)
 {
 	struct rockchip_sfc *sfc = dev_get_drvdata(dev);
@@ -778,9 +785,7 @@ static int rockchip_sfc_runtime_resume(struct device *dev)
 
 	return ret;
 }
-#endif /* CONFIG_PM */
 
-#ifdef CONFIG_PM_SLEEP
 static int rockchip_sfc_suspend(struct device *dev)
 {
 	pinctrl_pm_select_sleep_state(dev);
@@ -811,12 +816,11 @@ static int rockchip_sfc_resume(struct device *dev)
 
 	return 0;
 }
-#endif /* CONFIG_PM_SLEEP */
 
 static const struct dev_pm_ops rockchip_sfc_pm_ops = {
-	SET_RUNTIME_PM_OPS(rockchip_sfc_runtime_suspend,
-			   rockchip_sfc_runtime_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(rockchip_sfc_suspend, rockchip_sfc_resume)
+	RUNTIME_PM_OPS(rockchip_sfc_runtime_suspend,
+		       rockchip_sfc_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(rockchip_sfc_suspend, rockchip_sfc_resume)
 };
 
 static const struct of_device_id rockchip_sfc_dt_ids[] = {
@@ -829,7 +833,7 @@ static struct platform_driver rockchip_sfc_driver = {
 	.driver = {
 		.name	= "rockchip-sfc",
 		.of_match_table = rockchip_sfc_dt_ids,
-		.pm = &rockchip_sfc_pm_ops,
+		.pm = pm_ptr(&rockchip_sfc_pm_ops),
 	},
 	.probe	= rockchip_sfc_probe,
 	.remove = rockchip_sfc_remove,

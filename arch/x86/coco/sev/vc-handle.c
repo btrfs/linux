@@ -23,7 +23,6 @@
 #include <asm/init.h>
 #include <asm/stacktrace.h>
 #include <asm/sev.h>
-#include <asm/sev-internal.h>
 #include <asm/insn-eval.h>
 #include <asm/fpu/xcr.h>
 #include <asm/processor.h>
@@ -34,6 +33,8 @@
 #include <asm/cpu.h>
 #include <asm/apic.h>
 #include <asm/cpuid/api.h>
+
+#include "internal.h"
 
 static enum es_result vc_slow_virt_to_phys(struct ghcb *ghcb, struct es_em_ctxt *ctxt,
 					   unsigned long vaddr, phys_addr_t *paddr)
@@ -193,75 +194,113 @@ static enum es_result vc_decode_insn(struct es_em_ctxt *ctxt)
 		return __vc_decode_kern_insn(ctxt);
 }
 
+/*
+ * The memory operand of an emulated string instruction can be a user or a
+ * kernel address. MOVS to and from MMIO is only emulated for the kernel,
+ * but the kernel may be copying to or from user memory at the time, and
+ * INS/OUTS are emulated for both. So these are "user or kernel" accesses
+ * with fault handling: a single plain MOV of the given size, with an
+ * exception table entry to catch a fault. User access is enabled by hand
+ * so that a user address can be reached, without the range check of
+ * user_access_begin(), which would reject a kernel address.
+ *
+ * It must be a single MOV and not a string instruction, because the address
+ * can itself be MMIO. That takes a nested #VC, and a nested MOVS would nest
+ * forever.
+ *
+ * Page faults are disabled explicitly. A #VC from kernel mode runs as an NMI
+ * and is atomic anyway, but one from user mode only has interrupts disabled,
+ * which the page fault handler does not treat as atomic. A fault here is
+ * not handled: it is reported back as a #PF for the instruction that took the
+ * #VC, and gets handled there.
+ *
+ * The caller has already checked that size is 1, 2, 4 or 8.
+ */
+static bool vc_get_mem(void *buf, const void *addr, size_t size)
+{
+	union { u8 d1; u16 d2; u32 d4; u64 d8; } val;
+
+	guard(pagefault)();
+	__uaccess_begin_nospec();
+	switch (size) {
+	case 1:
+		unsafe_get_user(val.d1, (const u8 __user __force *)addr, efault);
+		break;
+	case 2:
+		unsafe_get_user(val.d2, (const u16 __user __force *)addr, efault);
+		break;
+	case 4:
+		unsafe_get_user(val.d4, (const u32 __user __force *)addr, efault);
+		break;
+	case 8:
+		unsafe_get_user(val.d8, (const u64 __user __force *)addr, efault);
+		break;
+	}
+	__uaccess_end();
+
+	memcpy(buf, &val, size);
+	return true;
+
+efault:
+	__uaccess_end();
+	return false;
+}
+
+static bool vc_put_mem(void *addr, const void *buf, size_t size)
+{
+	union { u8 d1; u16 d2; u32 d4; u64 d8; } val;
+
+	memcpy(&val, buf, size);
+
+	guard(pagefault)();
+	__uaccess_begin();
+	switch (size) {
+	case 1:
+		unsafe_put_user(val.d1, (u8 __user __force *)addr, efault);
+		break;
+	case 2:
+		unsafe_put_user(val.d2, (u16 __user __force *)addr, efault);
+		break;
+	case 4:
+		unsafe_put_user(val.d4, (u32 __user __force *)addr, efault);
+		break;
+	case 8:
+		unsafe_put_user(val.d8, (u64 __user __force *)addr, efault);
+		break;
+	}
+	__uaccess_end();
+	return true;
+
+efault:
+	__uaccess_end();
+	return false;
+}
+
+static bool vc_mem_size_ok(size_t size)
+{
+	switch (size) {
+	case 1:
+	case 2:
+	case 4:
+	case 8:
+		return true;
+	}
+	return false;
+}
+
 static enum es_result vc_write_mem(struct es_em_ctxt *ctxt,
 				   char *dst, char *buf, size_t size)
 {
 	unsigned long error_code = X86_PF_PROT | X86_PF_WRITE;
 
-	/*
-	 * This function uses __put_user() independent of whether kernel or user
-	 * memory is accessed. This works fine because __put_user() does no
-	 * sanity checks of the pointer being accessed. All that it does is
-	 * to report when the access failed.
-	 *
-	 * Also, this function runs in atomic context, so __put_user() is not
-	 * allowed to sleep. The page-fault handler detects that it is running
-	 * in atomic context and will not try to take mmap_sem and handle the
-	 * fault, so additional pagefault_enable()/disable() calls are not
-	 * needed.
-	 *
-	 * The access can't be done via copy_to_user() here because
-	 * vc_write_mem() must not use string instructions to access unsafe
-	 * memory. The reason is that MOVS is emulated by the #VC handler by
-	 * splitting the move up into a read and a write and taking a nested #VC
-	 * exception on whatever of them is the MMIO access. Using string
-	 * instructions here would cause infinite nesting.
-	 */
-	switch (size) {
-	case 1: {
-		u8 d1;
-		u8 __user *target = (u8 __user *)dst;
-
-		memcpy(&d1, buf, 1);
-		if (__put_user(d1, target))
-			goto fault;
-		break;
-	}
-	case 2: {
-		u16 d2;
-		u16 __user *target = (u16 __user *)dst;
-
-		memcpy(&d2, buf, 2);
-		if (__put_user(d2, target))
-			goto fault;
-		break;
-	}
-	case 4: {
-		u32 d4;
-		u32 __user *target = (u32 __user *)dst;
-
-		memcpy(&d4, buf, 4);
-		if (__put_user(d4, target))
-			goto fault;
-		break;
-	}
-	case 8: {
-		u64 d8;
-		u64 __user *target = (u64 __user *)dst;
-
-		memcpy(&d8, buf, 8);
-		if (__put_user(d8, target))
-			goto fault;
-		break;
-	}
-	default:
+	if (!vc_mem_size_ok(size)) {
 		WARN_ONCE(1, "%s: Invalid size: %zu\n", __func__, size);
 		return ES_UNSUPPORTED;
 	}
 
-	return ES_OK;
+	if (vc_put_mem(dst, buf, size))
+		return ES_OK;
 
-fault:
 	if (user_mode(ctxt->regs))
 		error_code |= X86_PF_USER;
 
@@ -277,69 +316,14 @@ static enum es_result vc_read_mem(struct es_em_ctxt *ctxt,
 {
 	unsigned long error_code = X86_PF_PROT;
 
-	/*
-	 * This function uses __get_user() independent of whether kernel or user
-	 * memory is accessed. This works fine because __get_user() does no
-	 * sanity checks of the pointer being accessed. All that it does is
-	 * to report when the access failed.
-	 *
-	 * Also, this function runs in atomic context, so __get_user() is not
-	 * allowed to sleep. The page-fault handler detects that it is running
-	 * in atomic context and will not try to take mmap_sem and handle the
-	 * fault, so additional pagefault_enable()/disable() calls are not
-	 * needed.
-	 *
-	 * The access can't be done via copy_from_user() here because
-	 * vc_read_mem() must not use string instructions to access unsafe
-	 * memory. The reason is that MOVS is emulated by the #VC handler by
-	 * splitting the move up into a read and a write and taking a nested #VC
-	 * exception on whatever of them is the MMIO access. Using string
-	 * instructions here would cause infinite nesting.
-	 */
-	switch (size) {
-	case 1: {
-		u8 d1;
-		u8 __user *s = (u8 __user *)src;
-
-		if (__get_user(d1, s))
-			goto fault;
-		memcpy(buf, &d1, 1);
-		break;
-	}
-	case 2: {
-		u16 d2;
-		u16 __user *s = (u16 __user *)src;
-
-		if (__get_user(d2, s))
-			goto fault;
-		memcpy(buf, &d2, 2);
-		break;
-	}
-	case 4: {
-		u32 d4;
-		u32 __user *s = (u32 __user *)src;
-
-		if (__get_user(d4, s))
-			goto fault;
-		memcpy(buf, &d4, 4);
-		break;
-	}
-	case 8: {
-		u64 d8;
-		u64 __user *s = (u64 __user *)src;
-		if (__get_user(d8, s))
-			goto fault;
-		memcpy(buf, &d8, 8);
-		break;
-	}
-	default:
+	if (!vc_mem_size_ok(size)) {
 		WARN_ONCE(1, "%s: Invalid size: %zu\n", __func__, size);
 		return ES_UNSUPPORTED;
 	}
 
-	return ES_OK;
+	if (vc_get_mem(buf, src, size))
+		return ES_OK;
 
-fault:
 	if (user_mode(ctxt->regs))
 		error_code |= X86_PF_USER;
 
@@ -352,7 +336,6 @@ fault:
 
 #define sev_printk(fmt, ...)		printk(fmt, ##__VA_ARGS__)
 #define error(v)
-#define has_cpuflag(f)			boot_cpu_has(f)
 
 #include "vc-shared.c"
 
@@ -404,7 +387,7 @@ static enum es_result __vc_handle_secure_tsc_msrs(struct es_em_ctxt *ctxt, bool 
 	return ES_OK;
 }
 
-enum es_result sev_es_ghcb_handle_msr(struct ghcb *ghcb, struct es_em_ctxt *ctxt, bool write)
+enum es_result __vc_handle_msr(struct ghcb *ghcb, struct es_em_ctxt *ctxt, bool write)
 {
 	struct pt_regs *regs = ctxt->regs;
 	enum es_result ret;
@@ -448,7 +431,7 @@ enum es_result sev_es_ghcb_handle_msr(struct ghcb *ghcb, struct es_em_ctxt *ctxt
 
 static enum es_result vc_handle_msr(struct ghcb *ghcb, struct es_em_ctxt *ctxt)
 {
-	return sev_es_ghcb_handle_msr(ghcb, ctxt, ctxt->insn.opcode.bytes[1] == 0x30);
+	return __vc_handle_msr(ghcb, ctxt, ctxt->insn.opcode.bytes[1] == 0x30);
 }
 
 static void __init vc_early_forward_exception(struct es_em_ctxt *ctxt)
@@ -954,7 +937,7 @@ static __always_inline bool vc_is_db(unsigned long error_code)
  * Runtime #VC exception handler when raised from kernel mode. Runs in NMI mode
  * and will panic when an error happens.
  */
-DEFINE_IDTENTRY_VC_KERNEL(exc_vmm_communication)
+noinstr void kernel_exc_vmm_communication(struct pt_regs *regs, unsigned long error_code)
 {
 	irqentry_state_t irq_state;
 
@@ -1006,7 +989,7 @@ DEFINE_IDTENTRY_VC_KERNEL(exc_vmm_communication)
  * Runtime #VC exception handler when raised from user mode. Runs in IRQ mode
  * and will kill the current task with SIGBUS when an error happens.
  */
-DEFINE_IDTENTRY_VC_USER(exc_vmm_communication)
+noinstr void user_exc_vmm_communication(struct pt_regs *regs, unsigned long error_code)
 {
 	/*
 	 * Handle #DB before calling into !noinstr code to avoid recursive #DB.
@@ -1030,6 +1013,14 @@ DEFINE_IDTENTRY_VC_USER(exc_vmm_communication)
 
 	instrumentation_end();
 	irqentry_exit_to_user_mode(regs);
+}
+
+DEFINE_IDTENTRY_RAW_ERRORCODE(exc_vmm_communication)
+{
+	if (user_mode(regs))
+		return user_exc_vmm_communication(regs, error_code);
+	else
+		return kernel_exc_vmm_communication(regs, error_code);
 }
 
 bool __init handle_vc_boot_ghcb(struct pt_regs *regs)

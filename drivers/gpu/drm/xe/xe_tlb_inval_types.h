@@ -9,6 +9,9 @@
 #include <linux/workqueue.h>
 #include <linux/dma-fence.h>
 
+#include "xe_device_types.h"
+
+struct drm_suballoc;
 struct xe_tlb_inval;
 
 /** struct xe_tlb_inval_ops - TLB invalidation ops (backend) */
@@ -34,18 +37,29 @@ struct xe_tlb_inval_ops {
 	int (*ggtt)(struct xe_tlb_inval *tlb_inval, u32 seqno);
 
 	/**
+	 * @ggtt_full: Full engine TLB invalidation within a VF
+	 * @tlb_inval: TLB invalidation client
+	 * @seqno: Seqno of TLB invalidation
+	 *
+	 * Return 0 on success, -ECANCELED if backend is mid-reset, error on
+	 * failure
+	 */
+	int (*ggtt_full)(struct xe_tlb_inval *tlb_inval, u32 seqno);
+
+	/**
 	 * @ppgtt: Invalidate per-process translation TLBs
 	 * @tlb_inval: TLB invalidation client
 	 * @seqno: Seqno of TLB invalidation
 	 * @start: Start address
 	 * @end: End address
 	 * @asid: Address space ID
+	 * @prl_sa: Suballocation for page reclaim list
 	 *
 	 * Return 0 on success, -ECANCELED if backend is mid-reset, error on
 	 * failure
 	 */
 	int (*ppgtt)(struct xe_tlb_inval *tlb_inval, u32 seqno, u64 start,
-		     u64 end, u32 asid);
+		     u64 end, u32 asid, struct drm_suballoc *prl_sa);
 
 	/**
 	 * @initialized: Backend is initialized
@@ -80,6 +94,7 @@ struct xe_tlb_inval {
 	const struct xe_tlb_inval_ops *ops;
 	/** @tlb_inval.seqno: TLB invalidation seqno, protected by CT lock */
 #define TLB_INVALIDATION_SEQNO_MAX	0x100000
+#define TLB_INVALIDATION_SEQNO_INVALID	TLB_INVALIDATION_SEQNO_MAX
 	int seqno;
 	/** @tlb_invalidation.seqno_lock: protects @tlb_invalidation.seqno */
 	struct mutex seqno_lock;
@@ -98,6 +113,23 @@ struct xe_tlb_inval {
 	 */
 	spinlock_t pending_lock;
 	/**
+	 * @timedout_seqno: seqno of the most recent timed out TLB
+	 * invalidation, 0 if none. Used to measure how late the ack for a
+	 * timed out invalidation actually arrives. Protected by
+	 * @pending_lock.
+	 */
+	int timedout_seqno;
+	/**
+	 * @timedout_inval_time: request time of @timedout_seqno. Protected by
+	 * @pending_lock.
+	 */
+	ktime_t timedout_inval_time;
+	/**
+	 * @timedout_time: time @timedout_seqno was signaled with -ETIME.
+	 * Protected by @pending_lock.
+	 */
+	ktime_t timedout_time;
+	/**
 	 * @fence_tdr: schedules a delayed call to xe_tlb_fence_timeout after
 	 * the timeout interval is over.
 	 */
@@ -106,6 +138,8 @@ struct xe_tlb_inval {
 	struct workqueue_struct *job_wq;
 	/** @tlb_inval.lock: protects TLB invalidation fences */
 	spinlock_t lock;
+	/** @timeout_wq: schedules TLB invalidation fence timeouts */
+	struct workqueue_struct *timeout_wq;
 };
 
 /**
@@ -125,6 +159,18 @@ struct xe_tlb_inval_fence {
 	int seqno;
 	/** @inval_time: time of TLB invalidation */
 	ktime_t inval_time;
+};
+
+/**
+ * struct xe_tlb_inval_batch - Batch of TLB invalidation fences
+ *
+ * Holds one fence per GT covered by a TLB invalidation request.
+ */
+struct xe_tlb_inval_batch {
+	/** @fence: per-GT TLB invalidation fences */
+	struct xe_tlb_inval_fence fence[XE_MAX_TILES_PER_DEVICE * XE_MAX_GT_PER_TILE];
+	/** @num_fences: number of valid entries in @fence */
+	unsigned int num_fences;
 };
 
 #endif

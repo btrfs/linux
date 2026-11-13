@@ -15,7 +15,7 @@ static int cs40l50_spi_probe(struct spi_device *spi)
 {
 	struct cs40l50 *cs40l50;
 
-	cs40l50 = devm_kzalloc(&spi->dev, sizeof(*cs40l50), GFP_KERNEL);
+	cs40l50 = devm_kzalloc_obj(&spi->dev, *cs40l50);
 	if (!cs40l50)
 		return -ENOMEM;
 
@@ -40,8 +40,8 @@ static void cs40l50_spi_remove(struct spi_device *spi)
 }
 
 static const struct spi_device_id cs40l50_id_spi[] = {
-	{ "cs40l50" },
-	{}
+	{ .name = "cs40l50" },
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, cs40l50_id_spi);
 

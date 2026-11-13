@@ -4,7 +4,6 @@
  */
 
 #include <linux/component.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
@@ -57,7 +56,7 @@ static int dc_de_bind(struct device *dev, struct device *master, void *data)
 	struct dc_de *de;
 	int ret, id;
 
-	de = devm_kzalloc(dev, sizeof(*de), GFP_KERNEL);
+	de = devm_kzalloc_obj(dev, *de);
 	if (!de)
 		return -ENOMEM;
 

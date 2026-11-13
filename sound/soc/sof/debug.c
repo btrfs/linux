@@ -121,7 +121,7 @@ static int snd_sof_debugfs_io_item(struct snd_sof_dev *sdev,
 	if (!sdev)
 		return -EINVAL;
 
-	dfse = devm_kzalloc(sdev->dev, sizeof(*dfse), GFP_KERNEL);
+	dfse = devm_kzalloc_obj(sdev->dev, *dfse);
 	if (!dfse)
 		return -ENOMEM;
 
@@ -177,7 +177,7 @@ int snd_sof_debugfs_buf_item(struct snd_sof_dev *sdev,
 	if (!sdev)
 		return -EINVAL;
 
-	dfse = devm_kzalloc(sdev->dev, sizeof(*dfse), GFP_KERNEL);
+	dfse = devm_kzalloc_obj(sdev->dev, *dfse);
 	if (!dfse)
 		return -ENOMEM;
 
@@ -216,7 +216,12 @@ static int memory_info_update(struct snd_sof_dev *sdev, char *buf, size_t buff_s
 		goto error;
 	}
 
-	ret = sof_ipc_tx_message(sdev->ipc, &msg, msg.size, reply, SOF_IPC_MSG_MAX_SIZE);
+	/* Make sure the DSP/firmware is booted up */
+	ret = snd_sof_boot_dsp_firmware(sdev);
+	if (!ret)
+		ret = sof_ipc_tx_message(sdev->ipc, &msg, msg.size, reply,
+					 SOF_IPC_MSG_MAX_SIZE);
+
 	pm_runtime_put_autosuspend(sdev->dev);
 	if (ret < 0 || reply->rhdr.error < 0) {
 		ret = min(ret, reply->rhdr.error);
@@ -292,7 +297,7 @@ int snd_sof_dbg_memory_info_init(struct snd_sof_dev *sdev)
 {
 	struct snd_sof_dfsentry *dfse;
 
-	dfse = devm_kzalloc(sdev->dev, sizeof(*dfse), GFP_KERNEL);
+	dfse = devm_kzalloc_obj(sdev->dev, *dfse);
 	if (!dfse)
 		return -ENOMEM;
 

@@ -103,10 +103,7 @@ static void __init mark_region(unsigned long start, unsigned long end,
 	while (start < end) {
 		u32 chunk = start>>Z2RAM_CHUNKSHIFT;
 
-		if (flag)
-			set_bit(chunk, zorro_unused_z2ram);
-		else
-			clear_bit(chunk, zorro_unused_z2ram);
+		assign_bit(chunk, zorro_unused_z2ram, flag);
 		start += Z2RAM_CHUNKSIZE;
 	}
 }
@@ -135,8 +132,7 @@ static int __init amiga_zorro_probe(struct platform_device *pdev)
 	int error;
 
 	/* Initialize the Zorro bus */
-	bus = kzalloc(struct_size(bus, devices, zorro_num_autocon),
-		      GFP_KERNEL);
+	bus = kzalloc_flex(*bus, devices, zorro_num_autocon);
 	if (!bus)
 		return -ENOMEM;
 

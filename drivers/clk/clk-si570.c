@@ -412,12 +412,12 @@ static const struct regmap_config si570_regmap_config = {
 static int si570_probe(struct i2c_client *client)
 {
 	struct clk_si570 *data;
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	u32 initial_fout, factory_fout, stability;
 	bool skip_recall;
 	int err;
 
-	data = devm_kzalloc(&client->dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(&client->dev, *data);
 	if (!data)
 		return -ENOMEM;
 
@@ -503,10 +503,10 @@ static const struct clk_si570_info clk_si590_info = {
 };
 
 static const struct i2c_device_id si570_id[] = {
-	{ "si570", (kernel_ulong_t)&clk_si570_info },
-	{ "si571", (kernel_ulong_t)&clk_si570_info },
-	{ "si598", (kernel_ulong_t)&clk_si590_info },
-	{ "si599", (kernel_ulong_t)&clk_si590_info },
+	{ .name = "si570", .driver_data = (kernel_ulong_t)&clk_si570_info },
+	{ .name = "si571", .driver_data = (kernel_ulong_t)&clk_si570_info },
+	{ .name = "si598", .driver_data = (kernel_ulong_t)&clk_si590_info },
+	{ .name = "si599", .driver_data = (kernel_ulong_t)&clk_si590_info },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, si570_id);

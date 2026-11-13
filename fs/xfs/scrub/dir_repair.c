@@ -3,7 +3,7 @@
  * Copyright (c) 2020-2024 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -172,8 +172,12 @@ xrep_dir_teardown(
 	struct xrep_dir		*rd = sc->buf;
 
 	xrep_findparent_scan_teardown(&rd->pscan);
-	xfblob_destroy(rd->dir_names);
-	xfarray_destroy(rd->dir_entries);
+	if (rd->dir_names)
+		xfblob_destroy(rd->dir_names);
+	rd->dir_names = NULL;
+	if (rd->dir_entries)
+		xfarray_destroy(rd->dir_entries);
+	rd->dir_entries = NULL;
 }
 
 /* Set up for a directory repair. */
@@ -194,7 +198,7 @@ xrep_setup_directory(
 	if (error)
 		return error;
 
-	rd = kvzalloc(sizeof(struct xrep_dir), XCHK_GFP_FLAGS);
+	rd = kvzalloc_obj(struct xrep_dir, XCHK_GFP_FLAGS);
 	if (!rd)
 		return -ENOMEM;
 	rd->sc = sc;
@@ -300,7 +304,7 @@ xrep_dir_want_salvage(
 	struct xfs_mount	*mp = rd->sc->mp;
 
 	/* No pointers to ourselves or to garbage. */
-	if (ino == rd->sc->ip->i_ino)
+	if (ino == I_INO(rd->sc->ip))
 		return false;
 	if (!xfs_verify_dir_ino(mp, ino))
 		return false;
@@ -458,6 +462,63 @@ xrep_dir_salvage_data_entry(
 	return xrep_dir_salvage_entry(rd, dep->name, dep->namelen, ino);
 }
 
+/*
+ * Deal with an unused directory entry.  Returns a positive number of bytes to
+ * advance in the directory block, or zero to stop processing.
+ */
+static int
+xrep_dir_recover_unused(
+	struct xfs_buf			*bp,
+	unsigned int			offset,
+	unsigned int			end)
+{
+	struct xfs_dir2_data_unused	*dup = bp->b_addr + offset;
+	unsigned int			advance;
+
+	if (offset + sizeof(*dup) > end)
+		return 0;
+
+	advance = xfs_dir2_data_unusedsize(be16_to_cpu(dup->length));
+	if (!advance || offset + advance > end)
+		return 0;
+
+	return advance;
+}
+
+/*
+ * Salvage a directory entry.  Returns a positive number of bytes to advance
+ * in the directory block, zero to stop processing, or a negative errno.
+ */
+static int
+xrep_dir_recover_entry(
+	struct xrep_dir			*rd,
+	struct xfs_buf			*bp,
+	unsigned int			offset,
+	unsigned int			end)
+{
+	struct xfs_dir2_data_entry	*dep = bp->b_addr + offset;
+	unsigned int			advance;
+	int				error;
+
+	/* must have namelen */
+	advance = offsetof(typeof(*dep), name);
+	if (offset + advance >= end)
+		return 0;
+
+	/* Don't walk off the end of the block. */
+	advance = xfs_dir2_data_entsize(rd->sc->mp, dep->namelen);
+	if (!advance || offset + advance > end)
+		return 0;
+
+	/* Ok, let's save this entry. */
+	error = xrep_dir_salvage_data_entry(rd, dep);
+	if (error < 0)
+		return error;
+
+	return advance;
+}
+
+
 /* Try to recover block/data format directory entries. */
 STATIC int
 xrep_dir_recover_data(
@@ -479,27 +540,25 @@ xrep_dir_recover_data(
 
 	while (offset < end) {
 		struct xfs_dir2_data_unused	*dup = bp->b_addr + offset;
-		struct xfs_dir2_data_entry	*dep = bp->b_addr + offset;
+		int				advance;
 
 		if (xchk_should_terminate(rd->sc, &error))
 			return error;
 
-		/* Skip unused entries. */
-		if (be16_to_cpu(dup->freetag) == XFS_DIR2_DATA_FREE_TAG) {
-			offset += be16_to_cpu(dup->length);
-			continue;
-		}
-
-		/* Don't walk off the end of the block. */
-		offset += xfs_dir2_data_entsize(rd->sc->mp, dep->namelen);
-		if (offset > end)
+		/* must have freetag */
+		advance = offsetof(typeof(*dup), length);
+		if (offset + advance >= end)
 			break;
 
-		/* Ok, let's save this entry. */
-		error = xrep_dir_salvage_data_entry(rd, dep);
-		if (error)
-			return error;
-
+		if (dup->freetag == cpu_to_be16(XFS_DIR2_DATA_FREE_TAG))
+			advance = xrep_dir_recover_unused(bp, offset, end);
+		else
+			advance = xrep_dir_recover_entry(rd, bp, offset, end);
+		if (advance < 0)
+			return advance;
+		if (!advance)
+			break;
+		offset += advance;
 	}
 
 	return 0;
@@ -521,6 +580,19 @@ xrep_dir_recover_sf(
 	ifp = xfs_ifork_ptr(rd->sc->ip, XFS_DATA_FORK);
 	hdr = ifp->if_data;
 	end = (unsigned char *)ifp->if_data + ifp->if_bytes;
+
+	/* sf header must be big enough for count/i8count */
+	if (!hdr || ifp->if_bytes < 2)
+		return 0;
+
+	/* and large enough for the parent inumber */
+	if (hdr->i8count) {
+		if (ifp->if_bytes < offsetof(struct xfs_dir2_sf_hdr, parent[8]))
+			return 0;
+	} else {
+		if (ifp->if_bytes < offsetof(struct xfs_dir2_sf_hdr, parent[4]))
+			return 0;
+	}
 
 	ino = xfs_dir2_sf_get_parent_ino(hdr);
 	trace_xrep_dir_salvaged_parent(rd->sc->ip, ino);
@@ -640,14 +712,14 @@ xrep_dir_recover_dirblock(
 	case cpu_to_be32(XFS_DIR3_BLOCK_MAGIC):
 		if (!xrep_buf_verify_struct(bp, &xfs_dir3_block_buf_ops))
 			goto out;
-		if (xfs_dir3_block_header_check(bp, rd->sc->ip->i_ino) != NULL)
+		if (xfs_dir3_block_header_check(bp, I_INO(rd->sc->ip)) != NULL)
 			goto out;
 		break;
 	case cpu_to_be32(XFS_DIR2_DATA_MAGIC):
 	case cpu_to_be32(XFS_DIR3_DATA_MAGIC):
 		if (!xrep_buf_verify_struct(bp, &xfs_dir3_data_buf_ops))
 			goto out;
-		if (xfs_dir3_data_header_check(bp, rd->sc->ip->i_ino) != NULL)
+		if (xfs_dir3_data_header_check(bp, I_INO(rd->sc->ip)) != NULL)
 			goto out;
 		break;
 	default:
@@ -672,7 +744,7 @@ xrep_dir_init_args(
 	memset(&rd->args, 0, sizeof(struct xfs_da_args));
 	rd->args.geo = rd->sc->mp->m_dir_geo;
 	rd->args.whichfork = XFS_DATA_FORK;
-	rd->args.owner = rd->sc->ip->i_ino;
+	rd->args.owner = I_INO(rd->sc->ip);
 	rd->args.trans = rd->sc->tp;
 	rd->args.dp = dp;
 	if (!name)
@@ -717,7 +789,7 @@ xrep_dir_replay_removename(
 	const struct xfs_name	*name,
 	xfs_extlen_t		total)
 {
-	struct xfs_inode	*dp = rd->args.dp;
+	struct xfs_inode	*dp = rd->sc->tempip;
 
 	ASSERT(S_ISDIR(VFS_I(dp)->i_mode));
 
@@ -1121,12 +1193,12 @@ xrep_dir_scan_pptr(
 	if (error)
 		return error;
 
-	if (parent_ino != sc->ip->i_ino ||
+	if (parent_ino != I_INO(sc->ip) ||
 	    parent_gen != VFS_I(sc->ip)->i_generation)
 		return 0;
 
 	mutex_lock(&rd->pscan.lock);
-	error = xrep_dir_stash_createname(rd, &xname, ip->i_ino);
+	error = xrep_dir_stash_createname(rd, &xname, I_INO(ip));
 	mutex_unlock(&rd->pscan.lock);
 	return error;
 }
@@ -1147,7 +1219,7 @@ xrep_dir_scan_dirent(
 	struct xrep_dir		*rd = priv;
 
 	/* Dirent doesn't point to this directory. */
-	if (ino != rd->sc->ip->i_ino)
+	if (ino != I_INO(rd->sc->ip))
 		return 0;
 
 	/* Ignore garbage inum. */
@@ -1164,9 +1236,9 @@ xrep_dir_scan_dirent(
 		return 0;
 
 	trace_xrep_dir_stash_createname(sc->tempip, &xfs_name_dotdot,
-			dp->i_ino);
+			I_INO(dp));
 
-	xrep_findparent_scan_found(&rd->pscan, dp->i_ino);
+	xrep_findparent_scan_found(&rd->pscan, I_INO(dp));
 	return 0;
 }
 
@@ -1179,7 +1251,9 @@ xrep_dir_want_scan(
 	struct xrep_dir		*rd,
 	const struct xfs_inode	*ip)
 {
-	return ip != rd->sc->ip && !xrep_is_tempfile(ip);
+	return ip != rd->sc->ip &&
+	       xfs_is_metadir_inode(ip) == xfs_is_metadir_inode(rd->sc->ip) &&
+	       !xrep_is_tempfile(ip);
 }
 
 /*
@@ -1277,7 +1351,7 @@ xrep_dir_scan_dirtree(
 
 	/* Roots of directory trees are their own parents. */
 	if (xchk_inode_is_dirtree_root(sc->ip))
-		xrep_findparent_scan_found(&rd->pscan, sc->ip->i_ino);
+		xrep_findparent_scan_found(&rd->pscan, I_INO(sc->ip));
 
 	/*
 	 * Filesystem scans are time consuming.  Drop the directory ILOCK and
@@ -1365,15 +1439,30 @@ xrep_dir_live_update(
 	 * rebuilding.  Stash the update for replay against the temporary
 	 * directory.
 	 */
-	if (p->dp->i_ino == sc->ip->i_ino &&
-	    xchk_iscan_want_live_update(&rd->pscan.iscan, p->ip->i_ino)) {
+	if (I_INO(p->dp) == I_INO(sc->ip) &&
+	    xchk_iscan_want_live_update(&rd->pscan.iscan, I_INO(p->ip))) {
 		mutex_lock(&rd->pscan.lock);
 		if (p->delta > 0)
 			error = xrep_dir_stash_createname(rd, p->name,
-					p->ip->i_ino);
-		else
-			error = xrep_dir_stash_removename(rd, p->name,
-					p->ip->i_ino);
+					I_INO(p->ip));
+		else {
+			/*
+			 * xfs_dentry_to_name in unlink or rename-exchange can
+			 * pass us names with ftype FT_UNKNOWN, but we really
+			 * must know the ftype of the child that is being
+			 * removed so that we can do nlink updates correctly
+			 * without holding inode references.
+			 */
+			struct xfs_name	name = {
+				.name	= p->name->name,
+				.len	= p->name->len,
+				.type	= xfs_mode_to_ftype(
+						VFS_IC(p->ip)->i_mode),
+			};
+
+			error = xrep_dir_stash_removename(rd, &name,
+					I_INO(p->ip));
+		}
 		mutex_unlock(&rd->pscan.lock);
 		if (error)
 			goto out_abort;
@@ -1384,14 +1473,14 @@ xrep_dir_live_update(
 	 * the directory that we're rebuilding, so remember the new dotdot
 	 * target.
 	 */
-	if (p->ip->i_ino == sc->ip->i_ino &&
-	    xchk_iscan_want_live_update(&rd->pscan.iscan, p->dp->i_ino)) {
+	if (I_INO(p->ip) == I_INO(sc->ip) &&
+	    xchk_iscan_want_live_update(&rd->pscan.iscan, I_INO(p->dp))) {
 		if (p->delta > 0) {
 			trace_xrep_dir_stash_createname(sc->tempip,
 					&xfs_name_dotdot,
-					p->dp->i_ino);
+					I_INO(p->dp));
 
-			xrep_findparent_scan_found(&rd->pscan, p->dp->i_ino);
+			xrep_findparent_scan_found(&rd->pscan, I_INO(p->dp));
 		} else {
 			trace_xrep_dir_stash_removename(sc->tempip,
 					&xfs_name_dotdot,
@@ -1463,8 +1552,8 @@ xrep_dir_swap_prep(
 			.geo		= sc->mp->m_dir_geo,
 			.whichfork	= XFS_DATA_FORK,
 			.trans		= sc->tp,
-			.total		= 1,
-			.owner		= sc->ip->i_ino,
+			.total		= xfs_dabuf_nfsb(sc->mp, XFS_DATA_FORK),
+			.owner		= I_INO(sc->ip),
 		};
 
 		error = xfs_dir2_sf_to_block(&args);
@@ -1485,20 +1574,8 @@ xrep_dir_swap_prep(
 	 * to an empty extent list in preparation for the atomic mapping
 	 * exchange.
 	 */
-	if (ip_local) {
-		struct xfs_ifork	*ifp;
-
-		ifp = xfs_ifork_ptr(sc->ip, XFS_DATA_FORK);
-		xfs_idestroy_fork(ifp);
-		ifp->if_format = XFS_DINODE_FMT_EXTENTS;
-		ifp->if_nextents = 0;
-		ifp->if_bytes = 0;
-		ifp->if_data = NULL;
-		ifp->if_height = 0;
-
-		xfs_trans_log_inode(sc->tp, sc->ip,
-				XFS_ILOG_CORE | XFS_ILOG_DDATA);
-	}
+	if (ip_local)
+		xrep_reset_fork_to_extents(sc, XFS_DATA_FORK);
 
 	return 0;
 }
@@ -1572,7 +1649,7 @@ xrep_dir_set_nlink(
 	 * count.  If the directory has no parent, it will be moved to the
 	 * orphanage.
 	 */
-	pag = xfs_perag_get(sc->mp, XFS_INO_TO_AGNO(sc->mp, dp->i_ino));
+	pag = xfs_perag_get(sc->mp, XFS_INODE_TO_AGNO(dp));
 	if (!pag) {
 		ASSERT(0);
 		return -EFSCORRUPTED;
@@ -1647,7 +1724,10 @@ xrep_dir_swap(
 	ASSERT(sc->ilock_flags & XFS_ILOCK_EXCL);
 	if (rd->pscan.parent_ino == NULLFSINO) {
 		rd->needs_adoption = true;
-		rd->pscan.parent_ino = rd->sc->mp->m_sb.sb_rootino;
+		if (xfs_is_metadir_inode(rd->sc->ip))
+			rd->pscan.parent_ino = rd->sc->mp->m_sb.sb_metadirino;
+		else
+			rd->pscan.parent_ino = rd->sc->mp->m_sb.sb_rootino;
 	}
 
 	/*
@@ -1760,7 +1840,7 @@ xrep_dir_rebuild_tree(
 	 * directory to an empty shortform directory because inactivation does
 	 * nothing for directories.
 	 */
-	error = xrep_dir_reset_fork(rd, sc->mp->m_rootip->i_ino);
+	error = xrep_dir_reset_fork(rd, I_INO(sc->mp->m_rootip));
 	if (error)
 		return error;
 
@@ -1784,20 +1864,15 @@ xrep_dir_setup_scan(
 	struct xrep_dir		*rd)
 {
 	struct xfs_scrub	*sc = rd->sc;
-	char			*descr;
 	int			error;
 
 	/* Set up some staging memory for salvaging dirents. */
-	descr = xchk_xfile_ino_descr(sc, "directory entries");
-	error = xfarray_create(descr, 0, sizeof(struct xrep_dirent),
-			&rd->dir_entries);
-	kfree(descr);
+	error = xfarray_create("directory entries", 0,
+			sizeof(struct xrep_dirent), &rd->dir_entries);
 	if (error)
 		return error;
 
-	descr = xchk_xfile_ino_descr(sc, "directory entry names");
-	error = xfblob_create(descr, &rd->dir_names);
-	kfree(descr);
+	error = xfblob_create("directory entry names", &rd->dir_names);
 	if (error)
 		goto out_xfarray;
 

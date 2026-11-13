@@ -19,14 +19,29 @@ properties:
     items:
       - enum:
           - airoha,en7581-chip-scu
+          - airoha,an7583-chip-scu
       - const: syscon
 
   reg:
     maxItems: 1
 
+  '#thermal-sensor-cells':
+    description: Sensor index, 0 bandgap, 1 GbE, 2 CPU.
+    const: 1
+
 required:
   - compatible
   - reg
+
+if:
+  properties:
+    compatible:
+      contains:
+        const: airoha,en7581-chip-scu
+
+then:
+  properties:
+    '#thermal-sensor-cells': false
 
 additionalProperties: false
 

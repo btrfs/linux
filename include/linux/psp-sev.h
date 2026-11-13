@@ -14,9 +14,42 @@
 
 #include <uapi/linux/psp-sev.h>
 
+/* As defined by SEV API, under "Guest Policy". */
+#define SEV_POLICY_MASK_NODBG			BIT(0)
+#define SEV_POLICY_MASK_NOKS			BIT(1)
+#define SEV_POLICY_MASK_ES			BIT(2)
+#define SEV_POLICY_MASK_NOSEND			BIT(3)
+#define SEV_POLICY_MASK_DOMAIN			BIT(4)
+#define SEV_POLICY_MASK_SEV			BIT(5)
+#define SEV_POLICY_MASK_API_MAJOR		GENMASK(23, 16)
+#define SEV_POLICY_MASK_API_MINOR		GENMASK(31, 24)
+
+/* As defined by SEV-SNP Firmware ABI, under "Guest Policy". */
+#define SNP_POLICY_MASK_API_MINOR		GENMASK_ULL(7, 0)
+#define SNP_POLICY_MASK_API_MAJOR		GENMASK_ULL(15, 8)
+#define SNP_POLICY_MASK_SMT			BIT_ULL(16)
+#define SNP_POLICY_MASK_RSVD_MBO		BIT_ULL(17)
+#define SNP_POLICY_MASK_MIGRATE_MA		BIT_ULL(18)
+#define SNP_POLICY_MASK_DEBUG			BIT_ULL(19)
+#define SNP_POLICY_MASK_SINGLE_SOCKET		BIT_ULL(20)
+#define SNP_POLICY_MASK_CXL_ALLOW		BIT_ULL(21)
+#define SNP_POLICY_MASK_MEM_AES_256_XTS		BIT_ULL(22)
+#define SNP_POLICY_MASK_RAPL_DIS		BIT_ULL(23)
+#define SNP_POLICY_MASK_CIPHERTEXT_HIDING_DRAM	BIT_ULL(24)
+#define SNP_POLICY_MASK_PAGE_SWAP_DISABLE	BIT_ULL(25)
+
+/* Base SEV-SNP policy bitmask for minimum supported SEV firmware version */
+#define SNP_POLICY_MASK_BASE	(SNP_POLICY_MASK_API_MINOR		| \
+				 SNP_POLICY_MASK_API_MAJOR		| \
+				 SNP_POLICY_MASK_SMT			| \
+				 SNP_POLICY_MASK_RSVD_MBO		| \
+				 SNP_POLICY_MASK_MIGRATE_MA		| \
+				 SNP_POLICY_MASK_DEBUG			| \
+				 SNP_POLICY_MASK_SINGLE_SOCKET)
+
 #define SEV_FW_BLOB_MAX_SIZE	0x4000	/* 16KB */
 
-/**
+/*
  * SEV platform state
  */
 enum sev_state {
@@ -27,7 +60,7 @@ enum sev_state {
 	SEV_STATE_MAX
 };
 
-/**
+/*
  * SEV platform and guest management commands
  */
 enum sev_cmd {
@@ -96,6 +129,7 @@ enum sev_cmd {
 	SEV_CMD_SNP_LAUNCH_FINISH	= 0x0A2,
 	SEV_CMD_SNP_DBG_DECRYPT		= 0x0B0,
 	SEV_CMD_SNP_DBG_ENCRYPT		= 0x0B1,
+	SEV_CMD_SNP_VERIFY_MITIGATION	= 0x0B2,
 	SEV_CMD_SNP_PAGE_SWAP_OUT	= 0x0C0,
 	SEV_CMD_SNP_PAGE_SWAP_IN	= 0x0C1,
 	SEV_CMD_SNP_PAGE_MOVE		= 0x0C2,
@@ -109,6 +143,13 @@ enum sev_cmd {
 	SEV_CMD_SNP_VLEK_LOAD		= 0x0CD,
 	SEV_CMD_SNP_FEATURE_INFO	= 0x0CE,
 
+	/* SEV-TIO commands */
+	SEV_CMD_TIO_STATUS		= 0x0D0,
+	SEV_CMD_TIO_INIT		= 0x0D1,
+	SEV_CMD_TIO_DEV_CREATE		= 0x0D2,
+	SEV_CMD_TIO_DEV_RECLAIM		= 0x0D3,
+	SEV_CMD_TIO_DEV_CONNECT		= 0x0D4,
+	SEV_CMD_TIO_DEV_DISCONNECT	= 0x0D5,
 	SEV_CMD_MAX,
 };
 
@@ -116,6 +157,7 @@ enum sev_cmd {
  * struct sev_data_init - INIT command parameters
  *
  * @flags: processing flags
+ * @reserved: reserved
  * @tmr_address: system physical address used for SEV-ES
  * @tmr_len: len of tmr_address
  */
@@ -133,6 +175,7 @@ struct sev_data_init {
  * @flags: processing flags
  * @tmr_address: system physical address used for SEV-ES
  * @tmr_len: len of tmr_address
+ * @reserved: reserved
  * @nv_address: system physical address used for PSP NV storage
  * @nv_len: len of nv_address
  */
@@ -160,12 +203,13 @@ struct sev_data_pek_csr {
 } __packed;
 
 /**
- * struct sev_data_cert_import - PEK_CERT_IMPORT command parameters
+ * struct sev_data_pek_cert_import - PEK_CERT_IMPORT command parameters
  *
- * @pek_address: PEK certificate chain
- * @pek_len: len of PEK certificate
- * @oca_address: OCA certificate chain
- * @oca_len: len of OCA certificate
+ * @pek_cert_address: PEK certificate chain
+ * @pek_cert_len: len of PEK certificate
+ * @reserved: reserved
+ * @oca_cert_address: OCA certificate chain
+ * @oca_cert_len: len of OCA certificate
  */
 struct sev_data_pek_cert_import {
 	u64 pek_cert_address;			/* In */
@@ -199,8 +243,9 @@ struct sev_data_get_id {
 /**
  * struct sev_data_pdh_cert_export - PDH_CERT_EXPORT command parameters
  *
- * @pdh_address: PDH certificate address
- * @pdh_len: len of PDH certificate
+ * @pdh_cert_address: PDH certificate address
+ * @pdh_cert_len: len of PDH certificate
+ * @reserved: reserved
  * @cert_chain_address: PDH certificate chain
  * @cert_chain_len: len of PDH certificate chain
  */
@@ -263,6 +308,7 @@ struct sev_data_guest_status {
  * @policy: guest launch policy
  * @dh_cert_address: physical address of DH certificate blob
  * @dh_cert_len: len of DH certificate blob
+ * @reserved: reserved
  * @session_address: physical address of session parameters
  * @session_len: len of session parameters
  */
@@ -280,6 +326,7 @@ struct sev_data_launch_start {
  * struct sev_data_launch_update_data - LAUNCH_UPDATE_DATA command parameter
  *
  * @handle: handle of the VM to update
+ * @reserved: reserved
  * @len: len of memory to be encrypted
  * @address: physical address of memory region to encrypt
  */
@@ -294,6 +341,7 @@ struct sev_data_launch_update_data {
  * struct sev_data_launch_update_vmsa - LAUNCH_UPDATE_VMSA command
  *
  * @handle: handle of the VM
+ * @reserved: reserved
  * @address: physical address of memory region to encrypt
  * @len: len of memory region to encrypt
  */
@@ -308,6 +356,7 @@ struct sev_data_launch_update_vmsa {
  * struct sev_data_launch_measure - LAUNCH_MEASURE command parameters
  *
  * @handle: handle of the VM to process
+ * @reserved: reserved
  * @address: physical address containing the measurement blob
  * @len: len of measurement blob
  */
@@ -322,10 +371,13 @@ struct sev_data_launch_measure {
  * struct sev_data_launch_secret - LAUNCH_SECRET command parameters
  *
  * @handle: handle of the VM to process
+ * @reserved1: reserved
  * @hdr_address: physical address containing the packet header
  * @hdr_len: len of packet header
+ * @reserved2: reserved
  * @guest_address: system physical address of guest memory region
  * @guest_len: len of guest_paddr
+ * @reserved3: reserved
  * @trans_address: physical address of transport memory buffer
  * @trans_len: len of transport memory buffer
  */
@@ -358,10 +410,13 @@ struct sev_data_launch_finish {
  * @policy: policy information for the VM
  * @pdh_cert_address: physical address containing PDH certificate
  * @pdh_cert_len: len of PDH certificate
+ * @reserved1: reserved
  * @plat_certs_address: physical address containing platform certificate
  * @plat_certs_len: len of platform certificate
+ * @reserved2: reserved
  * @amd_certs_address: physical address containing AMD certificate
  * @amd_certs_len: len of AMD certificate
+ * @reserved3: reserved
  * @session_address: physical address containing Session data
  * @session_len: len of session data
  */
@@ -382,13 +437,16 @@ struct sev_data_send_start {
 } __packed;
 
 /**
- * struct sev_data_send_update - SEND_UPDATE_DATA command
+ * struct sev_data_send_update_data - SEND_UPDATE_DATA command
  *
  * @handle: handle of the VM to process
+ * @reserved1: reserved
  * @hdr_address: physical address containing packet header
  * @hdr_len: len of packet header
+ * @reserved2: reserved
  * @guest_address: physical address of guest memory region to send
  * @guest_len: len of guest memory region to send
+ * @reserved3: reserved
  * @trans_address: physical address of host memory region
  * @trans_len: len of host memory region
  */
@@ -406,13 +464,15 @@ struct sev_data_send_update_data {
 } __packed;
 
 /**
- * struct sev_data_send_update - SEND_UPDATE_VMSA command
+ * struct sev_data_send_update_vmsa - SEND_UPDATE_VMSA command
  *
  * @handle: handle of the VM to process
  * @hdr_address: physical address containing packet header
  * @hdr_len: len of packet header
+ * @reserved2: reserved
  * @guest_address: physical address of guest memory region to send
  * @guest_len: len of guest memory region to send
+ * @reserved3: reserved
  * @trans_address: physical address of host memory region
  * @trans_len: len of host memory region
  */
@@ -450,8 +510,10 @@ struct sev_data_send_cancel {
  * struct sev_data_receive_start - RECEIVE_START command parameters
  *
  * @handle: handle of the VM to perform receive operation
+ * @policy: policy information for the VM
  * @pdh_cert_address: system physical address containing PDH certificate blob
  * @pdh_cert_len: len of PDH certificate blob
+ * @reserved1: reserved
  * @session_address: system physical address containing session blob
  * @session_len: len of session blob
  */
@@ -469,10 +531,13 @@ struct sev_data_receive_start {
  * struct sev_data_receive_update_data - RECEIVE_UPDATE_DATA command parameters
  *
  * @handle: handle of the VM to update
+ * @reserved1: reserved
  * @hdr_address: physical address containing packet header blob
  * @hdr_len: len of packet header
+ * @reserved2: reserved
  * @guest_address: system physical address of guest memory region
  * @guest_len: len of guest memory region
+ * @reserved3: reserved
  * @trans_address: system physical address of transport buffer
  * @trans_len: len of transport buffer
  */
@@ -493,10 +558,13 @@ struct sev_data_receive_update_data {
  * struct sev_data_receive_update_vmsa - RECEIVE_UPDATE_VMSA command parameters
  *
  * @handle: handle of the VM to update
+ * @reserved1: reserved
  * @hdr_address: physical address containing packet header blob
  * @hdr_len: len of packet header
+ * @reserved2: reserved
  * @guest_address: system physical address of guest memory region
  * @guest_len: len of guest memory region
+ * @reserved3: reserved
  * @trans_address: system physical address of transport buffer
  * @trans_len: len of transport buffer
  */
@@ -526,6 +594,7 @@ struct sev_data_receive_finish {
  * struct sev_data_dbg - DBG_ENCRYPT/DBG_DECRYPT command parameters
  *
  * @handle: handle of the VM to perform debug operation
+ * @reserved: reserved
  * @src_addr: source address of data to operate on
  * @dst_addr: destination address of data to operate on
  * @len: len of data to operate on
@@ -542,6 +611,7 @@ struct sev_data_dbg {
  * struct sev_data_attestation_report - SEV_ATTESTATION_REPORT command parameters
  *
  * @handle: handle of the VM
+ * @reserved: reserved
  * @mnonce: a random nonce that will be included in the report.
  * @address: physical address where the report will be copied.
  * @len: length of the physical buffer.
@@ -740,9 +810,14 @@ struct sev_data_snp_guest_request {
  *
  * @init_rmp: indicate that the RMP should be initialized.
  * @list_paddr_en: indicate that list_paddr is valid
+ * @rapl_dis: whether RAPL is disabled
+ * @ciphertext_hiding_en: whether ciphertext hiding is enabled
+ * @tio_en: Indicates that SNP_INIT_EX initialized the RMP for SEV-TIO
  * @rsvd: reserved
  * @rsvd1: reserved
  * @list_paddr: system physical address of range list
+ * @max_snp_asid: When non-zero, enable ciphertext hiding and specify the
+ *  maximum ASID that can be used for an SEV-SNP guest.
  * @rsvd2: reserved
  */
 struct sev_data_snp_init_ex {
@@ -750,7 +825,8 @@ struct sev_data_snp_init_ex {
 	u32 list_paddr_en:1;
 	u32 rapl_dis:1;
 	u32 ciphertext_hiding_en:1;
-	u32 rsvd:28;
+	u32 tio_en:1;
+	u32 rsvd:27;
 	u32 rsvd1;
 	u64 list_paddr;
 	u16 max_snp_asid;
@@ -788,16 +864,18 @@ struct sev_data_range_list {
  *
  * @len: length of the command buffer read by the PSP
  * @iommu_snp_shutdown: Disable enforcement of SNP in the IOMMU
+ * @x86_snp_shutdown: Disable SNP on all cores
  * @rsvd1: reserved
  */
 struct sev_data_snp_shutdown_ex {
 	u32 len;
 	u32 iommu_snp_shutdown:1;
-	u32 rsvd1:31;
+	u32 x86_snp_shutdown:1;
+	u32 rsvd1:30;
 } __packed;
 
 /**
- * struct sev_platform_init_args
+ * struct sev_platform_init_args - parameters for sev_platform_init()
  *
  * @error: SEV firmware error code
  * @probe: True if this is being called as part of CCP module probe, which
@@ -835,12 +913,12 @@ struct sev_data_snp_feature_info {
 } __packed;
 
 /**
- * struct feature_info - FEATURE_INFO structure
+ * struct snp_feature_info - FEATURE_INFO structure
  *
  * @eax: output of SNP_FEATURE_INFO command
  * @ebx: output of SNP_FEATURE_INFO command
  * @ecx: output of SNP_FEATURE_INFO command
- * #edx: output of SNP_FEATURE_INFO command
+ * @edx: output of SNP_FEATURE_INFO command
  */
 struct snp_feature_info {
 	u32 eax;
@@ -849,7 +927,101 @@ struct snp_feature_info {
 	u32 edx;
 } __packed;
 
+/* Feature bits in ECX */
+#define SNP_X86_SHUTDOWN_SUPPORTED		BIT(1)
+#define SNP_RAPL_DISABLE_SUPPORTED		BIT(2)
 #define SNP_CIPHER_TEXT_HIDING_SUPPORTED	BIT(3)
+#define SNP_AES_256_XTS_POLICY_SUPPORTED	BIT(4)
+#define SNP_CXL_ALLOW_POLICY_SUPPORTED		BIT(5)
+#define SNP_VERIFY_MITIGATION_SUPPORTED		BIT(13)
+
+/* Feature bits in EBX */
+#define SNP_SEV_TIO_SUPPORTED			BIT(1)
+
+#define SNP_MIT_SUBCMD_REQ_STATUS      0x0
+#define SNP_MIT_SUBCMD_REQ_VERIFY      0x1
+
+/**
+ * struct sev_data_snp_verify_mitigation - SNP_VERIFY_MITIGATION command params
+ *
+ * @length: Length of the command buffer read by the PSP
+ * @subcommand: Mitigation sub-command for the firmware to execute.
+ *              REQ_STATUS: 0x0 - Request status about currently supported and
+ *                                verified mitigations
+ *              REQ_VERIFY: 0x1 - Request to initiate verification mitigation
+ *                                operation on a specific mitigation
+ * @rsvd: Reserved
+ * @vector: Bit specifying the vulnerability mitigation to process
+ * @dst_paddr_en: Destination paddr enabled
+ * @src_paddr_en: Source paddr enabled
+ * @rsvd1: Reserved
+ * @rsvd2: Reserved
+ * @src_paddr: Source address for optional input data
+ * @dst_paddr: Destination address to write the result
+ * @rsvd3: Reserved
+ */
+struct sev_data_snp_verify_mitigation {
+	u32 length;
+	u16 subcommand;
+	u16 rsvd;
+	u64 vector;
+	u32 dst_paddr_en : 1,
+	    src_paddr_en : 1,
+	    rsvd1 : 30;
+	u8 rsvd2[4];
+	u64 src_paddr;
+	u64 dst_paddr;
+	u8 rsvd3[24];
+} __packed;
+
+/**
+ * struct sev_data_snp_verify_mitigation_dst - mitigation result vectors
+ *
+ * @mit_verified_vector: Bit vector of vulnerability mitigations verified
+ * @mit_supported_vector: Bit vector of vulnerability mitigations supported
+ * @mit_failure_status: Status of the verification operation
+ */
+struct sev_data_snp_verify_mitigation_dst {
+	u64 mit_verified_vector;                /* OUT */
+	u64 mit_supported_vector;               /* OUT */
+	u32 mit_failure_status;                 /* OUT */
+} __packed;
+
+/**
+ * struct sev_snp_tcb_version_genoa_milan - v1 SVN payload
+ *
+ * @boot_loader: SVN of PSP bootloader
+ * @tee: SVN of PSP operating system
+ * @reserved: reserved
+ * @snp: SVN of SNP firmware
+ * @microcode: Lowest current patch level of all cores
+ */
+struct sev_snp_tcb_version_genoa_milan {
+	u8 boot_loader;
+	u8 tee;
+	u8 reserved[4];
+	u8 snp;
+	u8 microcode;
+};
+
+/**
+ * struct sev_snp_tcb_version_turin - v2 SVN payload
+ *
+ * @fmc: SVN of FMC firmware
+ * @boot_loader: SVN of PSP bootloader
+ * @tee: SVN of PSP operating system
+ * @snp: SVN of SNP firmware
+ * @reserved: reserved
+ * @microcode: Lowest current patch level of all cores
+ */
+struct sev_snp_tcb_version_turin {
+	u8 fmc;
+	u8 boot_loader;
+	u8 tee;
+	u8 snp;
+	u8 reserved[3];
+	u8 microcode;
+};
 
 #ifdef CONFIG_CRYPTO_DEV_SP_PSP
 
@@ -899,9 +1071,9 @@ int sev_platform_status(struct sev_user_data_status *status, int *error);
  * behalf of userspace. The caller must pass a valid SEV file descriptor
  * so that we know that it has access to SEV device.
  *
- * @filep - SEV device file pointer
- * @cmd - command to issue
- * @data - command buffer
+ * @filep: SEV device file pointer
+ * @id: command to issue
+ * @data: command buffer
  * @error: SEV command return code
  *
  * Returns:
@@ -918,8 +1090,8 @@ int sev_issue_cmd_external_user(struct file *filep, unsigned int id,
 /**
  * sev_guest_deactivate - perform SEV DEACTIVATE command
  *
- * @deactivate: sev_data_deactivate structure to be processed
- * @sev_ret: sev command return code
+ * @data: sev_data_deactivate structure to be processed
+ * @error: sev command return code
  *
  * Returns:
  * 0 if the sev successfully processed the command
@@ -933,8 +1105,8 @@ int sev_guest_deactivate(struct sev_data_deactivate *data, int *error);
 /**
  * sev_guest_activate - perform SEV ACTIVATE command
  *
- * @activate: sev_data_activate structure to be processed
- * @sev_ret: sev command return code
+ * @data: sev_data_activate structure to be processed
+ * @error: sev command return code
  *
  * Returns:
  * 0 if the sev successfully processed the command
@@ -948,7 +1120,7 @@ int sev_guest_activate(struct sev_data_activate *data, int *error);
 /**
  * sev_guest_df_flush - perform SEV DF_FLUSH command
  *
- * @sev_ret: sev command return code
+ * @error: sev command return code
  *
  * Returns:
  * 0 if the sev successfully processed the command
@@ -962,8 +1134,8 @@ int sev_guest_df_flush(int *error);
 /**
  * sev_guest_decommission - perform SEV DECOMMISSION command
  *
- * @decommission: sev_data_decommission structure to be processed
- * @sev_ret: sev command return code
+ * @data: sev_data_decommission structure to be processed
+ * @error: sev command return code
  *
  * Returns:
  * 0 if the sev successfully processed the command
@@ -992,9 +1164,12 @@ int sev_do_cmd(int cmd, void *data, int *psp_ret);
 
 void *psp_copy_user_blob(u64 uaddr, u32 len);
 void *snp_alloc_firmware_page(gfp_t mask);
+int snp_reclaim_pages(unsigned long paddr, unsigned int npages, bool locked);
 void snp_free_firmware_page(void *addr);
 void sev_platform_shutdown(void);
 bool sev_is_snp_ciphertext_hiding_supported(void);
+u64 sev_get_snp_policy_bits(void);
+int sev_firmware_supported_vm_types(void);
 
 #else	/* !CONFIG_CRYPTO_DEV_SP_PSP */
 
@@ -1025,6 +1200,11 @@ static inline void *psp_copy_user_blob(u64 __user uaddr, u32 len) { return ERR_P
 static inline void *snp_alloc_firmware_page(gfp_t mask)
 {
 	return NULL;
+}
+
+static inline int snp_reclaim_pages(unsigned long paddr, unsigned int npages, bool locked)
+{
+	return -ENODEV;
 }
 
 static inline void snp_free_firmware_page(void *addr) { }

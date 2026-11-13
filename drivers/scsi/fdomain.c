@@ -273,7 +273,7 @@ static void fdomain_work(struct work_struct *work)
 	int status;
 	int done = 0;
 
-	spin_lock_irqsave(sh->host_lock, flags);
+	spin_lock_irqsave(&sh->host_lock, flags);
 
 	if (scsi_pointer->phase & in_arbitration) {
 		status = inb(fd->base + REG_ASTAT);
@@ -380,7 +380,7 @@ static void fdomain_work(struct work_struct *work)
 			     fd->base + REG_ICTL);
 	}
 out:
-	spin_unlock_irqrestore(sh->host_lock, flags);
+	spin_unlock_irqrestore(&sh->host_lock, flags);
 }
 
 static irqreturn_t fdomain_irq(int irq, void *dev_id)
@@ -402,7 +402,8 @@ static irqreturn_t fdomain_irq(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static int fdomain_queue(struct Scsi_Host *sh, struct scsi_cmnd *cmd)
+static enum scsi_qc_status fdomain_queue(struct Scsi_Host *sh,
+					 struct scsi_cmnd *cmd)
 {
 	struct scsi_pointer *scsi_pointer = fdomain_scsi_pointer(cmd);
 	struct fdomain *fd = shost_priv(cmd->device->host);
@@ -415,7 +416,7 @@ static int fdomain_queue(struct Scsi_Host *sh, struct scsi_cmnd *cmd)
 	scsi_pointer->phase		= in_arbitration;
 	scsi_set_resid(cmd, scsi_bufflen(cmd));
 
-	spin_lock_irqsave(sh->host_lock, flags);
+	spin_lock_irqsave(&sh->host_lock, flags);
 
 	fd->cur_cmd = cmd;
 
@@ -430,7 +431,7 @@ static int fdomain_queue(struct Scsi_Host *sh, struct scsi_cmnd *cmd)
 	/* Start arbitration */
 	outb(ACTL_ARB | ACTL_IRQEN | PARITY_MASK, fd->base + REG_ACTL);
 
-	spin_unlock_irqrestore(sh->host_lock, flags);
+	spin_unlock_irqrestore(&sh->host_lock, flags);
 
 	return 0;
 }
@@ -444,7 +445,7 @@ static int fdomain_abort(struct scsi_cmnd *cmd)
 	if (!fd->cur_cmd)
 		return FAILED;
 
-	spin_lock_irqsave(sh->host_lock, flags);
+	spin_lock_irqsave(&sh->host_lock, flags);
 
 	fdomain_make_bus_idle(fd);
 	fdomain_scsi_pointer(fd->cur_cmd)->phase |= aborted;
@@ -452,7 +453,7 @@ static int fdomain_abort(struct scsi_cmnd *cmd)
 	/* Aborts are not done well. . . */
 	set_host_byte(fd->cur_cmd, DID_ABORT);
 	fdomain_finish_cmd(fd);
-	spin_unlock_irqrestore(sh->host_lock, flags);
+	spin_unlock_irqrestore(&sh->host_lock, flags);
 	return SUCCESS;
 }
 
@@ -462,9 +463,9 @@ static int fdomain_host_reset(struct scsi_cmnd *cmd)
 	struct fdomain *fd = shost_priv(sh);
 	unsigned long flags;
 
-	spin_lock_irqsave(sh->host_lock, flags);
+	spin_lock_irqsave(&sh->host_lock, flags);
 	fdomain_reset(fd->base);
-	spin_unlock_irqrestore(sh->host_lock, flags);
+	spin_unlock_irqrestore(&sh->host_lock, flags);
 	return SUCCESS;
 }
 

@@ -4,10 +4,10 @@
  */
 
 #include <linux/acpi.h>
+#include <linux/arm-smccc.h>
 #include <linux/export.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 
@@ -27,6 +27,11 @@
 #define PMC_STRAPPING_OPT_A_RAM_CODE_MASK_SHORT	\
 	(0x3 << PMC_STRAPPING_OPT_A_RAM_CODE_SHIFT)
 
+#define TEGRA_SMCCC_PLATFORM(x)		(((x) >> 8) & 0xff)
+#define TEGRA_SMCCC_CHIP_ID(x)		(((x) >> 4) & 0xff)
+#define TEGRA_SMCCC_MAJOR_REV(x)	((x) & 0xf)
+#define TEGRA_SMCCC_MINOR_REV(x)	((x) & 0xf)
+
 static void __iomem *apbmisc_base;
 static bool long_ram_code;
 static u32 strapping;
@@ -34,28 +39,56 @@ static u32 chipid;
 
 u32 tegra_read_chipid(void)
 {
-	WARN(!chipid, "Tegra APB MISC not yet available\n");
+	WARN(!apbmisc_base, "Tegra APB MISC not yet available\n");
+
+	if (!chipid)
+		chipid = readl_relaxed(apbmisc_base + 4);
 
 	return chipid;
 }
 
 u8 tegra_get_chip_id(void)
 {
+#if IS_ENABLED(CONFIG_HAVE_ARM_SMCCC_DISCOVERY)
+	s32 soc_id = arm_smccc_get_soc_id_version();
+
+	if (soc_id >= 0)
+		return TEGRA_SMCCC_CHIP_ID(soc_id);
+#endif
 	return (tegra_read_chipid() >> 8) & 0xff;
 }
 
 u8 tegra_get_major_rev(void)
 {
+#if IS_ENABLED(CONFIG_HAVE_ARM_SMCCC_DISCOVERY)
+	s32 soc_id = arm_smccc_get_soc_id_version();
+
+	if (soc_id >= 0)
+		return TEGRA_SMCCC_MAJOR_REV(soc_id);
+#endif
 	return (tegra_read_chipid() >> 4) & 0xf;
 }
 
 u8 tegra_get_minor_rev(void)
 {
+#if IS_ENABLED(CONFIG_HAVE_ARM_SMCCC_DISCOVERY)
+	s32 revision = arm_smccc_get_soc_id_revision();
+
+	if (revision >= 0)
+		return TEGRA_SMCCC_MINOR_REV(revision);
+#endif
 	return (tegra_read_chipid() >> 16) & 0xf;
+
 }
 
 u8 tegra_get_platform(void)
 {
+#if IS_ENABLED(CONFIG_HAVE_ARM_SMCCC_DISCOVERY)
+	s32 revision = arm_smccc_get_soc_id_revision();
+
+	if (revision >= 0)
+		return TEGRA_SMCCC_PLATFORM(revision);
+#endif
 	return (tegra_read_chipid() >> 20) & 0xf;
 }
 
@@ -83,7 +116,7 @@ bool tegra_is_silicon(void)
 
 u32 tegra_read_straps(void)
 {
-	WARN(!chipid, "Tegra ABP MISC not yet available\n");
+	WARN(!apbmisc_base, "Tegra ABP MISC not yet available\n");
 
 	return strapping;
 }
@@ -134,30 +167,41 @@ static const struct of_device_id apbmisc_match[] __initconst = {
 
 void __init tegra_init_revision(void)
 {
-	u8 chip_id, minor_rev;
+	u8 chip_id, major_rev, minor_rev;
 
 	chip_id = tegra_get_chip_id();
+	major_rev = tegra_get_major_rev();
 	minor_rev = tegra_get_minor_rev();
 
-	switch (minor_rev) {
-	case 1:
-		tegra_sku_info.revision = TEGRA_REVISION_A01;
-		break;
-	case 2:
-		tegra_sku_info.revision = TEGRA_REVISION_A02;
-		break;
-	case 3:
-		if (chip_id == TEGRA20 && (tegra_fuse_read_spare(18) ||
-					   tegra_fuse_read_spare(19)))
-			tegra_sku_info.revision = TEGRA_REVISION_A03p;
-		else
-			tegra_sku_info.revision = TEGRA_REVISION_A03;
-		break;
-	case 4:
-		tegra_sku_info.revision = TEGRA_REVISION_A04;
-		break;
-	default:
-		tegra_sku_info.revision = TEGRA_REVISION_UNKNOWN;
+	if (major_rev > 1) {
+		switch (minor_rev) {
+		case 1:
+			tegra_sku_info.revision = TEGRA_REVISION_B01;
+			break;
+		default:
+			tegra_sku_info.revision = TEGRA_REVISION_UNKNOWN;
+		}
+	} else {
+		switch (minor_rev) {
+		case 1:
+			tegra_sku_info.revision = TEGRA_REVISION_A01;
+			break;
+		case 2:
+			tegra_sku_info.revision = TEGRA_REVISION_A02;
+			break;
+		case 3:
+			if (chip_id == TEGRA20 && (tegra_fuse_read_spare(18) ||
+						   tegra_fuse_read_spare(19)))
+				tegra_sku_info.revision = TEGRA_REVISION_A03p;
+			else
+				tegra_sku_info.revision = TEGRA_REVISION_A03;
+			break;
+		case 4:
+			tegra_sku_info.revision = TEGRA_REVISION_A04;
+			break;
+		default:
+			tegra_sku_info.revision = TEGRA_REVISION_UNKNOWN;
+		}
 	}
 
 	tegra_sku_info.sku_id = tegra_fuse_read_early(FUSE_SKU_INFO);
@@ -170,9 +214,7 @@ static void tegra_init_apbmisc_resources(struct resource *apbmisc,
 	void __iomem *strapping_base;
 
 	apbmisc_base = ioremap(apbmisc->start, resource_size(apbmisc));
-	if (apbmisc_base)
-		chipid = readl_relaxed(apbmisc_base + 4);
-	else
+	if (!apbmisc_base)
 		pr_err("failed to map APBMISC registers\n");
 
 	strapping_base = ioremap(straps->start, resource_size(straps));
@@ -278,7 +320,7 @@ void tegra_acpi_init_apbmisc(void)
 
 	ret = acpi_dev_get_memory_resources(adev, &resource_list);
 	if (ret < 0) {
-		pr_err("failed to get APBMISC memory resources");
+		pr_err("failed to get APBMISC memory resources\n");
 		goto out_put_acpi_dev;
 	}
 

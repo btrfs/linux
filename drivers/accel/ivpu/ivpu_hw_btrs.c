@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (C) 2020-2025 Intel Corporation
+ * Copyright (C) 2020-2026 Intel Corporation
  */
 
 #include <linux/units.h>
@@ -8,9 +8,9 @@
 #include "ivpu_drv.h"
 #include "ivpu_hw.h"
 #include "ivpu_hw_btrs.h"
-#include "ivpu_hw_btrs_lnl_reg.h"
-#include "ivpu_hw_btrs_mtl_reg.h"
+#include "ivpu_hw_btrs_reg.h"
 #include "ivpu_hw_reg_io.h"
+#include "ivpu_jsm_msg.h"
 #include "ivpu_pm.h"
 
 #define BTRS_MTL_IRQ_MASK ((REG_FLD(VPU_HW_BTRS_MTL_INTERRUPT_STAT, ATS_ERR)) | \
@@ -23,9 +23,6 @@
 			   (REG_FLD(VPU_HW_BTRS_LNL_INTERRUPT_STAT, IMR1_ERR)) | \
 			   (REG_FLD(VPU_HW_BTRS_LNL_INTERRUPT_STAT, SURV_ERR)))
 
-#define BTRS_MTL_ALL_IRQ_MASK (BTRS_MTL_IRQ_MASK | (REG_FLD(VPU_HW_BTRS_MTL_INTERRUPT_STAT, \
-			       FREQ_CHANGE)))
-
 #define BTRS_IRQ_DISABLE_MASK ((u32)-1)
 
 #define BTRS_LNL_ALL_IRQ_MASK ((u32)-1)
@@ -33,8 +30,7 @@
 
 #define PLL_CDYN_DEFAULT               0x80
 #define PLL_EPP_DEFAULT                0x80
-#define PLL_REF_CLK_FREQ               50000000ull
-#define PLL_RATIO_TO_FREQ(x)           ((x) * PLL_REF_CLK_FREQ)
+#define PLL_REF_CLK_FREQ_MHZ           50
 
 #define PLL_TIMEOUT_US		       (1500 * USEC_PER_MSEC)
 #define IDLE_TIMEOUT_US		       (5 * USEC_PER_MSEC)
@@ -49,29 +45,12 @@
 #define BTRS_MTL_TILE_FUSE_ENABLE_BOTH 0x0
 #define BTRS_MTL_TILE_SKU_BOTH         0x3630
 
-#define BTRS_LNL_TILE_MAX_NUM          6
-#define BTRS_LNL_TILE_MAX_MASK         0x3f
-
 #define WEIGHTS_DEFAULT                0xf711f711u
 #define WEIGHTS_ATS_DEFAULT            0x0000f711u
 
 #define DCT_REQ                        0x2
 #define DCT_ENABLE                     0x1
 #define DCT_DISABLE                    0x0
-
-static u32 pll_ratio_to_dpu_freq(struct ivpu_device *vdev, u32 ratio);
-
-int ivpu_hw_btrs_irqs_clear_with_0_mtl(struct ivpu_device *vdev)
-{
-	REGB_WR32(VPU_HW_BTRS_MTL_INTERRUPT_STAT, BTRS_MTL_ALL_IRQ_MASK);
-	if (REGB_RD32(VPU_HW_BTRS_MTL_INTERRUPT_STAT) == BTRS_MTL_ALL_IRQ_MASK) {
-		/* Writing 1s does not clear the interrupt status register */
-		REGB_WR32(VPU_HW_BTRS_MTL_INTERRUPT_STAT, 0x0);
-		return true;
-	}
-
-	return false;
-}
 
 static void freq_ratios_init_mtl(struct ivpu_device *vdev)
 {
@@ -111,16 +90,14 @@ void ivpu_hw_btrs_freq_ratios_init(struct ivpu_device *vdev)
 	hw->pll.min_ratio = clamp_t(u8, ivpu_pll_min_ratio, hw->pll.min_ratio, hw->pll.max_ratio);
 	hw->pll.max_ratio = clamp_t(u8, ivpu_pll_max_ratio, hw->pll.min_ratio, hw->pll.max_ratio);
 	hw->pll.pn_ratio = clamp_t(u8, hw->pll.pn_ratio, hw->pll.min_ratio, hw->pll.max_ratio);
+	hw->pll.cfg_max_ratio = hw->pll.max_ratio;
+	hw->pll.cfg_min_ratio = hw->pll.min_ratio;
 }
 
 static bool tile_disable_check(u32 config)
 {
-	/* Allowed values: 0 or one bit from range 0-5 (6 tiles) */
 	if (config == 0)
 		return true;
-
-	if (config > BIT(BTRS_LNL_TILE_MAX_NUM - 1))
-		return false;
 
 	if ((config & (config - 1)) == 0)
 		return true;
@@ -156,6 +133,11 @@ static int info_init_mtl(struct ivpu_device *vdev)
 	hw->tile_fuse = BTRS_MTL_TILE_FUSE_ENABLE_BOTH;
 	hw->sku = BTRS_MTL_TILE_SKU_BOTH;
 	hw->config = WP_CONFIG(MTL_CONFIG_2_TILE, MTL_PLL_RATIO_4_3);
+	hw->btrs_irq_mask = BTRS_MTL_IRQ_MASK;
+
+	if (ivpu_test_mode & IVPU_TEST_MODE_FREQ_CHANGE_ENABLE)
+		hw->btrs_irq_mask = REG_SET_FLD(VPU_HW_BTRS_MTL_INTERRUPT_STAT, FREQ_CHANGE,
+						hw->btrs_irq_mask);
 
 	return 0;
 }
@@ -172,6 +154,11 @@ static int info_init_lnl(struct ivpu_device *vdev)
 
 	hw->tile_fuse = tile_fuse_config;
 	hw->pll.profiling_freq = PLL_PROFILING_FREQ_DEFAULT;
+	hw->btrs_irq_mask = BTRS_LNL_IRQ_MASK;
+
+	if (ivpu_test_mode & IVPU_TEST_MODE_FREQ_CHANGE_ENABLE)
+		hw->btrs_irq_mask = REG_SET_FLD(VPU_HW_BTRS_LNL_INTERRUPT_STAT, FREQ_CHANGE,
+						hw->btrs_irq_mask);
 
 	return 0;
 }
@@ -321,6 +308,14 @@ static int wait_for_pll_lock(struct ivpu_device *vdev, bool enable)
 	return REGB_POLL_FLD(VPU_HW_BTRS_MTL_PLL_STATUS, LOCK, exp_val, PLL_TIMEOUT_US);
 }
 
+static int wait_for_cdyn_deassert(struct ivpu_device *vdev)
+{
+	if (ivpu_hw_btrs_gen(vdev) == IVPU_HW_BTRS_MTL)
+		return 0;
+
+	return REGB_POLL_FLD(VPU_HW_BTRS_LNL_CDYN, CDYN, 0, PLL_TIMEOUT_US);
+}
+
 int ivpu_hw_btrs_wp_drive(struct ivpu_device *vdev, bool enable)
 {
 	struct wp_request wp;
@@ -333,8 +328,8 @@ int ivpu_hw_btrs_wp_drive(struct ivpu_device *vdev, bool enable)
 
 	prepare_wp_request(vdev, &wp, enable);
 
-	ivpu_dbg(vdev, PM, "PLL workpoint request: %lu MHz, config: 0x%x, epp: 0x%x, cdyn: 0x%x\n",
-		 pll_ratio_to_dpu_freq(vdev, wp.target) / HZ_PER_MHZ, wp.cfg, wp.epp, wp.cdyn);
+	ivpu_dbg(vdev, PM, "PLL workpoint request: %u MHz, config: 0x%x, epp: 0x%x, cdyn: 0x%x\n",
+		 ivpu_hw_btrs_pll_ratio_to_mhz(vdev, wp.target), wp.cfg, wp.epp, wp.cdyn);
 
 	ret = wp_request_send(vdev, &wp);
 	if (ret) {
@@ -352,6 +347,14 @@ int ivpu_hw_btrs_wp_drive(struct ivpu_device *vdev, bool enable)
 	if (ret) {
 		ivpu_err(vdev, "Timed out waiting for NPU ready status\n");
 		return ret;
+	}
+
+	if (!enable) {
+		ret = wait_for_cdyn_deassert(vdev);
+		if (ret) {
+			ivpu_err(vdev, "Timed out waiting for CDYN deassert\n");
+			return ret;
+		}
 	}
 
 	return 0;
@@ -582,41 +585,107 @@ static u32 pll_config_get_lnl(struct ivpu_device *vdev)
 	return REGB_RD32(VPU_HW_BTRS_LNL_PLL_FREQ);
 }
 
-static u32 pll_ratio_to_dpu_freq_mtl(u16 ratio)
+static u32 pll_ratio_to_mhz_mtl(u8 pll_ratio)
 {
-	return (PLL_RATIO_TO_FREQ(ratio) * 2) / 3;
+	return (pll_ratio * PLL_REF_CLK_FREQ_MHZ * 2) / 3;
 }
 
-static u32 pll_ratio_to_dpu_freq_lnl(u16 ratio)
+static u32 pll_ratio_to_mhz_lnl(u8 pll_ratio)
 {
-	return PLL_RATIO_TO_FREQ(ratio) / 2;
+	return (pll_ratio * PLL_REF_CLK_FREQ_MHZ) / 2;
 }
 
-static u32 pll_ratio_to_dpu_freq(struct ivpu_device *vdev, u32 ratio)
+u32 ivpu_hw_btrs_pll_ratio_to_mhz(struct ivpu_device *vdev, u8 pll_ratio)
 {
 	if (ivpu_hw_btrs_gen(vdev) == IVPU_HW_BTRS_MTL)
-		return pll_ratio_to_dpu_freq_mtl(ratio);
+		return pll_ratio_to_mhz_mtl(pll_ratio);
 	else
-		return pll_ratio_to_dpu_freq_lnl(ratio);
+		return pll_ratio_to_mhz_lnl(pll_ratio);
 }
 
-u32 ivpu_hw_btrs_dpu_max_freq_get(struct ivpu_device *vdev)
+u32 ivpu_hw_btrs_pll_ratio_to_hz(struct ivpu_device *vdev, u8 pll_ratio)
 {
-	return pll_ratio_to_dpu_freq(vdev, vdev->hw->pll.max_ratio);
+	return ivpu_hw_btrs_pll_ratio_to_mhz(vdev, pll_ratio) * HZ_PER_MHZ;
 }
 
-u32 ivpu_hw_btrs_dpu_freq_get(struct ivpu_device *vdev)
+u32 ivpu_hw_btrs_current_freq_get(struct ivpu_device *vdev)
 {
 	if (ivpu_hw_btrs_gen(vdev) == IVPU_HW_BTRS_MTL)
-		return pll_ratio_to_dpu_freq_mtl(pll_config_get_mtl(vdev));
+		return pll_ratio_to_mhz_mtl(pll_config_get_mtl(vdev));
 	else
-		return pll_ratio_to_dpu_freq_lnl(pll_config_get_lnl(vdev));
+		return pll_ratio_to_mhz_lnl(pll_config_get_lnl(vdev));
+}
+
+static int ivpu_hw_btrs_cfg_freq_set(struct ivpu_device *vdev, u8 cfg_min_ratio, u8 cfg_max_ratio)
+{
+	u8 min_ratio = clamp_t(u8, cfg_min_ratio, vdev->hw->pll.min_ratio, cfg_max_ratio);
+	u8 pn_ratio = clamp_t(u8, vdev->hw->pll.pn_ratio, min_ratio, cfg_max_ratio);
+	int ret;
+
+	ivpu_dbg(vdev, PM, "Set frequency range to min: %u, pn: %u, max: %u MHz\n",
+		 ivpu_hw_btrs_pll_ratio_to_mhz(vdev, min_ratio),
+		 ivpu_hw_btrs_pll_ratio_to_mhz(vdev, pn_ratio),
+		 ivpu_hw_btrs_pll_ratio_to_mhz(vdev, cfg_max_ratio));
+
+	ret = ivpu_rpm_get(vdev);
+	if (ret < 0)
+		return ret;
+
+	ret = ivpu_jsm_msg_freq_config(vdev, min_ratio, pn_ratio, cfg_max_ratio);
+	ivpu_rpm_put(vdev);
+
+	if (ret) {
+		ivpu_warn(vdev,
+			  "Failed to set frequency to min: %u, pn: %u, max: %u MHz, ret %d\n",
+			  ivpu_hw_btrs_pll_ratio_to_mhz(vdev, min_ratio),
+			  ivpu_hw_btrs_pll_ratio_to_mhz(vdev, pn_ratio),
+			  ivpu_hw_btrs_pll_ratio_to_mhz(vdev, cfg_max_ratio),
+			  ret);
+		return ret;
+	}
+
+	vdev->hw->pll.cfg_min_ratio = cfg_min_ratio;
+	vdev->hw->pll.cfg_max_ratio = cfg_max_ratio;
+
+	return 0;
+}
+
+static u8 dpu_mhz_to_pll_ratio_lnl(u32 freq_mhz)
+{
+	return clamp_t(u32, freq_mhz / (PLL_REF_CLK_FREQ_MHZ / 2), 0, U8_MAX);
+}
+
+int ivpu_hw_btrs_cfg_max_freq_set(struct ivpu_device *vdev, u32 max_freq_mhz)
+{
+	u8 ratio = dpu_mhz_to_pll_ratio_lnl(max_freq_mhz);
+	u8 cfg_max_ratio = clamp_t(u8, ratio, vdev->hw->pll.min_ratio, vdev->hw->pll.max_ratio);
+
+	return ivpu_hw_btrs_cfg_freq_set(vdev, vdev->hw->pll.cfg_min_ratio, cfg_max_ratio);
+}
+
+int ivpu_hw_btrs_cfg_min_freq_set(struct ivpu_device *vdev, u32 min_freq_mhz)
+{
+	u8 ratio = dpu_mhz_to_pll_ratio_lnl(min_freq_mhz);
+	u8 cfg_min_ratio = clamp_t(u8, ratio, vdev->hw->pll.min_ratio, vdev->hw->pll.max_ratio);
+
+	return ivpu_hw_btrs_cfg_freq_set(vdev, cfg_min_ratio, vdev->hw->pll.cfg_max_ratio);
+}
+
+int ivpu_hw_btrs_cfg_freq_init(struct ivpu_device *vdev)
+{
+	if (vdev->hw->pll.min_ratio == vdev->hw->pll.cfg_min_ratio &&
+	    vdev->hw->pll.max_ratio == vdev->hw->pll.cfg_max_ratio)
+		return 0;
+
+	return ivpu_hw_btrs_cfg_freq_set(vdev,
+					 vdev->hw->pll.cfg_min_ratio,
+					 vdev->hw->pll.cfg_max_ratio);
 }
 
 /* Handler for IRQs from Buttress core (irqB) */
 bool ivpu_hw_btrs_irq_handler_mtl(struct ivpu_device *vdev, int irq)
 {
-	u32 status = REGB_RD32(VPU_HW_BTRS_MTL_INTERRUPT_STAT) & BTRS_MTL_IRQ_MASK;
+	u32 status = REGB_RD32(VPU_HW_BTRS_MTL_INTERRUPT_STAT) & vdev->hw->btrs_irq_mask;
 	bool schedule_recovery = false;
 
 	if (!status)
@@ -625,8 +694,8 @@ bool ivpu_hw_btrs_irq_handler_mtl(struct ivpu_device *vdev, int irq)
 	if (REG_TEST_FLD(VPU_HW_BTRS_MTL_INTERRUPT_STAT, FREQ_CHANGE, status)) {
 		u32 pll = pll_config_get_mtl(vdev);
 
-		ivpu_dbg(vdev, IRQ, "FREQ_CHANGE irq, wp %08x, %lu MHz",
-			 pll, pll_ratio_to_dpu_freq_mtl(pll) / HZ_PER_MHZ);
+		ivpu_dbg(vdev, IRQ, "FREQ_CHANGE irq, wp %08x, %u MHz",
+			 pll, pll_ratio_to_mhz_mtl(pll));
 	}
 
 	if (REG_TEST_FLD(VPU_HW_BTRS_MTL_INTERRUPT_STAT, ATS_ERR, status)) {
@@ -647,14 +716,7 @@ bool ivpu_hw_btrs_irq_handler_mtl(struct ivpu_device *vdev, int irq)
 	}
 
 	/* This must be done after interrupts are cleared at the source. */
-	if (IVPU_WA(interrupt_clear_with_0))
-		/*
-		 * Writing 1 triggers an interrupt, so we can't perform read update write.
-		 * Clear local interrupt status by writing 0 to all bits.
-		 */
-		REGB_WR32(VPU_HW_BTRS_MTL_INTERRUPT_STAT, 0x0);
-	else
-		REGB_WR32(VPU_HW_BTRS_MTL_INTERRUPT_STAT, status);
+	REGB_WR32(VPU_HW_BTRS_MTL_INTERRUPT_STAT, status);
 
 	if (schedule_recovery)
 		ivpu_pm_trigger_recovery(vdev, "Buttress IRQ");
@@ -665,7 +727,7 @@ bool ivpu_hw_btrs_irq_handler_mtl(struct ivpu_device *vdev, int irq)
 /* Handler for IRQs from Buttress core (irqB) */
 bool ivpu_hw_btrs_irq_handler_lnl(struct ivpu_device *vdev, int irq)
 {
-	u32 status = REGB_RD32(VPU_HW_BTRS_LNL_INTERRUPT_STAT) & BTRS_LNL_IRQ_MASK;
+	u32 status = REGB_RD32(VPU_HW_BTRS_LNL_INTERRUPT_STAT) & vdev->hw->btrs_irq_mask;
 	bool schedule_recovery = false;
 
 	if (!status)
@@ -673,14 +735,14 @@ bool ivpu_hw_btrs_irq_handler_lnl(struct ivpu_device *vdev, int irq)
 
 	if (REG_TEST_FLD(VPU_HW_BTRS_LNL_INTERRUPT_STAT, SURV_ERR, status)) {
 		ivpu_dbg(vdev, IRQ, "Survivability IRQ\n");
-		queue_work(system_wq, &vdev->irq_dct_work);
+		queue_work(system_percpu_wq, &vdev->irq_dct_work);
 	}
 
 	if (REG_TEST_FLD(VPU_HW_BTRS_LNL_INTERRUPT_STAT, FREQ_CHANGE, status)) {
 		u32 pll = pll_config_get_lnl(vdev);
 
-		ivpu_dbg(vdev, IRQ, "FREQ_CHANGE irq, wp %08x, %lu MHz",
-			 pll, pll_ratio_to_dpu_freq_lnl(pll) / HZ_PER_MHZ);
+		ivpu_dbg(vdev, IRQ, "FREQ_CHANGE irq, wp %08x, %u MHz",
+			 pll, pll_ratio_to_mhz_lnl(pll));
 	}
 
 	if (REG_TEST_FLD(VPU_HW_BTRS_LNL_INTERRUPT_STAT, ATS_ERR, status)) {
@@ -752,7 +814,7 @@ int ivpu_hw_btrs_dct_get_request(struct ivpu_device *vdev, bool *enable)
 	}
 }
 
-void ivpu_hw_btrs_dct_set_status(struct ivpu_device *vdev, bool enable, u32 active_percent)
+void ivpu_hw_btrs_dct_set_status(struct ivpu_device *vdev, bool enable, u8 active_percent)
 {
 	u32 val = 0;
 	u32 cmd = enable ? DCT_ENABLE : DCT_DISABLE;
@@ -807,10 +869,10 @@ void ivpu_hw_btrs_global_int_enable(struct ivpu_device *vdev)
 void ivpu_hw_btrs_irq_enable(struct ivpu_device *vdev)
 {
 	if (ivpu_hw_btrs_gen(vdev) == IVPU_HW_BTRS_MTL) {
-		REGB_WR32(VPU_HW_BTRS_MTL_LOCAL_INT_MASK, (u32)(~BTRS_MTL_IRQ_MASK));
+		REGB_WR32(VPU_HW_BTRS_MTL_LOCAL_INT_MASK, (u32)(~vdev->hw->btrs_irq_mask));
 		REGB_WR32(VPU_HW_BTRS_MTL_GLOBAL_INT_MASK, 0x0);
 	} else {
-		REGB_WR32(VPU_HW_BTRS_LNL_LOCAL_INT_MASK, (u32)(~BTRS_LNL_IRQ_MASK));
+		REGB_WR32(VPU_HW_BTRS_LNL_LOCAL_INT_MASK, (u32)(~vdev->hw->btrs_irq_mask));
 		REGB_WR32(VPU_HW_BTRS_LNL_GLOBAL_INT_MASK, 0x0);
 	}
 }
@@ -828,7 +890,7 @@ void ivpu_hw_btrs_irq_disable(struct ivpu_device *vdev)
 
 static void diagnose_failure_mtl(struct ivpu_device *vdev)
 {
-	u32 reg = REGB_RD32(VPU_HW_BTRS_MTL_INTERRUPT_STAT) & BTRS_MTL_IRQ_MASK;
+	u32 reg = REGB_RD32(VPU_HW_BTRS_MTL_INTERRUPT_STAT) & vdev->hw->btrs_irq_mask;
 
 	if (REG_TEST_FLD(VPU_HW_BTRS_MTL_INTERRUPT_STAT, ATS_ERR, reg))
 		ivpu_err(vdev, "ATS_ERR irq 0x%016llx", REGB_RD64(VPU_HW_BTRS_MTL_ATS_ERR_LOG_0));
@@ -845,7 +907,7 @@ static void diagnose_failure_mtl(struct ivpu_device *vdev)
 
 static void diagnose_failure_lnl(struct ivpu_device *vdev)
 {
-	u32 reg = REGB_RD32(VPU_HW_BTRS_MTL_INTERRUPT_STAT) & BTRS_LNL_IRQ_MASK;
+	u32 reg = REGB_RD32(VPU_HW_BTRS_LNL_INTERRUPT_STAT) & vdev->hw->btrs_irq_mask;
 
 	if (REG_TEST_FLD(VPU_HW_BTRS_LNL_INTERRUPT_STAT, ATS_ERR, reg)) {
 		ivpu_err(vdev, "ATS_ERR_LOG1 0x%08x ATS_ERR_LOG2 0x%08x\n",

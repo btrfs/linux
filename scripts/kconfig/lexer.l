@@ -105,6 +105,9 @@ n	[A-Za-z0-9_-]
 "comment"		return T_COMMENT;
 "config"		return T_CONFIG;
 "def_bool"		return T_DEF_BOOL;
+"def_hex"		return T_DEF_HEX;
+"def_int"		return T_DEF_INT;
+"def_string"		return T_DEF_STRING;
 "def_tristate"		return T_DEF_TRISTATE;
 "default"		return T_DEFAULT;
 "depends"		return T_DEPENDS;
@@ -402,7 +405,7 @@ void zconf_initscan(const char *name)
 		exit(1);
 	}
 
-	cur_filename = file_lookup(name);
+	cur_filename = file_lookup(name, NULL, 0);
 	yylineno = 1;
 }
 
@@ -443,7 +446,7 @@ void zconf_nextfile(const char *name)
 	}
 
 	yylineno = 1;
-	cur_filename = file_lookup(name);
+	cur_filename = file_lookup(name, cur_filename, cur_lineno);
 }
 
 static void zconf_endfile(void)

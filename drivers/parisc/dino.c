@@ -590,7 +590,7 @@ dino_card_fixup(struct pci_dev *dev)
 	dino_cfg_write(dev->bus, dev->devfn, PCI_INTERRUPT_LINE, 1, dev->irq); 
 }
 
-/* The alignment contraints for PCI bridges under dino */
+/* The alignment constraints for PCI bridges under dino */
 #define DINO_BRIDGE_ALIGN 0x100000
 
 
@@ -990,7 +990,7 @@ static int __init dino_probe(struct parisc_device *dev)
 */
 	}
 
-	dino_dev = kzalloc(sizeof(struct dino_device), GFP_KERNEL);
+	dino_dev = kzalloc_obj(struct dino_device);
 	if (!dino_dev) {
 		printk("dino_init_chip - couldn't alloc dino_device\n");
 		return 1;

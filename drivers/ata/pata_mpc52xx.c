@@ -737,7 +737,7 @@ static int mpc52xx_ata_probe(struct platform_device *op)
 	}
 
 	/* Prepare our private structure */
-	priv = devm_kzalloc(&op->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&op->dev, *priv);
 	if (!priv) {
 		rv = -ENOMEM;
 		goto err1;
@@ -769,10 +769,8 @@ static int mpc52xx_ata_probe(struct platform_device *op)
 	task_irq = bcom_get_task_irq(dmatsk);
 	rv = devm_request_irq(&op->dev, task_irq, &mpc52xx_ata_task_irq, 0,
 				"ATA task", priv);
-	if (rv) {
-		dev_err(&op->dev, "error requesting DMA IRQ\n");
+	if (rv)
 		goto err2;
-	}
 	priv->dmatsk = dmatsk;
 
 	/* Init the hw */

@@ -225,7 +225,7 @@ static int da9063_wdt_probe(struct platform_device *pdev)
 	if (!da9063)
 		return -EINVAL;
 
-	wdd = devm_kzalloc(dev, sizeof(*wdd), GFP_KERNEL);
+	wdd = devm_kzalloc_obj(dev, *wdd);
 	if (!wdd)
 		return -ENOMEM;
 
@@ -271,7 +271,7 @@ static int da9063_wdt_suspend(struct device *dev)
 	if (!da9063->use_sw_pm)
 		return 0;
 
-	if (watchdog_active(wdd))
+	if (watchdog_active(wdd) || watchdog_hw_running(wdd))
 		return da9063_wdt_stop(wdd);
 
 	return 0;
@@ -285,7 +285,7 @@ static int da9063_wdt_resume(struct device *dev)
 	if (!da9063->use_sw_pm)
 		return 0;
 
-	if (watchdog_active(wdd))
+	if (watchdog_active(wdd) || watchdog_hw_running(wdd))
 		return da9063_wdt_start(wdd);
 
 	return 0;

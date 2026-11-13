@@ -104,6 +104,11 @@
 	LE_SF(DP_AUX0_AUX_DPHY_RX_CONTROL1, AUX_RX_TIMEOUT_LEN, mask_sh),\
 	LE_SF(DP_AUX0_AUX_DPHY_RX_CONTROL1, AUX_RX_TIMEOUT_LEN_MUL, mask_sh)
 
+#define LINK_ENCODER_MASK_SH_LIST_DCN60_ON_DCN401(mask_sh) \
+	LE_SF(DIG0_HDCP_I2C_CONTROL_0, HDCP_I2C_DISABLE, mask_sh),\
+	LE_SF(DIG0_HDCP_I2C_CONTROL_0, HDCP_I2C_DDC_SELECT, mask_sh),\
+	LE_SF(DIG0_HDCP_INT_CONTROL, HDCP_I2C_XFER_REQ_MASK, mask_sh)
+
 void dcn401_link_encoder_construct(
 	struct dcn20_link_encoder *enc20,
 	const struct encoder_init_data *init_data,
@@ -121,6 +126,22 @@ void dcn401_link_encoder_enable_dp_output(
 	const struct dc_link_settings *link_settings,
 	enum clock_source_id clock_source);
 
+void dpcs401_program_eq_setting(
+		struct link_encoder *enc,
+		uint8_t FFE_Level,
+		bool de_emphasis_only,
+		bool pre_shoot_only,
+		bool no_ffe,
+		const struct dc_hdmi_frl_link_settings *link_settings);
+
+void dpcs401_get_txffe(
+		struct link_encoder *enc,
+		struct frl_txffe *lane_settings);
+
+void dpcs401_set_txffe(
+		struct link_encoder *enc,
+		struct frl_txffe *lane_settings);
+
 void dcn401_link_encoder_setup(
 	struct link_encoder *enc,
 	enum signal_type signal);
@@ -131,4 +152,9 @@ enum signal_type dcn401_get_dig_mode(
 bool dcn401_is_dig_enabled(struct link_encoder *enc);
 
 enum signal_type dcn401_get_dig_mode(struct link_encoder *enc);
+
+void dcn401_setup_ri_pj_check_in_sw_or_hw_mode(
+	struct link_encoder *enc,
+	unsigned char aux_or_ddc_instance,
+	bool enable_sw_mode);
 #endif /* __DC_LINK_ENCODER__DCN401_H__ */

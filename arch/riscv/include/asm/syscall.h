@@ -20,7 +20,7 @@ extern void * const sys_call_table[];
 extern void * const compat_sys_call_table[];
 
 /*
- * Only the low 32 bits of orig_r0 are meaningful, so we return int.
+ * Only the low 32 bits of orig_a0 are meaningful, so we return int.
  * This importantly ignores the high bits on 64-bit, so comparisons
  * sign-extend the low 32 bits.
  */
@@ -110,11 +110,6 @@ static inline void syscall_handler(struct pt_regs *regs, ulong syscall)
 		fn = sys_call_table[syscall];
 
 	regs->a0 = fn(regs);
-}
-
-static inline bool arch_syscall_is_vdso_sigreturn(struct pt_regs *regs)
-{
-	return false;
 }
 
 asmlinkage long sys_riscv_flush_icache(uintptr_t, uintptr_t, uintptr_t);

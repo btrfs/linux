@@ -28,9 +28,8 @@ int mtk_vcodec_init_enc_clk(struct mtk_vcodec_enc_dev *mtkdev)
 	enc_clk->clk_num = of_property_count_strings(pdev->dev.of_node,
 		"clock-names");
 	if (enc_clk->clk_num > 0) {
-		enc_clk->clk_info = devm_kcalloc(&pdev->dev,
-			enc_clk->clk_num, sizeof(*clk_info),
-			GFP_KERNEL);
+		enc_clk->clk_info = devm_kzalloc_objs(&pdev->dev, *clk_info,
+						      enc_clk->clk_num);
 		if (!enc_clk->clk_info)
 			return -ENOMEM;
 	} else {
@@ -71,11 +70,7 @@ int mtk_vcodec_enc_pw_on(struct mtk_vcodec_pm *pm)
 
 void mtk_vcodec_enc_pw_off(struct mtk_vcodec_pm *pm)
 {
-	int ret;
-
-	ret = pm_runtime_put(pm->dev);
-	if (ret && ret != -EAGAIN)
-		dev_err(pm->dev, "pm_runtime_put fail %d", ret);
+	pm_runtime_put(pm->dev);
 }
 
 void mtk_vcodec_enc_clock_on(struct mtk_vcodec_pm *pm)

@@ -37,7 +37,7 @@
 /* global variable */
 static int mxb_num;
 
-/* initial frequence the tuner will be tuned to.
+/* initial frequency the tuner will be tuned to.
    in verden (lower saxony, germany) 4148 is a
    channel called "phoenix" */
 static int freq = 4148;
@@ -226,7 +226,7 @@ static int mxb_probe(struct saa7146_dev *dev)
 			V4L2_CID_AUDIO_MUTE, 0, 1, 1, 1);
 	if (hdl->error)
 		return hdl->error;
-	mxb = kzalloc(sizeof(struct mxb), GFP_KERNEL);
+	mxb = kzalloc_obj(struct mxb);
 	if (mxb == NULL) {
 		DEB_D("not enough kernel memory\n");
 		return -ENOMEM;
@@ -429,7 +429,7 @@ err:
 	/* some stuff is done via direct write to the registers */
 
 	/* this is ugly, but because of the fact that this is completely
-	   hardware dependend, it should be done directly... */
+	   hardware dependent, it should be done directly... */
 	saa7146_write(dev, DD1_STREAM_B,	0x00000000);
 	saa7146_write(dev, DD1_INIT,		0x02000200);
 	saa7146_write(dev, MC2, (MASK_09 | MASK_25 | MASK_10 | MASK_26));
@@ -821,14 +821,10 @@ static struct saa7146_pci_extension_data mxb = {
 
 static const struct pci_device_id pci_tbl[] = {
 	{
-		.vendor    = PCI_VENDOR_ID_PHILIPS,
-		.device	   = PCI_DEVICE_ID_PHILIPS_SAA7146,
-		.subvendor = 0x0000,
-		.subdevice = 0x0000,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7146, 0x0000, 0x0000),
 		.driver_data = (unsigned long)&mxb,
-	}, {
-		.vendor	= 0,
-	}
+	},
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, pci_tbl);

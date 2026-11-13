@@ -318,7 +318,7 @@ at91_clk_register_pll(struct regmap *regmap, const char *name,
 {
 	struct clk_pll *pll;
 	struct clk_hw *hw;
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	int offset = PLL_REG(id);
 	unsigned int pllr;
 	int ret;
@@ -326,7 +326,7 @@ at91_clk_register_pll(struct regmap *regmap, const char *name,
 	if (id > PLL_MAX_ID)
 		return ERR_PTR(-EINVAL);
 
-	pll = kzalloc(sizeof(*pll), GFP_KERNEL);
+	pll = kzalloc_obj(*pll);
 	if (!pll)
 		return ERR_PTR(-ENOMEM);
 

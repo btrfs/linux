@@ -14,7 +14,7 @@
 #include <linux/mm.h>
 #include <net/sock.h>
 
-#define XDP_UMEM_SG_FLAG (1 << 1)
+#define XDP_UMEM_SG_FLAG BIT(3)
 
 struct net_device;
 struct xsk_queue;
@@ -80,6 +80,7 @@ struct xdp_sock {
 	 * call of __xsk_generic_xmit().
 	 */
 	struct sk_buff *skb;
+	bool drain_cont;
 
 	struct list_head map_list;
 	/* Protects map_list */
@@ -125,6 +126,7 @@ struct xsk_tx_metadata_ops {
 int xsk_generic_rcv(struct xdp_sock *xs, struct xdp_buff *xdp);
 int __xsk_map_redirect(struct xdp_sock *xs, struct xdp_buff *xdp);
 void __xsk_map_flush(struct list_head *flush_list);
+INDIRECT_CALLABLE_DECLARE(void xsk_destruct_skb(struct sk_buff *));
 
 /**
  *  xsk_tx_metadata_to_compl - Save enough relevant metadata information
@@ -139,45 +141,16 @@ void __xsk_map_flush(struct list_head *flush_list);
 static inline void xsk_tx_metadata_to_compl(struct xsk_tx_metadata *meta,
 					    struct xsk_tx_metadata_compl *compl)
 {
+	compl->tx_timestamp = NULL;
+
 	if (!meta)
 		return;
 
-	if (meta->flags & XDP_TXMD_FLAGS_TIMESTAMP)
-		compl->tx_timestamp = &meta->completion.tx_timestamp;
-	else
-		compl->tx_timestamp = NULL;
-}
+	/* we can only arrive here if the completion timestamp has been
+	 * requested via XDP_TXMD_FLAGS_TIMESTAMP, see xsk_tx_metadata_request
+	 */
 
-/**
- *  xsk_tx_metadata_request - Evaluate AF_XDP TX metadata at submission
- *  and call appropriate xsk_tx_metadata_ops operation.
- *  @meta: pointer to AF_XDP metadata area
- *  @ops: pointer to struct xsk_tx_metadata_ops
- *  @priv: pointer to driver-private aread
- *
- *  This function should be called by the networking device when
- *  it prepares AF_XDP egress packet.
- */
-static inline void xsk_tx_metadata_request(const struct xsk_tx_metadata *meta,
-					   const struct xsk_tx_metadata_ops *ops,
-					   void *priv)
-{
-	if (!meta)
-		return;
-
-	if (ops->tmo_request_launch_time)
-		if (meta->flags & XDP_TXMD_FLAGS_LAUNCH_TIME)
-			ops->tmo_request_launch_time(meta->request.launch_time,
-						     priv);
-
-	if (ops->tmo_request_timestamp)
-		if (meta->flags & XDP_TXMD_FLAGS_TIMESTAMP)
-			ops->tmo_request_timestamp(priv);
-
-	if (ops->tmo_request_checksum)
-		if (meta->flags & XDP_TXMD_FLAGS_CHECKSUM)
-			ops->tmo_request_checksum(meta->request.csum_start,
-						  meta->request.csum_offset, priv);
+	compl->tx_timestamp = &meta->completion.tx_timestamp;
 }
 
 /**
@@ -218,14 +191,14 @@ static inline void __xsk_map_flush(struct list_head *flush_list)
 {
 }
 
-static inline void xsk_tx_metadata_to_compl(struct xsk_tx_metadata *meta,
-					    struct xsk_tx_metadata_compl *compl)
+#ifdef CONFIG_MITIGATION_RETPOLINE
+static inline void xsk_destruct_skb(struct sk_buff *skb)
 {
 }
+#endif
 
-static inline void xsk_tx_metadata_request(struct xsk_tx_metadata *meta,
-					   const struct xsk_tx_metadata_ops *ops,
-					   void *priv)
+static inline void xsk_tx_metadata_to_compl(struct xsk_tx_metadata *meta,
+					    struct xsk_tx_metadata_compl *compl)
 {
 }
 

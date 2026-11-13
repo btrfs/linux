@@ -203,7 +203,7 @@ static void nvmet_execute_get_supported_log_pages(struct nvmet_req *req)
 	struct nvme_supported_log *logs;
 	u16 status;
 
-	logs = kzalloc(sizeof(*logs), GFP_KERNEL);
+	logs = kzalloc_obj(*logs);
 	if (!logs) {
 		status = NVME_SC_INTERNAL;
 		goto out;
@@ -298,7 +298,7 @@ static void nvmet_execute_get_log_page_rmi(struct nvmet_req *req)
 	if (status)
 		goto out;
 
-	if (!req->ns->bdev || bdev_nonrot(req->ns->bdev)) {
+	if (!req->ns->bdev || !bdev_rot(req->ns->bdev)) {
 		status = NVME_SC_INVALID_FIELD | NVME_STATUS_DNR;
 		goto out;
 	}
@@ -308,9 +308,11 @@ static void nvmet_execute_get_log_page_rmi(struct nvmet_req *req)
 		goto out;
 	}
 
-	log = kzalloc(sizeof(*log), GFP_KERNEL);
-	if (!log)
+	log = kzalloc_obj(*log);
+	if (!log) {
+		status = NVME_SC_INTERNAL;
 		goto out;
+	}
 
 	log->endgid = req->cmd->get_log_page.lsi;
 	disk = req->ns->bdev->bd_disk;
@@ -334,7 +336,7 @@ static void nvmet_execute_get_log_page_smart(struct nvmet_req *req)
 	if (req->transfer_len != sizeof(*log))
 		goto out;
 
-	log = kzalloc(sizeof(*log), GFP_KERNEL);
+	log = kzalloc_obj(*log);
 	if (!log)
 		goto out;
 
@@ -409,7 +411,7 @@ static void nvmet_execute_get_log_cmd_effects_ns(struct nvmet_req *req)
 	struct nvme_effects_log *log;
 	u16 status = NVME_SC_SUCCESS;
 
-	log = kzalloc(sizeof(*log), GFP_KERNEL);
+	log = kzalloc_obj(*log);
 	if (!log) {
 		status = NVME_SC_INTERNAL;
 		goto out;
@@ -504,7 +506,7 @@ static void nvmet_execute_get_log_page_endgrp(struct nvmet_req *req)
 	if (status)
 		goto out;
 
-	log = kzalloc(sizeof(*log), GFP_KERNEL);
+	log = kzalloc_obj(*log);
 	if (!log) {
 		status = NVME_SC_INTERNAL;
 		goto out;
@@ -541,9 +543,17 @@ static void nvmet_execute_get_log_page_ana(struct nvmet_req *req)
 	u16 ngrps = 0;
 	u16 status;
 
+	/*
+	 * The header and one descriptor per enabled group are the only bytes
+	 * written below; zero the whole transfer first so the unwritten tail
+	 * does not leak stale kernel memory to the host.
+	 */
+	status = nvmet_zero_sgl(req, 0, req->transfer_len);
+	if (status)
+		goto out;
+
 	status = NVME_SC_INTERNAL;
-	desc = kmalloc(struct_size(desc, nsids, NVMET_MAX_NAMESPACES),
-		       GFP_KERNEL);
+	desc = kmalloc_flex(*desc, nsids, NVMET_MAX_NAMESPACES);
 	if (!desc)
 		goto out;
 
@@ -581,7 +591,7 @@ static void nvmet_execute_get_log_page_features(struct nvmet_req *req)
 	struct nvme_supported_features_log *features;
 	u16 status;
 
-	features = kzalloc(sizeof(*features), GFP_KERNEL);
+	features = kzalloc_obj(*features);
 	if (!features) {
 		status = NVME_SC_INTERNAL;
 		goto out;
@@ -660,7 +670,7 @@ static void nvmet_execute_identify_ctrl(struct nvmet_req *req)
 		mutex_unlock(&subsys->lock);
 	}
 
-	id = kzalloc(sizeof(*id), GFP_KERNEL);
+	id = kzalloc_obj(*id);
 	if (!id) {
 		status = NVME_SC_INTERNAL;
 		goto out;
@@ -688,18 +698,16 @@ static void nvmet_execute_identify_ctrl(struct nvmet_req *req)
 	id->cmic = NVME_CTRL_CMIC_MULTI_PORT | NVME_CTRL_CMIC_MULTI_CTRL |
 		NVME_CTRL_CMIC_ANA;
 
-	/* Limit MDTS according to transport capability */
-	if (ctrl->ops->get_mdts)
-		id->mdts = ctrl->ops->get_mdts(ctrl);
-	else
-		id->mdts = 0;
-
+	/* Limit MDTS according to port config or transport capability */
+	id->mdts = nvmet_ctrl_mdts(req);
 	id->cntlid = cpu_to_le16(ctrl->cntlid);
 	id->ver = cpu_to_le32(ctrl->subsys->ver);
 
 	/* XXX: figure out what to do about RTD3R/RTD3 */
 	id->oaes = cpu_to_le32(NVMET_AEN_CFG_OPTIONAL);
-	ctratt = NVME_CTRL_ATTR_HID_128_BIT | NVME_CTRL_ATTR_TBKAS;
+	ctratt = NVME_CTRL_ATTR_HID_128_BIT;
+	if (ctrl->tbkas)
+		ctratt |= NVME_CTRL_ATTR_TBKAS;
 	if (nvmet_is_pci_ctrl(ctrl))
 		ctratt |= NVME_CTRL_ATTR_RHII;
 	id->ctratt = cpu_to_le32(ctratt);
@@ -708,7 +716,7 @@ static void nvmet_execute_identify_ctrl(struct nvmet_req *req)
 
 	/*
 	 * We don't really have a practical limit on the number of abort
-	 * comands.  But we don't do anything useful for abort either, so
+	 * commands.  But we don't do anything useful for abort either, so
 	 * no point in allowing more abort commands than the spec requires.
 	 */
 	id->acl = 3;
@@ -809,7 +817,7 @@ static void nvmet_execute_identify_ns(struct nvmet_req *req)
 		goto out;
 	}
 
-	id = kzalloc(sizeof(*id), GFP_KERNEL);
+	id = kzalloc_obj(*id);
 	if (!id) {
 		status = NVME_SC_INTERNAL;
 		goto out;
@@ -963,7 +971,7 @@ static void nvmet_execute_identify_nslist(struct nvmet_req *req, bool match_css)
 	nvmet_for_each_enabled_ns(&ctrl->subsys->namespaces, idx, ns) {
 		if (ns->nsid <= min_nsid)
 			continue;
-		if (match_css && req->ns->csi != req->cmd->identify.csi)
+		if (match_css && ns->csi != req->cmd->identify.csi)
 			continue;
 		list[i++] = cpu_to_le32(ns->nsid);
 		if (i == buf_size / sizeof(__le32))
@@ -1053,11 +1061,13 @@ static void nvme_execute_identify_ns_nvm(struct nvmet_req *req)
 	if (status)
 		goto out;
 
-	id = kzalloc(sizeof(*id), GFP_KERNEL);
+	id = kzalloc_obj(*id);
 	if (!id) {
 		status = NVME_SC_INTERNAL;
 		goto out;
 	}
+	if (req->ns->bdev)
+		nvmet_bdev_set_nvm_limits(req->ns->bdev, id);
 	status = nvmet_copy_to_sgl(req, 0, id, sizeof(*id));
 	kfree(id);
 out:
@@ -1073,7 +1083,7 @@ static void nvmet_execute_id_cs_indep(struct nvmet_req *req)
 	if (status)
 		goto out;
 
-	id = kzalloc(sizeof(*id), GFP_KERNEL);
+	id = kzalloc_obj(*id);
 	if (!id) {
 		status = NVME_SC_INTERNAL;
 		goto out;
@@ -1084,7 +1094,7 @@ static void nvmet_execute_id_cs_indep(struct nvmet_req *req)
 	id->nmic = NVME_NS_NMIC_SHARED;
 	if (req->ns->readonly)
 		id->nsattr |= NVME_NS_ATTR_RO;
-	if (req->ns->bdev && !bdev_nonrot(req->ns->bdev))
+	if (req->ns->bdev && bdev_rot(req->ns->bdev))
 		id->nsfeat |= NVME_NS_ROTATIONAL;
 	/*
 	 * We need flush command to flush the file's metadata,
@@ -1226,8 +1236,13 @@ u16 nvmet_set_feat_kato(struct nvmet_req *req)
 {
 	u32 val32 = le32_to_cpu(req->cmd->common.cdw11);
 
+	if (val32 > NVMET_MAX_KATO * MSEC_PER_SEC) {
+		req->error_loc = offsetof(struct nvme_common_command, cdw11);
+		return NVME_SC_KA_TIMEOUT_INVALID | NVME_STATUS_DNR;
+	}
+
 	nvmet_stop_keep_alive_timer(req->sq->ctrl);
-	req->sq->ctrl->kato = DIV_ROUND_UP(val32, 1000);
+	req->sq->ctrl->kato = DIV_ROUND_UP_ULL(val32, MSEC_PER_SEC);
 	nvmet_start_keep_alive_timer(req->sq->ctrl);
 
 	nvmet_set_result(req, req->sq->ctrl->kato);
@@ -1325,7 +1340,7 @@ static u16 nvmet_set_feat_arbitration(struct nvmet_req *req)
 		.hpw = (cdw11 >> 24) & 0xff,
 		.mpw = (cdw11 >> 16) & 0xff,
 		.lpw = (cdw11 >> 8) & 0xff,
-		.ab = cdw11 & 0x3,
+		.ab = cdw11 & 0x7,
 	};
 
 	if (!ctrl->ops->set_feature) {
@@ -1338,7 +1353,7 @@ static u16 nvmet_set_feat_arbitration(struct nvmet_req *req)
 
 void nvmet_execute_set_features(struct nvmet_req *req)
 {
-	struct nvmet_subsys *subsys = nvmet_req_subsys(req);
+	struct nvmet_ctrl *ctrl = nvmet_req_ctrl(req);
 	u32 cdw10 = le32_to_cpu(req->cmd->common.cdw10);
 	u32 cdw11 = le32_to_cpu(req->cmd->common.cdw11);
 	u16 status = 0;
@@ -1360,7 +1375,7 @@ void nvmet_execute_set_features(struct nvmet_req *req)
 			break;
 		}
 		nvmet_set_result(req,
-			(subsys->max_qid - 1) | ((subsys->max_qid - 1) << 16));
+			(ctrl->max_qid - 1) | ((ctrl->max_qid - 1) << 16));
 		break;
 	case NVME_FEAT_IRQ_COALESCE:
 		status = nvmet_set_feat_irq_coalesce(req);
@@ -1480,7 +1495,7 @@ static u16 nvmet_get_feat_arbitration(struct nvmet_req *req)
 			 ((u32)arb.hpw << 24) |
 			 ((u32)arb.mpw << 16) |
 			 ((u32)arb.lpw << 8) |
-			 (arb.ab & 0x3));
+			 (arb.ab & 0x7));
 
 	return NVME_SC_SUCCESS;
 }
@@ -1497,7 +1512,7 @@ void nvmet_get_feat_async_event(struct nvmet_req *req)
 
 void nvmet_execute_get_features(struct nvmet_req *req)
 {
-	struct nvmet_subsys *subsys = nvmet_req_subsys(req);
+	struct nvmet_ctrl *ctrl = nvmet_req_ctrl(req);
 	u32 cdw10 = le32_to_cpu(req->cmd->common.cdw10);
 	u16 status = 0;
 
@@ -1537,7 +1552,7 @@ void nvmet_execute_get_features(struct nvmet_req *req)
 		break;
 	case NVME_FEAT_NUM_QUEUES:
 		nvmet_set_result(req,
-			(subsys->max_qid-1) | ((subsys->max_qid-1) << 16));
+			(ctrl->max_qid-1) | ((ctrl->max_qid-1) << 16));
 		break;
 	case NVME_FEAT_KATO:
 		nvmet_get_feat_kato(req);
@@ -1586,7 +1601,7 @@ void nvmet_execute_async_event(struct nvmet_req *req)
 	ctrl->async_event_cmds[ctrl->nr_async_event_cmds++] = req;
 	mutex_unlock(&ctrl->lock);
 
-	queue_work(nvmet_wq, &ctrl->async_event_work);
+	queue_work(nvmet_aen_wq, &ctrl->async_event_work);
 }
 
 void nvmet_execute_keep_alive(struct nvmet_req *req)
@@ -1604,7 +1619,7 @@ void nvmet_execute_keep_alive(struct nvmet_req *req)
 
 	pr_debug("ctrl %d update keep-alive timer for %d secs\n",
 		ctrl->cntlid, ctrl->kato);
-	mod_delayed_work(system_wq, &ctrl->ka_work, ctrl->kato * HZ);
+	mod_delayed_work(system_percpu_wq, &ctrl->ka_work, ctrl->kato * HZ);
 out:
 	nvmet_req_complete(req, status);
 }

@@ -55,6 +55,9 @@ struct qat_vf_core_device {
 	struct qat_vf_migration_file *saving_migf;
 };
 
+VFIO_PCI_CORE_DEFINE_CALLBACKS(qat_vf, struct qat_vf_core_device,
+			       core_device)
+
 static int qat_vf_pci_open_device(struct vfio_device *core_vdev)
 {
 	struct qat_vf_core_device *qat_vdev =
@@ -121,18 +124,12 @@ static long qat_vf_precopy_ioctl(struct file *filp, unsigned int cmd,
 	struct qat_mig_dev *mig_dev = qat_vdev->mdev;
 	struct vfio_precopy_info info;
 	loff_t *pos = &filp->f_pos;
-	unsigned long minsz;
 	int ret = 0;
 
-	if (cmd != VFIO_MIG_GET_PRECOPY_INFO)
-		return -ENOTTY;
-
-	minsz = offsetofend(struct vfio_precopy_info, dirty_bytes);
-
-	if (copy_from_user(&info, (void __user *)arg, minsz))
-		return -EFAULT;
-	if (info.argsz < minsz)
-		return -EINVAL;
+	ret = vfio_check_precopy_ioctl(&qat_vdev->core_device.vdev, cmd, arg,
+				       &info);
+	if (ret)
+		return ret;
 
 	mutex_lock(&qat_vdev->state_mutex);
 	if (qat_vdev->mig_state != VFIO_DEVICE_STATE_PRE_COPY &&
@@ -160,7 +157,8 @@ out:
 	mutex_unlock(&qat_vdev->state_mutex);
 	if (ret)
 		return ret;
-	return copy_to_user((void __user *)arg, &info, minsz) ? -EFAULT : 0;
+	return copy_to_user((void __user *)arg, &info,
+		offsetofend(struct vfio_precopy_info, dirty_bytes)) ? -EFAULT : 0;
 }
 
 static ssize_t qat_vf_save_read(struct file *filp, char __user *buf,
@@ -261,7 +259,7 @@ qat_vf_save_device_data(struct qat_vf_core_device *qat_vdev, bool pre_copy)
 	struct qat_vf_migration_file *migf;
 	int ret;
 
-	migf = kzalloc(sizeof(*migf), GFP_KERNEL);
+	migf = kzalloc_obj(*migf);
 	if (!migf)
 		return ERR_PTR(-ENOMEM);
 
@@ -303,14 +301,18 @@ static ssize_t qat_vf_resume_write(struct file *filp, const char __user *buf,
 		return -ESPIPE;
 	offs = &filp->f_pos;
 
-	if (*offs < 0 ||
-	    check_add_overflow(len, *offs, &end))
-		return -EOVERFLOW;
-
-	if (end > mig_dev->state_size)
-		return -ENOMEM;
-
 	mutex_lock(&migf->lock);
+
+	if (*offs < 0 || check_add_overflow(len, *offs, &end)) {
+		done = -EOVERFLOW;
+		goto out_unlock;
+	}
+
+	if (end > mig_dev->state_size) {
+		done = -ENOMEM;
+		goto out_unlock;
+	}
+
 	if (migf->disabled) {
 		done = -ENODEV;
 		goto out_unlock;
@@ -352,7 +354,7 @@ qat_vf_resume_device_data(struct qat_vf_core_device *qat_vdev)
 	struct qat_vf_migration_file *migf;
 	int ret;
 
-	migf = kzalloc(sizeof(*migf), GFP_KERNEL);
+	migf = kzalloc_obj(*migf);
 	if (!migf)
 		return ERR_PTR(-ENOMEM);
 
@@ -609,6 +611,7 @@ static const struct vfio_device_ops qat_vf_pci_ops = {
 	.open_device = qat_vf_pci_open_device,
 	.close_device = qat_vf_pci_close_device,
 	.ioctl = vfio_pci_core_ioctl,
+	.get_region_info_caps = vfio_pci_ioctl_get_region_info,
 	.read = vfio_pci_core_read,
 	.write = vfio_pci_core_write,
 	.mmap = vfio_pci_core_mmap,
@@ -623,9 +626,7 @@ static const struct vfio_device_ops qat_vf_pci_ops = {
 
 static struct qat_vf_core_device *qat_vf_drvdata(struct pci_dev *pdev)
 {
-	struct vfio_pci_core_device *core_device = pci_get_drvdata(pdev);
-
-	return container_of(core_device, struct qat_vf_core_device, core_device);
+	return pci_get_drvdata(pdev);
 }
 
 static void qat_vf_pci_aer_reset_done(struct pci_dev *pdev)
@@ -651,7 +652,7 @@ qat_vf_vfio_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (IS_ERR(qat_vdev))
 		return PTR_ERR(qat_vdev);
 
-	pci_set_drvdata(pdev, &qat_vdev->core_device);
+	pci_set_drvdata(pdev, qat_vdev);
 	ret = vfio_pci_core_register_device(&qat_vdev->core_device);
 	if (ret)
 		goto out_put_device;
@@ -676,6 +677,8 @@ static const struct pci_device_id qat_vf_vfio_pci_table[] = {
 	{ PCI_DRIVER_OVERRIDE_DEVICE_VFIO(PCI_VENDOR_ID_INTEL, 0x4941) },
 	{ PCI_DRIVER_OVERRIDE_DEVICE_VFIO(PCI_VENDOR_ID_INTEL, 0x4943) },
 	{ PCI_DRIVER_OVERRIDE_DEVICE_VFIO(PCI_VENDOR_ID_INTEL, 0x4945) },
+	/* Intel QAT GEN5 420xx VF device */
+	{ PCI_DRIVER_OVERRIDE_DEVICE_VFIO(PCI_VENDOR_ID_INTEL, 0x4947) },
 	/* Intel QAT GEN6 6xxx VF device */
 	{ PCI_DRIVER_OVERRIDE_DEVICE_VFIO(PCI_VENDOR_ID_INTEL, 0x4949) },
 	{}
@@ -684,7 +687,7 @@ MODULE_DEVICE_TABLE(pci, qat_vf_vfio_pci_table);
 
 static const struct pci_error_handlers qat_vf_err_handlers = {
 	.reset_done = qat_vf_pci_aer_reset_done,
-	.error_detected = vfio_pci_core_aer_err_detected,
+	.error_detected = qat_vf_aer_err_detected,
 };
 
 static struct pci_driver qat_vf_vfio_pci_driver = {
@@ -692,6 +695,7 @@ static struct pci_driver qat_vf_vfio_pci_driver = {
 	.id_table = qat_vf_vfio_pci_table,
 	.probe = qat_vf_vfio_pci_probe,
 	.remove = qat_vf_vfio_pci_remove,
+	.driver	= { .pm = pm_ptr(&qat_vf_pm_ops) },
 	.err_handler = &qat_vf_err_handlers,
 	.driver_managed_dma = true,
 };

@@ -43,7 +43,8 @@ static int lvds_codec_attach(struct drm_bridge *bridge,
 				 bridge, flags);
 }
 
-static void lvds_codec_enable(struct drm_bridge *bridge)
+static void lvds_codec_enable(struct drm_bridge *bridge,
+			      struct drm_atomic_commit *commit)
 {
 	struct lvds_codec *lvds_codec = to_lvds_codec(bridge);
 	int ret;
@@ -59,7 +60,8 @@ static void lvds_codec_enable(struct drm_bridge *bridge)
 		gpiod_set_value_cansleep(lvds_codec->powerdown_gpio, 0);
 }
 
-static void lvds_codec_disable(struct drm_bridge *bridge)
+static void lvds_codec_disable(struct drm_bridge *bridge,
+			       struct drm_atomic_commit *commit)
 {
 	struct lvds_codec *lvds_codec = to_lvds_codec(bridge);
 	int ret;
@@ -87,8 +89,7 @@ lvds_codec_atomic_get_input_bus_fmts(struct drm_bridge *bridge,
 
 	*num_input_fmts = 0;
 
-	input_fmts = kcalloc(MAX_INPUT_SEL_FORMATS, sizeof(*input_fmts),
-			     GFP_KERNEL);
+	input_fmts = kzalloc_objs(*input_fmts, MAX_INPUT_SEL_FORMATS);
 	if (!input_fmts)
 		return NULL;
 
@@ -100,11 +101,11 @@ lvds_codec_atomic_get_input_bus_fmts(struct drm_bridge *bridge,
 
 static const struct drm_bridge_funcs funcs = {
 	.attach = lvds_codec_attach,
-	.enable = lvds_codec_enable,
-	.disable = lvds_codec_disable,
+	.atomic_enable = lvds_codec_enable,
+	.atomic_disable = lvds_codec_disable,
 	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
-	.atomic_reset = drm_atomic_helper_bridge_reset,
+	.atomic_create_state = drm_atomic_helper_bridge_create_state,
 	.atomic_get_input_bus_fmts = lvds_codec_atomic_get_input_bus_fmts,
 };
 
@@ -154,6 +155,7 @@ static int lvds_codec_probe(struct platform_device *pdev)
 	lvds_codec->panel_bridge =
 		devm_drm_panel_bridge_add_typed(dev, panel,
 						lvds_codec->connector_type);
+	drm_panel_put(panel);
 	if (IS_ERR(lvds_codec->panel_bridge))
 		return PTR_ERR(lvds_codec->panel_bridge);
 

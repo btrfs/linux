@@ -31,6 +31,12 @@
 #define CEPH_INO_CEPH   2            /* hidden .ceph dir */
 #define CEPH_INO_GLOBAL_SNAPREALM  3 /* global dummy snaprealm */
 
+/*
+ * name for "old" CephFS file systems,
+ * see ceph.git e2b151d009640114b2565c901d6f41f6cd5ec652
+ */
+#define CEPH_OLD_FS_NAME	"cephfs"
+
 /* arbitrary limit on max # of monitors (cluster of 3 is typical) */
 #define CEPH_MAX_MON   31
 
@@ -83,8 +89,9 @@ struct ceph_dir_layout {
 } __attribute__ ((packed));
 
 /* crypto algorithms */
-#define CEPH_CRYPTO_NONE 0x0
-#define CEPH_CRYPTO_AES  0x1
+#define CEPH_CRYPTO_NONE       0x0
+#define CEPH_CRYPTO_AES        0x1
+#define CEPH_CRYPTO_AES256KRB5 0x2 /* AES256-CTS-HMAC384-192 */
 
 #define CEPH_AES_IV "cephsageyudagreg"
 
@@ -407,6 +414,7 @@ extern const char *ceph_mds_op_name(int op);
 #define CEPH_O_CREAT		00000100
 #define CEPH_O_EXCL		00000200
 #define CEPH_O_TRUNC		00001000
+#define CEPH_O_LAZY		00020000
 #define CEPH_O_DIRECTORY	00200000
 #define CEPH_O_NOFOLLOW		00400000
 
@@ -700,8 +708,13 @@ int ceph_flags_to_mode(int flags);
 				 CEPH_CAP_LINK_SHARED |	\
 				 CEPH_CAP_FILE_SHARED |	\
 				 CEPH_CAP_XATTR_SHARED)
+#ifdef CONFIG_CEPH_FS_INLINE_DATA
 #define CEPH_STAT_CAP_INLINE_DATA (CEPH_CAP_FILE_SHARED | \
 				   CEPH_CAP_FILE_RD)
+#else
+/* no inline data to fetch, so no extra caps are needed for it */
+#define CEPH_STAT_CAP_INLINE_DATA 0
+#endif
 #define CEPH_STAT_RSTAT CEPH_CAP_FILE_WREXTEND
 
 #define CEPH_CAP_ANY_SHARED (CEPH_CAP_AUTH_SHARED |			\

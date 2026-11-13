@@ -13,7 +13,6 @@
 #include <linux/io.h>
 #include <linux/irq.h>
 #include <linux/irqdomain.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -246,7 +245,7 @@ static int xgene_gpio_sb_probe(struct platform_device *pdev)
 	struct irq_domain *parent_domain = NULL;
 	u32 val32;
 
-	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&pdev->dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

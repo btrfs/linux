@@ -223,7 +223,7 @@ static int lm3509_probe(struct i2c_client *client)
 		return -EOPNOTSUPP;
 	}
 
-	data = devm_kzalloc(dev, sizeof(struct lm3509_bl), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct lm3509_bl);
 	if (!data)
 		return -ENOMEM;
 
@@ -311,8 +311,8 @@ static void lm3509_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id lm3509_id[] = {
-	{ LM3509_NAME },
-	{}
+	{ .name = LM3509_NAME },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, lm3509_id);

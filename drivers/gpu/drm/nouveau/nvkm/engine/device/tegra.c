@@ -54,7 +54,8 @@ nvkm_device_tegra_power_up(struct nvkm_device_tegra *tdev)
 		reset_control_assert(tdev->rst);
 		udelay(10);
 
-		ret = tegra_powergate_remove_clamping(TEGRA_POWERGATE_3D);
+		ret = tegra_pmc_powergate_remove_clamping(tdev->pmc,
+							  TEGRA_POWERGATE_3D);
 		if (ret)
 			goto err_clamp;
 		udelay(10);
@@ -253,11 +254,15 @@ nvkm_device_tegra_new(const struct nvkm_device_tegra_func *func,
 	unsigned long rate;
 	int ret;
 
-	if (!(tdev = kzalloc(sizeof(*tdev), GFP_KERNEL)))
+	if (!(tdev = kzalloc_obj(*tdev)))
 		return -ENOMEM;
 
 	tdev->func = func;
 	tdev->pdev = pdev;
+
+	tdev->regs = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(tdev->regs))
+		return PTR_ERR(tdev->regs);
 
 	if (func->require_vdd) {
 		tdev->vdd = devm_regulator_get(&pdev->dev, "vdd");
@@ -300,6 +305,12 @@ nvkm_device_tegra_new(const struct nvkm_device_tegra_func *func,
 	tdev->clk_pwr = devm_clk_get(&pdev->dev, "pwr");
 	if (IS_ERR(tdev->clk_pwr)) {
 		ret = PTR_ERR(tdev->clk_pwr);
+		goto free;
+	}
+
+	tdev->pmc = devm_tegra_pmc_get(&pdev->dev);
+	if (IS_ERR(tdev->pmc)) {
+		ret = PTR_ERR(tdev->pmc);
 		goto free;
 	}
 

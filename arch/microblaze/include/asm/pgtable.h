@@ -103,13 +103,6 @@ extern pte_t *va_to_pte(unsigned long address);
 #define USER_PGD_PTRS (PAGE_OFFSET >> PGDIR_SHIFT)
 #define KERNEL_PGD_PTRS (PTRS_PER_PGD-USER_PGD_PTRS)
 
-#define pte_ERROR(e) \
-	printk(KERN_ERR "%s:%d: bad pte "PTE_FMT".\n", \
-		__FILE__, __LINE__, pte_val(e))
-#define pgd_ERROR(e) \
-	printk(KERN_ERR "%s:%d: bad pgd %08lx.\n", \
-		__FILE__, __LINE__, pgd_val(e))
-
 /*
  * Bits in a linux-style PTE.  These match the bits in the
  * (hardware-defined) PTE as closely as possible.
@@ -206,16 +199,6 @@ extern pte_t *va_to_pte(unsigned long address);
  * We consider execute permission the same as read.
  * Also, write permissions imply read permissions.
  */
-
-#ifndef __ASSEMBLER__
-/*
- * ZERO_PAGE is a global shared page that is always zero: used
- * for zero-mapped memory areas etc..
- */
-extern unsigned long empty_zero_page[1024];
-#define ZERO_PAGE(vaddr) (virt_to_page(empty_zero_page))
-
-#endif /* __ASSEMBLER__ */
 
 #define pte_none(pte)		((pte_val(pte) & ~_PTE_NONE_MASK) == 0)
 #define pte_present(pte)	(pte_val(pte) & _PAGE_PRESENT)
@@ -328,7 +311,7 @@ static inline void set_pte(pte_t *ptep, pte_t pte)
 
 #define __HAVE_ARCH_PTEP_TEST_AND_CLEAR_YOUNG
 struct vm_area_struct;
-static inline int ptep_test_and_clear_young(struct vm_area_struct *vma,
+static inline bool ptep_test_and_clear_young(struct vm_area_struct *vma,
 		unsigned long address, pte_t *ptep)
 {
 	return (pte_update(ptep, _PAGE_ACCESSED, 0) & _PAGE_ACCESSED) != 0;

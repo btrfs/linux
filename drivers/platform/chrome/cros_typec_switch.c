@@ -211,9 +211,8 @@ static int cros_typec_register_switches(struct cros_typec_switch_data *sdata)
 	struct cros_typec_port *port;
 	struct device *dev = sdata->dev;
 	struct fwnode_handle *fwnode;
-	struct acpi_device *adev;
-	unsigned long long index;
 	int nports, ret;
+	u64 index;
 
 	nports = device_get_child_node_count(dev);
 	if (nports == 0) {
@@ -222,28 +221,20 @@ static int cros_typec_register_switches(struct cros_typec_switch_data *sdata)
 	}
 
 	device_for_each_child_node(dev, fwnode) {
-		port = devm_kzalloc(dev, sizeof(*port), GFP_KERNEL);
+		port = devm_kzalloc_obj(dev, *port);
 		if (!port) {
 			ret = -ENOMEM;
 			goto err_switch;
 		}
 
-		adev = to_acpi_device_node(fwnode);
-		if (!adev) {
-			dev_err(fwnode->dev, "Couldn't get ACPI device handle\n");
-			ret = -ENODEV;
-			goto err_switch;
-		}
-
-		ret = acpi_evaluate_integer(adev->handle, "_ADR", NULL, &index);
-		if (ACPI_FAILURE(ret)) {
-			dev_err(fwnode->dev, "_ADR wasn't evaluated\n");
-			ret = -ENODATA;
+		ret = acpi_get_local_u64_address(ACPI_HANDLE_FWNODE(fwnode), &index);
+		if (ret) {
+			dev_err(dev, "_ADR wasn't evaluated for %pfwP\n", fwnode);
 			goto err_switch;
 		}
 
 		if (index >= EC_USB_PD_MAX_PORTS) {
-			dev_err(fwnode->dev, "Invalid port index number: %llu\n", index);
+			dev_err(dev, "%pfwP: Invalid port index number: %llu\n", fwnode, index);
 			ret = -EINVAL;
 			goto err_switch;
 		}
@@ -285,7 +276,7 @@ static int cros_typec_switch_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct cros_typec_switch_data *sdata;
 
-	sdata = devm_kzalloc(dev, sizeof(*sdata), GFP_KERNEL);
+	sdata = devm_kzalloc_obj(dev, *sdata);
 	if (!sdata)
 		return -ENOMEM;
 

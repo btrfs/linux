@@ -218,10 +218,9 @@ static int i2c_demux_pinctrl_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	priv = devm_kzalloc(&pdev->dev, struct_size(priv, chan, num_chan),
-			    GFP_KERNEL);
+	priv = devm_kzalloc_flex(&pdev->dev, *priv, chan, num_chan);
 
-	props = devm_kcalloc(&pdev->dev, num_chan, sizeof(*props), GFP_KERNEL);
+	props = devm_kzalloc_objs(&pdev->dev, *props, num_chan);
 
 	if (!priv || !props)
 		return -ENOMEM;
@@ -247,6 +246,7 @@ static int i2c_demux_pinctrl_probe(struct platform_device *pdev)
 		props[i].value = devm_kstrdup(&pdev->dev, "ok", GFP_KERNEL);
 		if (!props[i].name || !props[i].value) {
 			err = -ENOMEM;
+			of_node_put(adap_np);
 			goto err_rollback;
 		}
 		props[i].length = 3;

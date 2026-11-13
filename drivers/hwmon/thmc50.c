@@ -384,7 +384,7 @@ static int thmc50_probe(struct i2c_client *client)
 	struct device *hwmon_dev;
 	int idx = 0;
 
-	data = devm_kzalloc(dev, sizeof(struct thmc50_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct thmc50_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -407,8 +407,8 @@ static int thmc50_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id thmc50_id[] = {
-	{ "adm1022", adm1022 },
-	{ "thmc50", thmc50 },
+	{ .name = "adm1022", .driver_data = adm1022 },
+	{ .name = "thmc50", .driver_data = thmc50 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, thmc50_id);

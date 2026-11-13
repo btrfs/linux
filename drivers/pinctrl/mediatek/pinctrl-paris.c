@@ -771,7 +771,6 @@ static const struct pinmux_ops mtk_pmxops = {
 	.get_function_name	= mtk_pmx_get_func_name,
 	.get_function_groups	= mtk_pmx_get_func_groups,
 	.set_mux		= mtk_pmx_set_mux,
-	.gpio_set_direction	= mtk_pinmux_gpio_set_direction,
 	.gpio_request_enable	= mtk_pinmux_gpio_request_enable,
 };
 
@@ -886,19 +885,22 @@ static int mtk_gpio_set(struct gpio_chip *chip, unsigned int gpio, int value)
 
 static int mtk_gpio_direction_input(struct gpio_chip *chip, unsigned int gpio)
 {
-	return pinctrl_gpio_direction_input(chip, gpio);
+	struct mtk_pinctrl *hw = gpiochip_get_data(chip);
+
+	return mtk_pinmux_gpio_set_direction(hw->pctrl, NULL, gpio, true);
 }
 
 static int mtk_gpio_direction_output(struct gpio_chip *chip, unsigned int gpio,
 				     int value)
 {
+	struct mtk_pinctrl *hw = gpiochip_get_data(chip);
 	int ret;
 
 	ret = mtk_gpio_set(chip, gpio, value);
 	if (ret)
 		return ret;
 
-	return pinctrl_gpio_direction_output(chip, gpio);
+	return mtk_pinmux_gpio_set_direction(hw->pctrl, NULL, gpio, false);
 }
 
 static int mtk_gpio_to_irq(struct gpio_chip *chip, unsigned int offset)
@@ -955,7 +957,7 @@ static int mtk_build_gpiochip(struct mtk_pinctrl *hw)
 	chip->base		= -1;
 	chip->ngpio		= hw->soc->npins;
 
-	ret = gpiochip_add_data(chip, hw);
+	ret = devm_gpiochip_add_data(hw->dev, chip, hw);
 	if (ret < 0)
 		return ret;
 
@@ -968,14 +970,13 @@ static int mtk_pctrl_build_state(struct platform_device *pdev)
 	int i;
 
 	/* Allocate groups */
-	hw->groups = devm_kmalloc_array(&pdev->dev, hw->soc->ngrps,
-					sizeof(*hw->groups), GFP_KERNEL);
+	hw->groups = devm_kmalloc_objs(&pdev->dev, *hw->groups, hw->soc->ngrps);
 	if (!hw->groups)
 		return -ENOMEM;
 
 	/* We assume that one pin is one group, use pin name as group name. */
-	hw->grp_names = devm_kmalloc_array(&pdev->dev, hw->soc->ngrps,
-					   sizeof(*hw->grp_names), GFP_KERNEL);
+	hw->grp_names = devm_kmalloc_objs(&pdev->dev, *hw->grp_names,
+					  hw->soc->ngrps);
 	if (!hw->grp_names)
 		return -ENOMEM;
 
@@ -999,7 +1000,7 @@ int mtk_paris_pinctrl_probe(struct platform_device *pdev)
 	struct mtk_pinctrl *hw;
 	int err, i;
 
-	hw = devm_kzalloc(&pdev->dev, sizeof(*hw), GFP_KERNEL);
+	hw = devm_kzalloc_obj(&pdev->dev, *hw);
 	if (!hw)
 		return -ENOMEM;
 
@@ -1015,8 +1016,8 @@ int mtk_paris_pinctrl_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, -EINVAL,
 			"SoC should be assigned at least one register base\n");
 
-	hw->base = devm_kmalloc_array(&pdev->dev, hw->soc->nbase_names,
-				      sizeof(*hw->base), GFP_KERNEL);
+	hw->base = devm_kmalloc_objs(&pdev->dev, *hw->base,
+				     hw->soc->nbase_names);
 	if (!hw->base)
 		return -ENOMEM;
 
@@ -1039,8 +1040,7 @@ int mtk_paris_pinctrl_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, err, "build state failed\n");
 
 	/* Copy from internal struct mtk_pin_desc to register to the core */
-	pins = devm_kmalloc_array(&pdev->dev, hw->soc->npins, sizeof(*pins),
-				  GFP_KERNEL);
+	pins = devm_kmalloc_objs(&pdev->dev, *pins, hw->soc->npins);
 	if (!pins)
 		return -ENOMEM;
 

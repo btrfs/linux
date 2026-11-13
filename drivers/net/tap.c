@@ -278,9 +278,10 @@ rx_handler_result_t tap_handle_frame(struct sk_buff **pskb)
 	if (q->flags & IFF_VNET_HDR)
 		features |= tap->tap_features;
 	if (netif_needs_gso(skb, features)) {
-		struct sk_buff *segs = __skb_gso_segment(skb, features, false);
+		struct sk_buff *segs;
 		struct sk_buff *next;
 
+		segs = __skb_gso_segment(skb, features, false, 0);
 		if (IS_ERR(segs)) {
 			drop_reason = SKB_DROP_REASON_SKB_GSO_SEG;
 			goto drop;
@@ -883,7 +884,7 @@ static int set_offload(struct tap_queue *q, unsigned long arg)
 
 		/* TODO: for now USO4 and USO6 should work simultaneously */
 		if ((arg & (TUN_F_USO4 | TUN_F_USO6)) == (TUN_F_USO4 | TUN_F_USO6))
-			features |= NETIF_F_GSO_UDP_L4;
+			feature_mask |= NETIF_F_GSO_UDP_L4;
 	}
 
 	/* tun/tap driver inverts the usage for TSO offloads, where
@@ -894,8 +895,7 @@ static int set_offload(struct tap_queue *q, unsigned long arg)
 	 * When user space turns off TSO, we turn off GSO/LRO so that
 	 * user-space will not receive TSO frames.
 	 */
-	if (feature_mask & (NETIF_F_TSO | NETIF_F_TSO6) ||
-	    (feature_mask & (TUN_F_USO4 | TUN_F_USO6)) == (TUN_F_USO4 | TUN_F_USO6))
+	if (feature_mask & (NETIF_F_TSO | NETIF_F_TSO6 | NETIF_F_GSO_UDP_L4))
 		features |= RX_OFFLOADS;
 	else
 		features &= ~RX_OFFLOADS;
@@ -919,11 +919,11 @@ static long tap_ioctl(struct file *file, unsigned int cmd,
 	struct tap_queue *q = file->private_data;
 	struct tap_dev *tap;
 	void __user *argp = (void __user *)arg;
+	struct sockaddr_storage ss = {};
 	struct ifreq __user *ifr = argp;
 	unsigned int __user *up = argp;
 	unsigned short u;
 	int __user *sp = argp;
-	struct sockaddr_storage ss;
 	int s;
 	int ret;
 
@@ -932,6 +932,9 @@ static long tap_ioctl(struct file *file, unsigned int cmd,
 		/* ignore the name, just look at flags */
 		if (get_user(u, &ifr->ifr_flags))
 			return -EFAULT;
+
+		/* TUNGETIFF may report IFF_DETACH_QUEUE, ignore it here */
+		u &= ~IFF_DETACH_QUEUE;
 
 		ret = 0;
 		if ((u & ~TAP_IFFEATURES) != (IFF_NO_PI | IFF_TAP))
@@ -951,6 +954,8 @@ static long tap_ioctl(struct file *file, unsigned int cmd,
 
 		ret = 0;
 		u = q->flags;
+		if (!q->enabled)
+			u |= IFF_DETACH_QUEUE;
 		if (copy_to_user(&ifr->ifr_name, tap->dev->name, IFNAMSIZ) ||
 		    put_user(u, &ifr->ifr_flags))
 			ret = -EFAULT;
@@ -1052,6 +1057,7 @@ static int tap_get_user_xdp(struct tap_queue *q, struct xdp_buff *xdp)
 	int err, depth;
 
 	if (unlikely(xdp->data_end - xdp->data < ETH_HLEN)) {
+		put_page(virt_to_head_page(xdp->data));
 		err = -EINVAL;
 		goto err;
 	}
@@ -1061,6 +1067,7 @@ static int tap_get_user_xdp(struct tap_queue *q, struct xdp_buff *xdp)
 
 	skb = build_skb(xdp->data_hard_start, buflen);
 	if (!skb) {
+		put_page(virt_to_head_page(xdp->data));
 		err = -ENOMEM;
 		goto err;
 	}
@@ -1072,26 +1079,31 @@ static int tap_get_user_xdp(struct tap_queue *q, struct xdp_buff *xdp)
 	skb_reset_mac_header(skb);
 	skb->protocol = eth_hdr(skb)->h_proto;
 
+	rcu_read_lock();
+	tap = rcu_dereference(q->tap);
+	if (!tap) {
+		kfree_skb(skb);
+		rcu_read_unlock();
+		return 0;
+	}
+	skb->dev = tap->dev;
+
 	if (vnet_hdr_len) {
 		err = tun_vnet_hdr_to_skb(q->flags, skb, gso);
-		if (err)
+		if (err) {
+			rcu_read_unlock();
 			goto err_kfree;
+		}
 	}
+
+	skb_probe_transport_header(skb);
 
 	/* Move network header to the right position for VLAN tagged packets */
 	if (eth_type_vlan(skb->protocol) &&
 	    vlan_get_protocol_and_depth(skb, skb->protocol, &depth) != 0)
 		skb_set_network_header(skb, depth);
 
-	rcu_read_lock();
-	tap = rcu_dereference(q->tap);
-	if (tap) {
-		skb->dev = tap->dev;
-		skb_probe_transport_header(skb);
-		dev_queue_xmit(skb);
-	} else {
-		kfree_skb(skb);
-	}
+	dev_queue_xmit(skb);
 	rcu_read_unlock();
 
 	return 0;
@@ -1197,7 +1209,7 @@ int tap_queue_resize(struct tap_dev *tap)
 	int n = tap->numqueues;
 	int ret, i = 0;
 
-	rings = kmalloc_array(n, sizeof(*rings), GFP_KERNEL);
+	rings = kmalloc_objs(*rings, n);
 	if (!rings)
 		return -ENOMEM;
 
@@ -1217,7 +1229,7 @@ static int tap_list_add(dev_t major, const char *device_name)
 {
 	struct major_info *tap_major;
 
-	tap_major = kzalloc(sizeof(*tap_major), GFP_ATOMIC);
+	tap_major = kzalloc_obj(*tap_major, GFP_ATOMIC);
 	if (!tap_major)
 		return -ENOMEM;
 

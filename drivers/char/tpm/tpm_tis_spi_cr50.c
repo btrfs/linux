@@ -270,7 +270,7 @@ int cr50_spi_probe(struct spi_device *spi)
 	int ret;
 	struct tpm_chip *chip;
 
-	cr50_phy = devm_kzalloc(&spi->dev, sizeof(*cr50_phy), GFP_KERNEL);
+	cr50_phy = devm_kzalloc_obj(&spi->dev, *cr50_phy);
 	if (!cr50_phy)
 		return -ENOMEM;
 
@@ -287,7 +287,7 @@ int cr50_spi_probe(struct spi_device *spi)
 	if (spi->irq > 0) {
 		ret = devm_request_irq(&spi->dev, spi->irq,
 				       cr50_spi_irq_handler,
-				       IRQF_TRIGGER_RISING | IRQF_ONESHOT,
+				       IRQF_TRIGGER_RISING,
 				       "cr50_spi", cr50_phy);
 		if (ret < 0) {
 			if (ret == -EPROBE_DEFER)

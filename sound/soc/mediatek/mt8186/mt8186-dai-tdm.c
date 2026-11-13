@@ -272,7 +272,7 @@ static const struct soc_enum mt8186_tdm_enum[] = {
 static int mt8186_tdm_hd_get(struct snd_kcontrol *kcontrol,
 			     struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
 	struct mt8186_afe_private *afe_priv = afe->platform_priv;
 	int dai_id = get_tdm_id_by_name(kcontrol->id.name);
@@ -286,7 +286,7 @@ static int mt8186_tdm_hd_get(struct snd_kcontrol *kcontrol,
 static int mt8186_tdm_hd_set(struct snd_kcontrol *kcontrol,
 			     struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
 	struct mt8186_afe_private *afe_priv = afe->platform_priv;
 	int dai_id = get_tdm_id_by_name(kcontrol->id.name);
@@ -599,8 +599,7 @@ static struct mtk_afe_tdm_priv *init_tdm_priv_data(struct mtk_base_afe *afe)
 {
 	struct mtk_afe_tdm_priv *tdm_priv;
 
-	tdm_priv = devm_kzalloc(afe->dev, sizeof(struct mtk_afe_tdm_priv),
-				GFP_KERNEL);
+	tdm_priv = devm_kzalloc_obj(afe->dev, struct mtk_afe_tdm_priv);
 	if (!tdm_priv)
 		return NULL;
 
@@ -617,7 +616,7 @@ int mt8186_dai_tdm_register(struct mtk_base_afe *afe)
 	struct mtk_afe_tdm_priv *tdm_priv;
 	struct mtk_base_afe_dai *dai;
 
-	dai = devm_kzalloc(afe->dev, sizeof(*dai), GFP_KERNEL);
+	dai = devm_kzalloc_obj(afe->dev, *dai);
 	if (!dai)
 		return -ENOMEM;
 

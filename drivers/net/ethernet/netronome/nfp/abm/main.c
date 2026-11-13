@@ -317,7 +317,7 @@ nfp_abm_vnic_alloc(struct nfp_app *app, struct nfp_net *nn, unsigned int id)
 	struct nfp_abm_link *alink;
 	int err;
 
-	alink = kzalloc(sizeof(*alink), GFP_KERNEL);
+	alink = kzalloc_obj(*alink);
 	if (!alink)
 		return -ENOMEM;
 	nn->app_priv = alink;
@@ -461,7 +461,7 @@ static int nfp_abm_init(struct nfp_app *app)
 		return -EINVAL;
 	}
 
-	abm = kzalloc(sizeof(*abm), GFP_KERNEL);
+	abm = kzalloc_obj(*abm);
 	if (!abm)
 		return -ENOMEM;
 	app->priv = abm;
@@ -477,8 +477,7 @@ static int nfp_abm_init(struct nfp_app *app)
 	if (!abm->threshold_undef)
 		goto err_free_abm;
 
-	abm->thresholds = kvcalloc(abm->num_thresholds,
-				   sizeof(*abm->thresholds), GFP_KERNEL);
+	abm->thresholds = kvzalloc_objs(*abm->thresholds, abm->num_thresholds);
 	if (!abm->thresholds)
 		goto err_free_thresh_umap;
 

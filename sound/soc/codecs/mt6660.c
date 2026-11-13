@@ -187,8 +187,7 @@ static const struct snd_soc_dapm_route mt6660_component_dapm_routes[] = {
 static int mt6660_component_get_volsw(struct snd_kcontrol *kcontrol,
 				  struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-		snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct mt6660_chip *chip = (struct mt6660_chip *)
 		snd_soc_component_get_drvdata(component);
 
@@ -463,7 +462,7 @@ static int mt6660_i2c_probe(struct i2c_client *client)
 	int ret;
 
 	dev_dbg(&client->dev, "%s\n", __func__);
-	chip = devm_kzalloc(&client->dev, sizeof(*chip), GFP_KERNEL);
+	chip = devm_kzalloc_obj(&client->dev, *chip);
 	if (!chip)
 		return -ENOMEM;
 	chip->i2c = client;
@@ -558,8 +557,8 @@ static const struct of_device_id __maybe_unused mt6660_of_id[] = {
 MODULE_DEVICE_TABLE(of, mt6660_of_id);
 
 static const struct i2c_device_id mt6660_i2c_id[] = {
-	{"mt6660" },
-	{},
+	{ .name = "mt6660" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mt6660_i2c_id);
 

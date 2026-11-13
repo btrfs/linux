@@ -285,7 +285,7 @@ static struct tps62360_regulator_platform_data *
 	struct tps62360_regulator_platform_data *pdata;
 	struct device_node *np = dev->of_node;
 
-	pdata = devm_kzalloc(dev, sizeof(*pdata), GFP_KERNEL);
+	pdata = devm_kzalloc_obj(dev, *pdata);
 	if (!pdata)
 		return NULL;
 
@@ -329,7 +329,7 @@ static int tps62360_probe(struct i2c_client *client)
 
 	pdata = dev_get_platdata(&client->dev);
 
-	tps = devm_kzalloc(&client->dev, sizeof(*tps), GFP_KERNEL);
+	tps = devm_kzalloc_obj(&client->dev, *tps);
 	if (!tps)
 		return -ENOMEM;
 
@@ -476,11 +476,11 @@ static void tps62360_shutdown(struct i2c_client *client)
 }
 
 static const struct i2c_device_id tps62360_id[] = {
-	{.name = "tps62360", .driver_data = TPS62360},
-	{.name = "tps62361", .driver_data = TPS62361},
-	{.name = "tps62362", .driver_data = TPS62362},
-	{.name = "tps62363", .driver_data = TPS62363},
-	{},
+	{ .name = "tps62360", .driver_data = TPS62360 },
+	{ .name = "tps62361", .driver_data = TPS62361 },
+	{ .name = "tps62362", .driver_data = TPS62362 },
+	{ .name = "tps62363", .driver_data = TPS62363 },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, tps62360_id);

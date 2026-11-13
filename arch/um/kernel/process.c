@@ -43,7 +43,9 @@
  * cares about its entry, so it's OK if another processor is modifying its
  * entry.
  */
-struct task_struct *cpu_tasks[NR_CPUS];
+struct task_struct *cpu_tasks[NR_CPUS] = {
+	[0 ... NR_CPUS - 1] = &init_task,
+};
 EXPORT_SYMBOL(cpu_tasks);
 
 void free_stack(unsigned long stack, int order)
@@ -185,11 +187,7 @@ int copy_thread(struct task_struct * p, const struct kernel_clone_args *args)
 
 void initial_thread_cb(void (*proc)(void *), void *arg)
 {
-	int save_kmalloc_ok = kmalloc_ok;
-
-	kmalloc_ok = 0;
 	initial_thread_cb_skas(proc, arg);
-	kmalloc_ok = save_kmalloc_ok;
 }
 
 int arch_dup_task_struct(struct task_struct *dst,
@@ -220,9 +218,19 @@ void arch_cpu_idle(void)
 	um_idle_sleep();
 }
 
+void arch_cpu_idle_prepare(void)
+{
+	os_idle_prepare();
+}
+
 int __uml_cant_sleep(void) {
 	return in_atomic() || irqs_disabled() || in_interrupt();
 	/* Is in_interrupt() really needed? */
+}
+
+int uml_need_resched(void)
+{
+	return need_resched();
 }
 
 extern exitcall_t __uml_exitcall_begin, __uml_exitcall_end;
@@ -268,16 +276,12 @@ unsigned long arch_align_stack(unsigned long sp)
 }
 #endif
 
-unsigned long __get_wchan(struct task_struct *p)
+static unsigned long ___get_wchan(struct task_struct *p)
 {
 	unsigned long stack_page, sp, ip;
 	bool seen_sched = 0;
 
 	stack_page = (unsigned long) task_stack_page(p);
-	/* Bail if the process has no kernel stack for some reason */
-	if (stack_page == 0)
-		return 0;
-
 	sp = p->thread.switch_buf->JB_SP;
 	/*
 	 * Bail if the stack pointer is below the bottom of the kernel
@@ -298,4 +302,21 @@ unsigned long __get_wchan(struct task_struct *p)
 	}
 
 	return 0;
+
+}
+
+unsigned long __get_wchan(struct task_struct *p)
+{
+	unsigned long ret;
+
+	/* Bail if the process has no kernel stack for some reason */
+	if (!try_get_task_stack(p))
+		return 0;
+
+	ret = ___get_wchan(p);
+
+	put_task_stack(p);
+
+	return ret;
+
 }

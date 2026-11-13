@@ -46,6 +46,7 @@
 	panel {
 		compatible = "dataimage,fg1001l0dsswmg01";
 		backlight = <&backlight_lvds>;
+		power-supply = <&reg_lcd>;
 
 		port {
 			panel_in: endpoint {
@@ -176,7 +177,7 @@
 		regulator-name = "usb_h2_vbus";
 		regulator-min-microvolt = <5000000>;
 		regulator-max-microvolt = <5000000>;
-		vin-supply = <&reg_5p0> ;
+		vin-supply = <&reg_5p0>;
 		regulator-always-on;
 	};
 
@@ -206,7 +207,7 @@
 		regulator-name = "vref_dac";
 		regulator-min-microvolt = <20000>;
 		regulator-max-microvolt = <20000>;
-		vin-supply = <&reg_5p0> ;
+		vin-supply = <&reg_5p0>;
 		regulator-boot-on;
 	};
 

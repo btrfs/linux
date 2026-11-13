@@ -4,7 +4,6 @@
  *
  * Copyright (C) 2020 Remi Pommarel <repk@triplefau.lt>
  */
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/phy/phy.h>
 #include <linux/regmap.h>
@@ -132,7 +131,7 @@ static int phy_axg_pcie_probe(struct platform_device *pdev)
 	struct device_node *np = dev->of_node;
 	void __iomem *base;
 
-	priv = devm_kmalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kmalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

@@ -9,7 +9,6 @@
 #include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
@@ -1817,7 +1816,7 @@ static int tegra210_emc_probe(struct platform_device *pdev)
 	unsigned int i;
 	int err;
 
-	emc = devm_kzalloc(&pdev->dev, sizeof(*emc), GFP_KERNEL);
+	emc = devm_kzalloc_obj(&pdev->dev, *emc);
 	if (!emc)
 		return -ENOMEM;
 
@@ -1920,9 +1919,9 @@ static int tegra210_emc_probe(struct platform_device *pdev)
 	emc->provider.dev = &pdev->dev;
 	emc->provider.set_rate = tegra210_emc_set_rate;
 
-	emc->provider.configs = devm_kcalloc(&pdev->dev, emc->num_timings,
-					     sizeof(*emc->provider.configs),
-					     GFP_KERNEL);
+	emc->provider.configs = devm_kzalloc_objs(&pdev->dev,
+						  *emc->provider.configs,
+						  emc->num_timings);
 	if (!emc->provider.configs) {
 		err = -ENOMEM;
 		goto release;
@@ -1966,8 +1965,8 @@ static int tegra210_emc_probe(struct platform_device *pdev)
 
 	tegra210_emc_debugfs_init(emc);
 
-	cd = devm_thermal_of_cooling_device_register(emc->dev, np, "emc", emc,
-						     &tegra210_emc_cd_ops);
+	cd = devm_thermal_of_child_cooling_device_register(emc->dev, np, "emc", emc,
+							   &tegra210_emc_cd_ops);
 	if (IS_ERR(cd)) {
 		err = PTR_ERR(cd);
 		dev_err(emc->dev, "failed to register cooling device: %d\n",

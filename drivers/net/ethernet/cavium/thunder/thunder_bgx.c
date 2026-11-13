@@ -1086,8 +1086,7 @@ static int bgx_lmac_enable(struct bgx *bgx, u8 lmacid)
 
 	/* actual number of filters available to exact LMAC */
 	lmac->dmacs_count = (RX_DMAC_COUNT / bgx->lmac_count);
-	lmac->dmacs = kcalloc(lmac->dmacs_count, sizeof(*lmac->dmacs),
-			      GFP_KERNEL);
+	lmac->dmacs = kzalloc_objs(*lmac->dmacs, lmac->dmacs_count);
 	if (!lmac->dmacs)
 		return -ENOMEM;
 
@@ -1596,7 +1595,7 @@ static int bgx_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	u8 lmac;
 	u16 sdevid;
 
-	bgx = devm_kzalloc(dev, sizeof(*bgx), GFP_KERNEL);
+	bgx = devm_kzalloc_obj(dev, *bgx);
 	if (!bgx)
 		return -ENOMEM;
 	bgx->pdev = pdev;

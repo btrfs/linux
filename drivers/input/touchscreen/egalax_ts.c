@@ -162,7 +162,7 @@ static int egalax_ts_probe(struct i2c_client *client)
 	struct input_dev *input_dev;
 	int error;
 
-	ts = devm_kzalloc(&client->dev, sizeof(struct egalax_ts), GFP_KERNEL);
+	ts = devm_kzalloc_obj(&client->dev, struct egalax_ts);
 	if (!ts) {
 		dev_err(&client->dev, "Failed to allocate memory\n");
 		return -ENOMEM;
@@ -219,7 +219,7 @@ static int egalax_ts_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id egalax_ts_id[] = {
-	{ "egalax_ts" },
+	{ .name = "egalax_ts" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, egalax_ts_id);

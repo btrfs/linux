@@ -354,7 +354,7 @@ static int tw2804_probe(struct i2c_client *client)
 	if (!i2c_check_functionality(adapter, I2C_FUNC_SMBUS_BYTE_DATA))
 		return -ENODEV;
 
-	state = devm_kzalloc(&client->dev, sizeof(*state), GFP_KERNEL);
+	state = devm_kzalloc_obj(&client->dev, *state);
 	if (state == NULL)
 		return -ENOMEM;
 	sd = &state->sd;
@@ -414,7 +414,7 @@ static void tw2804_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id tw2804_id[] = {
-	{ "tw2804" },
+	{ .name = "tw2804" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tw2804_id);

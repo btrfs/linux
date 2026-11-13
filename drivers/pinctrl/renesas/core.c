@@ -51,8 +51,7 @@ static int sh_pfc_map_resources(struct sh_pfc *pfc,
 		return num_irqs;
 
 	/* Allocate memory windows and IRQs arrays. */
-	windows = devm_kcalloc(pfc->dev, num_windows, sizeof(*windows),
-			       GFP_KERNEL);
+	windows = devm_kzalloc_objs(pfc->dev, *windows, num_windows);
 	if (windows == NULL)
 		return -ENOMEM;
 
@@ -60,8 +59,7 @@ static int sh_pfc_map_resources(struct sh_pfc *pfc,
 	pfc->windows = windows;
 
 	if (num_irqs) {
-		irqs = devm_kcalloc(pfc->dev, num_irqs, sizeof(*irqs),
-				    GFP_KERNEL);
+		irqs = devm_kzalloc_objs(pfc->dev, *irqs, num_irqs);
 		if (irqs == NULL)
 			return -ENOMEM;
 
@@ -407,8 +405,7 @@ static int sh_pfc_init_ranges(struct sh_pfc *pfc)
 		 * continuous and allocate a single range.
 		 */
 		pfc->nr_ranges = 1;
-		pfc->ranges = devm_kzalloc(pfc->dev, sizeof(*pfc->ranges),
-					   GFP_KERNEL);
+		pfc->ranges = devm_kzalloc_obj(pfc->dev, *pfc->ranges);
 		if (pfc->ranges == NULL)
 			return -ENOMEM;
 
@@ -429,8 +426,7 @@ static int sh_pfc_init_ranges(struct sh_pfc *pfc)
 	}
 
 	pfc->nr_ranges = nr_ranges;
-	pfc->ranges = devm_kcalloc(pfc->dev, nr_ranges, sizeof(*pfc->ranges),
-				   GFP_KERNEL);
+	pfc->ranges = devm_kzalloc_objs(pfc->dev, *pfc->ranges, nr_ranges);
 	if (pfc->ranges == NULL)
 		return -ENOMEM;
 
@@ -710,9 +706,7 @@ static int sh_pfc_suspend_init(struct sh_pfc *pfc)
 	if (!n)
 		return 0;
 
-	pfc->saved_regs = devm_kmalloc_array(pfc->dev, n,
-					     sizeof(*pfc->saved_regs),
-					     GFP_KERNEL);
+	pfc->saved_regs = devm_kmalloc_objs(pfc->dev, *pfc->saved_regs, n);
 	if (!pfc->saved_regs)
 		return -ENOMEM;
 
@@ -1135,7 +1129,7 @@ static void __init sh_pfc_check_info(const struct sh_pfc_soc_info *info)
 	}
 
 	/* Check groups and functions */
-	refcnts = kcalloc(info->nr_groups, sizeof(*refcnts), GFP_KERNEL);
+	refcnts = kzalloc_objs(*refcnts, info->nr_groups);
 	if (!refcnts)
 		return;
 
@@ -1273,13 +1267,11 @@ static void __init sh_pfc_check_driver(const struct platform_driver *pdrv)
 	    !of_find_matching_node(NULL, pdrv->driver.of_match_table))
 		return;
 
-	sh_pfc_regs = kcalloc(SH_PFC_MAX_REGS, sizeof(*sh_pfc_regs),
-			      GFP_KERNEL);
+	sh_pfc_regs = kzalloc_objs(*sh_pfc_regs, SH_PFC_MAX_REGS);
 	if (!sh_pfc_regs)
 		return;
 
-	sh_pfc_enums = kcalloc(SH_PFC_MAX_ENUMS, sizeof(*sh_pfc_enums),
-			      GFP_KERNEL);
+	sh_pfc_enums = kzalloc_objs(*sh_pfc_enums, SH_PFC_MAX_ENUMS);
 	if (!sh_pfc_enums)
 		goto free_regs;
 
@@ -1316,7 +1308,7 @@ static int sh_pfc_probe(struct platform_device *pdev)
 	else
 		info = (const void *)platform_get_device_id(pdev)->driver_data;
 
-	pfc = devm_kzalloc(&pdev->dev, sizeof(*pfc), GFP_KERNEL);
+	pfc = devm_kzalloc_obj(&pdev->dev, *pfc);
 	if (pfc == NULL)
 		return -ENOMEM;
 
@@ -1381,40 +1373,40 @@ static int sh_pfc_probe(struct platform_device *pdev)
 
 static const struct platform_device_id sh_pfc_id_table[] = {
 #ifdef CONFIG_PINCTRL_PFC_SH7203
-	{ "pfc-sh7203", (kernel_ulong_t)&sh7203_pinmux_info },
+	{ .name = "pfc-sh7203", .driver_data = (kernel_ulong_t)&sh7203_pinmux_info },
 #endif
 #ifdef CONFIG_PINCTRL_PFC_SH7264
-	{ "pfc-sh7264", (kernel_ulong_t)&sh7264_pinmux_info },
+	{ .name = "pfc-sh7264", .driver_data = (kernel_ulong_t)&sh7264_pinmux_info },
 #endif
 #ifdef CONFIG_PINCTRL_PFC_SH7269
-	{ "pfc-sh7269", (kernel_ulong_t)&sh7269_pinmux_info },
+	{ .name = "pfc-sh7269", .driver_data = (kernel_ulong_t)&sh7269_pinmux_info },
 #endif
 #ifdef CONFIG_PINCTRL_PFC_SH7720
-	{ "pfc-sh7720", (kernel_ulong_t)&sh7720_pinmux_info },
+	{ .name = "pfc-sh7720", .driver_data = (kernel_ulong_t)&sh7720_pinmux_info },
 #endif
 #ifdef CONFIG_PINCTRL_PFC_SH7722
-	{ "pfc-sh7722", (kernel_ulong_t)&sh7722_pinmux_info },
+	{ .name = "pfc-sh7722", .driver_data = (kernel_ulong_t)&sh7722_pinmux_info },
 #endif
 #ifdef CONFIG_PINCTRL_PFC_SH7723
-	{ "pfc-sh7723", (kernel_ulong_t)&sh7723_pinmux_info },
+	{ .name = "pfc-sh7723", .driver_data = (kernel_ulong_t)&sh7723_pinmux_info },
 #endif
 #ifdef CONFIG_PINCTRL_PFC_SH7724
-	{ "pfc-sh7724", (kernel_ulong_t)&sh7724_pinmux_info },
+	{ .name = "pfc-sh7724", .driver_data = (kernel_ulong_t)&sh7724_pinmux_info },
 #endif
 #ifdef CONFIG_PINCTRL_PFC_SH7734
-	{ "pfc-sh7734", (kernel_ulong_t)&sh7734_pinmux_info },
+	{ .name = "pfc-sh7734", .driver_data = (kernel_ulong_t)&sh7734_pinmux_info },
 #endif
 #ifdef CONFIG_PINCTRL_PFC_SH7757
-	{ "pfc-sh7757", (kernel_ulong_t)&sh7757_pinmux_info },
+	{ .name = "pfc-sh7757", .driver_data = (kernel_ulong_t)&sh7757_pinmux_info },
 #endif
 #ifdef CONFIG_PINCTRL_PFC_SH7785
-	{ "pfc-sh7785", (kernel_ulong_t)&sh7785_pinmux_info },
+	{ .name = "pfc-sh7785", .driver_data = (kernel_ulong_t)&sh7785_pinmux_info },
 #endif
 #ifdef CONFIG_PINCTRL_PFC_SH7786
-	{ "pfc-sh7786", (kernel_ulong_t)&sh7786_pinmux_info },
+	{ .name = "pfc-sh7786", .driver_data = (kernel_ulong_t)&sh7786_pinmux_info },
 #endif
 #ifdef CONFIG_PINCTRL_PFC_SHX3
-	{ "pfc-shx3", (kernel_ulong_t)&shx3_pinmux_info },
+	{ .name = "pfc-shx3", .driver_data = (kernel_ulong_t)&shx3_pinmux_info },
 #endif
 	{ /* sentinel */ }
 };

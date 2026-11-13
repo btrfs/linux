@@ -24,6 +24,7 @@ properties:
           - const: fsl,fpga-qixis
       - items:
           - enum:
+              - fsl,ls1021aqds-fpga
               - fsl,ls1043aqds-fpga
               - fsl,ls1043ardb-fpga
               - fsl,ls1046aqds-fpga
@@ -56,6 +57,16 @@ properties:
 patternProperties:
   '^mdio-mux@[a-f0-9,]+$':
     $ref: /schemas/net/mdio-mux-mmioreg.yaml
+
+  '^gpio@[0-9a-f]+$':
+    type: object
+    additionalProperties: true
+
+    properties:
+      compatible:
+        contains:
+          enum:
+            - fsl,ls1046aqds-fpga-gpio-stat-pres2
 
 required:
   - compatible

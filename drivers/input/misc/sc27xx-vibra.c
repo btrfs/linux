@@ -5,7 +5,6 @@
 
 #include <linux/device.h>
 #include <linux/input.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -124,7 +123,7 @@ static int sc27xx_vibra_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	info = devm_kzalloc(&pdev->dev, sizeof(*info), GFP_KERNEL);
+	info = devm_kzalloc_obj(&pdev->dev, *info);
 	if (!info)
 		return -ENOMEM;
 

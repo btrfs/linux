@@ -16,6 +16,7 @@
 #include <linux/bitops.h>
 #include <linux/compiler.h>
 
+#include <net/netns/generic.h>
 #include <linux/netfilter/nf_conntrack_common.h>
 #include <linux/netfilter/nf_conntrack_tcp.h>
 #include <linux/netfilter/nf_conntrack_sctp.h>
@@ -182,6 +183,11 @@ static inline void nf_ct_put(struct nf_conn *ct)
 {
 	if (ct && refcount_dec_and_test(&ct->ct_general.use))
 		nf_ct_destroy(&ct->ct_general);
+}
+
+static inline bool nf_ct_shared(const struct nf_conn *ct)
+{
+	return refcount_read(&ct->ct_general.use) > 1;
 }
 
 /* load module; enable/disable conntrack in this namespace */

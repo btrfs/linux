@@ -86,7 +86,7 @@ int mac_partition(struct parsed_partitions *state)
 	if (blocks_in_map >= state->limit)
 		blocks_in_map = state->limit - 1;
 
-	strlcat(state->pp_buf, " [mac]", PAGE_SIZE);
+	seq_buf_puts(&state->pp_buf, " [mac]");
 	for (slot = 1; slot <= blocks_in_map; ++slot) {
 		int pos = slot * secsize;
 		put_dev_sector(sect);
@@ -97,8 +97,8 @@ int mac_partition(struct parsed_partitions *state)
 		if (be16_to_cpu(part->signature) != MAC_PARTITION_MAGIC)
 			break;
 		put_partition(state, slot,
-			be32_to_cpu(part->start_block) * (secsize/512),
-			be32_to_cpu(part->block_count) * (secsize/512));
+			(sector_t)be32_to_cpu(part->start_block) * (secsize/512),
+			(sector_t)be32_to_cpu(part->block_count) * (secsize/512));
 
 		if (!strncasecmp(part->type, "Linux_RAID", 10))
 			state->parts[slot].flags = ADDPART_FLAG_RAID;
@@ -152,6 +152,6 @@ int mac_partition(struct parsed_partitions *state)
 #endif
 
 	put_dev_sector(sect);
-	strlcat(state->pp_buf, "\n", PAGE_SIZE);
+	seq_buf_puts(&state->pp_buf, "\n");
 	return 1;
 }

@@ -20,7 +20,6 @@
 #include <linux/iio/types.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/power_supply.h>
 #include <linux/property.h>
@@ -159,7 +158,7 @@ static int lego_ev3_battery_probe(struct platform_device *pdev)
 	struct power_supply_config psy_cfg = {};
 	int err;
 
-	batt = devm_kzalloc(dev, sizeof(*batt), GFP_KERNEL);
+	batt = devm_kzalloc_obj(dev, *batt);
 	if (!batt)
 		return -ENOMEM;
 
@@ -231,3 +230,4 @@ module_platform_driver(lego_ev3_battery_driver);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("David Lechner <david@lechnology.com>");
 MODULE_DESCRIPTION("LEGO MINDSTORMS EV3 Battery Driver");
+MODULE_IMPORT_NS("IIO_CONSUMER");

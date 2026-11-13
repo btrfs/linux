@@ -257,7 +257,7 @@ static int coda_fill_super(struct super_block *sb, struct fs_context *fc)
 		goto error;
 	} 
 
-	pr_info("%s: rootinode is %ld dev %s\n",
+	pr_info("%s: rootinode is %llu dev %s\n",
 		__func__, root->i_ino, root->i_sb->s_id);
 	sb->s_root = d_make_root(root);
 	if (!sb->s_root) {
@@ -294,7 +294,7 @@ static void coda_evict_inode(struct inode *inode)
 	coda_cache_clear_inode(inode);
 }
 
-int coda_getattr(struct mnt_idmap *idmap, const struct path *path,
+int coda_getattr(const struct mnt_idmap *idmap, const struct path *path,
 		 struct kstat *stat, u32 request_mask, unsigned int flags)
 {
 	int err = coda_revalidate_inode(d_inode(path->dentry));
@@ -304,7 +304,7 @@ int coda_getattr(struct mnt_idmap *idmap, const struct path *path,
 	return err;
 }
 
-int coda_setattr(struct mnt_idmap *idmap, struct dentry *de,
+int coda_setattr(const struct mnt_idmap *idmap, struct dentry *de,
 		 struct iattr *iattr)
 {
 	struct inode *inode = d_inode(de);
@@ -381,7 +381,7 @@ static int coda_init_fs_context(struct fs_context *fc)
 {
 	struct coda_fs_context *ctx;
 
-	ctx = kzalloc(sizeof(struct coda_fs_context), GFP_KERNEL);
+	ctx = kzalloc_obj(struct coda_fs_context);
 	if (!ctx)
 		return -ENOMEM;
 

@@ -9,7 +9,6 @@
 #include <linux/bitfield.h>
 #include <linux/device.h>
 #include <linux/io.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 
@@ -77,7 +76,7 @@ static int dwi_bl_probe(struct platform_device *dev)
 	struct backlight_properties props;
 	struct resource *res;
 
-	dwi_bl = devm_kzalloc(&dev->dev, sizeof(*dwi_bl), GFP_KERNEL);
+	dwi_bl = devm_kzalloc_obj(&dev->dev, *dwi_bl);
 	if (!dwi_bl)
 		return -ENOMEM;
 

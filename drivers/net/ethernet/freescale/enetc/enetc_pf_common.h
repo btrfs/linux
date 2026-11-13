@@ -3,6 +3,7 @@
 
 #include "enetc_pf.h"
 
+void enetc_set_si_hw_addr(struct enetc_pf *pf, int si, const u8 *mac_addr);
 int enetc_pf_set_mac_addr(struct net_device *ndev, void *addr);
 int enetc_setup_mac_addresses(struct device_node *np, struct enetc_pf *pf);
 void enetc_pf_netdev_setup(struct enetc_si *si, struct net_device *ndev,
@@ -15,8 +16,42 @@ void enetc_phylink_destroy(struct enetc_ndev_priv *priv);
 void enetc_set_default_rss_key(struct enetc_pf *pf);
 int enetc_vlan_rx_add_vid(struct net_device *ndev, __be16 prot, u16 vid);
 int enetc_vlan_rx_del_vid(struct net_device *ndev, __be16 prot, u16 vid);
+int enetc_init_sriov_resources(struct enetc_pf *pf);
+void enetc_set_si_uc_promisc(struct enetc_si *si, int si_id, bool promisc);
+void enetc_set_si_mc_promisc(struct enetc_si *si, int si_id, bool promisc);
+void enetc_set_si_uc_hash_filter(struct enetc_si *si, int si_id, u64 hash);
+void enetc_set_si_mc_hash_filter(struct enetc_si *si, int si_id, u64 hash);
+void enetc_set_si_vlan_promisc(struct enetc_si *si, int si_id, bool promisc);
+int enetc_pf_set_vf_trust(struct net_device *ndev, int vf, bool setting);
+int enetc_pf_set_vf_mac(struct net_device *ndev, int vf, u8 *mac);
+int enetc_pf_get_vf_config(struct net_device *ndev, int vf,
+			   struct ifla_vf_info *ivi);
 
 static inline u16 enetc_get_ip_revision(struct enetc_hw *hw)
 {
 	return enetc_global_rd(hw, ENETC_G_EIPBRR0) & EIPBRR0_REVISION;
 }
+
+#if IS_ENABLED(CONFIG_PCI_IOV)
+int enetc_sriov_configure(struct pci_dev *pdev, int num_vfs);
+void enetc_pf_send_link_status_msg(struct enetc_pf *pf);
+void enetc_pf_notify_vf_link_up(struct enetc_pf *pf);
+void enetc_pf_notify_vf_link_down(struct enetc_pf *pf);
+#else
+static inline int enetc_sriov_configure(struct pci_dev *pdev, int num_vfs)
+{
+	return 0;
+}
+
+static inline void enetc_pf_send_link_status_msg(struct enetc_pf *pf)
+{
+}
+
+static inline void enetc_pf_notify_vf_link_up(struct enetc_pf *pf)
+{
+}
+
+static inline void enetc_pf_notify_vf_link_down(struct enetc_pf *pf)
+{
+}
+#endif

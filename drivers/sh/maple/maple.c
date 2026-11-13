@@ -187,7 +187,7 @@ static struct mapleq *maple_allocq(struct maple_device *mdev)
 {
 	struct mapleq *mq;
 
-	mq = kzalloc(sizeof(*mq), GFP_KERNEL);
+	mq = kzalloc_obj(*mq);
 	if (!mq)
 		goto failed_nomem;
 
@@ -215,7 +215,7 @@ static struct maple_device *maple_alloc_dev(int port, int unit)
 	/* zero this out to avoid kobj subsystem
 	* thinking it has already been registered */
 
-	mdev = kzalloc(sizeof(*mdev), GFP_KERNEL);
+	mdev = kzalloc_obj(*mdev);
 	if (!mdev)
 		return NULL;
 
@@ -863,10 +863,10 @@ cleanup_cache:
 	kmem_cache_destroy(maple_queue_cache);
 
 cleanup_bothirqs:
-	free_irq(HW_EVENT_VSYNC, 0);
+	free_irq(HW_EVENT_VSYNC, &maple_unsupported_device);
 
 cleanup_irq:
-	free_irq(HW_EVENT_MAPLE_DMA, 0);
+	free_irq(HW_EVENT_MAPLE_DMA, &maple_unsupported_device);
 
 cleanup_dma:
 	free_pages((unsigned long) maple_sendbuf, MAPLE_DMA_PAGES);

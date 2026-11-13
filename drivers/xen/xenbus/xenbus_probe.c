@@ -191,7 +191,7 @@ void xenbus_otherend_changed(struct xenbus_watch *watch,
 		return;
 	}
 
-	state = xenbus_read_driver_state(dev->otherend);
+	state = xenbus_read_driver_state(dev, dev->otherend);
 
 	dev_dbg(&dev->dev, "state is %d, (%s), %s, %s\n",
 		state, xenbus_strstate(state), dev->otherend_watch.node, path);
@@ -364,7 +364,7 @@ void xenbus_dev_remove(struct device *_dev)
 	 * closed.
 	 */
 	if (!drv->allow_rebind ||
-	    xenbus_read_driver_state(dev->nodename) == XenbusStateClosing)
+	    xenbus_read_driver_state(dev, dev->nodename) == XenbusStateClosing)
 		xenbus_switch_state(dev, XenbusStateClosed);
 }
 EXPORT_SYMBOL_GPL(xenbus_dev_remove);
@@ -444,6 +444,9 @@ static void xenbus_cleanup_devices(const char *path, struct bus_type *bus)
 		info.dev = NULL;
 		bus_for_each_dev(bus, NULL, &info, cleanup_dev);
 		if (info.dev) {
+			dev_warn(&info.dev->dev,
+				 "device forcefully removed from xenstore\n");
+			info.dev->vanished = true;
 			device_unregister(&info.dev->dev);
 			put_device(&info.dev->dev);
 		}
@@ -511,10 +514,10 @@ int xenbus_probe_node(struct xen_bus_type *bus,
 	char devname[XEN_BUS_ID_SIZE];
 	int err;
 	struct xenbus_device *xendev;
-	size_t stringlen;
+	size_t name_len, type_len;
 	char *tmpstring;
 
-	enum xenbus_state state = xenbus_read_driver_state(nodename);
+	enum xenbus_state state = xenbus_read_driver_state(NULL, nodename);
 
 	if (state != XenbusStateInitialising) {
 		/* Device is not new, so ignore it.  This can happen if a
@@ -522,8 +525,9 @@ int xenbus_probe_node(struct xen_bus_type *bus,
 		return 0;
 	}
 
-	stringlen = strlen(nodename) + 1 + strlen(type) + 1;
-	xendev = kzalloc(sizeof(*xendev) + stringlen, GFP_KERNEL);
+	name_len = strlen(nodename);
+	type_len = strlen(type);
+	xendev = kzalloc(sizeof(*xendev) + name_len + 1 + type_len + 1, GFP_KERNEL);
 	if (!xendev)
 		return -ENOMEM;
 
@@ -532,11 +536,11 @@ int xenbus_probe_node(struct xen_bus_type *bus,
 	/* Copy the strings into the extra space. */
 
 	tmpstring = (char *)(xendev + 1);
-	strcpy(tmpstring, nodename);
+	memcpy(tmpstring, nodename, name_len);
 	xendev->nodename = tmpstring;
 
-	tmpstring += strlen(tmpstring) + 1;
-	strcpy(tmpstring, type);
+	tmpstring += name_len + 1;
+	memcpy(tmpstring, type, type_len);
 	xendev->devicetype = tmpstring;
 	init_completion(&xendev->down);
 
@@ -659,6 +663,41 @@ void xenbus_dev_changed(const char *node, struct xen_bus_type *bus)
 		return;
 
 	dev = xenbus_device_find(root, &bus->bus);
+	/*
+	 * Backend domain crash results in not coordinated frontend removal,
+	 * without going through XenbusStateClosing. If this is a new instance
+	 * of the same device Xen tools will have reset the state to
+	 * XenbusStateInitializing.
+	 * It might be that the backend crashed early during the init phase of
+	 * device setup, in which case the known state would have been
+	 * XenbusStateInitializing. So test the backend domid to match the
+	 * saved one. In case the new backend happens to have the same domid as
+	 * the old one, we can just carry on, as there is no inconsistency
+	 * resulting in this case.
+	 */
+	if (dev && !strcmp(bus->root, "device")) {
+		enum xenbus_state state = xenbus_read_driver_state(dev, dev->nodename);
+		unsigned int backend = xenbus_read_unsigned(root, "backend-id",
+							    dev->otherend_id);
+
+		if (state == XenbusStateInitialising &&
+		    (state != dev->state ||
+		     (dev->otherend && backend != dev->otherend_id))) {
+			/*
+			 * State has been reset, assume the old one vanished
+			 * and new one needs to be probed.
+			 */
+			dev_warn(&dev->dev,
+				 "state reset occurred (xenstore state %u, local state %u, xenstore backend %u, local backend %u), reconnecting\n",
+				 state, dev->state, backend, dev->otherend_id);
+			dev->vanished = true;
+		}
+		if (dev->vanished) {
+			device_unregister(&dev->dev);
+			put_device(&dev->dev);
+			dev = NULL;
+		}
+	}
 	if (!dev)
 		xenbus_probe_node(bus, type, root);
 	else
@@ -668,7 +707,7 @@ void xenbus_dev_changed(const char *node, struct xen_bus_type *bus)
 }
 EXPORT_SYMBOL_GPL(xenbus_dev_changed);
 
-int xenbus_dev_suspend(struct device *dev)
+int xenbus_dev_freeze(struct device *dev)
 {
 	int err = 0;
 	struct xenbus_driver *drv;
@@ -683,12 +722,12 @@ int xenbus_dev_suspend(struct device *dev)
 	if (drv->suspend)
 		err = drv->suspend(xdev);
 	if (err)
-		dev_warn(dev, "suspend failed: %i\n", err);
+		dev_warn(dev, "freeze failed: %i\n", err);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(xenbus_dev_suspend);
+EXPORT_SYMBOL_GPL(xenbus_dev_freeze);
 
-int xenbus_dev_resume(struct device *dev)
+int xenbus_dev_restore(struct device *dev)
 {
 	int err;
 	struct xenbus_driver *drv;
@@ -702,7 +741,7 @@ int xenbus_dev_resume(struct device *dev)
 	drv = to_xenbus_driver(dev->driver);
 	err = talk_to_otherend(xdev);
 	if (err) {
-		dev_warn(dev, "resume (talk_to_otherend) failed: %i\n", err);
+		dev_warn(dev, "restore (talk_to_otherend) failed: %i\n", err);
 		return err;
 	}
 
@@ -711,28 +750,28 @@ int xenbus_dev_resume(struct device *dev)
 	if (drv->resume) {
 		err = drv->resume(xdev);
 		if (err) {
-			dev_warn(dev, "resume failed: %i\n", err);
+			dev_warn(dev, "restore failed: %i\n", err);
 			return err;
 		}
 	}
 
 	err = watch_otherend(xdev);
 	if (err) {
-		dev_warn(dev, "resume (watch_otherend) failed: %d\n", err);
+		dev_warn(dev, "restore (watch_otherend) failed: %d\n", err);
 		return err;
 	}
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(xenbus_dev_resume);
+EXPORT_SYMBOL_GPL(xenbus_dev_restore);
 
-int xenbus_dev_cancel(struct device *dev)
+int xenbus_dev_thaw(struct device *dev)
 {
 	/* Do nothing */
-	DPRINTK("cancel");
+	DPRINTK("thaw");
 	return 0;
 }
-EXPORT_SYMBOL_GPL(xenbus_dev_cancel);
+EXPORT_SYMBOL_GPL(xenbus_dev_thaw);
 
 /* A flag to determine if xenstored is 'ready' (i.e. has started) */
 int xenstored_ready;
@@ -794,7 +833,7 @@ static void xenbus_probe(void)
  */
 static bool xs_hvm_defer_init_for_callback(void)
 {
-#ifdef CONFIG_XEN_PVHVM
+#ifdef CONFIG_X86
 	return xen_store_domain_type == XS_HVM &&
 		!xen_have_vector_callback;
 #else

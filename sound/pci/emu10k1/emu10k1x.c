@@ -367,7 +367,7 @@ static int snd_emu10k1x_playback_open(struct snd_pcm_substream *substream)
 	if (err < 0)
                 return err;
 
-	epcm = kzalloc(sizeof(*epcm), GFP_KERNEL);
+	epcm = kzalloc_obj(*epcm);
 	if (epcm == NULL)
 		return -ENOMEM;
 	epcm->emu = chip;
@@ -547,7 +547,7 @@ static int snd_emu10k1x_pcm_open_capture(struct snd_pcm_substream *substream)
 	if (err < 0)
 		return err;
 
-	epcm = kzalloc(sizeof(*epcm), GFP_KERNEL);
+	epcm = kzalloc_obj(*epcm);
 	if (epcm == NULL)
 		return -ENOMEM;
 
@@ -1447,11 +1447,11 @@ static int snd_emu10k1x_midi(struct emu10k1x *emu)
 	return 0;
 }
 
-static int __snd_emu10k1x_probe(struct pci_dev *pci,
-				const struct pci_device_id *pci_id)
+static int snd_emu10k1x_probe(struct pci_dev *pci,
+			      const struct pci_device_id *pci_id)
 {
 	static int dev;
-	struct snd_card *card;
+	struct snd_card *card __free(snd_card_free) = NULL;
 	struct emu10k1x *chip;
 	int err;
 
@@ -1506,20 +1506,15 @@ static int __snd_emu10k1x_probe(struct pci_dev *pci,
 		return err;
 
 	pci_set_drvdata(pci, card);
+	card = NULL; /* probe succeeded, don't release as error */
 	dev++;
 	return 0;
 }
 
-static int snd_emu10k1x_probe(struct pci_dev *pci,
-			      const struct pci_device_id *pci_id)
-{
-	return snd_card_free_on_error(&pci->dev, __snd_emu10k1x_probe(pci, pci_id));
-}
-
 // PCI IDs
 static const struct pci_device_id snd_emu10k1x_ids[] = {
-	{ PCI_VDEVICE(CREATIVE, 0x0006), 0 },	/* Dell OEM version (EMU10K1) */
-	{ 0, }
+	{ PCI_VDEVICE(CREATIVE, 0x0006) },	/* Dell OEM version (EMU10K1) */
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, snd_emu10k1x_ids);
 

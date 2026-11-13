@@ -14,7 +14,6 @@
 #include <linux/irqchip/chained_irq.h>
 #include <linux/irqchip.h>
 #include <linux/irq.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
@@ -221,7 +220,6 @@ static int lan966x_oic_probe(struct platform_device *pdev)
 	};
 	struct irq_domain_info d_info = {
 		.fwnode		= of_fwnode_handle(pdev->dev.of_node),
-		.domain_flags	= IRQ_DOMAIN_FLAG_DESTROY_GC,
 		.size		= LAN966X_OIC_NR_IRQ,
 		.hwirq_max	= LAN966X_OIC_NR_IRQ,
 		.ops		= &irq_generic_chip_ops,
@@ -233,7 +231,7 @@ static int lan966x_oic_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct irq_domain *domain;
 
-	lan966x_oic = devm_kmalloc(dev, sizeof(*lan966x_oic), GFP_KERNEL);
+	lan966x_oic = devm_kmalloc_obj(dev, *lan966x_oic);
 	if (!lan966x_oic)
 		return -ENOMEM;
 

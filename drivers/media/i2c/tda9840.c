@@ -162,7 +162,7 @@ static int tda9840_probe(struct i2c_client *client)
 	v4l_info(client, "chip found @ 0x%x (%s)\n",
 			client->addr << 1, client->adapter->name);
 
-	sd = devm_kzalloc(&client->dev, sizeof(*sd), GFP_KERNEL);
+	sd = devm_kzalloc_obj(&client->dev, *sd);
 	if (sd == NULL)
 		return -ENOMEM;
 	v4l2_i2c_subdev_init(sd, client, &tda9840_ops);
@@ -182,7 +182,7 @@ static void tda9840_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id tda9840_id[] = {
-	{ "tda9840" },
+	{ .name = "tda9840" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tda9840_id);

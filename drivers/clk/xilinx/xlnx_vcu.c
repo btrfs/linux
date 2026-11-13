@@ -16,7 +16,6 @@
 #include <linux/mfd/syscon.h>
 #include <linux/mfd/syscon/xlnx-vcu.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 
@@ -407,9 +406,9 @@ static struct clk_hw *xvcu_register_pll(struct device *dev,
 					const char *name, const char *parent,
 					unsigned long flags)
 {
+	struct clk_init_data init = {};
 	struct vcu_pll *pll;
 	struct clk_hw *hw;
-	struct clk_init_data init;
 	int ret;
 
 	init.name = name;
@@ -418,7 +417,7 @@ static struct clk_hw *xvcu_register_pll(struct device *dev,
 	init.num_parents = 1;
 	init.flags = flags;
 
-	pll = devm_kmalloc(dev, sizeof(*pll), GFP_KERNEL);
+	pll = devm_kmalloc_obj(dev, *pll);
 	if (!pll)
 		return ERR_PTR(-ENOMEM);
 
@@ -455,7 +454,7 @@ static struct clk_hw *xvcu_clk_hw_register_leaf(struct device *dev,
 	/* Protect register shared by clocks */
 	spinlock_t *lock;
 
-	lock = devm_kzalloc(dev, sizeof(*lock), GFP_KERNEL);
+	lock = devm_kzalloc_obj(dev, *lock);
 	if (!lock)
 		return ERR_PTR(-ENOMEM);
 	spin_lock_init(lock);
@@ -533,7 +532,7 @@ static int xvcu_register_clock_provider(struct xvcu_device *xvcu)
 	struct clk_hw *hw;
 	void __iomem *reg_base = xvcu->vcu_slcr_ba;
 
-	data = devm_kzalloc(dev, struct_size(data, hws, CLK_XVCU_NUM_CLOCKS), GFP_KERNEL);
+	data = devm_kzalloc_flex(dev, *data, hws, CLK_XVCU_NUM_CLOCKS);
 	if (!data)
 		return -ENOMEM;
 	data->num = CLK_XVCU_NUM_CLOCKS;
@@ -613,7 +612,7 @@ static int xvcu_probe(struct platform_device *pdev)
 	void __iomem *regs;
 	int ret;
 
-	xvcu = devm_kzalloc(&pdev->dev, sizeof(*xvcu), GFP_KERNEL);
+	xvcu = devm_kzalloc_obj(&pdev->dev, *xvcu);
 	if (!xvcu)
 		return -ENOMEM;
 

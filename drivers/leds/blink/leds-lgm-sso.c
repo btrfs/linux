@@ -25,7 +25,7 @@
 #define LED_BLINK_H8_0			0x0
 #define LED_BLINK_H8_1			0x4
 #define GET_FREQ_OFFSET(pin, src)	(((pin) * 6) + ((src) * 2))
-#define GET_SRC_OFFSET(pinc)		(((pin) * 6) + 4)
+#define GET_SRC_OFFSET(pin) 		(((pin) * 6) + 4)
 
 #define DUTY_CYCLE(x)			(0x8 + ((x) * 4))
 #define SSO_CON0			0x2B0
@@ -627,7 +627,7 @@ __sso_led_dt_parse(struct sso_led_priv *priv, struct fwnode_handle *fw_ssoled)
 	int ret;
 
 	fwnode_for_each_child_node(fw_ssoled, fwnode_child) {
-		led = devm_kzalloc(dev, sizeof(*led), GFP_KERNEL);
+		led = devm_kzalloc_obj(dev, *led);
 		if (!led) {
 			ret = -ENOMEM;
 			goto __dt_err;
@@ -777,7 +777,7 @@ static int intel_sso_led_probe(struct platform_device *pdev)
 	struct sso_led_priv *priv;
 	int ret;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -807,8 +807,6 @@ static int intel_sso_led_probe(struct platform_device *pdev)
 		return ret;
 
 	priv->fpid_clkrate = clk_get_rate(priv->clocks[1].clk);
-
-	priv->mmap = syscon_node_to_regmap(dev->of_node);
 
 	priv->mmap = syscon_node_to_regmap(dev->of_node);
 	if (IS_ERR(priv->mmap)) {

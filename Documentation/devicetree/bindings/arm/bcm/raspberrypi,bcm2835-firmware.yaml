@@ -65,6 +65,11 @@ properties:
       gpio-line-names:
         minItems: 8
 
+    patternProperties:
+      '-hog$':
+        required:
+          - gpio-hog
+
     required:
       - compatible
       - gpio-controller
@@ -86,6 +91,9 @@ properties:
     required:
       - compatible
       - "#reset-cells"
+
+  power:
+    $ref: /schemas/power/raspberrypi,bcm2835-power.yaml#
 
   pwm:
     type: object
@@ -125,6 +133,11 @@ properties:
     required:
       - compatible
 
+  trickle-voltage-millivolt:
+    $ref: /schemas/rtc/rtc.yaml#/properties/trickle-voltage-millivolt
+    minimum: 1300
+    maximum: 5000
+
 required:
   - compatible
   - mboxes
@@ -136,6 +149,7 @@ examples:
     firmware {
         compatible = "raspberrypi,bcm2835-firmware", "simple-mfd";
         mboxes = <&mailbox>;
+        trickle-voltage-millivolt = <3300>;
 
         firmware_clocks: clocks {
             compatible = "raspberrypi,firmware-clocks";

@@ -6,7 +6,6 @@
  */
 
 #include <linux/i2c.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
 
@@ -79,7 +78,7 @@ static int bmi323_i2c_probe(struct i2c_client *i2c)
 	struct bmi323_i2c_priv *priv;
 	struct regmap *regmap;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -114,7 +113,7 @@ static const struct acpi_device_id bmi323_acpi_match[] = {
 MODULE_DEVICE_TABLE(acpi, bmi323_acpi_match);
 
 static const struct i2c_device_id bmi323_i2c_ids[] = {
-	{ "bmi323" },
+	{ .name = "bmi323" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, bmi323_i2c_ids);

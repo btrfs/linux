@@ -15,6 +15,7 @@
 
 #include <linux/module.h>
 #include <linux/spinlock.h>
+#include <linux/fs_context.h>
 #include <net/9p/9p.h>
 #include <net/9p/client.h>
 #include <net/9p/transport.h>
@@ -54,7 +55,7 @@ struct xen_9pfs_front_priv {
 	char *tag;
 	struct p9_client *client;
 
-	struct xen_9pfs_dataring *rings;
+	struct xen_9pfs_dataring rings[XEN_9PFS_NUM_RINGS];
 };
 
 static LIST_HEAD(xen_9pfs_devs);
@@ -66,8 +67,9 @@ static int p9_xen_cancel(struct p9_client *client, struct p9_req_t *req)
 	return 1;
 }
 
-static int p9_xen_create(struct p9_client *client, const char *addr, char *args)
+static int p9_xen_create(struct p9_client *client, struct fs_context *fc)
 {
+	const char *addr = fc->source;
 	struct xen_9pfs_front_priv *priv;
 
 	if (addr == NULL)
@@ -134,8 +136,8 @@ static int p9_xen_request(struct p9_client *client, struct p9_req_t *p9_req)
 	ring = &priv->rings[num];
 
 again:
-	while (wait_event_killable(ring->wq,
-				   p9_xen_write_todo(ring, size)) != 0)
+	while (io_wait_event_killable(ring->wq,
+				      p9_xen_write_todo(ring, size)) != 0)
 		;
 
 	spin_lock_irqsave(&ring->lock, flags);
@@ -198,9 +200,19 @@ static void p9_xen_response(struct work_struct *work)
 				     masked_prod, &masked_cons,
 				     XEN_9PFS_RING_SIZE(ring));
 
+		if (h.size < sizeof(h) ||
+		    h.size > xen_9pfs_queued(prod, cons,
+					     XEN_9PFS_RING_SIZE(ring))) {
+			dev_warn_ratelimited(&priv->dev->dev,
+					     "bad response size %u from backend\n", h.size);
+			break;
+		}
+
 		req = p9_tag_lookup(priv->client, h.tag);
 		if (!req || req->status != REQ_STATUS_SENT) {
 			dev_warn(&priv->dev->dev, "Wrong req tag=%x\n", h.tag);
+			if (req)
+				p9_req_put(priv->client, req);
 			cons += h.size;
 			virt_mb();
 			ring->intf->in_cons = cons;
@@ -257,7 +269,8 @@ static struct p9_trans_module p9_xen_trans = {
 	.name = "xen",
 	.maxsize = 1 << (XEN_9PFS_RING_ORDER + XEN_PAGE_SHIFT - 2),
 	.pooled_rbuffers = false,
-	.def = 1,
+	.def = true,
+	.supports_vmalloc = false,
 	.create = p9_xen_create,
 	.close = p9_xen_close,
 	.request = p9_xen_request,
@@ -274,45 +287,56 @@ static void xen_9pfs_front_free(struct xen_9pfs_front_priv *priv)
 {
 	int i, j;
 
-	write_lock(&xen_9pfs_lock);
-	list_del(&priv->list);
-	write_unlock(&xen_9pfs_lock);
-
 	for (i = 0; i < XEN_9PFS_NUM_RINGS; i++) {
 		struct xen_9pfs_dataring *ring = &priv->rings[i];
 
+		if (!ring->intf)
+			break;
+		if (ring->irq >= 0) {
+			unbind_from_irqhandler(ring->irq, ring);
+			ring->irq = -1;
+		}
 		cancel_work_sync(&ring->work);
 
-		if (!priv->rings[i].intf)
-			break;
-		if (priv->rings[i].irq > 0)
-			unbind_from_irqhandler(priv->rings[i].irq, ring);
-		if (priv->rings[i].data.in) {
-			for (j = 0;
-			     j < (1 << priv->rings[i].intf->ring_order);
-			     j++) {
+		if (ring->data.in) {
+			for (j = 0; j < (1 << ring->intf->ring_order); j++) {
 				grant_ref_t ref;
 
-				ref = priv->rings[i].intf->ref[j];
+				ref = ring->intf->ref[j];
 				gnttab_end_foreign_access(ref, NULL);
+				ring->intf->ref[j] = INVALID_GRANT_REF;
 			}
-			free_pages_exact(priv->rings[i].data.in,
-				   1UL << (priv->rings[i].intf->ring_order +
-					   XEN_PAGE_SHIFT));
+			free_pages_exact(ring->data.in,
+					 1UL << (ring->intf->ring_order +
+						 XEN_PAGE_SHIFT));
+			ring->data.in = NULL;
+			ring->data.out = NULL;
 		}
-		gnttab_end_foreign_access(priv->rings[i].ref, NULL);
-		free_page((unsigned long)priv->rings[i].intf);
+		if (ring->ref != INVALID_GRANT_REF) {
+			gnttab_end_foreign_access(ring->ref, NULL);
+			ring->ref = INVALID_GRANT_REF;
+		}
+		free_page((unsigned long)ring->intf);
+		ring->intf = NULL;
 	}
-	kfree(priv->rings);
 	kfree(priv->tag);
 	kfree(priv);
 }
 
 static void xen_9pfs_front_remove(struct xenbus_device *dev)
 {
-	struct xen_9pfs_front_priv *priv = dev_get_drvdata(&dev->dev);
+	struct xen_9pfs_front_priv *priv;
 
+	write_lock(&xen_9pfs_lock);
+	priv = dev_get_drvdata(&dev->dev);
+	if (priv == NULL) {
+		write_unlock(&xen_9pfs_lock);
+		return;
+	}
 	dev_set_drvdata(&dev->dev, NULL);
+	list_del(&priv->list);
+	write_unlock(&xen_9pfs_lock);
+
 	xen_9pfs_front_free(priv);
 }
 
@@ -323,6 +347,12 @@ static int xen_9pfs_front_alloc_dataring(struct xenbus_device *dev,
 	int i = 0;
 	int ret = -ENOMEM;
 	void *bytes = NULL;
+
+	ring->intf = NULL;
+	ring->data.in = NULL;
+	ring->data.out = NULL;
+	ring->ref = INVALID_GRANT_REF;
+	ring->irq = -1;
 
 	init_waitqueue_head(&ring->wq);
 	spin_lock_init(&ring->lock);
@@ -369,9 +399,18 @@ out:
 		for (i--; i >= 0; i--)
 			gnttab_end_foreign_access(ring->intf->ref[i], NULL);
 		free_pages_exact(bytes, 1UL << (order + XEN_PAGE_SHIFT));
+		ring->data.in = NULL;
+		ring->data.out = NULL;
 	}
-	gnttab_end_foreign_access(ring->ref, NULL);
-	free_page((unsigned long)ring->intf);
+	if (ring->ref != INVALID_GRANT_REF) {
+		gnttab_end_foreign_access(ring->ref, NULL);
+		ring->ref = INVALID_GRANT_REF;
+	}
+	if (ring->intf) {
+		free_page((unsigned long)ring->intf);
+		ring->intf = NULL;
+	}
+	ring->irq = -1;
 	return ret;
 }
 
@@ -379,24 +418,30 @@ static int xen_9pfs_front_init(struct xenbus_device *dev)
 {
 	int ret, i;
 	struct xenbus_transaction xbt;
-	struct xen_9pfs_front_priv *priv = dev_get_drvdata(&dev->dev);
-	char *versions, *v;
-	unsigned int max_rings, max_ring_order, len = 0;
+	struct xen_9pfs_front_priv *priv;
+	char *versions, *v, *token;
+	bool version_1 = false;
+	unsigned int max_rings, max_ring_order, len = 0, version;
 
 	versions = xenbus_read(XBT_NIL, dev->otherend, "versions", &len);
 	if (IS_ERR(versions))
 		return PTR_ERR(versions);
-	for (v = versions; *v; v++) {
-		if (simple_strtoul(v, &v, 10) == 1) {
-			v = NULL;
-			break;
+	for (v = versions; (token = strsep(&v, ",")); ) {
+		if (!*token)
+			continue;
+
+		ret = kstrtouint(token, 10, &version);
+		if (ret) {
+			kfree(versions);
+			return ret;
 		}
-	}
-	if (v) {
-		kfree(versions);
-		return -EINVAL;
+		if (version == 1)
+			version_1 = true;
 	}
 	kfree(versions);
+	if (!version_1)
+		return -EINVAL;
+
 	max_rings = xenbus_read_unsigned(dev->otherend, "max-rings", 0);
 	if (max_rings < XEN_9PFS_NUM_RINGS)
 		return -EINVAL;
@@ -407,12 +452,10 @@ static int xen_9pfs_front_init(struct xenbus_device *dev)
 	if (p9_xen_trans.maxsize > XEN_FLEX_RING_SIZE(max_ring_order))
 		p9_xen_trans.maxsize = XEN_FLEX_RING_SIZE(max_ring_order) / 2;
 
-	priv->rings = kcalloc(XEN_9PFS_NUM_RINGS, sizeof(*priv->rings),
-			      GFP_KERNEL);
-	if (!priv->rings) {
-		kfree(priv);
+	priv = kzalloc_obj(*priv);
+	if (!priv)
 		return -ENOMEM;
-	}
+	priv->dev = dev;
 
 	for (i = 0; i < XEN_9PFS_NUM_RINGS; i++) {
 		priv->rings[i].priv = priv;
@@ -465,6 +508,11 @@ static int xen_9pfs_front_init(struct xenbus_device *dev)
 		goto error;
 	}
 
+	write_lock(&xen_9pfs_lock);
+	dev_set_drvdata(&dev->dev, priv);
+	list_add_tail(&priv->list, &xen_9pfs_devs);
+	write_unlock(&xen_9pfs_lock);
+
 	xenbus_switch_state(dev, XenbusStateInitialised);
 	return 0;
 
@@ -479,19 +527,6 @@ static int xen_9pfs_front_init(struct xenbus_device *dev)
 static int xen_9pfs_front_probe(struct xenbus_device *dev,
 				const struct xenbus_device_id *id)
 {
-	struct xen_9pfs_front_priv *priv = NULL;
-
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
-	if (!priv)
-		return -ENOMEM;
-
-	priv->dev = dev;
-	dev_set_drvdata(&dev->dev, priv);
-
-	write_lock(&xen_9pfs_lock);
-	list_add_tail(&priv->list, &xen_9pfs_devs);
-	write_unlock(&xen_9pfs_lock);
-
 	return 0;
 }
 

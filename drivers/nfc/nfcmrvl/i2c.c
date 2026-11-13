@@ -195,7 +195,7 @@ static int nfcmrvl_i2c_probe(struct i2c_client *client)
 		return -ENODEV;
 	}
 
-	drv_data = devm_kzalloc(&client->dev, sizeof(*drv_data), GFP_KERNEL);
+	drv_data = devm_kzalloc_obj(&client->dev, *drv_data);
 	if (!drv_data)
 		return -ENOMEM;
 
@@ -245,15 +245,15 @@ static void nfcmrvl_i2c_remove(struct i2c_client *client)
 }
 
 
-static const struct of_device_id of_nfcmrvl_i2c_match[] __maybe_unused = {
-	{ .compatible = "marvell,nfc-i2c", },
-	{},
+static const struct of_device_id of_nfcmrvl_i2c_match[] = {
+	{ .compatible = "marvell,nfc-i2c" },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, of_nfcmrvl_i2c_match);
 
 static const struct i2c_device_id nfcmrvl_i2c_id_table[] = {
-	{ "nfcmrvl_i2c" },
-	{}
+	{ .name = "nfcmrvl_i2c" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, nfcmrvl_i2c_id_table);
 

@@ -42,7 +42,6 @@
 #include <linux/pm_runtime.h>
 #include <linux/gpio/consumer.h>
 
-#include "physmap-bt1-rom.h"
 #include "physmap-gemini.h"
 #include "physmap-ixp4xx.h"
 #include "physmap-versatile.h"
@@ -268,7 +267,7 @@ static const struct of_device_id of_flash_match[] = {
 MODULE_DEVICE_TABLE(of, of_flash_match);
 
 static const char * const of_default_part_probes[] = {
-	"cmdlinepart", "RedBoot", "ofpart", "ofoldpart", NULL
+	"cmdlinepart", "ofpart", "ofoldpart", "RedBoot", NULL
 };
 
 static const char * const *of_get_part_probes(struct platform_device *dev)
@@ -281,7 +280,7 @@ static const char * const *of_get_part_probes(struct platform_device *dev)
 	if (count < 0)
 		return of_default_part_probes;
 
-	res = devm_kcalloc(&dev->dev, count + 1, sizeof(*res), GFP_KERNEL);
+	res = devm_kzalloc_objs(&dev->dev, *res, count + 1);
 	if (!res)
 		return NULL;
 
@@ -364,10 +363,6 @@ static int physmap_flash_of_init(struct platform_device *dev)
 		info->maps[i].swap = swap;
 		info->maps[i].bankwidth = bankwidth;
 		info->maps[i].device_node = dp;
-
-		err = of_flash_probe_bt1_rom(dev, dp, &info->maps[i]);
-		if (err)
-			return err;
 
 		err = of_flash_probe_gemini(dev, dp, &info->maps[i]);
 		if (err)
@@ -452,7 +447,7 @@ static int physmap_flash_probe(struct platform_device *dev)
 	if (!dev->dev.of_node && !dev_get_platdata(&dev->dev))
 		return -EINVAL;
 
-	info = devm_kzalloc(&dev->dev, sizeof(*info), GFP_KERNEL);
+	info = devm_kzalloc_obj(&dev->dev, *info);
 	if (!info)
 		return -ENOMEM;
 

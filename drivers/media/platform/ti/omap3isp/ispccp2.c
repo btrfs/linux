@@ -658,7 +658,7 @@ static void ccp2_try_format(struct isp_ccp2_device *ccp2,
 			fmt->height = clamp_t(u32, fmt->height,
 					      ISPCCP2_DAT_SIZE_MIN,
 					      ISPCCP2_DAT_SIZE_MAX);
-		} else if (ccp2->input == CCP2_INPUT_MEMORY) {
+		} else {
 			fmt->width = clamp_t(u32, fmt->width,
 					     ISPCCP2_LCM_HSIZE_COUNT_MIN,
 					     ISPCCP2_LCM_HSIZE_COUNT_MAX);
@@ -776,6 +776,7 @@ static int ccp2_get_format(struct v4l2_subdev *sd,
  * returns zero
  */
 static int ccp2_set_format(struct v4l2_subdev *sd,
+			   const struct v4l2_subdev_client_info *ci,
 			   struct v4l2_subdev_state *sd_state,
 			   struct v4l2_subdev_format *fmt)
 {
@@ -820,7 +821,7 @@ static int ccp2_init_formats(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 	format.format.code = MEDIA_BUS_FMT_SGRBG10_1X10;
 	format.format.width = 4096;
 	format.format.height = 4096;
-	ccp2_set_format(sd, fh ? fh->state : NULL, &format);
+	ccp2_set_format(sd, NULL, fh ? fh->state : NULL, &format);
 
 	return 0;
 }
@@ -1086,6 +1087,7 @@ static int ccp2_init_entities(struct isp_ccp2_device *ccp2)
 	pads[CCP2_PAD_SOURCE].flags = MEDIA_PAD_FL_SOURCE;
 
 	me->ops = &ccp2_media_ops;
+	me->function = MEDIA_ENT_F_VID_IF_BRIDGE;
 	ret = media_entity_pads_init(me, CCP2_PADS_NUM, pads);
 	if (ret < 0)
 		return ret;

@@ -179,7 +179,7 @@ static int wacom_i2c_probe(struct i2c_client *client)
 	if (error)
 		return error;
 
-	wac_i2c = devm_kzalloc(dev, sizeof(*wac_i2c), GFP_KERNEL);
+	wac_i2c = devm_kzalloc_obj(dev, *wac_i2c);
 	if (!wac_i2c)
 		return -ENOMEM;
 
@@ -253,7 +253,7 @@ static int wacom_i2c_resume(struct device *dev)
 static DEFINE_SIMPLE_DEV_PM_OPS(wacom_i2c_pm, wacom_i2c_suspend, wacom_i2c_resume);
 
 static const struct i2c_device_id wacom_i2c_id[] = {
-	{ "WAC_I2C_EMR" },
+	{ .name = "WAC_I2C_EMR" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wacom_i2c_id);

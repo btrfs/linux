@@ -225,9 +225,9 @@ exit_unlock:
 	return ret;
 }
 
-static int idio_24_reg_mask_xlate(struct gpio_regmap *const gpio, const unsigned int base,
-				  const unsigned int offset, unsigned int *const reg,
-				  unsigned int *const mask)
+static int idio_24_reg_mask_xlate(struct gpio_regmap *const gpio, enum gpio_regmap_operation op,
+				  const unsigned int base, const unsigned int offset,
+				  unsigned int *const reg, unsigned int *const mask)
 {
 	const unsigned int out_stride = offset / IDIO_24_NGPIO_PER_REG;
 	const unsigned int in_stride = (offset - 24) / IDIO_24_NGPIO_PER_REG;
@@ -321,7 +321,7 @@ static int idio_24_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		return dev_err_probe(dev, PTR_ERR(intcsr_map),
 				     "Unable to initialize PEX8311 register map\n");
 
-	idio24gpio = devm_kzalloc(dev, sizeof(*idio24gpio), GFP_KERNEL);
+	idio24gpio = devm_kzalloc_obj(dev, *idio24gpio);
 	if (!idio24gpio)
 		return -ENOMEM;
 
@@ -335,7 +335,7 @@ static int idio_24_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	/* Initialize all IRQ type configuration to IRQ_TYPE_EDGE_BOTH */
 	idio24gpio->irq_type = GENMASK(7, 0);
 
-	chip = devm_kzalloc(dev, sizeof(*chip), GFP_KERNEL);
+	chip = devm_kzalloc_obj(dev, *chip);
 	if (!chip)
 		return -ENOMEM;
 

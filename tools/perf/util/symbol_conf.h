@@ -9,7 +9,38 @@
 struct strlist;
 struct intlist;
 
+enum unwind_style {
+	UNWIND_STYLE_UNKNOWN = 0,
+	UNWIND_STYLE_LIBDW,
+	UNWIND_STYLE_LIBUNWIND,
+};
+
+#define MAX_UNWIND_STYLE (UNWIND_STYLE_LIBUNWIND + 1)
+
+
+enum a2l_style {
+	A2L_STYLE_UNKNOWN = 0,
+	A2L_STYLE_LIBDW,
+	A2L_STYLE_LLVM,
+	A2L_STYLE_LIBBFD,
+	A2L_STYLE_CMD,
+};
+#define MAX_A2L_STYLE (A2L_STYLE_CMD + 1)
+
+enum symbol__weight_mode {
+	WEIGHT_NONE = 0,
+	WEIGHT_WEIGHT,
+	WEIGHT_INSNLAT,
+	WEIGHT_WEIGHT3,
+};
+
+#define for_each_weight(_weight) \
+	for ((_weight) = WEIGHT_WEIGHT; (_weight) <= WEIGHT_WEIGHT3; (_weight)++)
+
 struct symbol_conf {
+	bool		hybrid_merge;
+	/* Was hybrid_merge given on the command line rather than in a config file? */
+	bool		hybrid_merge_set;
 	bool		nanosecs;
 	unsigned short	priv_size;
 	bool		try_vmlinux_path,
@@ -42,7 +73,7 @@ struct symbol_conf {
 			report_block,
 			report_individual_block,
 			inline_name,
-			disable_add2line_warn,
+			addr2line_disable_warn,
 			no_buildid_mmap2,
 			guest_code,
 			lazy_load_kernel_maps,
@@ -51,7 +82,8 @@ struct symbol_conf {
 			annotate_data_sample,
 			skip_empty,
 			enable_latency,
-			prefer_latency;
+			prefer_latency,
+			annotate_weight;
 	const char	*vmlinux_name,
 			*kallsyms_name,
 			*source_prefix,
@@ -70,6 +102,9 @@ struct symbol_conf {
 			*col_width_list_str,
 			*bt_stop_list_str;
 	const char		*addr2line_path;
+	enum a2l_style	addr2line_style[MAX_A2L_STYLE];
+	int             addr2line_timeout_ms;
+	enum unwind_style unwind_style[MAX_UNWIND_STYLE];
 	unsigned long	time_quantum;
        struct strlist	*dso_list,
 			*comm_list,
@@ -83,6 +118,7 @@ struct symbol_conf {
 			*tid_list,
 			*addr_list;
 	const char	*symfs;
+	bool		symfs_layout_flat;
 	int		res_sample;
 	int		pad_output_len_dso;
 	int		group_sort_idx;

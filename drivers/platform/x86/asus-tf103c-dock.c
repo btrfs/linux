@@ -21,7 +21,6 @@
 #include <linux/input.h>
 #include <linux/irq.h>
 #include <linux/irqdomain.h>
-#include <linux/mod_devicetable.h>
 #include <linux/moduleparam.h>
 #include <linux/module.h>
 #include <linux/pm.h>
@@ -726,7 +725,7 @@ static int tf103c_dock_probe(struct i2c_client *client)
 	if (!dmi_check_system(tf103c_dock_dmi_ids))
 		return -ENODEV;
 
-	dock = devm_kzalloc(dev, sizeof(*dock), GFP_KERNEL);
+	dock = devm_kzalloc_obj(dev, *dock);
 	if (!dock)
 		return -ENOMEM;
 
@@ -773,7 +772,7 @@ static int tf103c_dock_probe(struct i2c_client *client)
 					IRQF_TRIGGER_LOW | IRQF_ONESHOT | IRQF_NO_AUTOEN,
 					"dock_irq", dock);
 	if (ret)
-		return dev_err_probe(dev, ret, "requesting dock IRQ");
+		return ret;
 
 	dock->hpd_gpio = devm_gpiod_get(dev, "dock_hpd", GPIOD_IN);
 	if (IS_ERR(dock->hpd_gpio))

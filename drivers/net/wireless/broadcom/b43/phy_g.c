@@ -6,7 +6,7 @@
 
   Copyright (c) 2005 Martin Langer <martin-langer@gmx.de>,
   Copyright (c) 2005-2007 Stefano Brivio <stefano.brivio@polimi.it>
-  Copyright (c) 2005-2008 Michael Buesch <m@bues.ch>
+  Copyright (c) 2005-2008 Michael Buesch
   Copyright (c) 2005, 2006 Danny van Dyk <kugelfang@gentoo.org>
   Copyright (c) 2005, 2006 Andreas Jaggi <andreas.jaggi@waterwave.ch>
 
@@ -2422,14 +2422,14 @@ static int b43_gphy_op_allocate(struct b43_wldev *dev)
 	struct b43_txpower_lo_control *lo;
 	int err;
 
-	gphy = kzalloc(sizeof(*gphy), GFP_KERNEL);
+	gphy = kzalloc_obj(*gphy);
 	if (!gphy) {
 		err = -ENOMEM;
 		goto error;
 	}
 	dev->phy.g = gphy;
 
-	lo = kzalloc(sizeof(*lo), GFP_KERNEL);
+	lo = kzalloc_obj(*lo);
 	if (!lo) {
 		err = -ENOMEM;
 		goto err_free_gphy;

@@ -11,6 +11,7 @@
 #include <linux/err.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
+#include <linux/minmax.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
@@ -80,12 +81,7 @@ static int bcm2835_thermal_temp2adc(int temp, int offset, int slope)
 	temp -= offset;
 	temp /= slope;
 
-	if (temp < 0)
-		temp = 0;
-	if (temp >= BIT(BCM2835_TS_TSENSSTAT_DATA_BITS))
-		temp = BIT(BCM2835_TS_TSENSSTAT_DATA_BITS) - 1;
-
-	return temp;
+	return clamp(temp, 0, (int)BIT(BCM2835_TS_TSENSSTAT_DATA_BITS) - 1);
 }
 
 static int bcm2835_thermal_get_temp(struct thermal_zone_device *tz, int *temp)
@@ -124,7 +120,7 @@ static void bcm2835_thermal_debugfs(struct platform_device *pdev)
 
 	data->debugfsdir = debugfs_create_dir("bcm2835_thermal", NULL);
 
-	regset = devm_kzalloc(&pdev->dev, sizeof(*regset), GFP_KERNEL);
+	regset = devm_kzalloc_obj(&pdev->dev, *regset);
 	if (!regset)
 		return;
 
@@ -171,7 +167,7 @@ static int bcm2835_thermal_probe(struct platform_device *pdev)
 	u32 val;
 	unsigned long rate;
 
-	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, *data);
 	if (!data)
 		return -ENOMEM;
 

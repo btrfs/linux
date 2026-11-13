@@ -537,7 +537,7 @@ static ssize_t smmu_pmu_cpumask_show(struct device *dev,
 {
 	struct smmu_pmu *smmu_pmu = to_smmu_pmu(dev_get_drvdata(dev));
 
-	return cpumap_print_to_pagebuf(true, buf, cpumask_of(smmu_pmu->on_cpu));
+	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(cpumask_of(smmu_pmu->on_cpu)));
 }
 
 static struct device_attribute smmu_pmu_cpumask_attr =
@@ -854,7 +854,7 @@ static int smmu_pmu_probe(struct platform_device *pdev)
 	char *name;
 	struct device *dev = &pdev->dev;
 
-	smmu_pmu = devm_kzalloc(dev, sizeof(*smmu_pmu), GFP_KERNEL);
+	smmu_pmu = devm_kzalloc_obj(dev, *smmu_pmu);
 	if (!smmu_pmu)
 		return -ENOMEM;
 

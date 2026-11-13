@@ -1470,6 +1470,9 @@ void i40e_clean_rx_ring(struct i40e_ring *rx_ring)
 	if (!rx_ring->rx_bi)
 		return;
 
+	if (xdp_rxq_info_is_reg(&rx_ring->xdp_rxq))
+		xdp_rxq_info_unreg(&rx_ring->xdp_rxq);
+
 	if (rx_ring->xsk_pool) {
 		i40e_xsk_clean_rx_ring(rx_ring);
 		goto skip_free;
@@ -1527,8 +1530,6 @@ skip_free:
 void i40e_free_rx_resources(struct i40e_ring *rx_ring)
 {
 	i40e_clean_rx_ring(rx_ring);
-	if (rx_ring->vsi->type == I40E_VSI_MAIN)
-		xdp_rxq_info_unreg(&rx_ring->xdp_rxq);
 	rx_ring->xdp_prog = NULL;
 	kfree(rx_ring->rx_bi);
 	rx_ring->rx_bi = NULL;
@@ -1572,7 +1573,7 @@ int i40e_setup_rx_descriptors(struct i40e_ring *rx_ring)
 	rx_ring->xdp_prog = rx_ring->vsi->xdp_prog;
 
 	rx_ring->rx_bi =
-		kcalloc(rx_ring->count, sizeof(*rx_ring->rx_bi), GFP_KERNEL);
+		kzalloc_objs(*rx_ring->rx_bi, rx_ring->count);
 	if (!rx_ring->rx_bi)
 		return -ENOMEM;
 
@@ -2437,10 +2438,11 @@ static int i40e_clean_rx_irq(struct i40e_ring *rx_ring, int budget,
 			     unsigned int *rx_cleaned)
 {
 	unsigned int total_rx_bytes = 0, total_rx_packets = 0;
+	struct i40e_xdp_buff *xdp_ctx = &rx_ring->xdp_ctx;
 	u16 cleaned_count = I40E_DESC_UNUSED(rx_ring);
 	u16 clean_threshold = rx_ring->count / 2;
 	unsigned int offset = rx_ring->rx_offset;
-	struct xdp_buff *xdp = &rx_ring->xdp;
+	struct xdp_buff *xdp = &xdp_ctx->xdp;
 	unsigned int xdp_xmit = 0;
 	struct bpf_prog *xdp_prog;
 	bool failure = false;
@@ -2528,6 +2530,8 @@ static int i40e_clean_rx_irq(struct i40e_ring *rx_ring, int budget,
 
 		if (neop)
 			continue;
+
+		xdp_ctx->desc = rx_desc;
 
 		xdp_res = i40e_run_xdp(rx_ring, xdp, xdp_prog);
 
@@ -3128,7 +3132,7 @@ static int i40e_tso(struct i40e_tx_buffer *first, u8 *hdr_len,
 					 SKB_GSO_UDP_TUNNEL_CSUM)) {
 		if (!(skb_shinfo(skb)->gso_type & SKB_GSO_PARTIAL) &&
 		    (skb_shinfo(skb)->gso_type & SKB_GSO_UDP_TUNNEL_CSUM)) {
-			l4.udp->len = 0;
+			udp_set_len_short(l4.udp, 0);
 
 			/* determine offset of outer transport header */
 			l4_offset = l4.hdr - skb->data;

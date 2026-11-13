@@ -217,7 +217,7 @@ again.
 
    There is a catch: 'localmodconfig' is likely to disable kernel features you
    did not use since you booted your Linux -- like drivers for currently
-   disconnected peripherals or a virtualization software not haven't used yet.
+   disconnected peripherals or virtualization software not currently in use.
    You can reduce or nearly eliminate that risk with tricks the reference
    section outlines; but when building a kernel just for quick testing purposes
    it is often negligible if such features are missing. But you should keep that
@@ -349,12 +349,14 @@ again.
 
 .. _submit_improvements_qbtl:
 
-Did you run into trouble following any of the above steps that is not cleared up
-by the reference section below? Or do you have ideas how to improve the text?
-Then please take a moment of your time and let the maintainer of this document
-know by email (Thorsten Leemhuis <linux@leemhuis.info>), ideally while CCing the
-Linux docs mailing list (linux-doc@vger.kernel.org). Such feedback is vital to
-improve this document further, which is in everybody's interest, as it will
+Did you run into trouble following the step-by-step guide not cleared up by the
+reference section below? Did you spot errors? Or do you have ideas on how to
+improve the guide?
+
+If any of that applies, please let the developers know by sending a short note
+or a patch to Thorsten Leemhuis <linux@leemhuis.info> while ideally CCing the
+public Linux docs mailing list <linux-doc@vger.kernel.org>. Such feedback is
+vital to improve this text further, which is in everybody's interest, as it will
 enable more people to master the task described here.
 
 Reference section for the step-by-step guide

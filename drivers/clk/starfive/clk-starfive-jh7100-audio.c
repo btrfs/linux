@@ -9,7 +9,6 @@
 #include <linux/clk-provider.h>
 #include <linux/device.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 
@@ -90,7 +89,7 @@ static int jh7100_audclk_probe(struct platform_device *pdev)
 	unsigned int idx;
 	int ret;
 
-	priv = devm_kzalloc(&pdev->dev, struct_size(priv, reg, JH7100_AUDCLK_END), GFP_KERNEL);
+	priv = devm_kzalloc_flex(&pdev->dev, *priv, reg, JH7100_AUDCLK_END);
 	if (!priv)
 		return -ENOMEM;
 

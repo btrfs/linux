@@ -110,7 +110,16 @@ static const struct out_csc_color_matrix global_color_matrix[] = {
 { COLOR_SPACE_YCBCR601_LIMITED, { 0xE00, 0xF447, 0xFDB9, 0x1000, 0x991,
 	0x12C9, 0x3A6, 0x200, 0xFB47, 0xF6B9, 0xE00, 0x1000} },
 { COLOR_SPACE_YCBCR709_LIMITED, { 0xE00, 0xF349, 0xFEB7, 0x1000, 0x6CE, 0x16E3,
-	0x24F, 0x200, 0xFCCB, 0xF535, 0xE00, 0x1000} }
+	0x24F, 0x200, 0xFCCB, 0xF535, 0xE00, 0x1000} },
+{ COLOR_SPACE_2020_RGB_FULLRANGE,
+	{ 0x2000, 0, 0, 0, 0, 0x2000, 0, 0, 0, 0, 0x2000, 0} },
+{ COLOR_SPACE_2020_RGB_LIMITEDRANGE,
+	{ 0x1B67, 0, 0, 0x201, 0, 0x1B67, 0, 0x201, 0, 0, 0x1B67, 0x201} },
+/* COLOR_SPACE_2020_YCBCR_* values corrected. Not included in the TODO above. */
+{ COLOR_SPACE_2020_YCBCR_LIMITED, { 0x0E04, 0xF31D, 0xFEDF, 0x1004, 0x0733,
+	0x1294, 0x01A0, 0x201, 0xFC16, 0xF5E6, 0x0E04, 0x1004} },
+{ COLOR_SPACE_2020_YCBCR_FULL, { 0x1000, 0xF149, 0xFEB7, 0x1004, 0x0868, 0x15B2,
+	0x01E6, 0, 0xFB88, 0xF478, 0x1000, 0x1004} }
 };
 
 static bool setup_scaling_configuration(
@@ -282,6 +291,7 @@ static void calculate_inits(
 	const struct scaler_data *data,
 	struct scl_ratios_inits *inits)
 {
+	(void)xfm_dce;
 	struct fixed31_32 h_init;
 	struct fixed31_32 v_init;
 
@@ -801,7 +811,7 @@ static void program_bit_depth_reduction(
 
 	ASSERT(depth <= COLOR_DEPTH_121212); /* Invalid clamp bit depth */
 
-	spatial_dither_enable = bit_depth_params->flags.SPATIAL_DITHER_ENABLED;
+	spatial_dither_enable = bit_depth_params->flags.SPATIAL_DITHER_ENABLED != 0;
 	/* Default to 12 bit truncation without rounding */
 	trunc_round_depth = DCP_OUT_TRUNC_ROUND_DEPTH_12BIT;
 	trunc_mode = DCP_OUT_TRUNC_ROUND_MODE_TRUNCATE;
@@ -834,9 +844,9 @@ static void program_bit_depth_reduction(
 		   spatial_dither_enable,
 		   DCP_SPATIAL_DITHER_MODE_A_AA_A,
 		   DCP_SPATIAL_DITHER_DEPTH_30BPP,
-		   bit_depth_params->flags.FRAME_RANDOM,
-		   bit_depth_params->flags.RGB_RANDOM,
-		   bit_depth_params->flags.HIGHPASS_RANDOM);
+		   bit_depth_params->flags.FRAME_RANDOM != 0,
+		   bit_depth_params->flags.RGB_RANDOM != 0,
+		   bit_depth_params->flags.HIGHPASS_RANDOM != 0);
 }
 
 #if defined(CONFIG_DRM_AMD_DC_SI)
@@ -1136,8 +1146,8 @@ static void dce_transform_set_gamut_remap(
 		for (i = 0; i < GAMUT_MATRIX_SIZE; i++)
 			arr_matrix[i] = adjust->temperature_matrix[i];
 
-		convert_float_matrix(
-			arr_reg_val, arr_matrix, GAMUT_MATRIX_SIZE);
+		convert_float_matrix(arr_reg_val, arr_matrix,
+			CM_GAMUT_REMAP_COEF_FORMAT_S2_13, GAMUT_MATRIX_SIZE);
 
 		program_gamut_remap(xfm_dce, arr_reg_val);
 	}
@@ -1172,13 +1182,13 @@ bool dce_transform_get_optimal_number_of_taps(
 {
 	struct dce_transform *xfm_dce = TO_DCE_TRANSFORM(xfm);
 	int pixel_width = scl_data->viewport.width;
-	int max_num_of_lines;
+	uint32_t max_num_of_lines;
 
 	if (xfm_dce->prescaler_on &&
 			(scl_data->viewport.width > scl_data->recout.width))
 		pixel_width = scl_data->recout.width;
 
-	max_num_of_lines = dce_transform_get_max_num_of_supported_lines(
+	max_num_of_lines = (uint32_t)dce_transform_get_max_num_of_supported_lines(
 		xfm_dce,
 		scl_data->lb_params.depth,
 		pixel_width);
@@ -1240,6 +1250,7 @@ static void program_color_matrix(
 	const struct out_csc_color_matrix *tbl_entry,
 	enum grph_color_adjust_option options)
 {
+	(void)options;
 	{
 		REG_SET_2(OUTPUT_CSC_C11_C12, 0,
 			OUTPUT_CSC_C11, tbl_entry->regval[0],

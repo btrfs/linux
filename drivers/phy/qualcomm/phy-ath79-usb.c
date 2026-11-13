@@ -5,7 +5,6 @@
  * Copyright (C) 2015-2018 Alban Bedel <albeu@free.fr>
  */
 
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/phy/phy.h>
@@ -66,7 +65,7 @@ static int ath79_usb_phy_probe(struct platform_device *pdev)
 	struct ath79_usb_phy *priv;
 	struct phy *phy;
 
-	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&pdev->dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

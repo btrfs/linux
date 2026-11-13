@@ -41,6 +41,9 @@
 
 #define AMDGPU_XCP_OPS_KFD	(1 << 0)
 
+#define XCP_INST_MASK(num_inst, xcp_id)		\
+	(num_inst ? GENMASK(num_inst - 1, 0) << (xcp_id * num_inst) : 0)
+
 struct amdgpu_fpriv;
 
 enum AMDGPU_XCP_IP_BLOCK {
@@ -97,6 +100,11 @@ struct amdgpu_xcp_ip {
 	bool valid;
 };
 
+struct amdgpu_xcp_ualink {
+	struct kobject kobj;
+	bool sysfs;
+};
+
 struct amdgpu_xcp {
 	struct amdgpu_xcp_ip ip[AMDGPU_XCP_MAX_BLOCKS];
 
@@ -112,6 +120,7 @@ struct amdgpu_xcp {
 	struct amdgpu_sched	gpu_sched[AMDGPU_HW_IP_NUM][AMDGPU_RING_PRIO_MAX];
 	struct amdgpu_xcp_mgr *xcp_mgr;
 	struct kobject kobj;
+	struct amdgpu_xcp_ualink ualink;
 	uint64_t unique_id;
 };
 
@@ -129,6 +138,8 @@ struct amdgpu_xcp_mgr {
 	struct amdgpu_xcp_cfg *xcp_cfg;
 	uint32_t supp_xcp_modes;
 	uint32_t avail_xcp_modes;
+	/* used to determin KFD memory alloc mode for each partition */
+	uint32_t mem_alloc_mode;
 };
 
 struct amdgpu_xcp_mgr_funcs {
@@ -186,6 +197,7 @@ int amdgpu_xcp_pre_partition_switch(struct amdgpu_xcp_mgr *xcp_mgr, u32 flags);
 int amdgpu_xcp_post_partition_switch(struct amdgpu_xcp_mgr *xcp_mgr, u32 flags);
 void amdgpu_xcp_sysfs_init(struct amdgpu_device *adev);
 void amdgpu_xcp_sysfs_fini(struct amdgpu_device *adev);
+bool amdgpu_xcp_is_primary(struct amdgpu_xcp *xcp);
 
 static inline int amdgpu_xcp_get_num_xcp(struct amdgpu_xcp_mgr *xcp_mgr)
 {

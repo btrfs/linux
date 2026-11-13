@@ -70,8 +70,7 @@ static void bd28623_power_off(struct bd28623_priv *bd)
 static int bd28623_get_switch_spk(struct snd_kcontrol *kcontrol,
 				  struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-		snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct bd28623_priv *bd = snd_soc_component_get_drvdata(component);
 
 	ucontrol->value.integer.value[0] = bd->switch_spk;
@@ -82,8 +81,7 @@ static int bd28623_get_switch_spk(struct snd_kcontrol *kcontrol,
 static int bd28623_set_switch_spk(struct snd_kcontrol *kcontrol,
 				  struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-		snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct bd28623_priv *bd = snd_soc_component_get_drvdata(component);
 
 	if (bd->switch_spk == ucontrol->value.integer.value[0])
@@ -184,7 +182,7 @@ static int bd28623_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	int i, ret;
 
-	bd = devm_kzalloc(&pdev->dev, sizeof(struct bd28623_priv), GFP_KERNEL);
+	bd = devm_kzalloc_obj(&pdev->dev, struct bd28623_priv);
 	if (!bd)
 		return -ENOMEM;
 

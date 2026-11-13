@@ -10,7 +10,6 @@
 #include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 
 struct max3355_data {
@@ -57,8 +56,7 @@ static int max3355_probe(struct platform_device *pdev)
 	struct gpio_desc *gpiod;
 	int irq, err;
 
-	data = devm_kzalloc(&pdev->dev, sizeof(struct max3355_data),
-			    GFP_KERNEL);
+	data = devm_kzalloc_obj(&pdev->dev, struct max3355_data);
 	if (!data)
 		return -ENOMEM;
 

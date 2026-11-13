@@ -398,7 +398,7 @@ static int sl3516_ce_probe(struct platform_device *pdev)
 	int err, irq;
 	u32 v;
 
-	ce = devm_kzalloc(&pdev->dev, sizeof(*ce), GFP_KERNEL);
+	ce = devm_kzalloc_obj(&pdev->dev, *ce);
 	if (!ce)
 		return -ENOMEM;
 
@@ -414,10 +414,8 @@ static int sl3516_ce_probe(struct platform_device *pdev)
 		return irq;
 
 	err = devm_request_irq(&pdev->dev, irq, ce_irq_handler, 0, "crypto", ce);
-	if (err) {
-		dev_err(ce->dev, "Cannot request Crypto Engine IRQ (err=%d)\n", err);
+	if (err)
 		return err;
-	}
 
 	ce->reset = devm_reset_control_get(&pdev->dev, NULL);
 	if (IS_ERR(ce->reset))

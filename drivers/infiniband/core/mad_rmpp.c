@@ -245,12 +245,15 @@ static void recv_timeout_handler(struct work_struct *work)
 	struct ib_mad_recv_wc *rmpp_wc;
 	unsigned long flags;
 
-	spin_lock_irqsave(&rmpp_recv->agent->lock, flags);
+	spin_lock_irqsave(&rmpp_recv->lock, flags);
 	if (rmpp_recv->state != RMPP_STATE_ACTIVE) {
-		spin_unlock_irqrestore(&rmpp_recv->agent->lock, flags);
+		spin_unlock_irqrestore(&rmpp_recv->lock, flags);
 		return;
 	}
 	rmpp_recv->state = RMPP_STATE_TIMEOUT;
+	spin_unlock_irqrestore(&rmpp_recv->lock, flags);
+
+	spin_lock_irqsave(&rmpp_recv->agent->lock, flags);
 	list_del(&rmpp_recv->list);
 	spin_unlock_irqrestore(&rmpp_recv->agent->lock, flags);
 
@@ -279,7 +282,7 @@ create_rmpp_recv(struct ib_mad_agent_private *agent,
 	struct mad_rmpp_recv *rmpp_recv;
 	struct ib_mad_hdr *mad_hdr;
 
-	rmpp_recv = kmalloc(sizeof *rmpp_recv, GFP_KERNEL);
+	rmpp_recv = kmalloc_obj(*rmpp_recv);
 	if (!rmpp_recv)
 		return NULL;
 

@@ -84,7 +84,6 @@ properties:
     description: gpio pin number used for codec reset
     deprecated: true
 
-
 required:
   - compatible
   - reg
@@ -122,6 +121,6 @@ examples:
             AVDD-supply = <&regulator>;
             IOVDD-supply = <&regulator>;
             DVDD-supply = <&regulator>;
-       };
+        };
     };
 

@@ -217,7 +217,8 @@ static int sb_validate(struct pcache_cache_dev *cache_dev, struct pcache_sb *sb)
 static int cache_dev_init(struct pcache_cache_dev *cache_dev, u32 seg_num)
 {
 	cache_dev->seg_num = seg_num;
-	cache_dev->seg_bitmap = kvcalloc(BITS_TO_LONGS(cache_dev->seg_num), sizeof(unsigned long), GFP_KERNEL);
+	cache_dev->seg_bitmap = kvzalloc_objs(unsigned long,
+					      BITS_TO_LONGS(cache_dev->seg_num));
 	if (!cache_dev->seg_bitmap)
 		return -ENOMEM;
 
@@ -242,6 +243,8 @@ int cache_dev_start(struct dm_pcache *pcache)
 	struct pcache_cache_dev *cache_dev = &pcache->cache_dev;
 	struct pcache_sb sb;
 	bool format = false;
+	u32 seg_num;
+	u64 max_segs;
 	int ret;
 
 	mutex_init(&cache_dev->seg_lock);
@@ -269,7 +272,25 @@ int cache_dev_start(struct dm_pcache *pcache)
 		goto dax_release;
 
 	cache_dev->sb_flags = le32_to_cpu(sb.flags);
-	ret = cache_dev_init(cache_dev, le32_to_cpu(sb.seg_num));
+
+	/*
+	 * seg_num is read from the crc32c-only superblock, so whoever supplies
+	 * the cache device controls it. It is the ceiling every later on-media
+	 * segment id is validated against, so bound it against what the device
+	 * physically holds before it is trusted, or a forged seg_num lets a
+	 * segment id address past the DAX mapping.
+	 */
+	seg_num = le32_to_cpu(sb.seg_num);
+	max_segs = (bdev_nr_bytes(cache_dev->dm_dev->bdev) - PCACHE_SEGMENTS_OFF) /
+		   PCACHE_SEG_SIZE;
+	if (seg_num == 0 || seg_num > max_segs || seg_num > PCACHE_CACHE_SEGS_MAX) {
+		pcache_dev_err(pcache, "invalid seg_num %u from cache device (device holds %llu, max %u)\n",
+			       seg_num, max_segs, (u32)PCACHE_CACHE_SEGS_MAX);
+		ret = -EIO;
+		goto dax_release;
+	}
+
+	ret = cache_dev_init(cache_dev, seg_num);
 	if (ret)
 		goto dax_release;
 

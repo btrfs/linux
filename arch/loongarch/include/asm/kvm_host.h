@@ -20,11 +20,14 @@
 #include <asm/inst.h>
 #include <asm/kvm_mmu.h>
 #include <asm/kvm_ipi.h>
+#include <asm/kvm_dmsintc.h>
 #include <asm/kvm_eiointc.h>
 #include <asm/kvm_pch_pic.h>
 #include <asm/loongarch.h>
 
 #define __KVM_HAVE_ARCH_INTC_INITIALIZED
+#define __KVM_HAVE_MSI
+#define __KVM_HAVE_READONLY_MEM
 
 /* Loongarch KVM register ids */
 #define KVM_GET_IOC_CSR_IDX(id)		((id & KVM_CSR_IDX_MASK) >> LOONGARCH_REG_SHIFT)
@@ -37,6 +40,8 @@
 #define KVM_REQ_TLB_FLUSH_GPA		KVM_ARCH_REQ(0)
 #define KVM_REQ_STEAL_UPDATE		KVM_ARCH_REQ(1)
 #define KVM_REQ_PMU			KVM_ARCH_REQ(2)
+#define KVM_REQ_FPU_LOAD		KVM_ARCH_REQ(3)
+#define KVM_REQ_LBT_LOAD		KVM_ARCH_REQ(4)
 
 #define KVM_GUESTDBG_SW_BP_MASK		\
 	(KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_USE_SW_BP)
@@ -76,6 +81,7 @@ struct kvm_arch_memory_slot {
 #define HOST_MAX_PMNUM			16
 struct kvm_context {
 	unsigned long vpid_cache;
+	unsigned long vmid_cache;
 	struct kvm_vcpu *last_vcpu;
 	/* Host PMU CSR */
 	u64 perf_ctrl[HOST_MAX_PMNUM];
@@ -85,7 +91,6 @@ struct kvm_context {
 struct kvm_world_switch {
 	int (*exc_entry)(void);
 	int (*enter_guest)(struct kvm_run *run, struct kvm_vcpu *vcpu);
-	unsigned long page_order;
 };
 
 #define MAX_PGTABLE_LEVELS	4
@@ -123,13 +128,19 @@ struct kvm_arch {
 	unsigned int  pte_shifts[MAX_PGTABLE_LEVELS];
 	unsigned int  root_level;
 	spinlock_t    phyid_map_lock;
+	spinlock_t    pv_setting_lock;
 	struct kvm_phyid_map  *phyid_map;
 	/* Enabled PV features */
 	unsigned long pv_features;
+	/* Supported KVM features */
+	unsigned long kvm_features;
 
 	s64 time_offset;
+	cpumask_t tlb_flush_pending;
+	unsigned long vmid[NR_CPUS];
 	struct kvm_context __percpu *vmcs;
 	struct loongarch_ipi *ipi;
+	struct loongarch_dmsintc *dmsintc;
 	struct loongarch_eiointc *eiointc;
 	struct loongarch_pch_pic *pch_pic;
 };
@@ -153,17 +164,16 @@ enum emulation_result {
 };
 
 #define KVM_LARCH_FPU		(0x1 << 0)
-#define KVM_LARCH_LSX		(0x1 << 1)
-#define KVM_LARCH_LASX		(0x1 << 2)
-#define KVM_LARCH_LBT		(0x1 << 3)
-#define KVM_LARCH_PMU		(0x1 << 4)
-#define KVM_LARCH_SWCSR_LATEST	(0x1 << 5)
-#define KVM_LARCH_HWCSR_USABLE	(0x1 << 6)
+#define KVM_LARCH_LBT		(0x1 << 1)
+#define KVM_LARCH_PMU		(0x1 << 2)
+#define KVM_LARCH_SWCSR_LATEST	(0x1 << 3)
+#define KVM_LARCH_HWCSR_USABLE	(0x1 << 4)
 
-#define LOONGARCH_PV_FEAT_UPDATED	BIT_ULL(63)
 #define LOONGARCH_PV_FEAT_MASK		(BIT(KVM_FEATURE_IPI) |		\
+					 BIT(KVM_FEATURE_PREEMPT) |	\
 					 BIT(KVM_FEATURE_STEAL_TIME) |	\
 					 BIT(KVM_FEATURE_USER_HCALL) |	\
+					 BIT(KVM_FEATURE_CRASH)	|	\
 					 BIT(KVM_FEATURE_VIRT_EXTIOI))
 
 struct kvm_vcpu_arch {
@@ -228,20 +238,23 @@ struct kvm_vcpu_arch {
 	/* Cache for pages needed inside spinlock regions */
 	struct kvm_mmu_memory_cache mmu_page_cache;
 
-	/* vcpu's vpid */
-	u64 vpid;
+	/* vCPU's vpid & tgid */
+	unsigned long vpid, tgid;
 	gpa_t flush_gpa;
 
 	/* Frequency of stable timer in Hz */
 	u64 timer_mhz;
 	ktime_t expire;
 
+	/* vCPU has run at least once */
+	bool has_run;
 	/* Last CPU the vCPU state was loaded on */
 	int last_sched_cpu;
 	/* mp state */
 	struct kvm_mp_state mp_state;
 	/* ipi state */
 	struct ipi_state ipi_state;
+	struct dmsintc_state dmsintc_state;
 	/* cpucfg */
 	u32 cpucfg[KVM_MAX_CPUCFG_REGS];
 
@@ -250,6 +263,7 @@ struct kvm_vcpu_arch {
 		u64 guest_addr;
 		u64 last_steal;
 		struct gfn_to_hva_cache cache;
+		u8  preempted;
 	} st;
 };
 
@@ -261,6 +275,11 @@ static inline unsigned long readl_sw_gcsr(struct loongarch_csrs *csr, int reg)
 static inline void writel_sw_gcsr(struct loongarch_csrs *csr, int reg, unsigned long val)
 {
 	csr->csrs[reg] = val;
+}
+
+static inline bool kvm_guest_has_msgint(struct kvm_vcpu_arch *arch)
+{
+	return arch->cpucfg[1] & CPUCFG1_MSGINT;
 }
 
 static inline bool kvm_guest_has_fpu(struct kvm_vcpu_arch *arch)
@@ -293,6 +312,12 @@ static inline int kvm_get_pmu_num(struct kvm_vcpu_arch *arch)
 	return (arch->cpucfg[6] & CPUCFG6_PMNUM) >> CPUCFG6_PMNUM_SHIFT;
 }
 
+/* Check whether KVM support this feature (VMM may disable it) */
+static inline bool kvm_vm_support(struct kvm_arch *arch, int feature)
+{
+	return !!(arch->kvm_features & BIT_ULL(feature));
+}
+
 bool kvm_arch_pmi_in_guest(struct kvm_vcpu *vcpu);
 
 /* Debug: dump vcpu state */
@@ -300,6 +325,8 @@ int kvm_arch_vcpu_dump_regs(struct kvm_vcpu *vcpu);
 
 /* MMU handling */
 void kvm_flush_tlb_all(void);
+void kvm_flush_tlb_all_stage1(void);
+void kvm_flush_tlb_all_stage2(void);
 void kvm_flush_tlb_gpa(struct kvm_vcpu *vcpu, unsigned long gpa);
 int kvm_handle_mm_fault(struct kvm_vcpu *vcpu, unsigned long badv, bool write, int ecode);
 
@@ -331,16 +358,15 @@ static inline void kvm_arch_vcpu_blocking(struct kvm_vcpu *vcpu) {}
 static inline void kvm_arch_vcpu_unblocking(struct kvm_vcpu *vcpu) {}
 static inline void kvm_arch_vcpu_block_finish(struct kvm_vcpu *vcpu) {}
 static inline void kvm_arch_free_memslot(struct kvm *kvm, struct kvm_memory_slot *slot) {}
+#define __KVM_HAVE_ARCH_FLUSH_REMOTE_TLBS
+int kvm_arch_flush_remote_tlbs(struct kvm *kvm);
 void kvm_check_vpid(struct kvm_vcpu *vcpu);
 enum hrtimer_restart kvm_swtimer_wakeup(struct hrtimer *timer);
-void kvm_arch_flush_remote_tlbs_memslot(struct kvm *kvm, const struct kvm_memory_slot *memslot);
 void kvm_init_vmcs(struct kvm *kvm);
 void kvm_exc_entry(void);
 int  kvm_enter_guest(struct kvm_run *run, struct kvm_vcpu *vcpu);
 
 extern unsigned long vpid_mask;
-extern const unsigned long kvm_exception_size;
-extern const unsigned long kvm_enter_guest_size;
 extern struct kvm_world_switch *kvm_loongarch_ops;
 
 #define SW_GCSR		(1 << 0)

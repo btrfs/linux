@@ -95,7 +95,7 @@ static int bcm_iproc_probe(struct platform_device *pdev)
 	struct bcm_iproc_intc *priv;
 	struct bcm_qspi_soc_intc *soc_intc;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 	soc_intc = &priv->soc_intc;
@@ -141,7 +141,7 @@ static struct platform_driver bcm_iproc_driver = {
 	.remove			= bcm_iproc_remove,
 	.driver = {
 		.name		= "bcm_iproc",
-		.pm		= &bcm_qspi_pm_ops,
+		.pm		= pm_sleep_ptr(&bcm_qspi_pm_ops),
 		.of_match_table = bcm_iproc_of_match,
 	}
 };

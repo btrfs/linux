@@ -93,12 +93,12 @@ static int spear_thermal_probe(struct platform_device *pdev)
 	struct device_node *np = pdev->dev.of_node;
 	int ret = 0, val;
 
-	if (!np || !of_property_read_u32(np, "st,thermal-flags", &val)) {
+	if (!np || of_property_read_u32(np, "st,thermal-flags", &val)) {
 		dev_err(&pdev->dev, "Failed: DT Pdata not passed\n");
 		return -EINVAL;
 	}
 
-	stdev = devm_kzalloc(&pdev->dev, sizeof(*stdev), GFP_KERNEL);
+	stdev = devm_kzalloc_obj(&pdev->dev, *stdev);
 	if (!stdev)
 		return -ENOMEM;
 

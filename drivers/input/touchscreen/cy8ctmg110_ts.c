@@ -178,7 +178,7 @@ static int cy8ctmg110_probe(struct i2c_client *client)
 					I2C_FUNC_SMBUS_READ_WORD_DATA))
 		return -EIO;
 
-	ts = devm_kzalloc(&client->dev, sizeof(*ts), GFP_KERNEL);
+	ts = devm_kzalloc_obj(&client->dev, *ts);
 	if (!ts)
 		return -ENOMEM;
 
@@ -267,7 +267,7 @@ static DEFINE_SIMPLE_DEV_PM_OPS(cy8ctmg110_pm,
 				cy8ctmg110_suspend, cy8ctmg110_resume);
 
 static const struct i2c_device_id cy8ctmg110_idtable[] = {
-	{ CY8CTMG110_DRIVER_NAME, 1 },
+	{ .name = CY8CTMG110_DRIVER_NAME, .driver_data = 1 },
 	{ }
 };
 

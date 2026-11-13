@@ -294,7 +294,7 @@ static int mt7629_pwm_1_funcs[] = { 2, };
 
 /* WF 2G */
 static int mt7629_wf0_2g_pins[] = { 70, 71, 72, 73, 74, 75, 76, 77, 78, };
-static int mt7629_wf0_2g_funcs[] = { 1, 1, 1, 1, 1, 1, 1, 1, };
+static int mt7629_wf0_2g_funcs[] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, };
 
 /* WF 5G */
 static int mt7629_wf0_5g_pins[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, };
@@ -430,6 +430,7 @@ static const struct of_device_id mt7629_pinctrl_of_match[] = {
 	{ .compatible = "mediatek,mt7629-pinctrl", },
 	{}
 };
+MODULE_DEVICE_TABLE(of, mt7629_pinctrl_of_match);
 
 static int mt7629_pinctrl_probe(struct platform_device *pdev)
 {
@@ -449,3 +450,7 @@ static int __init mt7629_pinctrl_init(void)
 	return platform_driver_register(&mt7629_pinctrl_driver);
 }
 arch_initcall(mt7629_pinctrl_init);
+
+MODULE_DESCRIPTION("MediaTek MT7629 Pinctrl Driver");
+MODULE_LICENSE("GPL v2");
+MODULE_IMPORT_NS("MTK_PINCTRL");

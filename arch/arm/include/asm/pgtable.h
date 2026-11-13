@@ -10,15 +10,6 @@
 #include <linux/const.h>
 #include <asm/proc-fns.h>
 
-#ifndef __ASSEMBLY__
-/*
- * ZERO_PAGE is a global shared page that is always zero: used
- * for zero-mapped memory areas etc..
- */
-extern struct page *empty_zero_page;
-#define ZERO_PAGE(vaddr)	(empty_zero_page)
-#endif
-
 #include <asm-generic/pgtable-nopud.h>
 
 #ifndef CONFIG_MMU
@@ -53,13 +44,6 @@ extern struct page *empty_zero_page;
 #define LIBRARY_TEXT_START	0x0c000000
 
 #ifndef __ASSEMBLY__
-extern void __pte_error(const char *file, int line, pte_t);
-extern void __pmd_error(const char *file, int line, pmd_t);
-extern void __pgd_error(const char *file, int line, pgd_t);
-
-#define pte_ERROR(pte)		__pte_error(__FILE__, __LINE__, pte)
-#define pmd_ERROR(pmd)		__pmd_error(__FILE__, __LINE__, pmd)
-#define pgd_ERROR(pgd)		__pgd_error(__FILE__, __LINE__, pgd)
 
 /*
  * This is the lowest virtual address we can permit any user space

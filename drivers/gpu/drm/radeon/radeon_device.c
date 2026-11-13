@@ -33,6 +33,7 @@
 #include <linux/vga_switcheroo.h>
 #include <linux/vgaarb.h>
 
+#include <drm/clients/drm_fbdev_helper.h>
 #include <drm/drm_cache.h>
 #include <drm/drm_client_event.h>
 #include <drm/drm_crtc_helper.h>
@@ -974,7 +975,7 @@ static uint32_t cail_ioreg_read(struct card_info *info, uint32_t reg)
 int radeon_atombios_init(struct radeon_device *rdev)
 {
 	struct card_info *atom_card_info =
-	    kzalloc(sizeof(struct card_info), GFP_KERNEL);
+	    kzalloc_obj(struct card_info);
 
 	if (!atom_card_info)
 		return -ENOMEM;
@@ -1069,16 +1070,15 @@ void radeon_combios_fini(struct radeon_device *rdev)
 /**
  * radeon_vga_set_decode - enable/disable vga decode
  *
- * @pdev: PCI device
+ * @data: driver private data (rdev)
  * @state: enable/disable vga decode
  *
  * Enable/disable vga decode (all asics).
  * Returns VGA resource flags.
  */
-static unsigned int radeon_vga_set_decode(struct pci_dev *pdev, bool state)
+static unsigned int radeon_vga_set_decode(void *data, bool state)
 {
-	struct drm_device *dev = pci_get_drvdata(pdev);
-	struct radeon_device *rdev = dev->dev_private;
+	struct radeon_device *rdev = data;
 	radeon_vga_set_state(rdev, state);
 	if (state)
 		return VGA_RSRC_LEGACY_IO | VGA_RSRC_LEGACY_MEM |
@@ -1257,10 +1257,17 @@ static bool radeon_switcheroo_can_switch(struct pci_dev *pdev)
 	return atomic_read(&dev->open_count) == 0;
 }
 
+static void radeon_switcheroo_pre_switch(struct pci_dev *pdev)
+{
+	struct drm_device *dev = pci_get_drvdata(pdev);
+
+	drm_client_dev_acquire_outputs(dev);
+}
+
 static const struct vga_switcheroo_client_ops radeon_switcheroo_ops = {
 	.set_gpu_state = radeon_switcheroo_set_state,
-	.reprobe = NULL,
 	.can_switch = radeon_switcheroo_can_switch,
+	.pre_switch = radeon_switcheroo_pre_switch,
 };
 
 /**
@@ -1374,6 +1381,7 @@ int radeon_device_init(struct radeon_device *rdev,
 		pr_warn("radeon: No suitable DMA available\n");
 		return r;
 	}
+	rdev->pdev->msi_addr_mask = DMA_BIT_MASK(dma_bits);
 	rdev->need_swiotlb = drm_need_swiotlb(dma_bits);
 
 	/* Registers mapping */
@@ -1422,7 +1430,7 @@ int radeon_device_init(struct radeon_device *rdev,
 	/* if we have > 1 VGA cards, then disable the radeon VGA resources */
 	/* this will fail for cards that aren't VGA class devices, just
 	 * ignore it */
-	vga_client_register(rdev->pdev, radeon_vga_set_decode);
+	vga_client_register(rdev->pdev, radeon_vga_set_decode, rdev);
 
 	if (rdev->flags & RADEON_IS_PX)
 		runtime = true;
@@ -1573,7 +1581,6 @@ int radeon_suspend_kms(struct drm_device *dev, bool suspend,
 	list_for_each_entry(crtc, &dev->mode_config.crtc_list, head) {
 		struct radeon_crtc *radeon_crtc = to_radeon_crtc(crtc);
 		struct drm_framebuffer *fb = crtc->primary->fb;
-		struct radeon_bo *robj;
 
 		if (radeon_crtc->cursor_bo) {
 			struct radeon_bo *robj = gem_to_radeon_bo(radeon_crtc->cursor_bo);
@@ -1587,9 +1594,10 @@ int radeon_suspend_kms(struct drm_device *dev, bool suspend,
 		if (fb == NULL || fb->obj[0] == NULL) {
 			continue;
 		}
-		robj = gem_to_radeon_bo(fb->obj[0]);
 		/* don't unpin kernel fb objects */
-		if (!radeon_fbdev_robj_is_fb(rdev, robj)) {
+		if (!drm_fb_helper_gem_is_fb(dev->fb_helper, fb->obj[0])) {
+			struct radeon_bo *robj = gem_to_radeon_bo(fb->obj[0]);
+
 			r = radeon_bo_reserve(robj, false);
 			if (r == 0) {
 				radeon_bo_unpin(robj);
@@ -1635,7 +1643,7 @@ int radeon_suspend_kms(struct drm_device *dev, bool suspend,
 	}
 
 	if (notify_clients)
-		drm_client_dev_suspend(dev, false);
+		drm_client_dev_suspend(dev);
 
 	return 0;
 }
@@ -1739,7 +1747,7 @@ int radeon_resume_kms(struct drm_device *dev, bool resume, bool notify_clients)
 		radeon_pm_compute_clocks(rdev);
 
 	if (notify_clients)
-		drm_client_dev_resume(dev, false);
+		drm_client_dev_resume(dev);
 
 	return 0;
 }

@@ -300,9 +300,6 @@ static void __prepare_superblock(struct dm_clone_metadata *cmd,
 {
 	sb->flags = cpu_to_le32(0UL);
 
-	/* FIXME: UUID is currently unused */
-	memset(sb->uuid, 0, sizeof(sb->uuid));
-
 	sb->magic = cpu_to_le64(SUPERBLOCK_MAGIC);
 	sb->version = cpu_to_le32(DM_CLONE_MAX_METADATA_VERSION);
 
@@ -553,7 +550,7 @@ struct dm_clone_metadata *dm_clone_metadata_open(struct block_device *bdev,
 	int r;
 	struct dm_clone_metadata *cmd;
 
-	cmd = kzalloc(sizeof(*cmd), GFP_KERNEL);
+	cmd = kzalloc_obj(*cmd);
 	if (!cmd) {
 		DMERR("Failed to allocate memory for dm-clone metadata");
 		return ERR_PTR(-ENOMEM);

@@ -15,7 +15,6 @@
 #include <linux/io.h>
 #include <linux/led-class-multicolor.h>
 #include <linux/leds.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
@@ -420,7 +419,7 @@ static int sun50i_a100_ledc_probe(struct platform_device *pdev)
 	if (!num_leds)
 		return -ENODEV;
 
-	priv = devm_kzalloc(dev, struct_size(priv, leds, num_leds), GFP_KERNEL);
+	priv = devm_kzalloc_flex(dev, *priv, leds, num_leds);
 	if (!priv)
 		return -ENOMEM;
 

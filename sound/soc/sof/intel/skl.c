@@ -62,11 +62,12 @@ int sof_skl_ops_init(struct snd_sof_dev *sdev)
 	/* probe/remove/shutdown */
 	sof_skl_ops.shutdown	= hda_dsp_shutdown;
 
-	sdev->private = kzalloc(sizeof(*ipc4_data), GFP_KERNEL);
+	sdev->private = kzalloc_obj(*ipc4_data);
 	if (!sdev->private)
 		return -ENOMEM;
 
 	ipc4_data = sdev->private;
+	INIT_LIST_HEAD(&ipc4_data->nhlt_list);
 	ipc4_data->manifest_fw_hdr_offset = SOF_MAN4_FW_HDR_OFFSET_CAVS_1_5;
 
 	ipc4_data->mtrace_type = SOF_IPC4_MTRACE_INTEL_CAVS_1_5;
@@ -113,5 +114,6 @@ const struct sof_intel_dsp_desc skl_chip_info = {
 	.power_down_dsp = hda_power_down_dsp,
 	.disable_interrupts = hda_dsp_disable_interrupts,
 	.hw_ip_version = SOF_INTEL_CAVS_1_5,
+	.platform = "skl",
 };
 EXPORT_SYMBOL_NS(skl_chip_info, "SND_SOC_SOF_INTEL_HDA_COMMON");

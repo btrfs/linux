@@ -108,7 +108,7 @@ static inline u64 erst_get_timeout(void)
 
 	if (erst_erange.attr & ERST_RANGE_SLOW) {
 		timeout = ((erst_erange.timings & ERST_EXEC_TIMING_MAX_MASK) >>
-			ERST_EXEC_TIMING_MAX_SHIFT) * NSEC_PER_MSEC;
+			ERST_EXEC_TIMING_MAX_SHIFT) * NSEC_PER_USEC;
 		if (timeout < FIRMWARE_TIMEOUT)
 			timeout = FIRMWARE_TIMEOUT;
 	}
@@ -543,8 +543,7 @@ retry:
 				pr_warn(FW_WARN "too many record IDs!\n");
 			return 0;
 		}
-		new_entries = kvmalloc_array(new_size, sizeof(entries[0]),
-					     GFP_KERNEL);
+		new_entries = kvmalloc_objs(entries[0], new_size);
 		if (!new_entries)
 			return -ENOMEM;
 		memcpy(new_entries, entries,

@@ -13,18 +13,18 @@
  */
 
 #include <linux/aperture.h>
+#include <linux/clk.h>
 #include <linux/errno.h>
 #include <linux/fb.h>
 #include <linux/io.h>
 #include <linux/module.h>
-#include <linux/platform_data/simplefb.h>
-#include <linux/platform_device.h>
-#include <linux/clk.h>
 #include <linux/of.h>
 #include <linux/of_clk.h>
 #include <linux/of_platform.h>
 #include <linux/of_reserved_mem.h>
 #include <linux/parser.h>
+#include <linux/platform_data/simplefb.h>
+#include <linux/platform_device.h>
 #include <linux/pm_domain.h>
 #include <linux/regulator/consumer.h>
 
@@ -249,7 +249,7 @@ static int simplefb_clocks_get(struct simplefb_par *par,
 	if (!par->clk_count)
 		return 0;
 
-	par->clks = kcalloc(par->clk_count, sizeof(struct clk *), GFP_KERNEL);
+	par->clks = kzalloc_objs(struct clk *, par->clk_count);
 	if (!par->clks)
 		return -ENOMEM;
 
@@ -363,8 +363,8 @@ static int simplefb_regulators_get(struct simplefb_par *par,
 	if (!count)
 		return 0;
 
-	par->regulators = devm_kcalloc(&pdev->dev, count,
-				       sizeof(struct regulator *), GFP_KERNEL);
+	par->regulators = devm_kzalloc_objs(&pdev->dev, struct regulator *,
+					    count);
 	if (!par->regulators)
 		return -ENOMEM;
 
@@ -479,14 +479,11 @@ static int simplefb_attach_genpds(struct simplefb_par *par,
 		return 0;
 	}
 
-	par->genpds = devm_kcalloc(dev, num_genpds, sizeof(*par->genpds),
-				   GFP_KERNEL);
+	par->genpds = devm_kzalloc_objs(dev, *par->genpds, num_genpds);
 	if (!par->genpds)
 		return -ENOMEM;
 
-	par->genpd_links = devm_kcalloc(dev, num_genpds,
-					sizeof(*par->genpd_links),
-					GFP_KERNEL);
+	par->genpd_links = devm_kzalloc_objs(dev, *par->genpd_links, num_genpds);
 	if (!par->genpd_links)
 		return -ENOMEM;
 

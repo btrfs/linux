@@ -4,15 +4,21 @@
 
 #include "query.h"
 #include "io_uring.h"
+#include "zcrx.h"
 
-#define IO_MAX_QUERY_SIZE		(sizeof(struct io_uring_query_opcode))
+union io_query_data {
+	struct io_uring_query_opcode opcodes;
+	struct io_uring_query_zcrx zcrx;
+	struct io_uring_query_zcrx_event zcrx_notif;
+	struct io_uring_query_scq scq;
+};
+
+#define IO_MAX_QUERY_SIZE		sizeof(union io_query_data)
 #define IO_MAX_QUERY_ENTRIES		1000
 
-static ssize_t io_query_ops(void *data)
+static ssize_t io_query_ops(union io_query_data *data)
 {
-	struct io_uring_query_opcode *e = data;
-
-	BUILD_BUG_ON(sizeof(*e) > IO_MAX_QUERY_SIZE);
+	struct io_uring_query_opcode *e = &data->opcodes;
 
 	e->nr_request_opcodes = IORING_OP_LAST;
 	e->nr_register_opcodes = IORING_REGISTER_LAST;
@@ -25,8 +31,42 @@ static ssize_t io_query_ops(void *data)
 	return sizeof(*e);
 }
 
-static int io_handle_query_entry(struct io_ring_ctx *ctx,
-				 void *data, void __user *uhdr,
+static ssize_t io_query_zcrx(union io_query_data *data)
+{
+	struct io_uring_query_zcrx *e = &data->zcrx;
+
+	e->register_flags = ZCRX_SUPPORTED_REG_FLAGS;
+	e->area_flags = IORING_ZCRX_AREA_DMABUF;
+	e->nr_ctrl_opcodes = __ZCRX_CTRL_LAST;
+	e->rq_hdr_size = sizeof(struct zcrx_rq_hdr);
+	e->rq_hdr_alignment = L1_CACHE_BYTES;
+	e->features = ZCRX_FEATURES;
+	e->__resv2 = 0;
+	return sizeof(*e);
+}
+
+static ssize_t io_query_zcrx_notif(union io_query_data *data)
+{
+	struct io_uring_query_zcrx_event *e = &data->zcrx_notif;
+
+	e->event_flags = ZCRX_EVENT_TYPE_MASK;
+	e->stats_size = sizeof(struct zcrx_stats);
+	e->stats_off_alignment = __alignof__(struct zcrx_stats);
+	e->__resv1 = 0;
+	memset(&e->__resv2, 0, sizeof(e->__resv2));
+	return sizeof(*e);
+}
+
+static ssize_t io_query_scq(union io_query_data *data)
+{
+	struct io_uring_query_scq *e = &data->scq;
+
+	e->hdr_size = sizeof(struct io_rings);
+	e->hdr_alignment = SMP_CACHE_BYTES;
+	return sizeof(*e);
+}
+
+static int io_handle_query_entry(union io_query_data *data, void __user *uhdr,
 				 u64 *next_entry)
 {
 	struct io_uring_query_hdr hdr;
@@ -36,6 +76,9 @@ static int io_handle_query_entry(struct io_ring_ctx *ctx,
 
 	if (copy_from_user(&hdr, uhdr, sizeof(hdr)))
 		return -EFAULT;
+	/* copy_struct_to_user() zeros up to usize bytes */
+	if (hdr.size > PAGE_SIZE)
+		return -E2BIG;
 	usize = hdr.size;
 	hdr.size = min(hdr.size, IO_MAX_QUERY_SIZE);
 	udata = u64_to_user_ptr(hdr.query_data);
@@ -52,6 +95,15 @@ static int io_handle_query_entry(struct io_ring_ctx *ctx,
 	switch (hdr.query_op) {
 	case IO_URING_QUERY_OPCODES:
 		ret = io_query_ops(data);
+		break;
+	case IO_URING_QUERY_ZCRX:
+		ret = io_query_zcrx(data);
+		break;
+	case IO_URING_QUERY_ZCRX_EVENT:
+		ret = io_query_zcrx_notif(data);
+		break;
+	case IO_URING_QUERY_SCQ:
+		ret = io_query_scq(data);
 		break;
 	}
 
@@ -73,13 +125,13 @@ out:
 	return 0;
 }
 
-int io_query(struct io_ring_ctx *ctx, void __user *arg, unsigned nr_args)
+int io_query(void __user *arg, unsigned nr_args)
 {
-	char entry_buffer[IO_MAX_QUERY_SIZE];
+	union io_query_data entry_buffer;
 	void __user *uhdr = arg;
 	int ret, nr = 0;
 
-	memset(entry_buffer, 0, sizeof(entry_buffer));
+	memset(&entry_buffer, 0, sizeof(entry_buffer));
 
 	if (nr_args)
 		return -EINVAL;
@@ -87,7 +139,7 @@ int io_query(struct io_ring_ctx *ctx, void __user *arg, unsigned nr_args)
 	while (uhdr) {
 		u64 next_hdr;
 
-		ret = io_handle_query_entry(ctx, entry_buffer, uhdr, &next_hdr);
+		ret = io_handle_query_entry(&entry_buffer, uhdr, &next_hdr);
 		if (ret)
 			return ret;
 		uhdr = u64_to_user_ptr(next_hdr);

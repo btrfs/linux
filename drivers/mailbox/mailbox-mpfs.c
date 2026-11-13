@@ -16,7 +16,6 @@
 #include <linux/regmap.h>
 #include <linux/interrupt.h>
 #include <linux/mfd/syscon.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/mailbox_controller.h>
 #include <soc/microchip/mpfs.h>
@@ -201,7 +200,7 @@ static irqreturn_t mpfs_mbox_inbox_isr(int irq, void *data)
 	struct mbox_chan *chan = data;
 	struct mpfs_mbox *mbox = (struct mpfs_mbox *)chan->con_priv;
 
-	if (mbox->control_scb)
+	if (mbox->sysreg_scb)
 		regmap_write(mbox->sysreg_scb, MESSAGE_INT_OFFSET, 0);
 	else
 		writel_relaxed(0, mbox->int_reg);
@@ -220,8 +219,6 @@ static int mpfs_mbox_startup(struct mbox_chan *chan)
 		return -EINVAL;
 
 	ret = devm_request_irq(mbox->dev, mbox->irq, mpfs_mbox_inbox_isr, 0, "mpfs-mailbox", chan);
-	if (ret)
-		dev_err(mbox->dev, "failed to register mailbox interrupt:%d\n", ret);
 
 	return ret;
 }
@@ -281,7 +278,7 @@ static int mpfs_mbox_probe(struct platform_device *pdev)
 	struct mpfs_mbox *mbox;
 	int ret;
 
-	mbox = devm_kzalloc(&pdev->dev, sizeof(*mbox), GFP_KERNEL);
+	mbox = devm_kzalloc_obj(&pdev->dev, *mbox);
 	if (!mbox)
 		return -ENOMEM;
 

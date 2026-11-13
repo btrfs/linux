@@ -22,6 +22,7 @@
  */
 
 #include "amdgpu.h"
+#include "amdgpu_ip.h"
 #include "amdgpu_jpeg.h"
 #include "amdgpu_pm.h"
 #include "soc15.h"
@@ -134,16 +135,12 @@ static int jpeg_v5_0_0_sw_init(struct amdgpu_ip_block *ip_block)
  *
  * @ip_block: Pointer to the amdgpu_ip_block for this hw instance.
  *
- * JPEG suspend and free up sw allocation
+ * Free up JPEG sw allocation
  */
 static int jpeg_v5_0_0_sw_fini(struct amdgpu_ip_block *ip_block)
 {
 	struct amdgpu_device *adev = ip_block->adev;
 	int r;
-
-	r = amdgpu_jpeg_suspend(adev);
-	if (r)
-		return r;
 
 	amdgpu_jpeg_sysfs_reset_mask_fini(adev);
 	r = amdgpu_jpeg_sw_fini(adev);
@@ -172,9 +169,13 @@ static int jpeg_v5_0_0_hw_init(struct amdgpu_ip_block *ip_block)
 
 	r = amdgpu_ring_test_helper(ring);
 	if (r)
-		return r;
+		goto error;
 
 	return 0;
+
+error:
+	amdgpu_jpeg_cancel_idle_work(adev);
+	return r;
 }
 
 /**
@@ -188,7 +189,9 @@ static int jpeg_v5_0_0_hw_fini(struct amdgpu_ip_block *ip_block)
 {
 	struct amdgpu_device *adev = ip_block->adev;
 
-	cancel_delayed_work_sync(&adev->jpeg.idle_work);
+	/* Teardown cancelled it synchronously in early_fini */
+	if (!adev->shutdown)
+		amdgpu_jpeg_cancel_idle_work(adev);
 
 	if (adev->jpeg.cur_state != AMD_PG_STATE_GATE &&
 	      RREG32_SOC15(JPEG, 0, regUVD_JRBC_STATUS))
@@ -206,15 +209,7 @@ static int jpeg_v5_0_0_hw_fini(struct amdgpu_ip_block *ip_block)
  */
 static int jpeg_v5_0_0_suspend(struct amdgpu_ip_block *ip_block)
 {
-	int r;
-
-	r = jpeg_v5_0_0_hw_fini(ip_block);
-	if (r)
-		return r;
-
-	r = amdgpu_jpeg_suspend(ip_block->adev);
-
-	return r;
+	return jpeg_v5_0_0_hw_fini(ip_block);
 }
 
 /**
@@ -625,7 +620,7 @@ static int jpeg_v5_0_0_set_interrupt_state(struct amdgpu_device *adev,
 	return 0;
 }
 
-static int jpeg_v5_0_0_process_interrupt(struct amdgpu_device *adev,
+int jpeg_v5_0_0_process_interrupt(struct amdgpu_device *adev,
 				      struct amdgpu_irq_src *source,
 				      struct amdgpu_iv_entry *entry)
 {
@@ -648,15 +643,28 @@ static int jpeg_v5_0_0_ring_reset(struct amdgpu_ring *ring,
 				  unsigned int vmid,
 				  struct amdgpu_fence *timedout_fence)
 {
+	struct amdgpu_device *adev = ring->adev;
+	u32 pg_flags = adev->pg_flags;
 	int r;
 
 	amdgpu_ring_reset_helper_begin(ring, timedout_fence);
-	r = jpeg_v5_0_0_stop(ring->adev);
+
+	/*
+	 * The DPG stop path only clears the JPEG_PG_MODE bit and never resets a
+	 * hung JRBC, so the post-reset ring test times out and the driver falls
+	 * back to a full MODE1 reset. Temporarily force the static power-gating
+	 * path so the stop/start sequence actually power-cycles the JPEG block
+	 * (JMI soft reset + ONO1 power off/on), matching the working jpeg_v4_0
+	 * reset.
+	 */
+	adev->pg_flags &= ~AMD_PG_SUPPORT_JPEG_DPG;
+	r = jpeg_v5_0_0_stop(adev);
+	if (!r)
+		r = jpeg_v5_0_0_start(adev);
+	adev->pg_flags = pg_flags;
 	if (r)
 		return r;
-	r = jpeg_v5_0_0_start(ring->adev);
-	if (r)
-		return r;
+
 	return amdgpu_ring_reset_helper_end(ring, timedout_fence);
 }
 
@@ -665,11 +673,11 @@ static const struct amd_ip_funcs jpeg_v5_0_0_ip_funcs = {
 	.early_init = jpeg_v5_0_0_early_init,
 	.sw_init = jpeg_v5_0_0_sw_init,
 	.sw_fini = jpeg_v5_0_0_sw_fini,
+	.early_fini = amdgpu_jpeg_early_fini,
 	.hw_init = jpeg_v5_0_0_hw_init,
 	.hw_fini = jpeg_v5_0_0_hw_fini,
 	.suspend = jpeg_v5_0_0_suspend,
 	.resume = jpeg_v5_0_0_resume,
-	.is_idle = jpeg_v5_0_0_is_idle,
 	.wait_for_idle = jpeg_v5_0_0_wait_for_idle,
 	.set_clockgating_state = jpeg_v5_0_0_set_clockgating_state,
 	.set_powergating_state = jpeg_v5_0_0_set_powergating_state,
@@ -680,6 +688,7 @@ static const struct amd_ip_funcs jpeg_v5_0_0_ip_funcs = {
 static const struct amdgpu_ring_funcs jpeg_v5_0_0_dec_ring_vm_funcs = {
 	.type = AMDGPU_RING_TYPE_VCN_JPEG,
 	.align_mask = 0xf,
+	.no_user_fence = true,
 	.get_rptr = jpeg_v5_0_0_dec_ring_get_rptr,
 	.get_wptr = jpeg_v5_0_0_dec_ring_get_wptr,
 	.set_wptr = jpeg_v5_0_0_dec_ring_set_wptr,

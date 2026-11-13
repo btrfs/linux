@@ -10,7 +10,6 @@
 #include <linux/module.h>
 #include <linux/pinctrl/pinmux.h>
 #include <linux/platform_device.h>
-#include <linux/mod_devicetable.h>
 
 #include <linux/mfd/tps6594.h>
 
@@ -347,6 +346,7 @@ static struct tps6594_pinctrl tps6594_template_pinctrl = {
 };
 
 static int tps6594_gpio_regmap_xlate(struct gpio_regmap *gpio,
+				     enum gpio_regmap_operation op,
 				     unsigned int base, unsigned int offset,
 				     unsigned int *reg, unsigned int *mask)
 {
@@ -492,11 +492,11 @@ static int tps6594_pinctrl_probe(struct platform_device *pdev)
 	struct pinctrl_desc *pctrl_desc;
 	struct gpio_regmap_config config = {};
 
-	pctrl_desc = devm_kzalloc(dev, sizeof(*pctrl_desc), GFP_KERNEL);
+	pctrl_desc = devm_kzalloc_obj(dev, *pctrl_desc);
 	if (!pctrl_desc)
 		return -ENOMEM;
 
-	pinctrl = devm_kzalloc(dev, sizeof(*pinctrl), GFP_KERNEL);
+	pinctrl = devm_kzalloc_obj(dev, *pinctrl);
 	if (!pinctrl)
 		return -ENOMEM;
 
@@ -562,8 +562,8 @@ static int tps6594_pinctrl_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id tps6594_pinctrl_id_table[] = {
-	{ "tps6594-pinctrl", },
-	{}
+	{ .name = "tps6594-pinctrl" },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, tps6594_pinctrl_id_table);
 

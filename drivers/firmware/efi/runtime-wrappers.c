@@ -119,6 +119,20 @@ union efi_rts_args {
 struct efi_runtime_work efi_rts_work;
 
 /*
+ * Upper bound on how long we wait for a single EFI runtime service
+ * call to finish before declaring firmware wedged. Chosen to be longer
+ * than any plausible legitimate call (including UpdateCapsule on slow
+ * SPI-NOR) while still bounding userspace wait time.
+ */
+#define EFI_RTS_TIMEOUT		(120 * HZ)
+
+/*
+ * Set when __efi_queue_work() gives up waiting for a call that is wedged in
+ * firmware. EFI runtime services are disabled for good at that point.
+ */
+static bool efi_rts_abandoned;
+
+/*
  * efi_queue_work:	Queue EFI runtime service call and wait for completion
  * @_rts:		EFI runtime service function identifier
  * @_args:		Arguments to pass to the EFI runtime service
@@ -202,12 +216,27 @@ void efi_call_virt_check_flags(unsigned long flags, const void *caller)
  */
 static DEFINE_SEMAPHORE(efi_runtime_lock, 1);
 
+static struct task_struct *efi_runtime_lock_owner __used;
+
 /*
  * Expose the EFI runtime lock to the UV platform
  */
 #ifdef CONFIG_X86_UV
 extern struct semaphore __efi_uv_runtime_lock __alias(efi_runtime_lock);
 #endif
+
+/*
+ * Park a worker that must never run efi_rts_wq again: EFI runtime services
+ * have been disabled and its efi_rts_work is abandoned. Loop in schedule()
+ * so a spurious wakeup cannot resume it.
+ */
+void __noreturn efi_rts_park_worker(void)
+{
+	for (;;) {
+		set_current_state(TASK_IDLE);
+		schedule();
+	}
+}
 
 /*
  * Calls the appropriate efi_runtime_service() with the appropriate
@@ -218,6 +247,11 @@ static void __nocfi efi_call_rts(struct work_struct *work)
 	const union efi_rts_args *args = efi_rts_work.args;
 	efi_status_t status = EFI_NOT_FOUND;
 	unsigned long flags;
+
+	if (!efi_enabled(EFI_RUNTIME_SERVICES))
+		efi_rts_park_worker();
+
+	efi_runtime_lock_owner = current;
 
 	arch_efi_call_virt_setup();
 	flags = efi_call_virt_save_flags();
@@ -303,28 +337,61 @@ static void __nocfi efi_call_rts(struct work_struct *work)
 		 * function identifier into efi_rts_work->efi_rts_id
 		 */
 		pr_err("Requested executing invalid EFI Runtime Service.\n");
+		break;
+
+#if IS_ENABLED(CONFIG_LKDTM)
+	case EFI_LKDTM_RUNTIME_RO_TEST:
+		/*
+		 * Call GetTime() with the output argument pointing to
+		 * executable memory, which should be mapped read-only in the
+		 * EFI page tables.
+		 */
+		status = efi_call_virt(get_time,
+				       (void *)efi.runtime->set_virtual_address_map,
+				       NULL);
+		break;
+	case EFI_LKDTM_RUNTIME_NX_TEST:
+		/*
+		 * Call efi.runtime, which points to a data object in a EFI
+		 * runtime region, as if it were a function pointer.
+		 */
+		{
+			struct { efi_status_t (*f)(int); } *s = (void *)&efi.runtime;
+
+			status = arch_efi_call_virt(s, f, 0);
+		}
+		break;
+#endif
 	}
 
 	efi_call_virt_check_flags(flags, efi_rts_work.caller);
 	arch_efi_call_virt_teardown();
 
+	/*
+	 * EFI runtime services may also have been disabled because the
+	 * firmware faulted, but the caller is still waiting for us in that
+	 * case. Only park the worker if the caller has given up on it.
+	 */
+	if (READ_ONCE(efi_rts_abandoned))
+		efi_rts_park_worker();
+
 	efi_rts_work.status = status;
 	complete(&efi_rts_work.efi_rts_comp);
+	efi_runtime_lock_owner = NULL;
 }
 
 static efi_status_t __efi_queue_work(enum efi_rts_ids id,
 				     union efi_rts_args *args)
 {
+	if (!efi_enabled(EFI_RUNTIME_SERVICES)) {
+		pr_warn_once("EFI Runtime Services are disabled!\n");
+		return EFI_DEVICE_ERROR;
+	}
+
 	efi_rts_work.efi_rts_id = id;
 	efi_rts_work.args = args;
 	efi_rts_work.caller = __builtin_return_address(0);
 	efi_rts_work.status = EFI_ABORTED;
-
-	if (!efi_enabled(EFI_RUNTIME_SERVICES)) {
-		pr_warn_once("EFI Runtime Services are disabled!\n");
-		efi_rts_work.status = EFI_DEVICE_ERROR;
-		goto exit;
-	}
 
 	init_completion(&efi_rts_work.efi_rts_comp);
 	INIT_WORK(&efi_rts_work.work, efi_call_rts);
@@ -333,10 +400,19 @@ static efi_status_t __efi_queue_work(enum efi_rts_ids id,
 	 * queue_work() returns 0 if work was already on queue,
 	 * _ideally_ this should never happen.
 	 */
-	if (queue_work(efi_rts_wq, &efi_rts_work.work))
-		wait_for_completion(&efi_rts_work.efi_rts_comp);
-	else
+	if (!queue_work(efi_rts_wq, &efi_rts_work.work)) {
 		pr_err("Failed to queue work to efi_rts_wq.\n");
+		goto exit;
+	}
+
+	if (!wait_for_completion_timeout(&efi_rts_work.efi_rts_comp,
+					 EFI_RTS_TIMEOUT)) {
+		pr_err("EFI runtime service %d wedged in firmware; disabling EFI runtime services\n",
+		       id);
+		WRITE_ONCE(efi_rts_abandoned, true);
+		clear_bit(EFI_RUNTIME_SERVICES, &efi.flags);
+		return EFI_ABORTED;
+	}
 
 	WARN_ON_ONCE(efi_rts_work.status == EFI_ABORTED);
 exit:
@@ -444,8 +520,15 @@ virt_efi_set_variable_nb(efi_char16_t *name, efi_guid_t *vendor, u32 attr,
 	if (down_trylock(&efi_runtime_lock))
 		return EFI_NOT_READY;
 
+	if (!efi_enabled(EFI_RUNTIME_SERVICES)) {
+		up(&efi_runtime_lock);
+		return EFI_DEVICE_ERROR;
+	}
+
+	efi_runtime_lock_owner = current;
 	status = efi_call_virt_pointer(efi.runtime, set_variable, name, vendor,
 				       attr, data_size, data);
+	efi_runtime_lock_owner = NULL;
 	up(&efi_runtime_lock);
 	return status;
 }
@@ -481,9 +564,16 @@ virt_efi_query_variable_info_nb(u32 attr, u64 *storage_space,
 	if (down_trylock(&efi_runtime_lock))
 		return EFI_NOT_READY;
 
+	if (!efi_enabled(EFI_RUNTIME_SERVICES)) {
+		up(&efi_runtime_lock);
+		return EFI_DEVICE_ERROR;
+	}
+
+	efi_runtime_lock_owner = current;
 	status = efi_call_virt_pointer(efi.runtime, query_variable_info, attr,
 				       storage_space, remaining_space,
 				       max_variable_size);
+	efi_runtime_lock_owner = NULL;
 	up(&efi_runtime_lock);
 	return status;
 }
@@ -509,12 +599,19 @@ virt_efi_reset_system(int reset_type, efi_status_t status,
 		return;
 	}
 
+	if (!efi_enabled(EFI_RUNTIME_SERVICES)) {
+		pr_warn("EFI Runtime Services are disabled, not invoking reset_system()\n");
+		up(&efi_runtime_lock);
+		return;
+	}
+
+	efi_runtime_lock_owner = current;
 	arch_efi_call_virt_setup();
 	efi_rts_work.efi_rts_id = EFI_RESET_SYSTEM;
 	arch_efi_call_virt(efi.runtime, reset_system, reset_type, status,
 			   data_size, data);
 	arch_efi_call_virt_teardown();
-
+	efi_runtime_lock_owner = NULL;
 	up(&efi_runtime_lock);
 }
 
@@ -552,6 +649,34 @@ static efi_status_t virt_efi_query_capsule_caps(efi_capsule_header_t **capsules,
 	return status;
 }
 
+#if IS_ENABLED(CONFIG_LKDTM)
+static efi_status_t efi_lkdtm_rt_test(enum efi_rts_ids id)
+{
+	efi_status_t status;
+
+	if (!efi_enabled(EFI_RUNTIME_SERVICES) || !efi_enabled(EFI_MEM_ATTR))
+		return EFI_NOT_READY;
+
+	switch (id) {
+	case EFI_LKDTM_RUNTIME_NX_TEST:
+		break;
+	case EFI_LKDTM_RUNTIME_RO_TEST:
+		if (efi.get_time &&
+		    efi_rt_services_supported(EFI_RT_SUPPORTED_GET_TIME))
+			break;
+		fallthrough;
+	default:
+		return EFI_UNSUPPORTED;
+	}
+
+	if (down_interruptible(&efi_runtime_lock))
+		return EFI_NOT_READY;
+	status = __efi_queue_work(id, NULL);
+	up(&efi_runtime_lock);
+	return status;
+}
+#endif
+
 void __init efi_native_runtime_setup(void)
 {
 	efi.get_time			    = virt_efi_get_time;
@@ -568,6 +693,10 @@ void __init efi_native_runtime_setup(void)
 	efi.query_variable_info_nonblocking = virt_efi_query_variable_info_nb;
 	efi.update_capsule		    = virt_efi_update_capsule;
 	efi.query_capsule_caps		    = virt_efi_query_capsule_caps;
+
+#if IS_ENABLED(CONFIG_LKDTM)
+	efi.lkdtm_rt_test		    = efi_lkdtm_rt_test;
+#endif
 }
 
 #ifdef CONFIG_ACPI_PRMT
@@ -587,3 +716,36 @@ efi_call_acpi_prm_handler(efi_status_t (__efiapi *handler_addr)(u64, void *),
 }
 
 #endif
+
+void efi_runtime_assert_lock_held(void)
+{
+	WARN_ON(efi_runtime_lock_owner != current);
+}
+
+efi_status_t efi_runtime_set_enable_flag(bool enable)
+{
+	static bool runtime_disabled;
+	efi_status_t ret = EFI_NOT_READY;
+
+	if (down_interruptible(&efi_runtime_lock))
+		return EFI_ABORTED;
+
+	if (enable) {
+		/* It could be enabled only if it is disabled here */
+		if (runtime_disabled) {
+			set_bit(EFI_RUNTIME_SERVICES, &efi.flags);
+			runtime_disabled = false;
+			ret = EFI_SUCCESS;
+		}
+	} else {
+		if (efi_enabled(EFI_RUNTIME_SERVICES)) {
+			clear_bit(EFI_RUNTIME_SERVICES, &efi.flags);
+			runtime_disabled = true;
+			ret = EFI_SUCCESS;
+		}
+	}
+
+	up(&efi_runtime_lock);
+
+	return ret;
+}

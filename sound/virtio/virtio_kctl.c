@@ -18,6 +18,21 @@ static const snd_ctl_elem_type_t g_v2a_type_map[] = {
 	[VIRTIO_SND_CTL_TYPE_IEC958] = SNDRV_CTL_ELEM_TYPE_IEC958
 };
 
+/* Map for converting VirtIO types to maximum value counts. */
+static const unsigned int g_v2a_count_map[] = {
+	[VIRTIO_SND_CTL_TYPE_BOOLEAN] =
+		ARRAY_SIZE(((struct virtio_snd_ctl_value *)0)->value.integer),
+	[VIRTIO_SND_CTL_TYPE_INTEGER] =
+		ARRAY_SIZE(((struct virtio_snd_ctl_value *)0)->value.integer),
+	[VIRTIO_SND_CTL_TYPE_INTEGER64] =
+		ARRAY_SIZE(((struct virtio_snd_ctl_value *)0)->value.integer64),
+	[VIRTIO_SND_CTL_TYPE_ENUMERATED] =
+		ARRAY_SIZE(((struct virtio_snd_ctl_value *)0)->value.enumerated),
+	[VIRTIO_SND_CTL_TYPE_BYTES] =
+		ARRAY_SIZE(((struct virtio_snd_ctl_value *)0)->value.bytes),
+	[VIRTIO_SND_CTL_TYPE_IEC958] = 1
+};
+
 /* Map for converting VirtIO access rights to ALSA access rights. */
 static const unsigned int g_v2a_access_map[] = {
 	[VIRTIO_SND_CTL_ACCESS_READ] = SNDRV_CTL_ELEM_ACCESS_READ,
@@ -35,6 +50,37 @@ static const unsigned int g_v2a_mask_map[] = {
 	[VIRTIO_SND_CTL_EVT_MASK_INFO] = SNDRV_CTL_EVENT_MASK_INFO,
 	[VIRTIO_SND_CTL_EVT_MASK_TLV] = SNDRV_CTL_EVENT_MASK_TLV
 };
+
+static int virtsnd_kctl_validate_info(struct virtio_snd *snd, u32 cid,
+				      struct virtio_snd_ctl_info *kinfo)
+{
+	struct virtio_device *vdev = snd->vdev;
+	unsigned int type = le32_to_cpu(kinfo->type);
+	unsigned int count = le32_to_cpu(kinfo->count);
+
+	if (type >= ARRAY_SIZE(g_v2a_type_map)) {
+		dev_err(&vdev->dev, "control #%u: unknown type %u\n",
+			cid, type);
+		return -EINVAL;
+	}
+
+	if (count > g_v2a_count_map[type] ||
+	    (type == VIRTIO_SND_CTL_TYPE_IEC958 && count != 1)) {
+		dev_err(&vdev->dev, "control #%u: invalid count %u for type %u\n",
+			cid, count, type);
+		return -EINVAL;
+	}
+
+	if (type == VIRTIO_SND_CTL_TYPE_ENUMERATED &&
+	    !le32_to_cpu(kinfo->value.enumerated.items)) {
+		dev_err(&vdev->dev,
+			"control #%u: no items for enumerated control\n",
+			cid);
+		return -EINVAL;
+	}
+
+	return 0;
+}
 
 /**
  * virtsnd_kctl_info() - Returns information about the control.
@@ -330,8 +376,7 @@ static int virtsnd_kctl_get_enum_items(struct virtio_snd *snd, unsigned int cid)
 	if (!msg)
 		return -ENOMEM;
 
-	kctl->items = devm_kcalloc(&vdev->dev, n, sizeof(*kctl->items),
-				   GFP_KERNEL);
+	kctl->items = devm_kzalloc_objs(&vdev->dev, *kctl->items, n);
 	if (!kctl->items) {
 		virtsnd_ctl_msg_unref(msg);
 		return -ENOMEM;
@@ -366,13 +411,12 @@ int virtsnd_kctl_parse_cfg(struct virtio_snd *snd)
 	if (!snd->nkctls)
 		return 0;
 
-	snd->kctl_infos = devm_kcalloc(&vdev->dev, snd->nkctls,
-				       sizeof(*snd->kctl_infos), GFP_KERNEL);
+	snd->kctl_infos = devm_kzalloc_objs(&vdev->dev, *snd->kctl_infos,
+					    snd->nkctls);
 	if (!snd->kctl_infos)
 		return -ENOMEM;
 
-	snd->kctls = devm_kcalloc(&vdev->dev, snd->nkctls, sizeof(*snd->kctls),
-				  GFP_KERNEL);
+	snd->kctls = devm_kzalloc_objs(&vdev->dev, *snd->kctls, snd->nkctls);
 	if (!snd->kctls)
 		return -ENOMEM;
 
@@ -384,6 +428,10 @@ int virtsnd_kctl_parse_cfg(struct virtio_snd *snd)
 	for (i = 0; i < snd->nkctls; ++i) {
 		struct virtio_snd_ctl_info *kinfo = &snd->kctl_infos[i];
 		unsigned int type = le32_to_cpu(kinfo->type);
+
+		rc = virtsnd_kctl_validate_info(snd, i, kinfo);
+		if (rc)
+			return rc;
 
 		if (type == VIRTIO_SND_CTL_TYPE_ENUMERATED) {
 			rc = virtsnd_kctl_get_enum_items(snd, i);

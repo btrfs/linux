@@ -35,40 +35,47 @@ static struct scsi_host_template zorro7xx_scsi_driver_template = {
 	.module		= THIS_MODULE,
 };
 
-static struct zorro_driver_data {
+struct zorro_driver_data {
 	const char *name;
 	unsigned long offset;
 	int absolute;	/* offset is absolute address */
-} zorro7xx_driver_data[] = {
-	{ .name = "PowerUP 603e+", .offset = 0xf40000, .absolute = 1 },
-	{ .name = "WarpEngine 40xx", .offset = 0x40000 },
-	{ .name = "A4091", .offset = 0x800000 },
-	{ .name = "GForce 040/060", .offset = 0x40000 },
-	{ 0 }
+};
+
+static const struct zorro_driver_data zorro7xx_blizzard_603e_plus_data = {
+	.name = "PowerUP 603e+", .offset = 0xf40000, .absolute = 1
+};
+static const struct zorro_driver_data zorro7xx_warp_engine_40xx_data = {
+	.name = "WarpEngine 40xx", .offset = 0x40000
+};
+static const struct zorro_driver_data zorro7xx_a4091_data = {
+	.name = "A4091", .offset = 0x800000
+};
+static const struct zorro_driver_data zorro7xx_gforce_040_060_data = {
+	.name = "GForce 040/060", .offset = 0x40000
 };
 
 static struct zorro_device_id zorro7xx_zorro_tbl[] = {
 	{
 		.id = ZORRO_PROD_PHASE5_BLIZZARD_603E_PLUS,
-		.driver_data = (unsigned long)&zorro7xx_driver_data[0],
+		.driver_data_ptr = &zorro7xx_blizzard_603e_plus_data,
 	},
 	{
 		.id = ZORRO_PROD_MACROSYSTEMS_WARP_ENGINE_40xx,
-		.driver_data = (unsigned long)&zorro7xx_driver_data[1],
+		.driver_data_ptr = &zorro7xx_warp_engine_40xx_data,
 	},
 	{
 		.id = ZORRO_PROD_CBM_A4091_1,
-		.driver_data = (unsigned long)&zorro7xx_driver_data[2],
+		.driver_data_ptr = &zorro7xx_a4091_data,
 	},
 	{
 		.id = ZORRO_PROD_CBM_A4091_2,
-		.driver_data = (unsigned long)&zorro7xx_driver_data[2],
+		.driver_data_ptr = &zorro7xx_a4091_data,
 	},
 	{
 		.id = ZORRO_PROD_GVP_GFORCE_040_060,
-		.driver_data = (unsigned long)&zorro7xx_driver_data[3],
+		.driver_data_ptr = &zorro7xx_gforce_040_060_data,
 	},
-	{ 0 }
+	{ }
 };
 MODULE_DEVICE_TABLE(zorro, zorro7xx_zorro_tbl);
 
@@ -77,11 +84,11 @@ static int zorro7xx_init_one(struct zorro_dev *z,
 {
 	struct Scsi_Host *host;
 	struct NCR_700_Host_Parameters *hostdata;
-	struct zorro_driver_data *zdd;
+	const struct zorro_driver_data *zdd;
 	unsigned long board, ioaddr;
 
 	board = zorro_resource_start(z);
-	zdd = (struct zorro_driver_data *)ent->driver_data;
+	zdd = ent->driver_data_ptr;
 
 	if (zdd->absolute) {
 		ioaddr = zdd->offset;
@@ -95,7 +102,7 @@ static int zorro7xx_init_one(struct zorro_dev *z,
 		return -EBUSY;
 	}
 
-	hostdata = kzalloc(sizeof(struct NCR_700_Host_Parameters), GFP_KERNEL);
+	hostdata = kzalloc_obj(struct NCR_700_Host_Parameters);
 	if (!hostdata) {
 		printk(KERN_ERR "zorro7xx: Failed to allocate host data\n");
 		goto out_release;
