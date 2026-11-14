@@ -16,18 +16,18 @@ static int iomap_seek_hole_iter(struct iomap_iter *iter,
 		*hole_pos = mapping_seek_hole_data(iter->inode->i_mapping,
 				iter->pos, iter->pos + length, SEEK_HOLE);
 		if (*hole_pos == iter->pos + length)
-			return iomap_iter_advance(iter, &length);
+			return iomap_iter_advance(iter, length);
 		return 0;
 	case IOMAP_HOLE:
 		*hole_pos = iter->pos;
 		return 0;
 	default:
-		return iomap_iter_advance(iter, &length);
+		return iomap_iter_advance(iter, length);
 	}
 }
 
 loff_t
-iomap_seek_hole(struct inode *inode, loff_t pos, const struct iomap_ops *ops)
+iomap_seek_hole(struct inode *inode, loff_t pos, iomap_iter_next_fn next)
 {
 	loff_t size = i_size_read(inode);
 	struct iomap_iter iter = {
@@ -42,7 +42,7 @@ iomap_seek_hole(struct inode *inode, loff_t pos, const struct iomap_ops *ops)
 		return -ENXIO;
 
 	iter.len = size - pos;
-	while ((ret = iomap_iter(&iter, ops)) > 0)
+	while ((ret = iomap_iter(&iter, next)) > 0)
 		iter.status = iomap_seek_hole_iter(&iter, &pos);
 	if (ret < 0)
 		return ret;
@@ -59,12 +59,12 @@ static int iomap_seek_data_iter(struct iomap_iter *iter,
 
 	switch (iter->iomap.type) {
 	case IOMAP_HOLE:
-		return iomap_iter_advance(iter, &length);
+		return iomap_iter_advance(iter, length);
 	case IOMAP_UNWRITTEN:
 		*hole_pos = mapping_seek_hole_data(iter->inode->i_mapping,
 				iter->pos, iter->pos + length, SEEK_DATA);
 		if (*hole_pos < 0)
-			return iomap_iter_advance(iter, &length);
+			return iomap_iter_advance(iter, length);
 		return 0;
 	default:
 		*hole_pos = iter->pos;
@@ -73,7 +73,7 @@ static int iomap_seek_data_iter(struct iomap_iter *iter,
 }
 
 loff_t
-iomap_seek_data(struct inode *inode, loff_t pos, const struct iomap_ops *ops)
+iomap_seek_data(struct inode *inode, loff_t pos, iomap_iter_next_fn next)
 {
 	loff_t size = i_size_read(inode);
 	struct iomap_iter iter = {
@@ -88,7 +88,7 @@ iomap_seek_data(struct inode *inode, loff_t pos, const struct iomap_ops *ops)
 		return -ENXIO;
 
 	iter.len = size - pos;
-	while ((ret = iomap_iter(&iter, ops)) > 0)
+	while ((ret = iomap_iter(&iter, next)) > 0)
 		iter.status = iomap_seek_data_iter(&iter, &pos);
 	if (ret < 0)
 		return ret;

@@ -98,6 +98,11 @@ struct panfrost_gem_object {
 	bool noexec		:1;
 	bool is_heap		:1;
 
+	/* On coherent devices, this reflects the creation flags, not the true
+	 * cacheability attribute of the mapping.
+	 */
+	bool wb_mmap		:1;
+
 #ifdef CONFIG_DEBUG_FS
 	struct panfrost_gem_debugfs debugfs;
 #endif
@@ -124,12 +129,18 @@ drm_mm_node_to_panfrost_mapping(struct drm_mm_node *node)
 	return container_of(node, struct panfrost_gem_mapping, mmnode);
 }
 
+int panfrost_gem_init(struct panfrost_device *pfdev);
+void panfrost_gem_fini(struct panfrost_device *pfdev);
+
 struct drm_gem_object *panfrost_gem_create_object(struct drm_device *dev, size_t size);
 
 struct drm_gem_object *
 panfrost_gem_prime_import_sg_table(struct drm_device *dev,
 				   struct dma_buf_attachment *attach,
 				   struct sg_table *sgt);
+struct drm_gem_object *
+panfrost_gem_prime_import(struct drm_device *dev,
+			  struct dma_buf *dma_buf);
 
 struct panfrost_gem_object *
 panfrost_gem_create(struct drm_device *dev, size_t size, u32 flags);
@@ -144,15 +155,16 @@ panfrost_gem_mapping_get(struct panfrost_gem_object *bo,
 void panfrost_gem_mapping_put(struct panfrost_gem_mapping *mapping);
 void panfrost_gem_teardown_mappings_locked(struct panfrost_gem_object *bo);
 
-int panfrost_gem_shrinker_init(struct drm_device *dev);
-void panfrost_gem_shrinker_cleanup(struct drm_device *dev);
+int panfrost_gem_shrinker_init(struct panfrost_device *pfdev);
+void panfrost_gem_shrinker_fini(struct panfrost_device *pfdev);
 
 void panfrost_gem_set_label(struct drm_gem_object *obj, const char *label);
+int panfrost_gem_sync(struct drm_gem_object *obj, u32 type,
+		      u32 offset, u32 size);
 void panfrost_gem_internal_set_label(struct drm_gem_object *obj, const char *label);
 
 #ifdef CONFIG_DEBUG_FS
-void panfrost_gem_debugfs_print_bos(struct panfrost_device *pfdev,
-				    struct seq_file *m);
+int panfrost_gem_debugfs_init(struct drm_minor *minor);
 #endif
 
 #endif /* __PANFROST_GEM_H__ */

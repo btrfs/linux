@@ -1002,7 +1002,7 @@ static struct dma_async_tx_descriptor *omap_dma_prep_slave_sg(
 	}
 
 	/* Now allocate and setup the descriptor. */
-	d = kzalloc(struct_size(d, sg, sglen), GFP_ATOMIC);
+	d = kzalloc_flex(*d, sg, sglen, GFP_ATOMIC);
 	if (!d)
 		return NULL;
 	d->sglen = sglen;
@@ -1503,7 +1503,7 @@ static int omap_dma_chan_init(struct omap_dmadev *od)
 {
 	struct omap_chan *c;
 
-	c = kzalloc(sizeof(*c), GFP_KERNEL);
+	c = kzalloc_obj(*c);
 	if (!c)
 		return -ENOMEM;
 
@@ -1660,7 +1660,7 @@ static int omap_dma_probe(struct platform_device *pdev)
 	int rc, i, irq;
 	u32 val;
 
-	od = devm_kzalloc(&pdev->dev, sizeof(*od), GFP_KERNEL);
+	od = devm_kzalloc_obj(&pdev->dev, *od);
 	if (!od)
 		return -ENOMEM;
 
@@ -1754,9 +1754,7 @@ static int omap_dma_probe(struct platform_device *pdev)
 	if (od->plat->dma_attr->dev_caps & HS_CHANNELS_RESERVED)
 		bitmap_set(od->lch_bitmap, 0, 2);
 
-	od->lch_map = devm_kcalloc(&pdev->dev, od->lch_count,
-				   sizeof(*od->lch_map),
-				   GFP_KERNEL);
+	od->lch_map = devm_kzalloc_objs(&pdev->dev, *od->lch_map, od->lch_count);
 	if (!od->lch_map)
 		return -ENOMEM;
 
@@ -1808,6 +1806,8 @@ static int omap_dma_probe(struct platform_device *pdev)
 	if (rc) {
 		pr_warn("OMAP-DMA: failed to register slave DMA engine device: %d\n",
 			rc);
+		if (od->ll123_supported)
+			dma_pool_destroy(od->desc_pool);
 		omap_dma_free(od);
 		return rc;
 	}
@@ -1823,6 +1823,8 @@ static int omap_dma_probe(struct platform_device *pdev)
 		if (rc) {
 			pr_warn("OMAP-DMA: failed to register DMA controller\n");
 			dma_async_device_unregister(&od->ddev);
+			if (od->ll123_supported)
+				dma_pool_destroy(od->desc_pool);
 			omap_dma_free(od);
 		}
 	}

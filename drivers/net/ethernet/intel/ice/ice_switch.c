@@ -1463,8 +1463,8 @@ int ice_init_def_sw_recp(struct ice_hw *hw)
 	struct ice_sw_recipe *recps;
 	u8 i;
 
-	recps = devm_kcalloc(ice_hw_to_dev(hw), ICE_MAX_NUM_RECIPES,
-			     sizeof(*recps), GFP_KERNEL);
+	recps = devm_kzalloc_objs(ice_hw_to_dev(hw), *recps,
+				  ICE_MAX_NUM_RECIPES);
 	if (!recps)
 		return -ENOMEM;
 
@@ -1771,8 +1771,7 @@ ice_add_vsi(struct ice_hw *hw, u16 vsi_handle, struct ice_vsi_ctx *vsi_ctx,
 	tmp_vsi_ctx = ice_get_vsi_ctx(hw, vsi_handle);
 	if (!tmp_vsi_ctx) {
 		/* Create a new VSI context */
-		tmp_vsi_ctx = devm_kzalloc(ice_hw_to_dev(hw),
-					   sizeof(*tmp_vsi_ctx), GFP_KERNEL);
+		tmp_vsi_ctx = devm_kzalloc_obj(ice_hw_to_dev(hw), *tmp_vsi_ctx);
 		if (!tmp_vsi_ctx) {
 			ice_aq_free_vsi(hw, vsi_ctx, false, cd);
 			return -ENOMEM;
@@ -1847,7 +1846,7 @@ ice_cfg_rdma_fltr(struct ice_hw *hw, u16 vsi_handle, bool enable)
 	if (!cached_ctx)
 		return -ENOENT;
 
-	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	ctx = kzalloc_obj(*ctx);
 	if (!ctx)
 		return -ENOMEM;
 
@@ -2069,7 +2068,7 @@ ice_update_recipe_lkup_idx(struct ice_hw *hw,
 	u16 num_recps = ICE_MAX_NUM_RECIPES;
 	int status;
 
-	rcp_list = kcalloc(num_recps, sizeof(*rcp_list), GFP_KERNEL);
+	rcp_list = kzalloc_objs(*rcp_list, num_recps);
 	if (!rcp_list)
 		return -ENOMEM;
 
@@ -2326,7 +2325,7 @@ ice_get_recp_frm_fw(struct ice_hw *hw, struct ice_sw_recipe *recps, u8 rid,
 	bitmap_zero(result_bm, ICE_MAX_FV_WORDS);
 
 	/* we need a buffer big enough to accommodate all the recipes */
-	tmp = kcalloc(ICE_MAX_NUM_RECIPES, sizeof(*tmp), GFP_KERNEL);
+	tmp = kzalloc_objs(*tmp, ICE_MAX_NUM_RECIPES);
 	if (!tmp)
 		return -ENOMEM;
 
@@ -2612,7 +2611,6 @@ ice_fill_sw_rule(struct ice_hw *hw, struct ice_fltr_info *f_info,
 	u16 vlan_id = ICE_MAX_VLAN_ID + 1;
 	u16 vlan_tpid = ETH_P_8021Q;
 	void *daddr = NULL;
-	u16 eth_hdr_sz;
 	u8 *eth_hdr;
 	u32 act = 0;
 	__be16 *off;
@@ -2625,11 +2623,10 @@ ice_fill_sw_rule(struct ice_hw *hw, struct ice_fltr_info *f_info,
 		return;
 	}
 
-	eth_hdr_sz = sizeof(dummy_eth_header);
 	eth_hdr = s_rule->hdr_data;
 
 	/* initialize the ether header with a dummy header */
-	memcpy(eth_hdr, dummy_eth_header, eth_hdr_sz);
+	ice_fill_eth_hdr(eth_hdr);
 	ice_fill_sw_info(hw, f_info);
 
 	switch (f_info->fltr_act) {
@@ -2730,7 +2727,7 @@ ice_fill_sw_rule(struct ice_hw *hw, struct ice_fltr_info *f_info,
 
 	/* Create the switch rule with the final dummy Ethernet header */
 	if (opc != ice_aqc_opc_update_sw_rules)
-		s_rule->hdr_len = cpu_to_le16(eth_hdr_sz);
+		s_rule->hdr_len = cpu_to_le16(DUMMY_ETH_HDR_LEN);
 }
 
 /**
@@ -2853,7 +2850,7 @@ ice_create_vsi_list_map(struct ice_hw *hw, u16 *vsi_handle_arr, u16 num_vsi,
 	struct ice_vsi_list_map_info *v_map;
 	int i;
 
-	v_map = devm_kzalloc(ice_hw_to_dev(hw), sizeof(*v_map), GFP_KERNEL);
+	v_map = devm_kzalloc_obj(ice_hw_to_dev(hw), *v_map);
 	if (!v_map)
 		return NULL;
 
@@ -2983,8 +2980,7 @@ ice_create_pkt_fwd_rule(struct ice_hw *hw,
 			      GFP_KERNEL);
 	if (!s_rule)
 		return -ENOMEM;
-	fm_entry = devm_kzalloc(ice_hw_to_dev(hw), sizeof(*fm_entry),
-				GFP_KERNEL);
+	fm_entry = devm_kzalloc_obj(ice_hw_to_dev(hw), *fm_entry);
 	if (!fm_entry) {
 		status = -ENOMEM;
 		goto ice_create_pkt_fwd_rule_exit;
@@ -4123,7 +4119,7 @@ ice_add_entry_to_vsi_fltr_list(struct ice_hw *hw, u16 vsi_handle,
 	/* this memory is freed up in the caller function
 	 * once filters for this VSI are removed
 	 */
-	tmp = devm_kzalloc(ice_hw_to_dev(hw), sizeof(*tmp), GFP_KERNEL);
+	tmp = devm_kzalloc_obj(ice_hw_to_dev(hw), *tmp);
 	if (!tmp)
 		return -ENOMEM;
 
@@ -4984,10 +4980,8 @@ ice_find_free_recp_res_idx(struct ice_hw *hw, const unsigned long *profiles,
 			  hw->switch_info->recp_list[bit].res_idxs,
 			  ICE_MAX_FV_WORDS);
 
-	bitmap_xor(free_idx, used_idx, possible_idx, ICE_MAX_FV_WORDS);
-
 	/* return number of free indexes */
-	return (u16)bitmap_weight(free_idx, ICE_MAX_FV_WORDS);
+	return (u16)bitmap_weighted_xor(free_idx, used_idx, possible_idx, ICE_MAX_FV_WORDS);
 }
 
 /**
@@ -5096,7 +5090,7 @@ ice_add_sw_recipe(struct ice_hw *hw, struct ice_sw_recipe *rm,
 	if (recp_cnt > ICE_MAX_CHAIN_RECIPE_RES)
 		return -E2BIG;
 
-	buf = kcalloc(recp_cnt, sizeof(*buf), GFP_KERNEL);
+	buf = kzalloc_objs(*buf, recp_cnt);
 	if (!buf)
 		return -ENOMEM;
 
@@ -5324,7 +5318,7 @@ ice_add_adv_recipe(struct ice_hw *hw, struct ice_adv_lkup_elem *lkups,
 	if (!lkups_cnt)
 		return -EINVAL;
 
-	lkup_exts = kzalloc(sizeof(*lkup_exts), GFP_KERNEL);
+	lkup_exts = kzalloc_obj(*lkup_exts);
 	if (!lkup_exts)
 		return -ENOMEM;
 
@@ -5346,7 +5340,7 @@ ice_add_adv_recipe(struct ice_hw *hw, struct ice_adv_lkup_elem *lkups,
 		}
 	}
 
-	rm = kzalloc(sizeof(*rm), GFP_KERNEL);
+	rm = kzalloc_obj(*rm);
 	if (!rm) {
 		status = -ENOMEM;
 		goto err_free_lkup_exts;
@@ -5530,7 +5524,7 @@ ice_dummy_packet_add_vlan(const struct ice_dummy_pkt_profile *dummy_pkt,
 	memcpy(pkt + etype_off + off, dummy_pkt->pkt + etype_off,
 	       dummy_pkt->pkt_len - etype_off);
 
-	profile = kzalloc(sizeof(*profile), GFP_KERNEL);
+	profile = kzalloc_obj(*profile);
 	if (!profile) {
 		kfree(offsets);
 		kfree(pkt);
@@ -6235,9 +6229,8 @@ ice_add_adv_rule(struct ice_hw *hw, struct ice_adv_lkup_elem *lkups,
 				 NULL);
 	if (status)
 		goto err_ice_add_adv_rule;
-	adv_fltr = devm_kzalloc(ice_hw_to_dev(hw),
-				sizeof(struct ice_adv_fltr_mgmt_list_entry),
-				GFP_KERNEL);
+	adv_fltr = devm_kzalloc_obj(ice_hw_to_dev(hw),
+				    struct ice_adv_fltr_mgmt_list_entry);
 	if (!adv_fltr) {
 		status = -ENOMEM;
 		goto err_ice_add_adv_rule;

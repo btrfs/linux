@@ -28,6 +28,7 @@
 #include "rzg2l_du_vsp.h"
 
 #define DU_MCR0			0x00
+#define DU_MCR0_DPI_EN		BIT(0)
 #define DU_MCR0_DI_EN		BIT(8)
 
 #define DU_DITR0		0x10
@@ -217,8 +218,12 @@ static void rzg2l_du_crtc_put(struct rzg2l_du_crtc *rcrtc)
 static void rzg2l_du_start_stop(struct rzg2l_du_crtc *rcrtc, bool start)
 {
 	struct rzg2l_du_device *rcdu = rcrtc->dev;
+	u32 val = DU_MCR0_DI_EN;
 
-	writel(start ? DU_MCR0_DI_EN : 0, rcdu->mmio + DU_MCR0);
+	if (start && rzg2l_du_has(rcdu, RZG2L_DU_FEATURE_DPIO_OE))
+		val |= DU_MCR0_DPI_EN;
+
+	writel(start ? val : 0, rcdu->mmio + DU_MCR0);
 }
 
 static void rzg2l_du_crtc_start(struct rzg2l_du_crtc *rcrtc)
@@ -249,7 +254,7 @@ static void rzg2l_du_crtc_stop(struct rzg2l_du_crtc *rcrtc)
  */
 
 static void rzg2l_du_crtc_atomic_enable(struct drm_crtc *crtc,
-					struct drm_atomic_state *state)
+					struct drm_atomic_commit *state)
 {
 	struct rzg2l_du_crtc *rcrtc = to_rzg2l_crtc(crtc);
 
@@ -259,7 +264,7 @@ static void rzg2l_du_crtc_atomic_enable(struct drm_crtc *crtc,
 }
 
 static void rzg2l_du_crtc_atomic_disable(struct drm_crtc *crtc,
-					 struct drm_atomic_state *state)
+					 struct drm_atomic_commit *state)
 {
 	struct rzg2l_du_crtc *rcrtc = to_rzg2l_crtc(crtc);
 
@@ -275,7 +280,7 @@ static void rzg2l_du_crtc_atomic_disable(struct drm_crtc *crtc,
 }
 
 static void rzg2l_du_crtc_atomic_flush(struct drm_crtc *crtc,
-				       struct drm_atomic_state *state)
+				       struct drm_atomic_commit *state)
 {
 	struct rzg2l_du_crtc *rcrtc = to_rzg2l_crtc(crtc);
 	struct drm_device *dev = rcrtc->crtc.dev;
@@ -327,20 +332,17 @@ static void rzg2l_du_crtc_atomic_destroy_state(struct drm_crtc *crtc,
 	kfree(to_rzg2l_crtc_state(state));
 }
 
-static void rzg2l_du_crtc_reset(struct drm_crtc *crtc)
+static struct drm_crtc_state *rzg2l_du_crtc_create_state(struct drm_crtc *crtc)
 {
 	struct rzg2l_du_crtc_state *state;
 
-	if (crtc->state) {
-		rzg2l_du_crtc_atomic_destroy_state(crtc, crtc->state);
-		crtc->state = NULL;
-	}
-
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	state = kzalloc_obj(*state);
 	if (!state)
-		return;
+		return ERR_PTR(-ENOMEM);
 
-	__drm_atomic_helper_crtc_reset(crtc, &state->state);
+	__drm_atomic_helper_crtc_state_init(&state->state, crtc);
+
+	return &state->state;
 }
 
 static int rzg2l_du_crtc_enable_vblank(struct drm_crtc *crtc)
@@ -360,7 +362,7 @@ static void rzg2l_du_crtc_disable_vblank(struct drm_crtc *crtc)
 }
 
 static const struct drm_crtc_funcs crtc_funcs_rz = {
-	.reset = rzg2l_du_crtc_reset,
+	.atomic_create_state = rzg2l_du_crtc_create_state,
 	.set_config = drm_atomic_helper_set_config,
 	.page_flip = drm_atomic_helper_page_flip,
 	.atomic_duplicate_state = rzg2l_du_crtc_atomic_duplicate_state,
@@ -380,7 +382,7 @@ int rzg2l_du_crtc_create(struct rzg2l_du_device *rcdu)
 	struct drm_plane *primary;
 	int ret;
 
-	rcrtc->rstc = devm_reset_control_get_shared(rcdu->dev, NULL);
+	rcrtc->rstc = devm_reset_control_get_optional_shared(rcdu->dev, NULL);
 	if (IS_ERR(rcrtc->rstc)) {
 		dev_err(rcdu->dev, "can't get cpg reset\n");
 		return PTR_ERR(rcrtc->rstc);

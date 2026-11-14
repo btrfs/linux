@@ -711,7 +711,7 @@ static int act8865_pmic_probe(struct i2c_client *client)
 		return -EINVAL;
 	}
 
-	act8865 = devm_kzalloc(dev, sizeof(struct act8865), GFP_KERNEL);
+	act8865 = devm_kzalloc_obj(dev, struct act8865);
 	if (!act8865)
 		return -ENOMEM;
 
@@ -780,7 +780,7 @@ static const struct i2c_device_id act8865_ids[] = {
 	{ .name = "act8600", .driver_data = ACT8600 },
 	{ .name = "act8846", .driver_data = ACT8846 },
 	{ .name = "act8865", .driver_data = ACT8865 },
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, act8865_ids);
 

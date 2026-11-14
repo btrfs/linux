@@ -15,6 +15,7 @@
 #include <linux/err.h>
 #include <linux/mutex.h>
 #include <asm/processor.h>
+#include <asm/cpuid/api.h>
 
 #define TEMP_FROM_REG(val)	(((((val) >> 16) & 0xff) - 49) * 1000)
 #define REG_TEMP	0xe4
@@ -138,7 +139,7 @@ static int k8temp_probe(struct pci_dev *pdev,
 	struct k8temp_data *data;
 	struct device *hwmon_dev;
 
-	data = devm_kzalloc(&pdev->dev, sizeof(struct k8temp_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(&pdev->dev, struct k8temp_data);
 	if (!data)
 		return -ENOMEM;
 

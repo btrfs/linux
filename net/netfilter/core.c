@@ -1,10 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /* netfilter.c: look after the filters for various protocols.
  * Heavily influenced by the old firewall.c by David Bonn and Alan Cox.
  *
  * Thanks to Rob `CmdrTaco' Malda for not influencing this code in any
  * way.
- *
- * This code is GPL.
  */
 #include <linux/kernel.h>
 #include <linux/netfilter.h>
@@ -27,9 +26,6 @@
 #include <net/sock.h>
 
 #include "nf_internals.h"
-
-const struct nf_ipv6_ops __rcu *nf_ipv6_ops __read_mostly;
-EXPORT_SYMBOL_GPL(nf_ipv6_ops);
 
 #ifdef CONFIG_JUMP_LABEL
 struct static_key nf_hooks_needed[NFPROTO_NUMPROTO][NF_MAX_HOOKS];
@@ -390,6 +386,15 @@ static void nf_static_key_dec(const struct nf_hook_ops *reg, int pf)
 #endif
 }
 
+static void bump_hook_base_seq(struct net *net)
+{
+	unsigned int base_seq = READ_ONCE(net->nf.hook_base_seq);
+
+	while (++base_seq == 0)
+		;
+	smp_store_release(&net->nf.hook_base_seq, base_seq);
+}
+
 static int __nf_register_net_hook(struct net *net, int pf,
 				  const struct nf_hook_ops *reg)
 {
@@ -434,6 +439,7 @@ static int __nf_register_net_hook(struct net *net, int pf,
 	if (!IS_ERR(new_hooks)) {
 		hooks_validate(new_hooks);
 		rcu_assign_pointer(*pp, new_hooks);
+		bump_hook_base_seq(net);
 	}
 
 	mutex_unlock(&nf_hook_mutex);
@@ -487,6 +493,7 @@ static void __nf_unregister_net_hook(struct net *net, int pf,
 {
 	struct nf_hook_entries __rcu **pp;
 	struct nf_hook_entries *p;
+	bool found;
 
 	pp = nf_hook_entry_head(net, pf, reg->hooknum, reg->dev);
 	if (!pp)
@@ -500,7 +507,8 @@ static void __nf_unregister_net_hook(struct net *net, int pf,
 		return;
 	}
 
-	if (nf_remove_net_hook(p, reg)) {
+	found = nf_remove_net_hook(p, reg);
+	if (found) {
 #ifdef CONFIG_NETFILTER_INGRESS
 		if (nf_ingress_hook(reg, pf))
 			net_dec_ingress_queue();
@@ -515,11 +523,13 @@ static void __nf_unregister_net_hook(struct net *net, int pf,
 	}
 
 	p = __nf_hook_entries_try_shrink(p, pp);
+	if (found)
+		bump_hook_base_seq(net);
 	mutex_unlock(&nf_hook_mutex);
 	if (!p)
 		return;
 
-	nf_queue_nf_hook_drop(net);
+	nf_queue_nf_hook_drop(net, reg);
 	nf_hook_entries_free(p);
 }
 
@@ -788,6 +798,8 @@ static int __net_init netfilter_net_init(struct net *net)
 		return -ENOMEM;
 	}
 #endif
+	net->nf.hook_base_seq = 1;
+	net->nf.nat_hook_base_seq = 1;
 
 	return 0;
 }

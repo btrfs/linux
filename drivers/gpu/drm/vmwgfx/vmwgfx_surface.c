@@ -15,6 +15,7 @@
 #include "vmw_surface_cache.h"
 #include "device_include/svga3d_surfacedefs.h"
 
+#include <drm/drm_dumb_buffers.h>
 #include <drm/ttm/ttm_placement.h>
 
 #define SVGA3D_FLAGS_64(upper32, lower32) (((uint64_t)upper32 << 32) | lower32)
@@ -77,7 +78,7 @@ static int vmw_gb_surface_unbind(struct vmw_resource *res,
 static int vmw_gb_surface_destroy(struct vmw_resource *res);
 static int
 vmw_gb_surface_define_internal(struct drm_device *dev,
-			       struct drm_vmw_gb_surface_create_ext_req *req,
+			       const  struct drm_vmw_gb_surface_create_ext_req *req,
 			       struct drm_vmw_gb_surface_create_rep *rep,
 			       struct drm_file *file_priv);
 static int
@@ -740,7 +741,7 @@ int vmw_surface_define_ioctl(struct drm_device *dev, void *data,
 		return -EINVAL;
 	}
 
-	user_srf = kzalloc(sizeof(*user_srf), GFP_KERNEL);
+	user_srf = kzalloc_obj(*user_srf);
 	if (unlikely(!user_srf)) {
 		ret = -ENOMEM;
 		goto out_unlock;
@@ -766,8 +767,7 @@ int vmw_surface_define_ioctl(struct drm_device *dev, void *data,
 		ret = PTR_ERR(metadata->sizes);
 		goto out_no_sizes;
 	}
-	srf->offsets = kmalloc_array(metadata->num_sizes, sizeof(*srf->offsets),
-				     GFP_KERNEL);
+	srf->offsets = kmalloc_objs(*srf->offsets, metadata->num_sizes);
 	if (unlikely(!srf->offsets)) {
 		ret = -ENOMEM;
 		goto out_no_offsets;
@@ -1503,7 +1503,7 @@ int vmw_gb_surface_reference_ext_ioctl(struct drm_device *dev, void *data,
  */
 static int
 vmw_gb_surface_define_internal(struct drm_device *dev,
-			       struct drm_vmw_gb_surface_create_ext_req *req,
+			       const  struct drm_vmw_gb_surface_create_ext_req *req,
 			       struct drm_vmw_gb_surface_create_rep *rep,
 			       struct drm_file *file_priv)
 {
@@ -1521,9 +1521,21 @@ vmw_gb_surface_define_internal(struct drm_device *dev,
 				req->base.svga3d_flags);
 
 	/* array_size must be null for non-GL3 host. */
-	if (req->base.array_size > 0 && !has_sm4_context(dev_priv)) {
-		VMW_DEBUG_USER("SM4 surface not supported.\n");
-		return -EINVAL;
+	if (req->base.array_size > 0) {
+		if (has_sm5_context(dev_priv)) {
+			if (req->base.array_size > SVGA3D_SM5_MAX_SURFACE_ARRAYSIZE) {
+				VMW_DEBUG_USER("Invalid Surface Array Size.\n");
+				return -EINVAL;
+			}
+		} else if (has_sm4_context(dev_priv)) {
+			if (req->base.array_size > SVGA3D_SM4_MAX_SURFACE_ARRAYSIZE) {
+				VMW_DEBUG_USER("Invalid Surface Array Size.\n");
+				return -EINVAL;
+			}
+		} else {
+			VMW_DEBUG_USER("SM4+ surface not supported.\n");
+			return -EINVAL;
+		}
 	}
 
 	if (!has_sm4_1_context(dev_priv)) {
@@ -2143,7 +2155,7 @@ int vmw_gb_surface_define(struct vmw_private *dev_priv,
 	if (req->sizes != NULL)
 		return -EINVAL;
 
-	user_srf = kzalloc(sizeof(*user_srf), GFP_KERNEL);
+	user_srf = kzalloc_obj(*user_srf);
 	if (unlikely(!user_srf)) {
 		ret = -ENOMEM;
 		goto out_unlock;
@@ -2267,23 +2279,9 @@ int vmw_dumb_create(struct drm_file *file_priv,
 	 * contents is going to be rendered guest side.
 	 */
 	if (!dev_priv->has_mob || !vmw_supports_3d(dev_priv)) {
-		int cpp = DIV_ROUND_UP(args->bpp, 8);
-
-		switch (cpp) {
-		case 1: /* DRM_FORMAT_C8 */
-		case 2: /* DRM_FORMAT_RGB565 */
-		case 4: /* DRM_FORMAT_XRGB8888 */
-			break;
-		default:
-			/*
-			 * Dumb buffers don't allow anything else.
-			 * This is tested via IGT's dumb_buffers
-			 */
-			return -EINVAL;
-		}
-
-		args->pitch = args->width * cpp;
-		args->size = ALIGN(args->pitch * args->height, PAGE_SIZE);
+		ret = drm_mode_size_dumb(dev, args, 0, 0);
+		if (ret)
+			return ret;
 
 		ret = vmw_gem_object_create_with_handle(dev_priv, file_priv,
 							args->size, &args->handle,

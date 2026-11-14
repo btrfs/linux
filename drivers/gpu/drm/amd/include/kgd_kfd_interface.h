@@ -33,6 +33,7 @@
 #include <linux/dma-fence.h>
 #include "amdgpu_irq.h"
 #include "amdgpu_gfx.h"
+#include "amdgpu_ptl.h"
 
 struct pci_dev;
 struct amdgpu_device;
@@ -318,7 +319,8 @@ struct kfd2kgd_calls {
 			uint32_t sch_wave,
 			uint32_t que_sleep,
 			uint32_t *reg_offset,
-			uint32_t *reg_data);
+			uint32_t *reg_data,
+			uint32_t inst);
 	void (*get_cu_occupancy)(struct amdgpu_device *adev,
 				 struct kfd_cu_occupancy *cu_occupancy,
 				 int *max_waves_per_cu, uint32_t inst);
@@ -333,6 +335,15 @@ struct kfd2kgd_calls {
 			      uint32_t inst, unsigned int utimeout);
 	uint32_t (*hqd_sdma_get_doorbell)(struct amdgpu_device *adev,
 					  int engine, int queue);
+	uint32_t (*ptl_ctrl)(struct amdgpu_device *adev,
+			     uint32_t cmd,
+			     uint32_t *ptl_state,
+			     enum amdgpu_ptl_fmt *fmt1,
+			     enum amdgpu_ptl_fmt *fmt2);
+	int (*hqd_sdma_get_counter)(struct amdgpu_device *adev,
+				    void *mqd, uint32_t num_sdma_queues_per_eng,
+				    uint64_t *val);
+	void (*hqd_gfx_clean_fault)(struct amdgpu_device *adev);
 };
 
 #endif	/* KGD_KFD_INTERFACE_H_INCLUDED */

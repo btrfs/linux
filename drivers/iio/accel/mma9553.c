@@ -6,7 +6,6 @@
 
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/iio/iio.h>
@@ -1100,11 +1099,8 @@ static int mma9553_probe(struct i2c_client *client)
 						mma9553_event_handler,
 						IRQF_TRIGGER_RISING,
 						"mma9553_event", indio_dev);
-		if (ret < 0) {
-			dev_err(&client->dev, "request irq %d failed\n",
-				client->irq);
+		if (ret)
 			goto out_poweroff;
-		}
 	}
 
 	ret = pm_runtime_set_active(&client->dev);
@@ -1140,6 +1136,7 @@ static void mma9553_remove(struct i2c_client *client)
 
 	iio_device_unregister(indio_dev);
 
+	pm_runtime_dont_use_autosuspend(&client->dev);
 	pm_runtime_disable(&client->dev);
 	pm_runtime_set_suspended(&client->dev);
 
@@ -1219,7 +1216,7 @@ static const struct acpi_device_id mma9553_acpi_match[] = {
 MODULE_DEVICE_TABLE(acpi, mma9553_acpi_match);
 
 static const struct i2c_device_id mma9553_id[] = {
-	{ "mma9553" },
+	{ .name = "mma9553" },
 	{ }
 };
 

@@ -514,7 +514,7 @@ static int aspire_ec_probe(struct i2c_client *client)
 					aspire_ec_irq_handler, IRQF_ONESHOT,
 					dev_name(dev), ec);
 	if (ret)
-		return dev_err_probe(dev, ret, "Failed to request irq\n");
+		return ret;
 
 	return 0;
 }
@@ -532,7 +532,7 @@ static int aspire_ec_resume(struct device *dev)
 }
 
 static const struct i2c_device_id aspire_ec_id[] = {
-	{ "aspire1-ec", },
+	{ .name = "aspire1-ec" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, aspire_ec_id);

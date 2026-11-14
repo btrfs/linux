@@ -199,7 +199,7 @@ static int sbsm_gpio_get_value(struct gpio_chip *gc, unsigned int off)
 	if (ret < 0)
 		return ret;
 
-	return ret & BIT(off);
+	return !!(ret & BIT(off));
 }
 
 /*
@@ -332,7 +332,7 @@ static int sbsm_probe(struct i2c_client *client)
 	if (!i2c_check_functionality(adapter, I2C_FUNC_SMBUS_WORD_DATA))
 		return -EPFNOSUPPORT;
 
-	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, *data);
 	if (!data)
 		return -ENOMEM;
 
@@ -389,8 +389,8 @@ static int sbsm_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id sbsm_ids[] = {
-	{ "sbs-manager" },
-	{ "ltc1760" },
+	{ .name = "sbs-manager" },
+	{ .name = "ltc1760" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, sbsm_ids);

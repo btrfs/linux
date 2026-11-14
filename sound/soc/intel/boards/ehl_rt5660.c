@@ -23,10 +23,8 @@
 #include "hda_dsp_common.h"
 #include "../../codecs/rt5660.h"
 
-#define DUAL_CHANNEL 2
 #define HDMI_LINK_START 3
 #define HDMI_LINE_END 6
-#define NAME_SIZE	32
 #define IDISP_CODEC_MASK	0x4
 
 struct sof_card_private {
@@ -77,7 +75,7 @@ static int hdmi_init(struct snd_soc_pcm_runtime *rtd)
 	struct snd_soc_dai *dai = snd_soc_rtd_to_codec(rtd, 0);
 	struct sof_hdmi_pcm *pcm;
 
-	pcm = devm_kzalloc(rtd->card->dev, sizeof(*pcm), GFP_KERNEL);
+	pcm = devm_kzalloc_obj(rtd->card->dev, *pcm);
 	if (!pcm)
 		return -ENOMEM;
 
@@ -127,7 +125,7 @@ static int rt5660_hw_params(struct snd_pcm_substream *substream,
 				  params_rate(params) * 50,
 				  params_rate(params) * 512);
 	if (ret < 0)
-		dev_err(codec_dai->dev, "can't set codec pll: %d\n", ret);
+		dev_err(rtd->dev, "can't set codec pll: %d\n", ret);
 
 	return ret;
 }
@@ -276,7 +274,7 @@ static int snd_ehl_rt5660_probe(struct platform_device *pdev)
 
 	card->dev = &pdev->dev;
 
-	ctx = devm_kzalloc(&pdev->dev, sizeof(*ctx), GFP_KERNEL);
+	ctx = devm_kzalloc_obj(&pdev->dev, *ctx);
 	if (!ctx)
 		return -ENOMEM;
 	INIT_LIST_HEAD(&ctx->hdmi_pcm_list);

@@ -11,7 +11,6 @@
 
 #include "core.h"
 #include "trace.h"
-#include "mce.h"
 
 static bool cxl_raw_allow_all;
 
@@ -91,6 +90,10 @@ static struct cxl_mem_command cxl_mem_commands[CXL_MEM_COMMAND_ID_MAX] = {
  *
  * CXL_MBOX_OP_[GET_,INJECT_,CLEAR_]POISON: These commands require kernel
  * driver orchestration for safety.
+ *
+ * CXL_MBOX_OP_[GET_SUPPORTED_FEATURES,GET_FEATURE,SET_FEATURE]: Features are
+ * accessed through the fwctl ABI, which applies scope-based access control.
+ * The RAW path would bypass those checks, so it is not permitted here.
  */
 static u16 cxl_disabled_raw_commands[] = {
 	CXL_MBOX_OP_ACTIVATE_FW,
@@ -102,6 +105,9 @@ static u16 cxl_disabled_raw_commands[] = {
 	CXL_MBOX_OP_GET_POISON,
 	CXL_MBOX_OP_INJECT_POISON,
 	CXL_MBOX_OP_CLEAR_POISON,
+	CXL_MBOX_OP_GET_SUPPORTED_FEATURES,
+	CXL_MBOX_OP_GET_FEATURE,
+	CXL_MBOX_OP_SET_FEATURE,
 };
 
 /*
@@ -159,6 +165,33 @@ static void cxl_set_security_cmd_enabled(struct cxl_security_state *security,
 	case CXL_MBOX_OP_PASSPHRASE_SECURE_ERASE:
 		set_bit(CXL_SEC_ENABLED_PASSPHRASE_SECURE_ERASE,
 			security->enabled_cmds);
+		break;
+	default:
+		break;
+	}
+}
+
+static bool cxl_is_dcd_command(u16 opcode)
+{
+#define CXL_MBOX_OP_DCD_CMDS 0x48
+
+	return (opcode >> 8) == CXL_MBOX_OP_DCD_CMDS;
+}
+
+static void cxl_set_dcd_cmd_enabled(u16 opcode, unsigned long *cmd_mask)
+{
+	switch (opcode) {
+	case CXL_MBOX_OP_GET_DC_CONFIG:
+		set_bit(CXL_DCD_ENABLED_GET_CONFIG, cmd_mask);
+		break;
+	case CXL_MBOX_OP_GET_DC_EXTENT_LIST:
+		set_bit(CXL_DCD_ENABLED_GET_EXTENT_LIST, cmd_mask);
+		break;
+	case CXL_MBOX_OP_ADD_DC_RESPONSE:
+		set_bit(CXL_DCD_ENABLED_ADD_RESPONSE, cmd_mask);
+		break;
+	case CXL_MBOX_OP_RELEASE_DC:
+		set_bit(CXL_DCD_ENABLED_RELEASE, cmd_mask);
 		break;
 	default:
 		break;
@@ -311,6 +344,7 @@ static bool cxl_mem_raw_command_allowed(u16 opcode)
  * cxl_payload_from_user_allowed() - Check contents of in_payload.
  * @opcode: The mailbox command opcode.
  * @payload_in: Pointer to the input payload passed in from user space.
+ * @in_size: Size of @payload_in in bytes.
  *
  * Return:
  *  * true	- payload_in passes check for @opcode.
@@ -325,12 +359,15 @@ static bool cxl_mem_raw_command_allowed(u16 opcode)
  *
  * The specific checks are determined by the opcode.
  */
-static bool cxl_payload_from_user_allowed(u16 opcode, void *payload_in)
+static bool cxl_payload_from_user_allowed(u16 opcode, void *payload_in,
+					  size_t in_size)
 {
 	switch (opcode) {
 	case CXL_MBOX_OP_SET_PARTITION_INFO: {
 		struct cxl_mbox_set_partition_info *pi = payload_in;
 
+		if (in_size < sizeof(*pi))
+			return false;
 		if (pi->flags & CXL_SET_PARTITION_IMMEDIATE_FLAG)
 			return false;
 		break;
@@ -338,6 +375,8 @@ static bool cxl_payload_from_user_allowed(u16 opcode, void *payload_in)
 	case CXL_MBOX_OP_CLEAR_LOG: {
 		const uuid_t *uuid = (uuid_t *)payload_in;
 
+		if (in_size < sizeof(uuid_t))
+			return false;
 		/*
 		 * Restrict the ‘Clear log’ action to only apply to
 		 * Vendor debug logs.
@@ -365,7 +404,8 @@ static int cxl_mbox_cmd_ctor(struct cxl_mbox_cmd *mbox_cmd,
 		if (IS_ERR(mbox_cmd->payload_in))
 			return PTR_ERR(mbox_cmd->payload_in);
 
-		if (!cxl_payload_from_user_allowed(opcode, mbox_cmd->payload_in)) {
+		if (!cxl_payload_from_user_allowed(opcode, mbox_cmd->payload_in,
+						  in_size)) {
 			dev_dbg(cxl_mbox->host, "%s: input payload not allowed\n",
 				cxl_mem_opcode_to_name(opcode));
 			kvfree(mbox_cmd->payload_in);
@@ -373,11 +413,7 @@ static int cxl_mbox_cmd_ctor(struct cxl_mbox_cmd *mbox_cmd,
 		}
 	}
 
-	/* Prepare to handle a full payload for variable sized output */
-	if (out_size == CXL_VARIABLE_PAYLOAD)
-		mbox_cmd->size_out = cxl_mbox->payload_size;
-	else
-		mbox_cmd->size_out = out_size;
+	mbox_cmd->size_out = min_t(size_t, out_size, cxl_mbox->payload_size);
 
 	if (mbox_cmd->size_out) {
 		mbox_cmd->payload_out = kvzalloc(mbox_cmd->size_out, GFP_KERNEL);
@@ -750,6 +786,7 @@ static void cxl_walk_cel(struct cxl_memdev_state *mds, size_t size, u8 *cel)
 	struct cxl_mailbox *cxl_mbox = &mds->cxlds.cxl_mbox;
 	struct cxl_cel_entry *cel_entry;
 	const int cel_entries = size / sizeof(*cel_entry);
+	DECLARE_BITMAP(dcd_cmds, CXL_DCD_ENABLED_MAX) = {};
 	struct device *dev = mds->cxlds.dev;
 	int i, ro_cmds = 0, wr_cmds = 0;
 
@@ -778,11 +815,22 @@ static void cxl_walk_cel(struct cxl_memdev_state *mds, size_t size, u8 *cel)
 			enabled++;
 		}
 
+		if (cxl_is_dcd_command(opcode)) {
+			cxl_set_dcd_cmd_enabled(opcode, dcd_cmds);
+			enabled++;
+		}
+
 		dev_dbg(dev, "Opcode 0x%04x %s\n", opcode,
 			enabled ? "enabled" : "unsupported by driver");
 	}
 
 	set_features_cap(cxl_mbox, ro_cmds, wr_cmds);
+	/*
+	 * Disabled until event handling implemented.
+	 */
+	if (bitmap_full(dcd_cmds, CXL_DCD_ENABLED_MAX))
+		dev_dbg(dev, "Device supports DCD; capability disabled\n");
+	mds->dcd_supported = false;
 }
 
 static struct cxl_mbox_get_supported_logs *cxl_get_gsl(struct cxl_memdev_state *mds)
@@ -886,7 +934,7 @@ out:
 }
 EXPORT_SYMBOL_NS_GPL(cxl_enumerate_cmds, "CXL");
 
-void cxl_event_trace_record(const struct cxl_memdev *cxlmd,
+void cxl_event_trace_record(struct cxl_memdev *cxlmd,
 			    enum cxl_event_log_type type,
 			    enum cxl_event_type event_type,
 			    const uuid_t *uuid, union cxl_event *evt)
@@ -913,6 +961,7 @@ void cxl_event_trace_record(const struct cxl_memdev *cxlmd,
 		 * translations. Take topology mutation locks and lookup
 		 * { HPA, REGION } from { DPA, MEMDEV } in the event record.
 		 */
+		guard(device)(&cxlmd->dev);
 		guard(rwsem_read)(&cxl_rwsem.region);
 		guard(rwsem_read)(&cxl_rwsem.dpa);
 
@@ -932,11 +981,11 @@ void cxl_event_trace_record(const struct cxl_memdev *cxlmd,
 
 			if (evt->gen_media.media_hdr.descriptor &
 			    CXL_GMER_EVT_DESC_THRESHOLD_EVENT)
-				WARN_ON_ONCE((evt->gen_media.media_hdr.type &
+				WARN_ON_ONCE((evt->gen_media.media_hdr.type ==
 					      CXL_GMER_MEM_EVT_TYPE_AP_CME_COUNTER_EXPIRE) &&
 					     !get_unaligned_le24(evt->gen_media.cme_count));
 			else
-				WARN_ON_ONCE(evt->gen_media.media_hdr.type &
+				WARN_ON_ONCE(evt->gen_media.media_hdr.type ==
 					     CXL_GMER_MEM_EVT_TYPE_AP_CME_COUNTER_EXPIRE);
 
 			trace_cxl_general_media(cxlmd, type, cxlr, hpa,
@@ -947,11 +996,11 @@ void cxl_event_trace_record(const struct cxl_memdev *cxlmd,
 
 			if (evt->dram.media_hdr.descriptor &
 			    CXL_GMER_EVT_DESC_THRESHOLD_EVENT)
-				WARN_ON_ONCE((evt->dram.media_hdr.type &
+				WARN_ON_ONCE((evt->dram.media_hdr.type ==
 					      CXL_DER_MEM_EVT_TYPE_AP_CME_COUNTER_EXPIRE) &&
 					     !get_unaligned_le24(evt->dram.cvme_count));
 			else
-				WARN_ON_ONCE(evt->dram.media_hdr.type &
+				WARN_ON_ONCE(evt->dram.media_hdr.type ==
 					     CXL_DER_MEM_EVT_TYPE_AP_CME_COUNTER_EXPIRE);
 
 			trace_cxl_dram(cxlmd, type, cxlr, hpa, hpa_alias,
@@ -961,7 +1010,7 @@ void cxl_event_trace_record(const struct cxl_memdev *cxlmd,
 }
 EXPORT_SYMBOL_NS_GPL(cxl_event_trace_record, "CXL");
 
-static void __cxl_event_trace_record(const struct cxl_memdev *cxlmd,
+static void __cxl_event_trace_record(struct cxl_memdev *cxlmd,
 				     enum cxl_event_log_type type,
 				     struct cxl_event_record_raw *record)
 {
@@ -1144,7 +1193,7 @@ EXPORT_SYMBOL_NS_GPL(cxl_mem_get_event_records, "CXL");
  *
  * See CXL @8.2.9.5.2.1 Get Partition Info
  */
-static int cxl_mem_get_partition_info(struct cxl_memdev_state *mds)
+int cxl_mem_get_partition_info(struct cxl_memdev_state *mds)
 {
 	struct cxl_mailbox *cxl_mbox = &mds->cxlds.cxl_mbox;
 	struct cxl_mbox_get_partition_info pi;
@@ -1294,60 +1343,255 @@ int cxl_mem_sanitize(struct cxl_memdev *cxlmd, u16 cmd)
 	 * Require an endpoint to be safe otherwise the driver can not
 	 * be sure that the device is unmapped.
 	 */
-	if (endpoint && cxl_num_decoders_committed(endpoint) == 0)
+	if (cxlmd->dev.driver && cxl_num_decoders_committed(endpoint) == 0)
 		return __cxl_mem_sanitize(mds, cmd);
 
 	return -EBUSY;
 }
 
-static void add_part(struct cxl_dpa_info *info, u64 start, u64 size, enum cxl_partition_mode mode)
+/*
+ * A partition unavailable for Dynamic Capacity reports zeros for decode_length,
+ * length, and block_size.
+ */
+static bool cxl_dc_partition_unavailable(struct cxl_dc_partition *dev_part)
 {
-	int i = info->nr_partitions;
-
-	if (size == 0)
-		return;
-
-	info->part[i].range = (struct range) {
-		.start = start,
-		.end = start + size - 1,
-	};
-	info->part[i].mode = mode;
-	info->nr_partitions++;
+	return !le64_to_cpu(dev_part->decode_length) &&
+	       !le64_to_cpu(dev_part->length) &&
+	       !le64_to_cpu(dev_part->block_size);
 }
 
-int cxl_mem_dpa_fetch(struct cxl_memdev_state *mds, struct cxl_dpa_info *info)
+static int cxl_dc_check(struct device *dev, struct cxl_dc_partition_info *part,
+			struct cxl_dc_partition *dev_part)
 {
-	struct cxl_dev_state *cxlds = &mds->cxlds;
-	struct device *dev = cxlds->dev;
-	int rc;
+	u64 decode_len = le64_to_cpu(dev_part->decode_length);
+	u64 blk_size = le64_to_cpu(dev_part->block_size);
+	u64 len = le64_to_cpu(dev_part->length);
+	u32 handle = le32_to_cpu(dev_part->dsmad_handle);
+	u64 size;
 
-	if (!cxlds->media_ready) {
-		info->size = 0;
+	/*
+	 * Not an error; leave the entry empty. A partially zeroed partition
+	 * is rejected by the checks below. CXL r4.0 Table 8-347.
+	 */
+	if (cxl_dc_partition_unavailable(dev_part)) {
+		*part = (struct cxl_dc_partition_info) { };
+		dev_dbg(dev, "Partition 0 unavailable for DC\n");
 		return 0;
 	}
 
-	info->size = mds->total_bytes;
-
-	if (mds->partition_align_bytes == 0) {
-		add_part(info, 0, mds->volatile_only_bytes, CXL_PARTMODE_RAM);
-		add_part(info, mds->volatile_only_bytes,
-			 mds->persistent_only_bytes, CXL_PARTMODE_PMEM);
-		return 0;
+	/* The CDAT DSMAD handle this refers to is 8 bits */
+	if (handle > U8_MAX) {
+		dev_warn(dev, "DSMAD handle 0x%x exceeds the 8 bit CDAT DSMAD handle\n",
+			 handle);
+		return -EINVAL;
 	}
 
-	rc = cxl_mem_get_partition_info(mds);
-	if (rc) {
-		dev_err(dev, "Failed to query partition information\n");
-		return rc;
+	/*
+	 * Decode length is a count of 256M units, so a device reporting 2^36
+	 * or more wraps.
+	 */
+	if (check_mul_overflow(decode_len, (u64)CXL_CAPACITY_MULTIPLIER, &size)) {
+		dev_err(dev, "DC partition 0 decode length %#llx overflows\n",
+			decode_len);
+		return -EINVAL;
 	}
 
-	add_part(info, 0, mds->active_volatile_bytes, CXL_PARTMODE_RAM);
-	add_part(info, mds->active_volatile_bytes, mds->active_persistent_bytes,
-		 CXL_PARTMODE_PMEM);
+	*part = (struct cxl_dc_partition_info) {
+		.start = le64_to_cpu(dev_part->base),
+		.size = size,
+		.handle = handle,
+	};
+
+	/*
+	 * Block size is a power of 2 and a multiple of 40h. is_power_of_2()
+	 * takes an unsigned long, which truncates blk_size on 32 bit.
+	 */
+	if (blk_size == 0 || (blk_size & (blk_size - 1)) ||
+	    blk_size % CXL_DCD_BLOCK_LINE_SIZE) {
+		dev_err(dev, "DC partition 0 invalid block size %#llx\n", blk_size);
+		return -EINVAL;
+	}
+
+	if (part->size == 0) {
+		dev_err(dev, "DC partition 0 zero decode length\n");
+		return -EINVAL;
+	}
+
+	if (len == 0) {
+		dev_err(dev, "DC partition 0 zero length\n");
+		return -EINVAL;
+	}
+
+	if (len > part->size) {
+		dev_err(dev, "DC partition 0 length %#llx exceeds decode length %#llx\n",
+			len, part->size);
+		return -EINVAL;
+	}
+
+	if (!IS_ALIGNED(len, blk_size)) {
+		dev_err(dev, "DC partition 0 length %#llx not a multiple of block size %#llx\n",
+			len, blk_size);
+		return -EINVAL;
+	}
+
+	if (!IS_ALIGNED(part->start, SZ_256M)) {
+		dev_err(dev, "DC partition 0 base %#llx not aligned to 256M\n",
+			part->start);
+		return -EINVAL;
+	}
+
+	dev_dbg(dev, "DC partition 0 start %#llx size %#llx blk_size: %#llx\n",
+		part->start, part->size, blk_size);
 
 	return 0;
 }
-EXPORT_SYMBOL_NS_GPL(cxl_mem_dpa_fetch, "CXL");
+
+/* Returns the number of partitions in dc_resp or -ERRNO */
+static int cxl_get_dc_config(struct cxl_mailbox *mbox, u8 start_partition,
+			     u8 partition_count,
+			     struct cxl_mbox_get_dc_config_out *dc_resp,
+			     size_t dc_resp_size)
+{
+	struct cxl_mbox_get_dc_config_in get_dc = (struct cxl_mbox_get_dc_config_in) {
+		.partition_count = partition_count,
+		.start_partition_index = start_partition,
+	};
+	struct cxl_mbox_cmd mbox_cmd = (struct cxl_mbox_cmd) {
+		.opcode = CXL_MBOX_OP_GET_DC_CONFIG,
+		.payload_in = &get_dc,
+		.size_in = sizeof(get_dc),
+		.size_out = dc_resp_size,
+		.payload_out = dc_resp,
+		/* The device must return at least the fixed header */
+		.min_out = sizeof(*dc_resp),
+	};
+	size_t expected_sz;
+	int rc;
+
+	rc = cxl_internal_send_cmd(mbox, &mbox_cmd);
+	if (rc < 0)
+		return rc;
+
+	if (dc_resp->partitions_returned > partition_count) {
+		dev_err(mbox->host, "Device returned %u partitions, requested %u\n",
+			dc_resp->partitions_returned, partition_count);
+		return -EIO;
+	}
+
+	/* The trailing extent/tag counts (CXL r4.0 Table 8-346) are not read */
+	expected_sz = struct_size(dc_resp, partition,
+				  dc_resp->partitions_returned);
+
+	if (mbox_cmd.size_out < expected_sz) {
+		dev_err(mbox->host,
+			"Payload size %zu less than expected %zu for %u partitions\n",
+			mbox_cmd.size_out, expected_sz,
+			dc_resp->partitions_returned);
+		return -EIO;
+	}
+
+	dev_dbg(mbox->host, "Read %d/%d DC partitions\n",
+		dc_resp->partitions_returned, dc_resp->avail_partition_count);
+	return dc_resp->partitions_returned;
+}
+
+/**
+ * cxl_dev_dc_identify() - Reads the dynamic capacity information from the
+ *                         device.
+ * @mbox: Mailbox to query
+ * @dc_info: The dynamic partition information to return
+ *
+ * Read every partition the device reports, but validate only the first:
+ * Linux maps partition 0 and nothing else, so a defect in capacity the
+ * driver never touches is not a reason to refuse the device dynamic
+ * capacity.  The remaining partitions are read but not recorded.
+ *
+ * Return: 0 if identify was executed successfully, -ERRNO on error.
+ *         On error, @dc_info is left unchanged.
+ */
+int cxl_dev_dc_identify(struct cxl_mailbox *mbox,
+			struct cxl_dc_partition_info *dc_info)
+{
+	struct cxl_dc_partition_info partitions[CXL_MAX_DC_PARTITIONS] = { };
+	struct device *dev = mbox->host;
+	u8 avail_partitions = 0;
+	u8 num_partitions;
+	u8 partition_count;
+	size_t dc_resp_size;
+
+	/*
+	 * Bound requested number of partitions by mailbox payload size. The
+	 * 256 byte spec minimum, verified in cxl_pci_setup_mailbox(), keeps
+	 * the subtraction below from underflowing.
+	 */
+	partition_count = min(CXL_MAX_DC_PARTITIONS,
+			      (mbox->payload_size -
+			       sizeof(struct cxl_mbox_get_dc_config_out) -
+			       sizeof(struct cxl_mbox_get_dc_config_tail)) /
+			      sizeof(struct cxl_dc_partition));
+	dc_resp_size = struct_size_t(struct cxl_mbox_get_dc_config_out,
+				     partition, partition_count) +
+				     sizeof(struct cxl_mbox_get_dc_config_tail);
+
+	struct cxl_mbox_get_dc_config_out *dc_resp __free(kfree) =
+		kmalloc(dc_resp_size, GFP_KERNEL);
+	if (!dc_resp)
+		return -ENOMEM;
+
+	num_partitions = 0;
+	do {
+		int returned, rc;
+
+		returned = cxl_get_dc_config(mbox, num_partitions,
+					     partition_count, dc_resp,
+					     dc_resp_size);
+		if (returned < 0) {
+			dev_err(dev, "Failed to get DC config: %d\n", returned);
+			return returned;
+		}
+
+		if (returned == 0) {
+			dev_err(dev,
+				"Device reported %u partitions available but returned none at index %u\n",
+				dc_resp->avail_partition_count, num_partitions);
+			return -EIO;
+		}
+
+		/* A DCD reports at least one partition (CXL r4.0 Table 8-346) */
+		if (dc_resp->avail_partition_count == 0) {
+			dev_err(dev, "Device reported no DC partitions\n");
+			return -EIO;
+		}
+
+		avail_partitions = min(dc_resp->avail_partition_count,
+				       CXL_MAX_DC_PARTITIONS);
+
+		/*
+		 * Only partition 0 is mapped, so it is the only one checked.
+		 * The rest are read to complete the enumeration and dropped.
+		 */
+		if (num_partitions == 0) {
+			rc = cxl_dc_check(dev, &partitions[0],
+					  &dc_resp->partition[0]);
+			if (rc)
+				return rc;
+		}
+
+		num_partitions += returned;
+
+	} while (num_partitions < avail_partitions);
+
+	/* Linux only supports the 1st partition; nothing to do if it is unavailable */
+	if (partitions[0].size == 0)
+		return -ENODEV;
+
+	*dc_info = partitions[0];
+	dev_dbg(dev, "Returning partition 0 %#llx size %#llx\n",
+		dc_info->start, dc_info->size);
+
+	return 0;
+}
+EXPORT_SYMBOL_NS_GPL(cxl_dev_dc_identify, "CXL");
 
 int cxl_get_dirty_count(struct cxl_memdev_state *mds, u32 *count)
 {
@@ -1425,6 +1669,9 @@ int cxl_mem_get_poison(struct cxl_memdev *cxlmd, u64 offset, u64 len,
 	int nr_records = 0;
 	int rc;
 
+	if (!len)
+		return 0;
+
 	ACQUIRE(mutex_intr, lock)(&mds->poison.mutex);
 	if ((rc = ACQUIRE_ERR(mutex_intr, &lock)))
 		return rc;
@@ -1446,6 +1693,11 @@ int cxl_mem_get_poison(struct cxl_memdev *cxlmd, u64 offset, u64 len,
 		rc = cxl_internal_send_cmd(cxl_mbox, &mbox_cmd);
 		if (rc)
 			break;
+
+		if (!le16_to_cpu(po->count)) {
+			dev_dbg(&cxlmd->dev, "Poison empty payload!\n");
+			break;
+		}
 
 		for (int i = 0; i < le16_to_cpu(po->count); i++)
 			trace_cxl_poison(cxlmd, cxlr, &po->record[i],
@@ -1508,35 +1760,27 @@ int cxl_mailbox_init(struct cxl_mailbox *cxl_mbox, struct device *host)
 
 	cxl_mbox->host = host;
 	mutex_init(&cxl_mbox->mbox_mutex);
+	mutex_init(&cxl_mbox->feat_mutex);
 	rcuwait_init(&cxl_mbox->mbox_wait);
 
 	return 0;
 }
 EXPORT_SYMBOL_NS_GPL(cxl_mailbox_init, "CXL");
 
-struct cxl_memdev_state *cxl_memdev_state_create(struct device *dev)
+struct cxl_memdev_state *cxl_memdev_state_create(struct device *dev, u64 serial,
+						 u16 dvsec)
 {
 	struct cxl_memdev_state *mds;
-	int rc;
 
-	mds = devm_kzalloc(dev, sizeof(*mds), GFP_KERNEL);
+	mds = devm_cxl_dev_state_create(dev, CXL_DEVTYPE_CLASSMEM, serial,
+					dvsec, struct cxl_memdev_state, cxlds,
+					true);
 	if (!mds) {
 		dev_err(dev, "No memory available\n");
 		return ERR_PTR(-ENOMEM);
 	}
 
 	mutex_init(&mds->event.log_lock);
-	mds->cxlds.dev = dev;
-	mds->cxlds.reg_map.host = dev;
-	mds->cxlds.cxl_mbox.host = dev;
-	mds->cxlds.reg_map.resource = CXL_RESOURCE_NONE;
-	mds->cxlds.type = CXL_DEVTYPE_CLASSMEM;
-
-	rc = devm_cxl_register_mce_notifier(dev, &mds->mce_notifier);
-	if (rc == -EOPNOTSUPP)
-		dev_warn(dev, "CXL MCE unsupported\n");
-	else if (rc)
-		return ERR_PTR(rc);
 
 	return mds;
 }

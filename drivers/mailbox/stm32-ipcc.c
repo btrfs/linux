@@ -217,7 +217,7 @@ static int stm32_ipcc_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
-	ipcc = devm_kzalloc(dev, sizeof(*ipcc), GFP_KERNEL);
+	ipcc = devm_kzalloc_obj(dev, *ipcc);
 	if (!ipcc)
 		return -ENOMEM;
 
@@ -263,10 +263,8 @@ static int stm32_ipcc_probe(struct platform_device *pdev)
 		ret = devm_request_threaded_irq(dev, ipcc->irqs[i], NULL,
 						irq_thread[i], IRQF_ONESHOT,
 						dev_name(dev), ipcc);
-		if (ret) {
-			dev_err(dev, "failed to request irq %lu (%d)\n", i, ret);
+		if (ret)
 			goto err_clk;
-		}
 	}
 
 	/* mask and enable rx/tx irq */
@@ -294,9 +292,8 @@ static int stm32_ipcc_probe(struct platform_device *pdev)
 	ipcc->controller.txdone_irq = true;
 	ipcc->controller.ops = &stm32_ipcc_ops;
 	ipcc->controller.num_chans = ipcc->n_chans;
-	ipcc->controller.chans = devm_kcalloc(dev, ipcc->controller.num_chans,
-					      sizeof(*ipcc->controller.chans),
-					      GFP_KERNEL);
+	ipcc->controller.chans = devm_kzalloc_objs(dev, *ipcc->controller.chans,
+						   ipcc->controller.num_chans);
 	if (!ipcc->controller.chans) {
 		ret = -ENOMEM;
 		goto err_irq_wkp;

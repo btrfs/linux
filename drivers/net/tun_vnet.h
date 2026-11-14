@@ -40,9 +40,9 @@ static inline long tun_set_vnet_be(unsigned int *flags, int __user *argp)
 		return -EFAULT;
 
 	if (be)
-		*flags |= TUN_VNET_BE;
+		WRITE_ONCE(*flags, *flags | TUN_VNET_BE);
 	else
-		*flags &= ~TUN_VNET_BE;
+		WRITE_ONCE(*flags, *flags & ~TUN_VNET_BE);
 
 	return 0;
 }
@@ -93,9 +93,9 @@ static inline long tun_vnet_ioctl(int *vnet_hdr_sz, unsigned int *flags,
 		if (get_user(s, sp))
 			return -EFAULT;
 		if (s)
-			*flags |= TUN_VNET_LE;
+			WRITE_ONCE(*flags, *flags | TUN_VNET_LE);
 		else
-			*flags &= ~TUN_VNET_LE;
+			WRITE_ONCE(*flags, *flags & ~TUN_VNET_LE);
 		return 0;
 
 	case TUNGETVNETBE:
@@ -197,9 +197,10 @@ static inline netdev_features_t tun_vnet_hdr_guest_features(int vnet_hdr_sz)
 static inline int
 tun_vnet_hdr_tnl_to_skb(unsigned int flags, netdev_features_t features,
 			struct sk_buff *skb,
-			const struct virtio_net_hdr_v1_hash_tunnel *hdr)
+			const struct virtio_net_hdr_v1_hash_tunnel *hdr,
+			bool has_eth)
 {
-	return virtio_net_hdr_tnl_to_skb(skb, hdr,
+	return virtio_net_hdr_tnl_to_skb(skb, hdr, has_eth,
 				features & NETIF_F_GSO_UDP_TUNNEL,
 				features & NETIF_F_GSO_UDP_TUNNEL_CSUM,
 				tun_vnet_is_little_endian(flags));
@@ -244,7 +245,7 @@ tun_vnet_hdr_tnl_from_skb(unsigned int flags,
 
 	if (virtio_net_hdr_tnl_from_skb(skb, tnl_hdr, has_tnl_offload,
 					tun_vnet_is_little_endian(flags),
-					vlan_hlen, true)) {
+					vlan_hlen, true, false)) {
 		struct virtio_net_hdr_v1 *hdr = &tnl_hdr->hash_hdr.hdr;
 		struct skb_shared_info *sinfo = skb_shinfo(skb);
 

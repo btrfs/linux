@@ -10,7 +10,6 @@
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
-#include <linux/gpio.h>
 #include <linux/module.h>
 #include <linux/platform_data/mlxcpld.h>
 #include <linux/platform_data/mlxreg.h>
@@ -1294,7 +1293,7 @@ static int nvsw_sn2201_probe(struct platform_device *pdev)
 	const char *sku;
 	int ret;
 
-	nvsw_sn2201 = devm_kzalloc(&pdev->dev, sizeof(*nvsw_sn2201), GFP_KERNEL);
+	nvsw_sn2201 = devm_kzalloc_obj(&pdev->dev, *nvsw_sn2201);
 	if (!nvsw_sn2201)
 		return -ENOMEM;
 

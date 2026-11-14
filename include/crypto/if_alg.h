@@ -8,6 +8,7 @@
 #ifndef _CRYPTO_IF_ALG_H
 #define _CRYPTO_IF_ALG_H
 
+#include <linux/bits.h>
 #include <linux/compiler.h>
 #include <linux/completion.h>
 #include <linux/if_alg.h>
@@ -41,7 +42,7 @@ struct af_alg_control {
 };
 
 struct af_alg_type {
-	void *(*bind)(const char *name, u32 type, u32 mask);
+	void *(*bind)(const char *name);
 	void (*release)(void *private);
 	int (*setkey)(void *private, const u8 *key, unsigned int keylen);
 	int (*setentropy)(void *private, sockptr_t entropy, unsigned int len);
@@ -80,7 +81,6 @@ struct af_alg_rsgl {
 
 /**
  * struct af_alg_async_req - definition of crypto request
- * @iocb:		IOCB for AIO operations
  * @sk:			Socket the request is associated with
  * @first_rsgl:		First RX SG
  * @last_rsgl:		Pointer to last RX SG
@@ -92,7 +92,6 @@ struct af_alg_rsgl {
  * @cra_u:		Cipher request
  */
 struct af_alg_async_req {
-	struct kiocb *iocb;
 	struct sock *sk;
 
 	struct af_alg_rsgl first_rsgl;
@@ -123,7 +122,7 @@ struct af_alg_async_req {
  * @iv:			IV for cipher operation
  * @state:		Existing state for continuing operation
  * @aead_assoclen:	Length of AAD for AEAD cipher operations
- * @completion:		Work queue for synchronous operation
+ * @wait:		For waiting for completion of async crypto ops
  * @used:		TX bytes sent to kernel. This variable is used to
  *			ensure that user space cannot cause the kernel
  *			to allocate too much memory in sendmsg operation.
@@ -138,7 +137,7 @@ struct af_alg_async_req {
  * @write:		True if we are in the middle of a write.
  * @init:		True if metadata has been sent.
  * @len:		Length of memory allocated for this data structure.
- * @inflight:		Non-zero when AIO requests are in flight.
+ * @inflight:		Non-zero when requests are in flight, for debugging only.
  */
 struct af_alg_ctx {
 	struct list_head tsgl_list;
@@ -163,8 +162,19 @@ struct af_alg_ctx {
 	unsigned int inflight;
 };
 
+/* Flags for af_alg_allowlist_entry::flags: */
+#define AF_ALG_UNPRIVILEGED BIT(0) /* Unprivileged use is allowed */
+
+struct af_alg_allowlist_entry {
+	const char *name;
+	u32 flags;
+};
+
 int af_alg_register_type(const struct af_alg_type *type);
 int af_alg_unregister_type(const struct af_alg_type *type);
+
+int af_alg_check_restriction(const char *name,
+			     const struct af_alg_allowlist_entry allowlist[]);
 
 int af_alg_release(struct socket *sock);
 void af_alg_release_parent(struct sock *sk);
@@ -179,10 +189,11 @@ static inline struct alg_sock *alg_sk(struct sock *sk)
 }
 
 /**
- * Size of available buffer for sending data from user space to kernel.
+ * af_alg_sndbuf - Size of available buffer for sending data from user space to kernel.
  *
- * @sk socket of connection to user space
- * @return number of bytes still available
+ * @sk: socket of connection to user space
+ *
+ * Returns: number of bytes still available
  */
 static inline int af_alg_sndbuf(struct sock *sk)
 {
@@ -194,10 +205,11 @@ static inline int af_alg_sndbuf(struct sock *sk)
 }
 
 /**
- * Can the send buffer still be written to?
+ * af_alg_writable - Can the send buffer still be written to?
  *
- * @sk socket of connection to user space
- * @return true => writable, false => not writable
+ * @sk: socket of connection to user space
+ *
+ * Returns: true => writable, false => not writable
  */
 static inline bool af_alg_writable(struct sock *sk)
 {
@@ -205,10 +217,11 @@ static inline bool af_alg_writable(struct sock *sk)
 }
 
 /**
- * Size of available buffer used by kernel for the RX user space operation.
+ * af_alg_rcvbuf - Size of available buffer used by kernel for the RX user space operation.
  *
- * @sk socket of connection to user space
- * @return number of bytes still available
+ * @sk: socket of connection to user space
+ *
+ * Returns: number of bytes still available
  */
 static inline int af_alg_rcvbuf(struct sock *sk)
 {
@@ -220,25 +233,24 @@ static inline int af_alg_rcvbuf(struct sock *sk)
 }
 
 /**
- * Can the RX buffer still be written to?
+ * af_alg_readable - Can the RX buffer still be read from?
  *
- * @sk socket of connection to user space
- * @return true => writable, false => not writable
+ * @sk: socket of connection to user space
+ *
+ * Returns: true => readable, false => not readable
  */
 static inline bool af_alg_readable(struct sock *sk)
 {
 	return PAGE_SIZE <= af_alg_rcvbuf(sk);
 }
 
-unsigned int af_alg_count_tsgl(struct sock *sk, size_t bytes, size_t offset);
-void af_alg_pull_tsgl(struct sock *sk, size_t used, struct scatterlist *dst,
-		      size_t dst_offset);
+unsigned int af_alg_count_tsgl(struct sock *sk, size_t bytes);
+void af_alg_pull_tsgl(struct sock *sk, size_t used, struct scatterlist *dst);
 void af_alg_wmem_wakeup(struct sock *sk);
 int af_alg_wait_for_data(struct sock *sk, unsigned flags, unsigned min);
 int af_alg_sendmsg(struct socket *sock, struct msghdr *msg, size_t size,
 		   unsigned int ivsize);
 void af_alg_free_resources(struct af_alg_async_req *areq);
-void af_alg_async_cb(void *data, int err);
 __poll_t af_alg_poll(struct file *file, struct socket *sock,
 			 poll_table *wait);
 struct af_alg_async_req *af_alg_alloc_areq(struct sock *sk,
@@ -246,5 +258,17 @@ struct af_alg_async_req *af_alg_alloc_areq(struct sock *sk,
 int af_alg_get_rsgl(struct sock *sk, struct msghdr *msg, int flags,
 		    struct af_alg_async_req *areq, size_t maxsize,
 		    size_t *outlen);
+
+/*
+ * Mask used to disable unsupported algorithm implementations.
+ *
+ * This is the same as FSCRYPT_CRYPTOAPI_MASK in fs/crypto/fscrypt_private.h.
+ * In additions to the motivations there, this API is exposed to userspace
+ * that might not be fully trusted.
+ */
+#define AF_ALG_CRYPTOAPI_MASK                             \
+	(CRYPTO_ALG_ASYNC | CRYPTO_ALG_ALLOCATES_MEMORY | \
+	 CRYPTO_ALG_KERN_DRIVER_ONLY)
+
 
 #endif	/* _CRYPTO_IF_ALG_H */

@@ -2,8 +2,8 @@
 /*
  * MD5 and HMAC-MD5 library functions
  *
- * md5_block_generic() is derived from cryptoapi implementation, originally
- * based on the public domain implementation written by Colin Plumb in 1993.
+ * md5_block() is derived from cryptoapi implementation, originally based on the
+ * public domain implementation written by Colin Plumb in 1993.
  *
  * Copyright (c) Cryptoapi developers.
  * Copyright (c) 2002 James Morris <jmorris@intercode.com.au>
@@ -16,7 +16,6 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/string.h>
-#include <linux/unaligned.h>
 #include <linux/wordpart.h>
 
 static const struct md5_block_state md5_iv = {
@@ -29,10 +28,10 @@ static const struct md5_block_state md5_iv = {
 #define F4(x, y, z) (y ^ (x | ~z))
 
 #define MD5STEP(f, w, x, y, z, in, s) \
-	(w += f(x, y, z) + in, w = (w << s | w >> (32 - s)) + x)
+	(w += f(x, y, z) + in, w = rol32(w, s) + x)
 
-static void md5_block_generic(struct md5_block_state *state,
-			      const u8 data[MD5_BLOCK_SIZE])
+static void md5_block(struct md5_block_state *state,
+		      const u8 data[MD5_BLOCK_SIZE])
 {
 	u32 in[MD5_BLOCK_WORDS];
 	u32 a, b, c, d;
@@ -119,20 +118,14 @@ static void md5_block_generic(struct md5_block_state *state,
 	state->h[3] += d;
 }
 
-static void __maybe_unused md5_blocks_generic(struct md5_block_state *state,
-					      const u8 *data, size_t nblocks)
+static void md5_blocks(struct md5_block_state *state,
+		       const u8 *data, size_t nblocks)
 {
 	do {
-		md5_block_generic(state, data);
+		md5_block(state, data);
 		data += MD5_BLOCK_SIZE;
 	} while (--nblocks);
 }
-
-#ifdef CONFIG_CRYPTO_LIB_MD5_ARCH
-#include "md5.h" /* $(SRCARCH)/md5.h */
-#else
-#define md5_blocks md5_blocks_generic
-#endif
 
 void md5_init(struct md5_ctx *ctx)
 {
@@ -277,7 +270,7 @@ void hmac_md5_final(struct hmac_md5_ctx *ctx, u8 out[MD5_DIGEST_SIZE])
 	cpu_to_le32_array(ctx->ostate.h, ARRAY_SIZE(ctx->ostate.h));
 	memcpy(out, ctx->ostate.h, MD5_DIGEST_SIZE);
 
-	memzero_explicit(ctx, sizeof(*ctx));
+	hmac_md5_zeroize_ctx(ctx);
 }
 EXPORT_SYMBOL_GPL(hmac_md5_final);
 
@@ -303,20 +296,6 @@ void hmac_md5_usingrawkey(const u8 *raw_key, size_t raw_key_len,
 	hmac_md5_final(&ctx, out);
 }
 EXPORT_SYMBOL_GPL(hmac_md5_usingrawkey);
-
-#ifdef md5_mod_init_arch
-static int __init md5_mod_init(void)
-{
-	md5_mod_init_arch();
-	return 0;
-}
-subsys_initcall(md5_mod_init);
-
-static void __exit md5_mod_exit(void)
-{
-}
-module_exit(md5_mod_exit);
-#endif
 
 MODULE_DESCRIPTION("MD5 and HMAC-MD5 library functions");
 MODULE_LICENSE("GPL");

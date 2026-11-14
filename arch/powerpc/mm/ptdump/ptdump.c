@@ -178,6 +178,7 @@ static void dump_addr(struct pg_state *st, unsigned long addr)
 	pt_dump_seq_printf(st->seq, REG "-" REG " ", st->start_address, addr - 1);
 	pt_dump_seq_printf(st->seq, " " REG " ", st->start_pa);
 	pt_dump_size(st->seq, addr - st->start_address);
+	pt_dump_seq_printf(st->seq, "%s ", pg_level[st->level].name);
 }
 
 static void note_prot_wx(struct pg_state *st, unsigned long addr)
@@ -190,7 +191,7 @@ static void note_prot_wx(struct pg_state *st, unsigned long addr)
 	if (!pte_write(pte) || !pte_exec(pte))
 		return;
 
-	WARN_ONCE(IS_ENABLED(CONFIG_DEBUG_WX),
+	WARN_ONCE(IS_ENABLED(CONFIG_CHECK_WX),
 		  "powerpc/mm: Found insecure W+X mapping at address %p/%pS\n",
 		  (void *)st->start_address, (void *)st->start_address);
 

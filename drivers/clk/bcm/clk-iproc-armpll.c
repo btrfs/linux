@@ -235,10 +235,10 @@ void __init iproc_armpll_setup(struct device_node *node)
 {
 	int ret;
 	struct iproc_arm_pll *pll;
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	const char *parent_name;
 
-	pll = kzalloc(sizeof(*pll), GFP_KERNEL);
+	pll = kzalloc_obj(*pll);
 	if (WARN_ON(!pll))
 		return;
 

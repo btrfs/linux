@@ -13,7 +13,6 @@
 #include <linux/i2c.h>
 #include <linux/delay.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/pm_runtime.h>
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
@@ -295,12 +294,14 @@ static int lidar_probe(struct i2c_client *client)
 
 	ret = pm_runtime_set_active(&client->dev);
 	if (ret)
-		goto error_unreg_buffer;
+		goto error_unreg_dev;
 	pm_runtime_enable(&client->dev);
 	pm_runtime_idle(&client->dev);
 
 	return 0;
 
+error_unreg_dev:
+	iio_device_unregister(indio_dev);
 error_unreg_buffer:
 	iio_triggered_buffer_cleanup(indio_dev);
 
@@ -319,8 +320,8 @@ static void lidar_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id lidar_id[] = {
-	{ "lidar-lite-v2" },
-	{ "lidar-lite-v3" },
+	{ .name = "lidar-lite-v2" },
+	{ .name = "lidar-lite-v3" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, lidar_id);

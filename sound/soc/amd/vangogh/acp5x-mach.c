@@ -61,8 +61,7 @@ static const struct snd_kcontrol_new acp5x_8821_controls[] = {
 static int platform_clock_control(struct snd_soc_dapm_widget *w,
 				  struct snd_kcontrol *k, int event)
 {
-	struct snd_soc_dapm_context *dapm = w->dapm;
-	struct snd_soc_card *card = dapm->card;
+	struct snd_soc_card *card = snd_soc_dapm_to_card(w->dapm);
 	struct snd_soc_dai *dai;
 	int ret = 0;
 
@@ -458,7 +457,7 @@ static int acp5x_probe(struct platform_device *pdev)
 	if (!dmi_id || !dmi_id->driver_data)
 		return -ENODEV;
 
-	machine = devm_kzalloc(dev, sizeof(*machine), GFP_KERNEL);
+	machine = devm_kzalloc_obj(dev, *machine);
 	if (!machine)
 		return -ENOMEM;
 

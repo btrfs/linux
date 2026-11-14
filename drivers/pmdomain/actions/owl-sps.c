@@ -8,7 +8,6 @@
  * Copyright (c) 2017 Andreas Färber
  */
 
-#include <linux/mod_devicetable.h>
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -78,7 +77,7 @@ static int owl_sps_init_domain(struct owl_sps *sps, int index)
 {
 	struct owl_sps_domain *pd;
 
-	pd = devm_kzalloc(sps->dev, sizeof(*pd), GFP_KERNEL);
+	pd = devm_kzalloc_obj(sps->dev, *pd);
 	if (!pd)
 		return -ENOMEM;
 
@@ -108,9 +107,8 @@ static int owl_sps_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	sps = devm_kzalloc(&pdev->dev,
-			   struct_size(sps, domains, sps_info->num_domains),
-			   GFP_KERNEL);
+	sps = devm_kzalloc_flex(&pdev->dev, *sps, domains,
+				sps_info->num_domains);
 	if (!sps)
 		return -ENOMEM;
 

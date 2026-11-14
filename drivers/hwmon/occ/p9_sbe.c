@@ -7,7 +7,6 @@
 #include <linux/fsi-occ.h>
 #include <linux/mm.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/mutex.h>
 #include <linux/platform_device.h>
 #include <linux/string.h>
@@ -135,8 +134,7 @@ static int p9_sbe_occ_probe(struct platform_device *pdev)
 {
 	int rc;
 	struct occ *occ;
-	struct p9_sbe_occ *ctx = devm_kzalloc(&pdev->dev, sizeof(*ctx),
-					      GFP_KERNEL);
+	struct p9_sbe_occ *ctx = devm_kzalloc_obj(&pdev->dev, *ctx);
 	if (!ctx)
 		return -ENOMEM;
 

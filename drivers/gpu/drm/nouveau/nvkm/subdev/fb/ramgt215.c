@@ -171,7 +171,7 @@ gt215_link_train(struct gt215_ram *ram)
 		return -ENOSYS;
 
 	/* XXX: Multiple partitions? */
-	result = kmalloc_array(64, sizeof(u32), GFP_KERNEL);
+	result = kmalloc_objs(u32, 64);
 	if (!result)
 		return -ENOMEM;
 
@@ -942,7 +942,7 @@ gt215_ram_new(struct nvkm_fb *fb, struct nvkm_ram **pram)
 	struct gt215_ram *ram;
 	int ret, i;
 
-	if (!(ram = kzalloc(sizeof(*ram), GFP_KERNEL)))
+	if (!(ram = kzalloc_obj(*ram)))
 		return -ENOMEM;
 	*pram = &ram->base;
 

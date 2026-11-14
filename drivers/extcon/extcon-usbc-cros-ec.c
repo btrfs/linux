@@ -68,7 +68,7 @@ static int cros_ec_pd_command(struct cros_ec_extcon_info *info,
 	struct cros_ec_command *msg;
 	int ret;
 
-	msg = kzalloc(struct_size(msg, data, max(outsize, insize)), GFP_KERNEL);
+	msg = kzalloc_flex(*msg, data, max(outsize, insize));
 	if (!msg)
 		return -ENOMEM;
 
@@ -388,7 +388,7 @@ static int extcon_cros_ec_probe(struct platform_device *pdev)
 	struct device_node *np = dev->of_node;
 	int numports, ret;
 
-	info = devm_kzalloc(dev, sizeof(*info), GFP_KERNEL);
+	info = devm_kzalloc_obj(dev, *info);
 	if (!info)
 		return -ENOMEM;
 

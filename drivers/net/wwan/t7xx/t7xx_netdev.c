@@ -420,6 +420,10 @@ static void t7xx_ccmni_recv_skb(struct t7xx_ccmni_ctrl *ccmni_ctlb, struct sk_bu
 
 	skb_cb = T7XX_SKB_CB(skb);
 	netif_id = skb_cb->netif_idx;
+	if (netif_id >= NIC_DEV_MAX) {
+		dev_kfree_skb(skb);
+		return;
+	}
 	ccmni = READ_ONCE(ccmni_ctlb->ccmni_inst[netif_id]);
 	if (!ccmni) {
 		dev_kfree_skb(skb);
@@ -489,7 +493,7 @@ int t7xx_ccmni_init(struct t7xx_pci_dev *t7xx_dev)
 	struct t7xx_ccmni_ctrl *ctlb;
 	int ret;
 
-	ctlb = devm_kzalloc(dev, sizeof(*ctlb), GFP_KERNEL);
+	ctlb = devm_kzalloc_obj(dev, *ctlb);
 	if (!ctlb)
 		return -ENOMEM;
 

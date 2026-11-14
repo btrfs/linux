@@ -48,14 +48,14 @@ int debug_ordered_events;
 static int redirect_to_stderr;
 int debug_data_convert;
 static FILE *_debug_file;
-bool debug_display_time;
+static bool debug_display_time;
 int debug_type_profile;
 
 FILE *debug_file(void)
 {
 	if (!_debug_file) {
 		debug_set_file(stderr);
-		pr_warning_once("debug_file not set");
+		pr_warning_once("%s not set\n", __func__);
 	}
 	return _debug_file;
 }

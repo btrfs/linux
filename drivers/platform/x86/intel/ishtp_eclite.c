@@ -557,8 +557,7 @@ static int ecl_ishtp_cl_probe(struct ishtp_cl_device *cl_device)
 	struct ishtp_opregion_dev *opr_dev;
 	int rv;
 
-	opr_dev = devm_kzalloc(ishtp_device(cl_device), sizeof(*opr_dev),
-			       GFP_KERNEL);
+	opr_dev = devm_kzalloc_obj(ishtp_device(cl_device), *opr_dev);
 	if (!opr_dev)
 		return -ENOMEM;
 
@@ -600,13 +599,16 @@ static int ecl_ishtp_cl_probe(struct ishtp_cl_device *cl_device)
 	rv = acpi_opregion_init(opr_dev);
 	if (rv) {
 		dev_err(cl_data_to_dev(opr_dev), "ACPI opregion init failed\n");
-		goto err_exit;
+		goto err_put;
 	}
 
 	/* Reprobe devices depending on ECLite - battery, fan, etc. */
 	acpi_dev_clear_dependencies(opr_dev->adev);
 
 	return 0;
+
+err_put:
+	acpi_dev_put(opr_dev->adev);
 err_exit:
 	ishtp_set_connection_state(ecl_ishtp_cl, ISHTP_CL_DISCONNECTING);
 	ishtp_cl_disconnect(ecl_ishtp_cl);

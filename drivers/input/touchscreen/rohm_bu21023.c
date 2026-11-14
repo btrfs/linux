@@ -1093,7 +1093,7 @@ static int rohm_bu21023_i2c_probe(struct i2c_client *client)
 	if (error)
 		return error;
 
-	ts = devm_kzalloc(dev, sizeof(struct rohm_ts_data), GFP_KERNEL);
+	ts = devm_kzalloc_obj(dev, struct rohm_ts_data);
 	if (!ts)
 		return -ENOMEM;
 
@@ -1144,7 +1144,7 @@ static int rohm_bu21023_i2c_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id rohm_bu21023_i2c_id[] = {
-	{ BU21023_NAME },
+	{ .name = BU21023_NAME },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(i2c, rohm_bu21023_i2c_id);

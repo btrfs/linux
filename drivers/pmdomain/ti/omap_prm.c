@@ -655,6 +655,7 @@ static int omap_prm_domain_attach_dev(struct generic_pm_domain *domain,
 	if (pd_args.args_count != 0)
 		dev_warn(dev, "%s: unusupported #power-domain-cells: %i\n",
 			 prmd->pd.name, pd_args.args_count);
+	of_node_put(pd_args.np);
 
 	genpd_data = dev_gpd_data(dev);
 	genpd_data->data = NULL;
@@ -692,7 +693,7 @@ static int omap_prm_domain_init(struct device *dev, struct omap_prm *prm)
 
 	of_node_put(dev->of_node);
 
-	prmd = devm_kzalloc(dev, sizeof(*prmd), GFP_KERNEL);
+	prmd = devm_kzalloc_obj(dev, *prmd);
 	if (!prmd)
 		return -ENOMEM;
 
@@ -899,7 +900,7 @@ static int omap_prm_reset_init(struct platform_device *pdev,
 	if (!map)
 		return -EINVAL;
 
-	reset = devm_kzalloc(&pdev->dev, sizeof(*reset), GFP_KERNEL);
+	reset = devm_kzalloc_obj(&pdev->dev, *reset);
 	if (!reset)
 		return -ENOMEM;
 
@@ -952,7 +953,7 @@ static int omap_prm_probe(struct platform_device *pdev)
 	if (!data)
 		return -ENOTSUPP;
 
-	prm = devm_kzalloc(&pdev->dev, sizeof(*prm), GFP_KERNEL);
+	prm = devm_kzalloc_obj(&pdev->dev, *prm);
 	if (!prm)
 		return -ENOMEM;
 

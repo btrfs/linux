@@ -60,7 +60,6 @@ static const struct tile_info sc8180x_tile_info[] = {
 		.io_reg = REG_SIZE * id + 0x4 + offset,	\
 		.intr_cfg_reg = REG_SIZE * id + 0x8 + offset,	\
 		.intr_status_reg = REG_SIZE * id + 0xc + offset,\
-		.intr_target_reg = REG_SIZE * id + 0x8 + offset,\
 		.tile = _tile,				\
 		.mux_bit = 2,				\
 		.pull_bit = 0,				\
@@ -90,7 +89,6 @@ static const struct tile_info sc8180x_tile_info[] = {
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.tile = EAST,				\
 		.mux_bit = -1,				\
 		.pull_bit = pull,			\
@@ -116,7 +114,6 @@ static const struct tile_info sc8180x_tile_info[] = {
 		.io_reg = 0xb6004,			\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.tile = SOUTH,				\
 		.mux_bit = -1,				\
 		.pull_bit = 3,				\
@@ -1634,7 +1631,7 @@ static int sc8180x_pinctrl_add_tile_resources(struct platform_device *pdev)
 		return 0;
 
 	/* Allocate for new resources */
-	nres = devm_kcalloc(&pdev->dev, nres_num, sizeof(*nres), GFP_KERNEL);
+	nres = devm_kzalloc_objs(&pdev->dev, *nres, nres_num);
 	if (!nres)
 		return -ENOMEM;
 

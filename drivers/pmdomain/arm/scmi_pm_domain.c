@@ -63,15 +63,15 @@ static int scmi_pm_domain_probe(struct scmi_device *sdev)
 		return num_domains;
 	}
 
-	scmi_pd = devm_kcalloc(dev, num_domains, sizeof(*scmi_pd), GFP_KERNEL);
+	scmi_pd = devm_kzalloc_objs(dev, *scmi_pd, num_domains);
 	if (!scmi_pd)
 		return -ENOMEM;
 
-	scmi_pd_data = devm_kzalloc(dev, sizeof(*scmi_pd_data), GFP_KERNEL);
+	scmi_pd_data = devm_kzalloc_obj(dev, *scmi_pd_data);
 	if (!scmi_pd_data)
 		return -ENOMEM;
 
-	domains = devm_kcalloc(dev, num_domains, sizeof(*domains), GFP_KERNEL);
+	domains = devm_kzalloc_objs(dev, *domains, num_domains);
 	if (!domains)
 		return -ENOMEM;
 
@@ -114,6 +114,16 @@ static int scmi_pm_domain_probe(struct scmi_device *sdev)
 
 	dev_set_drvdata(dev, scmi_pd_data);
 
+	/*
+	 * Parse (optional) power-domains-child-ids property to establish
+	 * parent-child relationships.
+	*/
+	ret = of_genpd_add_child_ids(np, scmi_pd_data);
+	if (ret < 0)
+		dev_err(dev, "Failed to add child domain hierarchy: %d\n", ret);
+
+	dev_info(dev, "Initialized %d power domains", num_domains);
+
 	return 0;
 err_rm_genpds:
 	for (i = num_domains - 1; i >= 0; i--)
@@ -129,9 +139,13 @@ static void scmi_pm_domain_remove(struct scmi_device *sdev)
 	struct device *dev = &sdev->dev;
 	struct device_node *np = dev->of_node;
 
+	scmi_pd_data = dev_get_drvdata(dev);
+
+	/* Remove any parent-child relationships established at probe time */
+	of_genpd_remove_child_ids(np, scmi_pd_data);
+
 	of_genpd_del_provider(np);
 
-	scmi_pd_data = dev_get_drvdata(dev);
 	for (i = 0; i < scmi_pd_data->num_domains; i++) {
 		if (!scmi_pd_data->domains[i])
 			continue;

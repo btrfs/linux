@@ -134,11 +134,6 @@ static void ip_expire(struct timer_list *t)
 	net = qp->q.fqdir->net;
 
 	rcu_read_lock();
-
-	/* Paired with WRITE_ONCE() in fqdir_pre_exit(). */
-	if (READ_ONCE(qp->q.fqdir->dead))
-		goto out_rcu_unlock;
-
 	spin_lock(&qp->q.lock);
 
 	if (qp->q.flags & INET_FRAG_COMPLETE)
@@ -146,6 +141,13 @@ static void ip_expire(struct timer_list *t)
 
 	qp->q.flags |= INET_FRAG_DROP;
 	inet_frag_kill(&qp->q, &refs);
+
+	/* Paired with WRITE_ONCE() in fqdir_pre_exit(). */
+	if (READ_ONCE(qp->q.fqdir->dead)) {
+		inet_frag_queue_flush(&qp->q, 0);
+		goto out;
+	}
+
 	__IP_INC_STATS(net, IPSTATS_MIB_REASMFAILS);
 	__IP_INC_STATS(net, IPSTATS_MIB_REASMTIMEOUT);
 
@@ -240,23 +242,14 @@ static int ip_frag_too_far(struct ipq *qp)
 
 static int ip_frag_reinit(struct ipq *qp)
 {
-	unsigned int sum_truesize = 0;
-
-	if (!mod_timer(&qp->q.timer, jiffies + qp->q.fqdir->timeout)) {
-		refcount_inc(&qp->q.refcnt);
+	if (!mod_timer_pending(&qp->q.timer, jiffies + qp->q.fqdir->timeout))
 		return -ETIMEDOUT;
-	}
 
-	sum_truesize = inet_frag_rbtree_purge(&qp->q.rb_fragments,
-					      SKB_DROP_REASON_FRAG_TOO_FAR);
-	sub_frag_mem_limit(qp->q.fqdir, sum_truesize);
+	inet_frag_queue_flush(&qp->q, SKB_DROP_REASON_FRAG_TOO_FAR);
 
 	qp->q.flags = 0;
 	qp->q.len = 0;
 	qp->q.meat = 0;
-	qp->q.rb_fragments = RB_ROOT;
-	qp->q.fragments_tail = NULL;
-	qp->q.last_run_head = NULL;
 	qp->iif = 0;
 	qp->ecn = 0;
 
@@ -385,8 +378,9 @@ insert_error:
 		err = -EINVAL;
 		goto err;
 	}
+	if (err == IPFRAG_OVERLAP)
+		__IP_INC_STATS(net, IPSTATS_MIB_REASM_OVERLAPS);
 	err = -EINVAL;
-	__IP_INC_STATS(net, IPSTATS_MIB_REASM_OVERLAPS);
 discard_qp:
 	inet_frag_kill(&qp->q, refs);
 	__IP_INC_STATS(net, IPSTATS_MIB_REASMFAILS);
@@ -419,15 +413,18 @@ static int ip_frag_reasm(struct ipq *qp, struct sk_buff *skb,
 		goto out_fail;
 	}
 
+	/* Check the size on the first fragment, which will become the head:
+	 * inet_frag_reasm_finish() must follow inet_frag_reasm_prepare().
+	 */
+	len = ip_hdrlen(skb_rb_first(&qp->q.rb_fragments)) + qp->q.len;
+	err = -E2BIG;
+	if (len > 65535)
+		goto out_oversize;
+
 	/* Make the one we just received the head. */
 	reasm_data = inet_frag_reasm_prepare(&qp->q, skb, prev_tail);
 	if (!reasm_data)
 		goto out_nomem;
-
-	len = ip_hdrlen(skb) + qp->q.len;
-	err = -E2BIG;
-	if (len > 65535)
-		goto out_oversize;
 
 	inet_frag_reasm_finish(&qp->q, skb, reasm_data,
 			       ip_frag_coalesce_ok(qp));

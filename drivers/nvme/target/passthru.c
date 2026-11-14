@@ -26,7 +26,7 @@ void nvmet_passthrough_override_cap(struct nvmet_ctrl *ctrl)
 	 * Multiple command set support can only be declared if the underlying
 	 * controller actually supports it.
 	 */
-	if (!nvme_multi_css(ctrl->subsys->passthru_ctrl))
+	if (!nvme_multi_css(ctrl->subsys->passthru->ctrl))
 		ctrl->cap &= ~(1ULL << 43);
 }
 
@@ -39,7 +39,7 @@ static u16 nvmet_passthru_override_id_descs(struct nvmet_req *req)
 	void *data;
 	u8 csi;
 
-	if (!ctrl->subsys->clear_ids)
+	if (!ctrl->subsys->passthru->clear_ids)
 		return status;
 
 	data = kzalloc(NVME_IDENTIFY_DATA_SIZE, GFP_KERNEL);
@@ -53,13 +53,22 @@ static u16 nvmet_passthru_override_id_descs(struct nvmet_req *req)
 	for (pos = 0; pos < NVME_IDENTIFY_DATA_SIZE; pos += len) {
 		struct nvme_ns_id_desc *cur = data + pos;
 
+		if (pos + sizeof(*cur) > NVME_IDENTIFY_DATA_SIZE)
+			break;
+
 		if (cur->nidl == 0)
 			break;
+
 		if (cur->nidt == NVME_NIDT_CSI) {
+			if (pos + sizeof(*cur) + NVME_NIDT_CSI_LEN >
+						NVME_IDENTIFY_DATA_SIZE)
+				break;
+
 			memcpy(&csi, cur + 1, NVME_NIDT_CSI_LEN);
 			csi_seen = true;
 			break;
 		}
+
 		len = sizeof(struct nvme_ns_id_desc) + cur->nidl;
 	}
 
@@ -80,13 +89,13 @@ out_free:
 static u16 nvmet_passthru_override_id_ctrl(struct nvmet_req *req)
 {
 	struct nvmet_ctrl *ctrl = req->sq->ctrl;
-	struct nvme_ctrl *pctrl = ctrl->subsys->passthru_ctrl;
+	struct nvme_ctrl *pctrl = ctrl->subsys->passthru->ctrl;
 	u16 status = NVME_SC_SUCCESS;
 	struct nvme_id_ctrl *id;
 	unsigned int max_hw_sectors;
 	int page_shift;
 
-	id = kzalloc(sizeof(*id), GFP_KERNEL);
+	id = kzalloc_obj(*id);
 	if (!id)
 		return NVME_SC_INTERNAL;
 
@@ -150,7 +159,7 @@ static u16 nvmet_passthru_override_id_ctrl(struct nvmet_req *req)
 	 * code path with duplicate ctrl subsysnqn. In order to prevent that we
 	 * mask the passthru-ctrl subsysnqn with the target ctrl subsysnqn.
 	 */
-	memcpy(id->subnqn, ctrl->subsysnqn, sizeof(id->subnqn));
+	strscpy(id->subnqn, ctrl->subsys->subsysnqn, sizeof(id->subnqn));
 
 	/* use fabric id-ctrl values */
 	id->ioccsz = cpu_to_le32((sizeof(struct nvme_command) +
@@ -178,7 +187,7 @@ static u16 nvmet_passthru_override_id_ns(struct nvmet_req *req)
 	struct nvme_id_ns *id;
 	int i;
 
-	id = kzalloc(sizeof(*id), GFP_KERNEL);
+	id = kzalloc_obj(*id);
 	if (!id)
 		return NVME_SC_INTERNAL;
 
@@ -199,7 +208,7 @@ static u16 nvmet_passthru_override_id_ns(struct nvmet_req *req)
 	 */
 	id->mc = 0;
 
-	if (req->sq->ctrl->subsys->clear_ids) {
+	if (req->sq->ctrl->subsys->passthru->clear_ids) {
 		memset(id->nguid, 0, NVME_NIDT_NGUID_LEN);
 		memset(id->eui64, 0, NVME_NIDT_EUI64_LEN);
 	}
@@ -247,7 +256,8 @@ static void nvmet_passthru_execute_cmd_work(struct work_struct *w)
 }
 
 static enum rq_end_io_ret nvmet_passthru_req_done(struct request *rq,
-						  blk_status_t blk_status)
+						  blk_status_t blk_status,
+						  const struct io_comp_batch *iob)
 {
 	struct nvmet_req *req = rq->end_io_data;
 
@@ -295,14 +305,24 @@ out_bio_put:
 
 static void nvmet_passthru_execute_cmd(struct nvmet_req *req)
 {
-	struct nvme_ctrl *ctrl = nvmet_req_subsys(req)->passthru_ctrl;
-	struct request_queue *q = ctrl->admin_q;
+	struct nvmet_passthru *passthru;
+	struct nvme_ctrl *ctrl;
+	struct request_queue *q;
 	struct nvme_ns *ns = NULL;
 	struct request *rq = NULL;
 	unsigned int timeout;
 	u32 effects;
 	u16 status;
 	int ret;
+
+	if (!nvmet_get_passthru_ref(req)) {
+		status = NVME_SC_INTERNAL | NVME_STATUS_DNR;
+		goto out;
+	}
+
+	passthru = nvmet_req_subsys(req)->passthru;
+	ctrl = passthru->ctrl;
+	q = ctrl->admin_q;
 
 	if (likely(req->sq->qid != 0)) {
 		u32 nsid = le32_to_cpu(req->cmd->common.nsid);
@@ -315,9 +335,9 @@ static void nvmet_passthru_execute_cmd(struct nvmet_req *req)
 		}
 
 		q = ns->queue;
-		timeout = nvmet_req_subsys(req)->io_timeout;
+		timeout = passthru->io_timeout;
 	} else {
-		timeout = nvmet_req_subsys(req)->admin_timeout;
+		timeout = passthru->admin_timeout;
 	}
 
 	rq = blk_mq_alloc_request(q, nvme_req_op(req->cmd), 0);
@@ -376,10 +396,16 @@ out:
  */
 static void nvmet_passthru_set_host_behaviour(struct nvmet_req *req)
 {
-	struct nvme_ctrl *ctrl = nvmet_req_subsys(req)->passthru_ctrl;
+	struct nvme_ctrl *ctrl;
 	struct nvme_feat_host_behavior *host;
 	u16 status = NVME_SC_INTERNAL;
 	int ret;
+
+	if (!nvmet_get_passthru_ref(req)) {
+		status |= NVME_STATUS_DNR;
+		goto out_complete_req;
+	}
+	ctrl = nvmet_req_subsys(req)->passthru->ctrl;
 
 	host = kzalloc(sizeof(*host) * 2, GFP_KERNEL);
 	if (!host)
@@ -574,17 +600,27 @@ u16 nvmet_parse_passthru_admin_cmd(struct nvmet_req *req)
 	}
 }
 
+static void nvmet_release_passthru_ctrl(struct percpu_ref *ref)
+{
+	struct nvmet_passthru *passthru = container_of(ref,
+				struct nvmet_passthru, ref);
+
+	complete(&passthru->disable_done);
+}
+
 int nvmet_passthru_ctrl_enable(struct nvmet_subsys *subsys)
 {
+	struct nvmet_passthru *passthru;
 	struct nvme_ctrl *ctrl;
 	struct file *file;
 	int ret = -EINVAL;
 	void *old;
 
 	mutex_lock(&subsys->lock);
-	if (!subsys->passthru_ctrl_path)
+	passthru = subsys->passthru;
+	if (!passthru || !passthru->ctrl_path)
 		goto out_unlock;
-	if (subsys->passthru_ctrl)
+	if (passthru->ctrl)
 		goto out_unlock;
 
 	if (subsys->nr_namespaces) {
@@ -592,7 +628,7 @@ int nvmet_passthru_ctrl_enable(struct nvmet_subsys *subsys)
 		goto out_unlock;
 	}
 
-	file = filp_open(subsys->passthru_ctrl_path, O_RDWR, 0);
+	file = filp_open(passthru->ctrl_path, O_RDWR, 0);
 	if (IS_ERR(file)) {
 		ret = PTR_ERR(file);
 		goto out_unlock;
@@ -601,7 +637,7 @@ int nvmet_passthru_ctrl_enable(struct nvmet_subsys *subsys)
 	ctrl = nvme_ctrl_from_file(file);
 	if (!ctrl) {
 		pr_err("failed to open nvme controller %s\n",
-		       subsys->passthru_ctrl_path);
+		       passthru->ctrl_path);
 
 		goto out_put_file;
 	}
@@ -616,7 +652,14 @@ int nvmet_passthru_ctrl_enable(struct nvmet_subsys *subsys)
 	if (old)
 		goto out_put_file;
 
-	subsys->passthru_ctrl = ctrl;
+	ret = percpu_ref_init(&passthru->ref, nvmet_release_passthru_ctrl,
+			0, GFP_KERNEL);
+	if (ret) {
+		xa_erase(&passthru_subsystems, ctrl->instance);
+		goto out_put_file;
+	}
+	init_completion(&passthru->disable_done);
+	passthru->ctrl = ctrl;
 	subsys->ver = ctrl->vs;
 
 	if (subsys->ver < NVME_VS(1, 2, 1)) {
@@ -626,7 +669,8 @@ int nvmet_passthru_ctrl_enable(struct nvmet_subsys *subsys)
 		subsys->ver = NVME_VS(1, 2, 1);
 	}
 	nvme_get_ctrl(ctrl);
-	__module_get(subsys->passthru_ctrl->ops->module);
+	__module_get(passthru->ctrl->ops->module);
+	set_bit(NVMET_PASSTHRU_ENABLED, &passthru->flags);
 	ret = 0;
 
 out_put_file:
@@ -638,12 +682,33 @@ out_unlock:
 
 static void __nvmet_passthru_ctrl_disable(struct nvmet_subsys *subsys)
 {
-	if (subsys->passthru_ctrl) {
-		xa_erase(&passthru_subsystems, subsys->passthru_ctrl->instance);
-		module_put(subsys->passthru_ctrl->ops->module);
-		nvme_put_ctrl(subsys->passthru_ctrl);
-	}
-	subsys->passthru_ctrl = NULL;
+	struct nvmet_passthru *passthru = subsys->passthru;
+
+	lockdep_assert_held(&subsys->lock);
+
+	if (!passthru)
+		return;
+
+	if (!test_and_clear_bit(NVMET_PASSTHRU_ENABLED, &passthru->flags))
+		return;
+
+	mutex_unlock(&subsys->lock);
+	/*
+	 * Now new I/Os should not enter passthru hotpath as we cleared the
+	 * enabled flag. Kill percpu reference and wait for in-flight I/Os
+	 * to drain.
+	 */
+	percpu_ref_kill(&passthru->ref);
+	wait_for_completion(&passthru->disable_done);
+	percpu_ref_exit(&passthru->ref);
+
+	mutex_lock(&subsys->lock);
+
+	xa_erase(&passthru_subsystems, passthru->ctrl->instance);
+	module_put(passthru->ctrl->ops->module);
+	nvme_put_ctrl(passthru->ctrl);
+
+	passthru->ctrl = NULL;
 	subsys->ver = NVMET_DEFAULT_VS;
 }
 
@@ -658,6 +723,10 @@ void nvmet_passthru_subsys_free(struct nvmet_subsys *subsys)
 {
 	mutex_lock(&subsys->lock);
 	__nvmet_passthru_ctrl_disable(subsys);
+	if (subsys->passthru) {
+		kfree(subsys->passthru->ctrl_path);
+		kfree(subsys->passthru);
+		subsys->passthru = NULL;
+	}
 	mutex_unlock(&subsys->lock);
-	kfree(subsys->passthru_ctrl_path);
 }

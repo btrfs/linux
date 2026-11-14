@@ -1686,7 +1686,7 @@ static int w83627hf_probe(struct platform_device *pdev)
 		return -EBUSY;
 	}
 
-	data = devm_kzalloc(dev, sizeof(struct w83627hf_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct w83627hf_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -1823,6 +1823,8 @@ static int w83627hf_probe(struct platform_device *pdev)
 	return 0;
 
  error:
+	device_remove_file(dev, &dev_attr_vrm);
+	device_remove_file(dev, &dev_attr_cpu0_vid);
 	sysfs_remove_group(&dev->kobj, &w83627hf_group);
 	sysfs_remove_group(&dev->kobj, &w83627hf_group_opt);
 	return err;
@@ -1834,6 +1836,8 @@ static void w83627hf_remove(struct platform_device *pdev)
 
 	hwmon_device_unregister(data->hwmon_dev);
 
+	device_remove_file(&pdev->dev, &dev_attr_vrm);
+	device_remove_file(&pdev->dev, &dev_attr_cpu0_vid);
 	sysfs_remove_group(&pdev->dev.kobj, &w83627hf_group);
 	sysfs_remove_group(&pdev->dev.kobj, &w83627hf_group_opt);
 }

@@ -10,7 +10,6 @@
 #include <linux/interrupt.h>
 #include <linux/mfd/intel_soc_pmic.h>
 #include <linux/mfd/intel_soc_pmic_mrfld.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -205,7 +204,7 @@ static int mrfld_extcon_probe(struct platform_device *pdev)
 	if (irq < 0)
 		return irq;
 
-	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, *data);
 	if (!data)
 		return -ENOMEM;
 

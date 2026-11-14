@@ -7,7 +7,6 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/usb.h>
 #include <linux/slab.h>
 
@@ -719,7 +718,7 @@ static void ds9490r_search(void *data, struct w1_master *master,
 	 * We are holding the bus mutex during the scan, but adding devices via the
 	 * callback needs the bus to be unlocked. So we queue up found ids here.
 	 */
-	found_ids = kmalloc_array(master->max_slave_count, sizeof(u64), GFP_KERNEL);
+	found_ids = kmalloc_objs(u64, master->max_slave_count);
 	if (!found_ids) {
 		kfree(buf);
 		return;
@@ -1018,15 +1017,12 @@ static int ds_probe(struct usb_interface *intf,
 	struct ds_device *dev;
 	int i, err, alt;
 
-	dev = kzalloc(sizeof(struct ds_device), GFP_KERNEL);
+	dev = kzalloc_obj(struct ds_device);
 	if (!dev)
 		return -ENOMEM;
 
-	dev->udev = usb_get_dev(udev);
-	if (!dev->udev) {
-		err = -ENOMEM;
-		goto err_out_free;
-	}
+	dev->udev = udev;
+
 	memset(dev->ep, 0, sizeof(dev->ep));
 
 	usb_set_intfdata(intf, dev);
@@ -1085,9 +1081,8 @@ static int ds_probe(struct usb_interface *intf,
 
 err_out_clear:
 	usb_set_intfdata(intf, NULL);
-	usb_put_dev(dev->udev);
-err_out_free:
 	kfree(dev);
+
 	return err;
 }
 
@@ -1107,7 +1102,6 @@ static void ds_disconnect(struct usb_interface *intf)
 
 	usb_set_intfdata(intf, NULL);
 
-	usb_put_dev(dev->udev);
 	kfree(dev);
 }
 

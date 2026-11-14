@@ -1499,7 +1499,7 @@ struct brcms_timer *brcms_init_timer(struct brcms_info *wl,
 {
 	struct brcms_timer *t;
 
-	t = kzalloc(sizeof(*t), GFP_ATOMIC);
+	t = kzalloc_obj(*t, GFP_ATOMIC);
 	if (!t)
 		return NULL;
 
@@ -1571,6 +1571,10 @@ void brcms_free_timer(struct brcms_timer *t)
 
 	/* delete the timer in case it is active */
 	brcms_del_timer(t);
+	/* Ensure the callback has finished before freeing the timer
+	 * structure, since brcms_del_timer() uses non-synchronous cancel.
+	 */
+	cancel_delayed_work_sync(&t->dly_wrk);
 
 	if (wl->timers == t) {
 		wl->timers = wl->timers->next;

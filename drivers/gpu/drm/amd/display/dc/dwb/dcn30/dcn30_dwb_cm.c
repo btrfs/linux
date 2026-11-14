@@ -280,7 +280,7 @@ bool dwb3_ogam_set_input_transfer_func(
 	if (in_transfer_func_dwb_ogam == NULL)
 		return result;
 
-	dwb_ogam_lut = kzalloc(sizeof(*dwb_ogam_lut), GFP_KERNEL);
+	dwb_ogam_lut = kzalloc_obj(*dwb_ogam_lut);
 
 	if (dwb_ogam_lut) {
 		cm_helper_translate_curve_to_hw_format(dwbc->ctx,
@@ -371,7 +371,8 @@ void dwb3_set_gamut_remap(
 		for (i = 0; i < 12; i++)
 			arr_matrix[i] = adjust.temperature_matrix[i];
 
-		convert_float_matrix(arr_reg_val, arr_matrix, 12);
+		convert_float_matrix(arr_reg_val, arr_matrix,
+			CM_GAMUT_REMAP_COEF_FORMAT_S2_13, 12);
 
 		REG_GET(DWB_GAMUT_REMAP_MODE, DWB_GAMUT_REMAP_MODE_CURRENT, &current_mode);
 

@@ -419,12 +419,12 @@ static int pxafb_adjust_timing(struct pxafb_info *fbi,
 	var->yres = max_t(int, var->yres, MIN_YRES);
 
 	if (!(fbi->lccr0 & LCCR0_LCDT)) {
-		clamp_val(var->hsync_len, 1, 64);
-		clamp_val(var->vsync_len, 1, 64);
-		clamp_val(var->left_margin,  1, 255);
-		clamp_val(var->right_margin, 1, 255);
-		clamp_val(var->upper_margin, 1, 255);
-		clamp_val(var->lower_margin, 1, 255);
+		var->hsync_len = clamp(var->hsync_len, 1, 64);
+		var->vsync_len = clamp(var->vsync_len, 1, 64);
+		var->left_margin  = clamp(var->left_margin,  1, 255);
+		var->right_margin = clamp(var->right_margin, 1, 255);
+		var->upper_margin = clamp(var->upper_margin, 1, 255);
+		var->lower_margin = clamp(var->lower_margin, 1, 255);
 	}
 
 	/* make sure each line is aligned on word boundary */
@@ -2108,9 +2108,8 @@ static int of_get_pxafb_display(struct device *dev, struct device_node *disp,
 		return -EINVAL;
 
 	ret = -ENOMEM;
-	info->modes = devm_kcalloc(dev, timings->num_timings,
-				   sizeof(info->modes[0]),
-				   GFP_KERNEL);
+	info->modes = devm_kzalloc_objs(dev, info->modes[0],
+					timings->num_timings);
 	if (!info->modes)
 		goto out;
 	info->num_modes = timings->num_timings;
@@ -2196,7 +2195,7 @@ static struct pxafb_mach_info *of_pxafb_of_mach_info(struct device *dev)
 
 	if (!dev->of_node)
 		return NULL;
-	info = devm_kzalloc(dev, sizeof(*info), GFP_KERNEL);
+	info = devm_kzalloc_obj(dev, *info);
 	if (!info)
 		return ERR_PTR(-ENOMEM);
 	ret = of_get_pxafb_mode_info(dev, info);
@@ -2312,7 +2311,6 @@ static int pxafb_probe(struct platform_device *dev)
 
 	ret = devm_request_irq(&dev->dev, irq, pxafb_handle_irq, 0, "LCD", fbi);
 	if (ret) {
-		dev_err(&dev->dev, "request_irq failed: %d\n", ret);
 		ret = -EBUSY;
 		goto failed_free_mem;
 	}

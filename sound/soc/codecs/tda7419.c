@@ -576,9 +576,7 @@ static int tda7419_probe(struct i2c_client *i2c)
 	struct tda7419_data *tda7419;
 	int i, ret;
 
-	tda7419 = devm_kzalloc(&i2c->dev,
-			       sizeof(struct tda7419_data),
-			       GFP_KERNEL);
+	tda7419 = devm_kzalloc_obj(&i2c->dev, struct tda7419_data);
 	if (tda7419 == NULL)
 		return -ENOMEM;
 
@@ -614,7 +612,7 @@ static int tda7419_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id tda7419_i2c_id[] = {
-	{ "tda7419" },
+	{ .name = "tda7419" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tda7419_i2c_id);

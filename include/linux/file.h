@@ -12,6 +12,7 @@
 #include <linux/errno.h>
 #include <linux/cleanup.h>
 #include <linux/err.h>
+#include <linux/vfsdebug.h>
 
 struct file;
 
@@ -126,5 +127,97 @@ extern void flush_delayed_fput(void);
 extern void __fput_sync(struct file *);
 
 extern unsigned int sysctl_nr_open_min, sysctl_nr_open_max;
+
+/*
+ * fd_prepare: Combined fd + file allocation cleanup class.
+ * @fd: Allocated fd
+ * @file: Allocated struct file pointer
+ *
+ * Allocates an fd and a file together. On error paths, automatically cleans
+ * up whichever resource was successfully allocated. Allows flexible file
+ * allocation with different functions per usage.
+ *
+ * Do not declare directly, use FD_PREPARE().
+ */
+struct fd_prepare {
+	int fd;
+	struct file *file;
+};
+
+/* Do not use directly. */
+static __always_inline void __fd_prepare_cleanup(const struct fd_prepare *fdf)
+{
+	if (unlikely(fdf->fd >= 0)) {
+		put_unused_fd(fdf->fd);
+		fput(fdf->file);
+	}
+}
+
+/* Do not use directly. */
+static __always_inline struct fd_prepare __fd_prepare(int fd, struct file *file)
+{
+	if (fd >= 0 && IS_ERR_OR_NULL(file)) {
+		int err = file ? PTR_ERR(file) : -ENOMEM;
+
+		put_unused_fd(fd);
+		fd = err;
+		file = NULL;
+	}
+	return (struct fd_prepare){ .fd = fd, .file = file };
+}
+
+/*
+ * FD_PREPARE - Declare and initialize an fd_prepare instance.
+ *
+ * This allocates a new fd and only evaluates @_file_owned if the
+ * allocation succeeded. Cleanup happens when the variable goes out of
+ * scope and the guard releases whichever of the descriptor and the file
+ * was allocated. If fd_publish() was called the fd and file are
+ * published and cleanup becomes a nop.
+ *
+ * @_fdf: name of the const struct fd_prepare pointer to define
+ * @_fd_flags: flags for get_unused_fd_flags()
+ * @_file_owned: struct file to take ownership of (can be expression)
+ */
+#define __FD_PREPARE(_guard, _fdf, _fd_flags, _file_owned)		\
+	struct fd_prepare _guard __cleanup(__fd_prepare_cleanup) = ({	\
+		int __fd = get_unused_fd_flags(_fd_flags);		\
+		__fd_prepare(__fd, __fd < 0 ? NULL : (_file_owned));	\
+	});								\
+	const struct fd_prepare *const _fdf = &_guard
+
+#define FD_PREPARE(_fdf, _fd_flags, _file_owned) \
+	__FD_PREPARE(__UNIQUE_ID(fd_prepare), _fdf, _fd_flags, _file_owned)
+
+/*
+ * fd_publish - Publish prepared fd and file to the fd table.
+ * @fdf: struct fd_prepare pointer defined by FD_PREPARE()
+ */
+static __always_inline int fd_publish(const struct fd_prepare *fdf)
+{
+	/* Callers only get a const view, the guard itself is writable. */
+	struct fd_prepare *guard = (struct fd_prepare *)fdf;
+
+	VFS_WARN_ON_ONCE(guard->fd < 0);
+	fd_install(guard->fd, guard->file);
+	return take_fd(guard->fd);
+}
+
+/* Do not use directly. */
+#define __FD_ADD(_fdf, _fd_flags, _file_owned)			\
+	({							\
+		FD_PREPARE(_fdf, _fd_flags, _file_owned);	\
+		_fdf->fd < 0 ? _fdf->fd : fd_publish(_fdf);	\
+	})
+
+/*
+ * FD_ADD - Allocate and install an fd and file in one step.
+ * @_fd_flags: flags for get_unused_fd_flags()
+ * @_file_owned: struct file to take ownership of
+ *
+ * Returns the allocated fd number, or negative error code on failure.
+ */
+#define FD_ADD(_fd_flags, _file_owned) \
+	__FD_ADD(__UNIQUE_ID(fd_prepare), _fd_flags, _file_owned)
 
 #endif /* __LINUX_FILE_H */

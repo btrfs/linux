@@ -139,7 +139,7 @@ static int dps920ab_probe(struct i2c_client *client)
 	struct dps920ab_data *data;
 	int ret;
 
-	data = devm_kzalloc(&client->dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(&client->dev, *data);
 	if (!data)
 		return -ENOMEM;
 
@@ -191,8 +191,8 @@ static const struct of_device_id __maybe_unused dps920ab_of_match[] = {
 MODULE_DEVICE_TABLE(of, dps920ab_of_match);
 
 static const struct i2c_device_id dps920ab_device_id[] = {
-	{ "dps920ab" },
-	{}
+	{ .name = "dps920ab" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, dps920ab_device_id);
 

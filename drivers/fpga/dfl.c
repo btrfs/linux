@@ -347,7 +347,7 @@ dfl_dev_add(struct dfl_feature_dev_data *fdata,
 	struct dfl_device *ddev;
 	int id, i, ret;
 
-	ddev = kzalloc(sizeof(*ddev), GFP_KERNEL);
+	ddev = kzalloc_obj(*ddev);
 	if (!ddev)
 		return ERR_PTR(-ENOMEM);
 
@@ -397,8 +397,7 @@ dfl_dev_add(struct dfl_feature_dev_data *fdata,
 
 	/* then add irq resource */
 	if (feature->nr_irqs) {
-		ddev->irqs = kcalloc(feature->nr_irqs,
-				     sizeof(*ddev->irqs), GFP_KERNEL);
+		ddev->irqs = kzalloc_objs(*ddev->irqs, feature->nr_irqs);
 		if (!ddev->irqs) {
 			ret = -ENOMEM;
 			goto put_dev;
@@ -755,17 +754,17 @@ binfo_create_feature_dev_data(struct build_feature_devs_info *binfo)
 	if (WARN_ON_ONCE(type >= DFL_ID_MAX))
 		return ERR_PTR(-EINVAL);
 
-	fdata = devm_kzalloc(binfo->dev, sizeof(*fdata), GFP_KERNEL);
+	fdata = devm_kzalloc_obj(binfo->dev, *fdata);
 	if (!fdata)
 		return ERR_PTR(-ENOMEM);
 
-	fdata->features = devm_kcalloc(binfo->dev, binfo->feature_num,
-				       sizeof(*fdata->features), GFP_KERNEL);
+	fdata->features = devm_kzalloc_objs(binfo->dev, *fdata->features,
+					    binfo->feature_num);
 	if (!fdata->features)
 		return ERR_PTR(-ENOMEM);
 
-	fdata->resources = devm_kcalloc(binfo->dev, binfo->feature_num,
-					sizeof(*fdata->resources), GFP_KERNEL);
+	fdata->resources = devm_kzalloc_objs(binfo->dev, *fdata->resources,
+					     binfo->feature_num);
 	if (!fdata->resources)
 		return ERR_PTR(-ENOMEM);
 
@@ -835,8 +834,8 @@ binfo_create_feature_dev_data(struct build_feature_devs_info *binfo)
 		}
 
 		if (finfo->nr_irqs) {
-			ctx = devm_kcalloc(binfo->dev, finfo->nr_irqs,
-					   sizeof(*ctx), GFP_KERNEL);
+			ctx = devm_kzalloc_objs(binfo->dev, *ctx,
+						finfo->nr_irqs);
 			if (!ctx)
 				return ERR_PTR(-ENOMEM);
 
@@ -1133,6 +1132,8 @@ static int dfh_get_param_size(void __iomem *dfh_base, resource_size_t max)
 			return -EINVAL;
 
 		size += next * sizeof(u64);
+		if (size > max)
+			return -EINVAL;
 
 		if (FIELD_GET(DFHv1_PARAM_HDR_NEXT_EOP, v))
 			return size;
@@ -1182,7 +1183,7 @@ create_feature_instance(struct build_feature_devs_info *binfo,
 	if (binfo->len - ofst < size)
 		return -EINVAL;
 
-	finfo = kzalloc(struct_size(finfo, params, dfh_psize / sizeof(u64)), GFP_KERNEL);
+	finfo = kzalloc_flex(*finfo, params, dfh_psize / sizeof(u64));
 	if (!finfo)
 		return -ENOMEM;
 
@@ -1424,7 +1425,7 @@ struct dfl_fpga_enum_info *dfl_fpga_enum_info_alloc(struct device *dev)
 
 	get_device(dev);
 
-	info = devm_kzalloc(dev, sizeof(*info), GFP_KERNEL);
+	info = devm_kzalloc_obj(dev, *info);
 	if (!info) {
 		put_device(dev);
 		return NULL;
@@ -1480,7 +1481,7 @@ int dfl_fpga_enum_info_add_dfl(struct dfl_fpga_enum_info *info,
 {
 	struct dfl_fpga_enum_dfl *dfl;
 
-	dfl = devm_kzalloc(info->dev, sizeof(*dfl), GFP_KERNEL);
+	dfl = devm_kzalloc_obj(info->dev, *dfl);
 	if (!dfl)
 		return -ENOMEM;
 
@@ -1567,7 +1568,7 @@ dfl_fpga_feature_devs_enumerate(struct dfl_fpga_enum_info *info)
 	if (!info->dev)
 		return ERR_PTR(-ENODEV);
 
-	cdev = devm_kzalloc(info->dev, sizeof(*cdev), GFP_KERNEL);
+	cdev = devm_kzalloc_obj(info->dev, *cdev);
 	if (!cdev)
 		return ERR_PTR(-ENOMEM);
 
@@ -1582,7 +1583,7 @@ dfl_fpga_feature_devs_enumerate(struct dfl_fpga_enum_info *info)
 	}
 
 	/* create and init build info for enumeration */
-	binfo = devm_kzalloc(info->dev, sizeof(*binfo), GFP_KERNEL);
+	binfo = devm_kzalloc_obj(info->dev, *binfo);
 	if (!binfo) {
 		ret = -ENOMEM;
 		goto unregister_region_exit;
@@ -2018,7 +2019,7 @@ static void __exit dfl_fpga_exit(void)
 	bus_unregister(&dfl_bus_type);
 }
 
-module_init(dfl_fpga_init);
+subsys_initcall(dfl_fpga_init);
 module_exit(dfl_fpga_exit);
 
 MODULE_DESCRIPTION("FPGA Device Feature List (DFL) Support");

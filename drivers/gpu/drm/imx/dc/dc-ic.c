@@ -14,6 +14,8 @@
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 
+#include "dc-drv.h"
+
 #define USERINTERRUPTMASK(n)	(0x8 + 4 * (n))
 #define INTERRUPTENABLE(n)	(0x10 + 4 * (n))
 #define INTERRUPTPRESET(n)	(0x18 + 4 * (n))
@@ -118,11 +120,11 @@ static int dc_ic_probe(struct platform_device *pdev)
 	void __iomem *base;
 	int i, ret;
 
-	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, *data);
 	if (!data)
 		return -ENOMEM;
 
-	entry = devm_kcalloc(dev, IRQ_COUNT, sizeof(*entry), GFP_KERNEL);
+	entry = devm_kzalloc_objs(dev, *entry, IRQ_COUNT);
 	if (!entry)
 		return -ENOMEM;
 
@@ -174,8 +176,8 @@ static int dc_ic_probe(struct platform_device *pdev)
 		regmap_write(data->regs, USERINTERRUPTMASK(i), 0xffffffff);
 	}
 
-	data->domain = irq_domain_add_linear(dev->of_node, IRQ_COUNT,
-					     &irq_generic_chip_ops, data);
+	data->domain = irq_domain_create_linear(of_fwnode_handle(dev->of_node), IRQ_COUNT,
+						&irq_generic_chip_ops, data);
 	if (!data->domain) {
 		dev_err(dev, "failed to create IRQ domain\n");
 		pm_runtime_put(dev);

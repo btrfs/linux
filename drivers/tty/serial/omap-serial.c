@@ -1092,7 +1092,7 @@ static void __maybe_unused wait_for_xmitr(struct uart_omap_port *up)
 	} while (!uart_lsr_tx_empty(status));
 
 	/* Wait up to 1s for flow control if necessary */
-	if (up->port.flags & UPF_CONS_FLOW) {
+	if (uart_cons_flow_enabled(&up->port)) {
 		for (tmout = 1000000; tmout; tmout--) {
 			unsigned int msr = serial_in(up, UART_MSR);
 
@@ -1466,7 +1466,7 @@ static struct omap_uart_port_info *of_get_uart_port_info(struct device *dev)
 {
 	struct omap_uart_port_info *omap_up_info;
 
-	omap_up_info = devm_kzalloc(dev, sizeof(*omap_up_info), GFP_KERNEL);
+	omap_up_info = devm_kzalloc_obj(dev, *omap_up_info);
 	if (!omap_up_info)
 		return NULL; /* out of memory */
 
@@ -1560,7 +1560,7 @@ static int serial_omap_probe(struct platform_device *pdev)
 			return -EPROBE_DEFER;
 	}
 
-	up = devm_kzalloc(&pdev->dev, sizeof(*up), GFP_KERNEL);
+	up = devm_kzalloc_obj(&pdev->dev, *up);
 	if (!up)
 		return -ENOMEM;
 

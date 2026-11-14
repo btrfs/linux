@@ -327,13 +327,13 @@ int asix_read_phy_addr(struct usbnet *dev, bool internal)
 	if (ret < 0)
 		goto error;
 
-	if (ret < 2) {
-		ret = -EIO;
-		goto error;
-	}
-
 	offset = (internal ? 1 : 0);
 	ret = buf[offset];
+
+	if (ret >= PHY_MAX_ADDR) {
+		netdev_err(dev->net, "invalid PHY address: %d\n", ret);
+		return -ENODEV;
+	}
 
 	netdev_dbg(dev->net, "%s PHY address 0x%x\n",
 		   internal ? "internal" : "external", ret);
@@ -626,8 +626,7 @@ int asix_get_eeprom(struct net_device *net, struct ethtool_eeprom *eeprom,
 	first_word = eeprom->offset >> 1;
 	last_word = (eeprom->offset + eeprom->len - 1) >> 1;
 
-	eeprom_buff = kmalloc_array(last_word - first_word + 1, sizeof(u16),
-				    GFP_KERNEL);
+	eeprom_buff = kmalloc_objs(u16, last_word - first_word + 1);
 	if (!eeprom_buff)
 		return -ENOMEM;
 
@@ -666,8 +665,7 @@ int asix_set_eeprom(struct net_device *net, struct ethtool_eeprom *eeprom,
 	first_word = eeprom->offset >> 1;
 	last_word = (eeprom->offset + eeprom->len - 1) >> 1;
 
-	eeprom_buff = kmalloc_array(last_word - first_word + 1, sizeof(u16),
-				    GFP_KERNEL);
+	eeprom_buff = kmalloc_objs(u16, last_word - first_word + 1);
 	if (!eeprom_buff)
 		return -ENOMEM;
 
@@ -724,14 +722,6 @@ int asix_set_eeprom(struct net_device *net, struct ethtool_eeprom *eeprom,
 free:
 	kfree(eeprom_buff);
 	return ret;
-}
-
-void asix_get_drvinfo(struct net_device *net, struct ethtool_drvinfo *info)
-{
-	/* Inherit standard device info */
-	usbnet_get_drvinfo(net, info);
-	strscpy(info->driver, DRIVER_NAME, sizeof(info->driver));
-	strscpy(info->version, DRIVER_VERSION, sizeof(info->version));
 }
 
 int asix_set_mac_address(struct net_device *net, void *p)

@@ -1061,8 +1061,7 @@ static int mt8188_etdm_clk_src_sel_put(struct snd_kcontrol *kcontrol,
 static int mt8188_etdm_clk_src_sel_get(struct snd_kcontrol *kcontrol,
 				       struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-		snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(component);
 	unsigned int value;
 	unsigned int reg;
@@ -2673,9 +2672,7 @@ static int init_etdm_priv_data(struct mtk_base_afe *afe)
 	int i;
 
 	for (i = MT8188_AFE_IO_ETDM_START; i < MT8188_AFE_IO_ETDM_END; i++) {
-		etdm_priv = devm_kzalloc(afe->dev,
-					 sizeof(struct mtk_dai_etdm_priv),
-					 GFP_KERNEL);
+		etdm_priv = devm_kzalloc_obj(afe->dev, struct mtk_dai_etdm_priv);
 		if (!etdm_priv)
 			return -ENOMEM;
 
@@ -2693,7 +2690,7 @@ int mt8188_dai_etdm_register(struct mtk_base_afe *afe)
 {
 	struct mtk_base_afe_dai *dai;
 
-	dai = devm_kzalloc(afe->dev, sizeof(*dai), GFP_KERNEL);
+	dai = devm_kzalloc_obj(afe->dev, *dai);
 	if (!dai)
 		return -ENOMEM;
 

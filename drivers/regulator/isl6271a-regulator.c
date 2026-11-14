@@ -109,7 +109,7 @@ static int isl6271a_probe(struct i2c_client *i2c)
 	if (!i2c_check_functionality(i2c->adapter, I2C_FUNC_SMBUS_BYTE_DATA))
 		return -EIO;
 
-	pmic = devm_kzalloc(&i2c->dev, sizeof(struct isl_pmic), GFP_KERNEL);
+	pmic = devm_kzalloc_obj(&i2c->dev, struct isl_pmic);
 	if (!pmic)
 		return -ENOMEM;
 
@@ -138,7 +138,7 @@ static int isl6271a_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id isl6271a_id[] = {
-	{ .name = "isl6271a", },
+	{ .name = "isl6271a" },
 	{ }
 };
 

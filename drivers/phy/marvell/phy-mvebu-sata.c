@@ -10,7 +10,6 @@
 #include <linux/clk.h>
 #include <linux/phy/phy.h>
 #include <linux/io.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 
 struct priv {
@@ -84,7 +83,7 @@ static int phy_mvebu_sata_probe(struct platform_device *pdev)
 	struct priv *priv;
 	struct phy *phy;
 
-	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&pdev->dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

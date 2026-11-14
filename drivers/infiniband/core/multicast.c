@@ -189,7 +189,10 @@ static void release_group(struct mcast_group *group)
 
 	spin_lock_irqsave(&port->lock, flags);
 	if (atomic_dec_and_test(&group->refcount)) {
-		rb_erase(&group->node, &port->table);
+
+		if (!RB_EMPTY_NODE(&group->node))
+			rb_erase(&group->node, &port->table);
+
 		spin_unlock_irqrestore(&port->lock, flags);
 		kfree(group);
 		deref_port(port);
@@ -533,6 +536,8 @@ static void join_handler(int status, struct ib_sa_mcmember_rec *rec,
 		group->rec = *rec;
 		if (mgids_changed) {
 			rb_erase(&group->node, &group->port->table);
+
+			RB_CLEAR_NODE(&group->node);
 			is_mgid0 = !memcmp(&mgid0, &group->rec.mgid,
 					   sizeof(mgid0));
 			mcast_insert(group->port, group, is_mgid0);
@@ -570,7 +575,7 @@ static struct mcast_group *acquire_group(struct mcast_port *port,
 		spin_unlock_irqrestore(&port->lock, flags);
 	}
 
-	group = kzalloc(sizeof *group, gfp_mask);
+	group = kzalloc_obj(*group, gfp_mask);
 	if (!group)
 		return NULL;
 
@@ -621,7 +626,7 @@ ib_sa_join_multicast(struct ib_sa_client *client,
 	if (!dev)
 		return ERR_PTR(-ENODEV);
 
-	member = kmalloc(sizeof *member, gfp_mask);
+	member = kmalloc_obj(*member, gfp_mask);
 	if (!member)
 		return ERR_PTR(-ENOMEM);
 
@@ -823,8 +828,7 @@ static int mcast_add_one(struct ib_device *device)
 	int i;
 	int count = 0;
 
-	dev = kmalloc(struct_size(dev, port, device->phys_port_cnt),
-		      GFP_KERNEL);
+	dev = kmalloc_flex(*dev, port, device->phys_port_cnt);
 	if (!dev)
 		return -ENOMEM;
 

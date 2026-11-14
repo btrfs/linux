@@ -2340,7 +2340,7 @@ mvneta_swbm_rx_frame(struct mvneta_port *pp,
 
 	/* Prefetch header */
 	prefetch(data);
-	xdp_buff_clear_frags_flag(xdp);
+	xdp_reinit_buff(xdp);
 	xdp_prepare_buff(xdp, data, pp->rx_offset_correction + MVNETA_MH_SIZE,
 			 data_len, true);
 }
@@ -2403,7 +2403,7 @@ mvneta_swbm_build_skb(struct mvneta_port *pp, struct page_pool *pool,
 	if (unlikely(xdp_buff_has_frags(xdp)))
 		num_frags = sinfo->nr_frags;
 
-	skb = build_skb(xdp->data_hard_start, PAGE_SIZE);
+	skb = napi_build_skb(xdp->data_hard_start, PAGE_SIZE);
 	if (!skb)
 		return ERR_PTR(-ENOMEM);
 
@@ -3554,7 +3554,7 @@ static int mvneta_txq_sw_init(struct mvneta_port *pp,
 
 	txq->last_desc = txq->size - 1;
 
-	txq->buf = kmalloc_array(txq->size, sizeof(*txq->buf), GFP_KERNEL);
+	txq->buf = kmalloc_objs(*txq->buf, txq->size);
 	if (!txq->buf)
 		return -ENOMEM;
 
@@ -5012,17 +5012,9 @@ static u32 mvneta_ethtool_get_rxfh_indir_size(struct net_device *dev)
 	return MVNETA_RSS_LU_TABLE_SIZE;
 }
 
-static int mvneta_ethtool_get_rxnfc(struct net_device *dev,
-				    struct ethtool_rxnfc *info,
-				    u32 *rules __always_unused)
+static u32 mvneta_ethtool_get_rx_ring_count(struct net_device *dev)
 {
-	switch (info->cmd) {
-	case ETHTOOL_GRXRINGS:
-		info->data =  rxq_number;
-		return 0;
-	default:
-		return -EOPNOTSUPP;
-	}
+	return rxq_number;
 }
 
 static int  mvneta_config_rss(struct mvneta_port *pp)
@@ -5356,7 +5348,7 @@ static const struct ethtool_ops mvneta_eth_tool_ops = {
 	.get_ethtool_stats = mvneta_ethtool_get_stats,
 	.get_sset_count	= mvneta_ethtool_get_sset_count,
 	.get_rxfh_indir_size = mvneta_ethtool_get_rxfh_indir_size,
-	.get_rxnfc	= mvneta_ethtool_get_rxnfc,
+	.get_rx_ring_count = mvneta_ethtool_get_rx_ring_count,
 	.get_rxfh	= mvneta_ethtool_get_rxfh,
 	.set_rxfh	= mvneta_ethtool_set_rxfh,
 	.get_link_ksettings = mvneta_ethtool_get_link_ksettings,
@@ -5379,7 +5371,7 @@ static int mvneta_init(struct device *dev, struct mvneta_port *pp)
 	/* Set port default values */
 	mvneta_defaults_set(pp);
 
-	pp->txqs = devm_kcalloc(dev, txq_number, sizeof(*pp->txqs), GFP_KERNEL);
+	pp->txqs = devm_kzalloc_objs(dev, *pp->txqs, txq_number);
 	if (!pp->txqs)
 		return -ENOMEM;
 
@@ -5391,7 +5383,7 @@ static int mvneta_init(struct device *dev, struct mvneta_port *pp)
 		txq->done_pkts_coal = MVNETA_TXDONE_COAL_PKTS;
 	}
 
-	pp->rxqs = devm_kcalloc(dev, rxq_number, sizeof(*pp->rxqs), GFP_KERNEL);
+	pp->rxqs = devm_kzalloc_objs(dev, *pp->rxqs, rxq_number);
 	if (!pp->rxqs)
 		return -ENOMEM;
 
@@ -5403,10 +5395,8 @@ static int mvneta_init(struct device *dev, struct mvneta_port *pp)
 		rxq->pkts_coal = MVNETA_RX_COAL_PKTS;
 		rxq->time_coal = MVNETA_RX_COAL_USEC;
 		rxq->buf_virt_addr
-			= devm_kmalloc_array(pp->dev->dev.parent,
-					     rxq->size,
-					     sizeof(*rxq->buf_virt_addr),
-					     GFP_KERNEL);
+			= devm_kmalloc_objs(pp->dev->dev.parent,
+					    *rxq->buf_virt_addr, rxq->size);
 		if (!rxq->buf_virt_addr)
 			return -ENOMEM;
 	}
@@ -5628,6 +5618,8 @@ static int mvneta_probe(struct platform_device *pdev)
 	}
 
 	err = of_get_ethdev_address(dn, dev);
+	if (err == -EPROBE_DEFER)
+		goto err_free_stats;
 	if (!err) {
 		mac_from = "device tree";
 	} else {
@@ -5682,6 +5674,24 @@ static int mvneta_probe(struct platform_device *pdev)
 			if (err < 0) {
 				dev_info(&pdev->dev,
 					 "use SW buffer management\n");
+				mvneta_bm_put(pp->bm_priv);
+				pp->bm_priv = NULL;
+			} else if (!device_link_add(&pdev->dev,
+						    &pp->bm_priv->pdev->dev,
+						    DL_FLAG_AUTOREMOVE_CONSUMER)) {
+				/*
+				 * Link guarantees BM resumes before mvneta.
+				 * Without it, BM may not be ready when
+				 * mvneta_bm_port_init() runs on resume,
+				 * causing stale buffer addresses and a crash.
+				 * Fall back to SW management to be safe.
+				 */
+				dev_warn(&pdev->dev,
+					 "failed to link to BM, use SW buffer management\n");
+				mvneta_bm_pool_destroy(pp->bm_priv,
+						       pp->pool_long, 1 << pp->id);
+				mvneta_bm_pool_destroy(pp->bm_priv,
+						       pp->pool_short, 1 << pp->id);
 				mvneta_bm_put(pp->bm_priv);
 				pp->bm_priv = NULL;
 			}
@@ -5763,6 +5773,7 @@ err_netdev:
 				       1 << pp->id);
 		mvneta_bm_put(pp->bm_priv);
 	}
+err_free_stats:
 	free_percpu(pp->stats);
 err_free_ports:
 	free_percpu(pp->ports);
@@ -5904,6 +5915,9 @@ static int mvneta_resume(struct device *device)
 	mvneta_start_dev(pp);
 	rtnl_unlock();
 	mvneta_set_rx_mode(dev);
+
+	if (!pp->neta_armada3700)
+		on_each_cpu(mvneta_percpu_enable, pp, true);
 
 	return 0;
 }

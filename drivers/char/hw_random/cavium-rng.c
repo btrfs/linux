@@ -26,7 +26,7 @@ static int cavium_rng_probe(struct pci_dev *pdev,
 	struct	cavium_rng_pf *rng;
 	int	iov_err;
 
-	rng = devm_kzalloc(&pdev->dev, sizeof(*rng), GFP_KERNEL);
+	rng = devm_kzalloc_obj(&pdev->dev, *rng);
 	if (!rng)
 		return -ENOMEM;
 
@@ -73,8 +73,8 @@ static void cavium_rng_remove(struct pci_dev *pdev)
 }
 
 static const struct pci_device_id cavium_rng_pf_id_table[] = {
-	{ PCI_DEVICE(PCI_VENDOR_ID_CAVIUM, 0xa018), 0, 0, 0}, /* Thunder RNM */
-	{0,},
+	{ PCI_DEVICE(PCI_VENDOR_ID_CAVIUM, 0xa018) }, /* Thunder RNM */
+	{ },
 };
 
 MODULE_DEVICE_TABLE(pci, cavium_rng_pf_id_table);

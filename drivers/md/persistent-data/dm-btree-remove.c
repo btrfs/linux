@@ -31,7 +31,7 @@
  * least MIN_ENTRIES + 1.  We do this in the following ways:
  *
  * [A] No siblings => this can only happen if the node is the root, in which
- *     case we copy the childs contents over the root.
+ *     case we copy the children contents over the root.
  *
  * [B] No left sibling
  *     ==> rebalance(node, right sibling)
@@ -490,11 +490,19 @@ static int rebalance_children(struct shadow_spine *s,
 
 	if (le32_to_cpu(n->header.nr_entries) == 1) {
 		struct dm_block *child;
+		int is_shared;
 		dm_block_t b = value64(n, 0);
+
+		r = dm_tm_block_is_shared(info->tm, b, &is_shared);
+		if (r)
+			return r;
 
 		r = dm_tm_read_lock(info->tm, b, &btree_node_validator, &child);
 		if (r)
 			return r;
+
+		if (is_shared)
+			inc_children(info->tm, dm_block_data(child), vt);
 
 		memcpy(n, dm_block_data(child),
 		       dm_bm_block_size(dm_tm_get_bm(info->tm)));

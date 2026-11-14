@@ -11,7 +11,6 @@
 #include <linux/errno.h>
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/notifier.h>
 #include <linux/reboot.h>
 #include <linux/slab.h>
@@ -53,7 +52,7 @@ static int ep93xx_reboot_probe(struct auxiliary_device *adev,
 	if (!rdev->update_bits)
 		return -ENODEV;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

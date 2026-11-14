@@ -18,7 +18,6 @@
 #include <linux/mfd/core.h>
 #include <linux/mfd/upboard-fpga.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
@@ -274,7 +273,7 @@ static int upboard_fpga_probe(struct platform_device *pdev)
 	struct upboard_fpga *fpga;
 	int ret;
 
-	fpga = devm_kzalloc(dev, sizeof(*fpga), GFP_KERNEL);
+	fpga = devm_kzalloc_obj(dev, *fpga);
 	if (!fpga)
 		return -ENOMEM;
 

@@ -799,7 +799,7 @@ static int ppc440spe_chan_xor_slot_count(size_t len, int src_cnt,
 	if (likely(len <= PPC440SPE_ADMA_XOR_MAX_BYTE_COUNT))
 		return slot_cnt;
 
-	printk(KERN_ERR "%s: len %d > max %d !!\n",
+	printk(KERN_ERR "%s: len %zu > max %d !!\n",
 		__func__, len, PPC440SPE_ADMA_XOR_MAX_BYTE_COUNT);
 	BUG();
 	return slot_cnt;
@@ -1781,8 +1781,7 @@ static int ppc440spe_adma_alloc_chan_resources(struct dma_chan *chan)
 		db_sz = sizeof(struct xor_cb);
 
 	for (; i < (ppc440spe_chan->device->pool_size / db_sz); i++) {
-		slot = kzalloc(sizeof(struct ppc440spe_adma_desc_slot),
-			       GFP_KERNEL);
+		slot = kzalloc_obj(struct ppc440spe_adma_desc_slot);
 		if (!slot) {
 			printk(KERN_INFO "SPE ADMA Channel only initialized"
 				" %d descriptor slots", i--);
@@ -1990,7 +1989,7 @@ static struct dma_async_tx_descriptor *ppc440spe_adma_prep_dma_memcpy(
 	spin_lock_bh(&ppc440spe_chan->lock);
 
 	dev_dbg(ppc440spe_chan->device->common.dev,
-		"ppc440spe adma%d: %s len: %u int_en %d\n",
+		"ppc440spe adma%d: %s len: %zu int_en %d\n",
 		ppc440spe_chan->device->id, __func__, len,
 		flags & DMA_PREP_INTERRUPT ? 1 : 0);
 	slot_cnt = slots_per_op = 1;
@@ -2031,7 +2030,7 @@ static struct dma_async_tx_descriptor *ppc440spe_adma_prep_dma_xor(
 	BUG_ON(len > PPC440SPE_ADMA_XOR_MAX_BYTE_COUNT);
 
 	dev_dbg(ppc440spe_chan->device->common.dev,
-		"ppc440spe adma%d: %s src_cnt: %d len: %u int_en: %d\n",
+		"ppc440spe adma%d: %s src_cnt: %d len: %zu int_en: %d\n",
 		ppc440spe_chan->device->id, __func__, src_cnt, len,
 		flags & DMA_PREP_INTERRUPT ? 1 : 0);
 
@@ -2280,7 +2279,7 @@ static struct ppc440spe_adma_desc_slot *ppc440spe_dma01_prep_pq(
 	unsigned long op = 0;
 	unsigned char mult = 1;
 
-	pr_debug("%s: dst_cnt %d, src_cnt %d, len %d\n",
+	pr_debug("%s: dst_cnt %d, src_cnt %d, len %zu\n",
 		 __func__, dst_cnt, src_cnt, len);
 	/*  select operations WXOR/RXOR depending on the
 	 * source addresses of operators and the number
@@ -2554,7 +2553,7 @@ static struct dma_async_tx_descriptor *ppc440spe_adma_prep_dma_pq(
 	BUG_ON(!dst_cnt);
 
 	dev_dbg(ppc440spe_chan->device->common.dev,
-		"ppc440spe adma%d: %s src_cnt: %d len: %u int_en: %d\n",
+		"ppc440spe adma%d: %s src_cnt: %d len: %zu int_en: %d\n",
 		ppc440spe_chan->device->id, __func__, src_cnt, len,
 		flags & DMA_PREP_INTERRUPT ? 1 : 0);
 
@@ -4064,7 +4063,7 @@ static int ppc440spe_adma_probe(struct platform_device *ofdev)
 	}
 
 	/* create a device */
-	adev = kzalloc(sizeof(*adev), GFP_KERNEL);
+	adev = kzalloc_obj(*adev);
 	if (!adev) {
 		initcode = PPC_ADMA_INIT_ALLOC;
 		ret = -ENOMEM;
@@ -4078,7 +4077,7 @@ static int ppc440spe_adma_probe(struct platform_device *ofdev)
 					adev->pool_size, &adev->dma_desc_pool,
 					GFP_KERNEL);
 	if (adev->dma_desc_pool_virt == NULL) {
-		dev_err(&ofdev->dev, "failed to allocate %d bytes of coherent "
+		dev_err(&ofdev->dev, "failed to allocate %zu bytes of coherent "
 			"memory for hardware descriptors\n",
 			adev->pool_size);
 		initcode = PPC_ADMA_INIT_COHERENT;
@@ -4124,7 +4123,7 @@ static int ppc440spe_adma_probe(struct platform_device *ofdev)
 	platform_set_drvdata(ofdev, adev);
 
 	/* create a channel */
-	chan = kzalloc(sizeof(*chan), GFP_KERNEL);
+	chan = kzalloc_obj(*chan);
 	if (!chan) {
 		initcode = PPC_ADMA_INIT_CHANNEL;
 		ret = -ENOMEM;
@@ -4161,7 +4160,7 @@ static int ppc440spe_adma_probe(struct platform_device *ofdev)
 					   PAGE_SIZE, DMA_BIDIRECTIONAL);
 	}
 
-	ref = kmalloc(sizeof(*ref), GFP_KERNEL);
+	ref = kmalloc_obj(*ref);
 	if (ref) {
 		ref->chan = &chan->common;
 		INIT_LIST_HEAD(&ref->node);

@@ -12,7 +12,6 @@
 #include <linux/irq.h>
 #include <linux/irqchip.h>
 #include <linux/irqdomain.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
@@ -23,7 +22,7 @@
 
 #define IRQS_PER_BANK			32
 
-#define HWSPNLCK_TIMEOUT		1000 /* usec */
+#define HWSPNLCK_TIMEOUT_MS		1
 
 #define EXTI_EnCIDCFGR(n)		(0x180 + (n) * 4)
 #define EXTI_HWCFGR1			0x3f0
@@ -377,7 +376,7 @@ static int stm32mp_exti_set_type(struct irq_data *d, unsigned int type)
 	raw_spin_lock(&chip_data->rlock);
 
 	if (hwlock) {
-		err = hwspin_lock_timeout_in_atomic(hwlock, HWSPNLCK_TIMEOUT);
+		err = hwspin_lock_timeout_in_atomic(hwlock, HWSPNLCK_TIMEOUT_MS);
 		if (err) {
 			pr_err("%s can't get hwspinlock (%d)\n", __func__, err);
 			goto unlock;
@@ -628,7 +627,7 @@ static int stm32mp_exti_probe(struct platform_device *pdev)
 	struct device_node *np = dev->of_node;
 	int ret, i;
 
-	host_data = devm_kzalloc(dev, sizeof(*host_data), GFP_KERNEL);
+	host_data = devm_kzalloc_obj(dev, *host_data);
 	if (!host_data)
 		return -ENOMEM;
 
@@ -661,9 +660,8 @@ static int stm32mp_exti_probe(struct platform_device *pdev)
 	}
 	host_data->drv_data = drv_data;
 
-	host_data->chips_data = devm_kcalloc(dev, drv_data->bank_nr,
-					     sizeof(*host_data->chips_data),
-					     GFP_KERNEL);
+	host_data->chips_data = devm_kzalloc_objs(dev, *host_data->chips_data,
+						  drv_data->bank_nr);
 	if (!host_data->chips_data)
 		return -ENOMEM;
 

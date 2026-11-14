@@ -391,7 +391,7 @@ static int bt819_probe(struct i2c_client *client)
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_BYTE_DATA))
 		return -ENODEV;
 
-	decoder = devm_kzalloc(&client->dev, sizeof(*decoder), GFP_KERNEL);
+	decoder = devm_kzalloc_obj(&client->dev, *decoder);
 	if (decoder == NULL)
 		return -ENOMEM;
 	sd = &decoder->sd;
@@ -457,9 +457,9 @@ static void bt819_remove(struct i2c_client *client)
 /* ----------------------------------------------------------------------- */
 
 static const struct i2c_device_id bt819_id[] = {
-	{ "bt819a" },
-	{ "bt817a" },
-	{ "bt815a" },
+	{ .name = "bt819a" },
+	{ .name = "bt817a" },
+	{ .name = "bt815a" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, bt819_id);

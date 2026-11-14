@@ -39,6 +39,24 @@ static __u32 count_free(struct buffer_head *map[], unsigned blocksize, __u32 num
 	return sum;
 }
 
+/*
+ * The bitmap buffers stay pinned for the lifetime of the mount and their
+ * in-memory contents are authoritative.  A failed writeback clears
+ * BH_Uptodate on them, so restore it before redirtying the buffer instead
+ * of tripping the warning in mark_buffer_dirty().  The buffer lock keeps
+ * this from racing with a write that is still in flight.
+ */
+static void minix_mark_bitmap_dirty(struct buffer_head *bh)
+{
+	lock_buffer(bh);
+	if (!buffer_uptodate(bh)) {
+		clear_buffer_write_io_error(bh);
+		set_buffer_uptodate(bh);
+	}
+	mark_buffer_dirty(bh);
+	unlock_buffer(bh);
+}
+
 void minix_free_block(struct inode *inode, unsigned long block)
 {
 	struct super_block *sb = inode->i_sb;
@@ -64,7 +82,7 @@ void minix_free_block(struct inode *inode, unsigned long block)
 		printk("minix_free_block (%s:%lu): bit already cleared\n",
 		       sb->s_id, block);
 	spin_unlock(&bitmap_lock);
-	mark_buffer_dirty(bh);
+	minix_mark_bitmap_dirty(bh);
 	return;
 }
 
@@ -83,7 +101,7 @@ int minix_new_block(struct inode * inode)
 		if (j < bits_per_zone) {
 			minix_set_bit(j, bh->b_data);
 			spin_unlock(&bitmap_lock);
-			mark_buffer_dirty(bh);
+			minix_mark_bitmap_dirty(bh);
 			j += i * bits_per_zone + sbi->s_firstdatazone-1;
 			if (j < sbi->s_firstdatazone || j >= sbi->s_nzones)
 				break;
@@ -103,21 +121,35 @@ unsigned long minix_count_free_blocks(struct super_block *sb)
 		<< sbi->s_log_zone_size);
 }
 
-struct minix_inode *
-minix_V1_raw_inode(struct super_block *sb, ino_t ino, struct buffer_head **bh)
+/* Return the block that holds inode @ino or 0 if @ino is out of range. */
+int minix_inode_block(struct super_block *sb, ino_t ino)
 {
-	int block;
 	struct minix_sb_info *sbi = minix_sb(sb);
-	struct minix_inode *p;
+	int inodes_per_block;
 
 	if (!ino || ino > sbi->s_ninodes) {
 		printk("Bad inode number on dev %s: %ld is out of range\n",
 		       sb->s_id, (long)ino);
-		return NULL;
+		return 0;
 	}
+	if (sbi->s_version == MINIX_V1)
+		inodes_per_block = MINIX_INODES_PER_BLOCK;
+	else
+		inodes_per_block = sb->s_blocksize / sizeof(struct minix2_inode);
+	return 2 + sbi->s_imap_blocks + sbi->s_zmap_blocks +
+		 (ino - 1) / inodes_per_block;
+}
+
+struct minix_inode *
+minix_V1_raw_inode(struct super_block *sb, ino_t ino, struct buffer_head **bh)
+{
+	int block;
+	struct minix_inode *p;
+
+	block = minix_inode_block(sb, ino);
+	if (!block)
+		return NULL;
 	ino--;
-	block = 2 + sbi->s_imap_blocks + sbi->s_zmap_blocks +
-		 ino / MINIX_INODES_PER_BLOCK;
 	*bh = sb_bread(sb, block);
 	if (!*bh) {
 		printk("Unable to read inode block\n");
@@ -131,19 +163,14 @@ struct minix2_inode *
 minix_V2_raw_inode(struct super_block *sb, ino_t ino, struct buffer_head **bh)
 {
 	int block;
-	struct minix_sb_info *sbi = minix_sb(sb);
 	struct minix2_inode *p;
 	int minix2_inodes_per_block = sb->s_blocksize / sizeof(struct minix2_inode);
 
 	*bh = NULL;
-	if (!ino || ino > sbi->s_ninodes) {
-		printk("Bad inode number on dev %s: %ld is out of range\n",
-		       sb->s_id, (long)ino);
+	block = minix_inode_block(sb, ino);
+	if (!block)
 		return NULL;
-	}
 	ino--;
-	block = 2 + sbi->s_imap_blocks + sbi->s_zmap_blocks +
-		 ino / minix2_inodes_per_block;
 	*bh = sb_bread(sb, block);
 	if (!*bh) {
 		printk("Unable to read inode block\n");
@@ -207,7 +234,7 @@ void minix_free_inode(struct inode * inode)
 	if (!minix_test_and_clear_bit(bit, bh->b_data))
 		printk("minix_free_inode: bit %lu already cleared\n", bit);
 	spin_unlock(&bitmap_lock);
-	mark_buffer_dirty(bh);
+	minix_mark_bitmap_dirty(bh);
 }
 
 struct inode *minix_new_inode(const struct inode *dir, umode_t mode)
@@ -243,11 +270,11 @@ struct inode *minix_new_inode(const struct inode *dir, umode_t mode)
 		return ERR_PTR(-ENOSPC);
 	}
 	spin_unlock(&bitmap_lock);
-	mark_buffer_dirty(bh);
+	minix_mark_bitmap_dirty(bh);
 	j += i * bits_per_zone;
 	if (!j || j > sbi->s_ninodes) {
 		iput(inode);
-		return ERR_PTR(-ENOSPC);
+		return ERR_PTR(-EFSCORRUPTED);
 	}
 	inode_init_owner(&nop_mnt_idmap, inode, dir, mode);
 	inode->i_ino = j;

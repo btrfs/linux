@@ -3,8 +3,8 @@
  * Copyright © 2025 Intel Corporation
  */
 
-#ifndef _xe_tile_printk_H_
-#define _xe_tile_printk_H_
+#ifndef _XE_TILE_PRINTK_H_
+#define _XE_TILE_PRINTK_H_
 
 #include "xe_printk.h"
 
@@ -33,6 +33,9 @@
 
 #define xe_tile_dbg(_tile, _fmt, ...) \
 	xe_tile_printk((_tile), dbg, _fmt, ##__VA_ARGS__)
+
+#define xe_tile_dbg_ratelimited(_tile, _fmt, ...) \
+	xe_tile_printk((_tile), dbg_ratelimited, _fmt, ##__VA_ARGS__)
 
 #define xe_tile_WARN_type(_tile, _type, _condition, _fmt, ...) \
 	xe_WARN##_type((_tile)->xe, _condition, _fmt, ## __VA_ARGS__)

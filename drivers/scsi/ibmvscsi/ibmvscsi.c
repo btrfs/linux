@@ -447,7 +447,7 @@ static int initialize_event_pool(struct event_pool *pool,
 
 	pool->size = size;
 	pool->next = 0;
-	pool->events = kcalloc(pool->size, sizeof(*pool->events), GFP_KERNEL);
+	pool->events = kzalloc_objs(*pool->events, pool->size);
 	if (!pool->events)
 		return -ENOMEM;
 
@@ -785,13 +785,13 @@ static void purge_requests(struct ibmvscsi_host_data *hostdata, int error_code)
 	struct srp_event_struct *evt;
 	unsigned long flags;
 
-	spin_lock_irqsave(hostdata->host->host_lock, flags);
+	spin_lock_irqsave(&hostdata->host->host_lock, flags);
 	while (!list_empty(&hostdata->sent)) {
 		evt = list_first_entry(&hostdata->sent, struct srp_event_struct, list);
 		list_del(&evt->list);
 		timer_delete(&evt->timer);
 
-		spin_unlock_irqrestore(hostdata->host->host_lock, flags);
+		spin_unlock_irqrestore(&hostdata->host->host_lock, flags);
 		if (evt->cmnd) {
 			evt->cmnd->result = (error_code << 16);
 			unmap_cmd_data(&evt->iu.srp.cmd, evt,
@@ -802,9 +802,9 @@ static void purge_requests(struct ibmvscsi_host_data *hostdata, int error_code)
 			   evt->iu.srp.login_req.opcode != SRP_LOGIN_REQ)
 			evt->done(evt);
 		free_event_struct(&evt->hostdata->pool, evt);
-		spin_lock_irqsave(hostdata->host->host_lock, flags);
+		spin_lock_irqsave(&hostdata->host->host_lock, flags);
 	}
-	spin_unlock_irqrestore(hostdata->host->host_lock, flags);
+	spin_unlock_irqrestore(&hostdata->host->host_lock, flags);
 }
 
 /**
@@ -818,9 +818,9 @@ static void ibmvscsi_set_request_limit(struct ibmvscsi_host_data *hostdata, int 
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(hostdata->host->host_lock, flags);
+	spin_lock_irqsave(&hostdata->host->host_lock, flags);
 	atomic_set(&hostdata->request_limit, limit);
-	spin_unlock_irqrestore(hostdata->host->host_lock, flags);
+	spin_unlock_irqrestore(&hostdata->host->host_lock, flags);
 }
 
 /**
@@ -868,9 +868,10 @@ static void ibmvscsi_timeout(struct timer_list *t)
  * Returns the value returned from ibmvscsi_send_crq(). (Zero for success)
  * Note that this routine assumes that host_lock is held for synchronization
 */
-static int ibmvscsi_send_srp_event(struct srp_event_struct *evt_struct,
-				   struct ibmvscsi_host_data *hostdata,
-				   unsigned long timeout)
+static enum scsi_qc_status
+ibmvscsi_send_srp_event(struct srp_event_struct *evt_struct,
+			struct ibmvscsi_host_data *hostdata,
+			unsigned long timeout)
 {
 	__be64 *crq_as_u64 = (__be64 *)&evt_struct->crq;
 	int request_status = 0;
@@ -1040,7 +1041,7 @@ static inline u16 lun_from_dev(struct scsi_device *dev)
  * @cmnd:	struct scsi_cmnd to be executed
  * @done:	Callback function to be called when cmd is completed
 */
-static int ibmvscsi_queuecommand_lck(struct scsi_cmnd *cmnd)
+static enum scsi_qc_status ibmvscsi_queuecommand_lck(struct scsi_cmnd *cmnd)
 {
 	void (*done)(struct scsi_cmnd *) = scsi_done;
 	struct srp_cmd *srp_cmd;
@@ -1220,9 +1221,9 @@ static int send_srp_login(struct ibmvscsi_host_data *hostdata)
 	 */
 	ibmvscsi_set_request_limit(hostdata, 0);
 
-	spin_lock_irqsave(hostdata->host->host_lock, flags);
+	spin_lock_irqsave(&hostdata->host->host_lock, flags);
 	rc = ibmvscsi_send_srp_event(evt_struct, hostdata, login_timeout * 2);
-	spin_unlock_irqrestore(hostdata->host->host_lock, flags);
+	spin_unlock_irqrestore(&hostdata->host->host_lock, flags);
 	dev_info(hostdata->dev, "sent SRP login\n");
 	return rc;
 };
@@ -1316,10 +1317,10 @@ static void send_mad_capabilities(struct ibmvscsi_host_data *hostdata)
 		req->common.length = cpu_to_be16(sizeof(hostdata->caps) -
 						sizeof(hostdata->caps.reserve));
 
-	spin_lock_irqsave(hostdata->host->host_lock, flags);
+	spin_lock_irqsave(&hostdata->host->host_lock, flags);
 	if (ibmvscsi_send_srp_event(evt_struct, hostdata, info_timeout * 2))
 		dev_err(hostdata->dev, "couldn't send CAPABILITIES_REQ!\n");
-	spin_unlock_irqrestore(hostdata->host->host_lock, flags);
+	spin_unlock_irqrestore(&hostdata->host->host_lock, flags);
 };
 
 /**
@@ -1372,9 +1373,9 @@ static int enable_fast_fail(struct ibmvscsi_host_data *hostdata)
 	fast_fail_mad->common.type = cpu_to_be32(VIOSRP_ENABLE_FAST_FAIL);
 	fast_fail_mad->common.length = cpu_to_be16(sizeof(*fast_fail_mad));
 
-	spin_lock_irqsave(hostdata->host->host_lock, flags);
+	spin_lock_irqsave(&hostdata->host->host_lock, flags);
 	rc = ibmvscsi_send_srp_event(evt_struct, hostdata, info_timeout * 2);
-	spin_unlock_irqrestore(hostdata->host->host_lock, flags);
+	spin_unlock_irqrestore(&hostdata->host->host_lock, flags);
 	return rc;
 }
 
@@ -1453,10 +1454,10 @@ static void send_mad_adapter_info(struct ibmvscsi_host_data *hostdata)
 	req->common.length = cpu_to_be16(sizeof(hostdata->madapter_info));
 	req->buffer = cpu_to_be64(hostdata->adapter_info_addr);
 
-	spin_lock_irqsave(hostdata->host->host_lock, flags);
+	spin_lock_irqsave(&hostdata->host->host_lock, flags);
 	if (ibmvscsi_send_srp_event(evt_struct, hostdata, info_timeout * 2))
 		dev_err(hostdata->dev, "couldn't send ADAPTER_INFO_REQ!\n");
-	spin_unlock_irqrestore(hostdata->host->host_lock, flags);
+	spin_unlock_irqrestore(&hostdata->host->host_lock, flags);
 };
 
 /*
@@ -1501,7 +1502,7 @@ static int ibmvscsi_eh_abort_handler(struct scsi_cmnd *cmd)
 	/* First, find this command in our sent list so we can figure
 	 * out the correct tag
 	 */
-	spin_lock_irqsave(hostdata->host->host_lock, flags);
+	spin_lock_irqsave(&hostdata->host->host_lock, flags);
 	wait_switch = jiffies + (init_timeout * HZ);
 	do {
 		found_evt = NULL;
@@ -1513,13 +1514,13 @@ static int ibmvscsi_eh_abort_handler(struct scsi_cmnd *cmd)
 		}
 
 		if (!found_evt) {
-			spin_unlock_irqrestore(hostdata->host->host_lock, flags);
+			spin_unlock_irqrestore(&hostdata->host->host_lock, flags);
 			return SUCCESS;
 		}
 
 		evt = get_event_struct(&hostdata->pool);
 		if (evt == NULL) {
-			spin_unlock_irqrestore(hostdata->host->host_lock, flags);
+			spin_unlock_irqrestore(&hostdata->host->host_lock, flags);
 			sdev_printk(KERN_ERR, cmd->device,
 				"failed to allocate abort event\n");
 			return FAILED;
@@ -1547,12 +1548,12 @@ static int ibmvscsi_eh_abort_handler(struct scsi_cmnd *cmd)
 		if (rsp_rc != SCSI_MLQUEUE_HOST_BUSY)
 			break;
 
-		spin_unlock_irqrestore(hostdata->host->host_lock, flags);
+		spin_unlock_irqrestore(&hostdata->host->host_lock, flags);
 		msleep(10);
-		spin_lock_irqsave(hostdata->host->host_lock, flags);
+		spin_lock_irqsave(&hostdata->host->host_lock, flags);
 	} while (time_before(jiffies, wait_switch));
 
-	spin_unlock_irqrestore(hostdata->host->host_lock, flags);
+	spin_unlock_irqrestore(&hostdata->host->host_lock, flags);
 
 	if (rsp_rc != 0) {
 		sdev_printk(KERN_ERR, cmd->device,
@@ -1591,7 +1592,7 @@ static int ibmvscsi_eh_abort_handler(struct scsi_cmnd *cmd)
 	 * The event is no longer in our list.  Make sure it didn't
 	 * complete while we were aborting
 	 */
-	spin_lock_irqsave(hostdata->host->host_lock, flags);
+	spin_lock_irqsave(&hostdata->host->host_lock, flags);
 	found_evt = NULL;
 	list_for_each_entry(tmp_evt, &hostdata->sent, list) {
 		if (tmp_evt->cmnd == cmd) {
@@ -1601,7 +1602,7 @@ static int ibmvscsi_eh_abort_handler(struct scsi_cmnd *cmd)
 	}
 
 	if (found_evt == NULL) {
-		spin_unlock_irqrestore(hostdata->host->host_lock, flags);
+		spin_unlock_irqrestore(&hostdata->host->host_lock, flags);
 		sdev_printk(KERN_INFO, cmd->device, "aborted task tag 0x%llx completed\n",
 			    tsk_mgmt->task_tag);
 		return SUCCESS;
@@ -1615,7 +1616,7 @@ static int ibmvscsi_eh_abort_handler(struct scsi_cmnd *cmd)
 	unmap_cmd_data(&found_evt->iu.srp.cmd, found_evt,
 		       found_evt->hostdata->dev);
 	free_event_struct(&found_evt->hostdata->pool, found_evt);
-	spin_unlock_irqrestore(hostdata->host->host_lock, flags);
+	spin_unlock_irqrestore(&hostdata->host->host_lock, flags);
 	atomic_inc(&hostdata->request_limit);
 	return SUCCESS;
 }
@@ -1637,12 +1638,12 @@ static int ibmvscsi_eh_device_reset_handler(struct scsi_cmnd *cmd)
 	u16 lun = lun_from_dev(cmd->device);
 	unsigned long wait_switch = 0;
 
-	spin_lock_irqsave(hostdata->host->host_lock, flags);
+	spin_lock_irqsave(&hostdata->host->host_lock, flags);
 	wait_switch = jiffies + (init_timeout * HZ);
 	do {
 		evt = get_event_struct(&hostdata->pool);
 		if (evt == NULL) {
-			spin_unlock_irqrestore(hostdata->host->host_lock, flags);
+			spin_unlock_irqrestore(&hostdata->host->host_lock, flags);
 			sdev_printk(KERN_ERR, cmd->device,
 				"failed to allocate reset event\n");
 			return FAILED;
@@ -1669,12 +1670,12 @@ static int ibmvscsi_eh_device_reset_handler(struct scsi_cmnd *cmd)
 		if (rsp_rc != SCSI_MLQUEUE_HOST_BUSY)
 			break;
 
-		spin_unlock_irqrestore(hostdata->host->host_lock, flags);
+		spin_unlock_irqrestore(&hostdata->host->host_lock, flags);
 		msleep(10);
-		spin_lock_irqsave(hostdata->host->host_lock, flags);
+		spin_lock_irqsave(&hostdata->host->host_lock, flags);
 	} while (time_before(jiffies, wait_switch));
 
-	spin_unlock_irqrestore(hostdata->host->host_lock, flags);
+	spin_unlock_irqrestore(&hostdata->host->host_lock, flags);
 
 	if (rsp_rc != 0) {
 		sdev_printk(KERN_ERR, cmd->device,
@@ -1711,7 +1712,7 @@ static int ibmvscsi_eh_device_reset_handler(struct scsi_cmnd *cmd)
 	/* We need to find all commands for this LUN that have not yet been
 	 * responded to, and fail them with DID_RESET
 	 */
-	spin_lock_irqsave(hostdata->host->host_lock, flags);
+	spin_lock_irqsave(&hostdata->host->host_lock, flags);
 	list_for_each_entry_safe(tmp_evt, pos, &hostdata->sent, list) {
 		if ((tmp_evt->cmnd) && (tmp_evt->cmnd->device == cmd->device)) {
 			if (tmp_evt->cmnd)
@@ -1728,7 +1729,7 @@ static int ibmvscsi_eh_device_reset_handler(struct scsi_cmnd *cmd)
 				tmp_evt->done(tmp_evt);
 		}
 	}
-	spin_unlock_irqrestore(hostdata->host->host_lock, flags);
+	spin_unlock_irqrestore(&hostdata->host->host_lock, flags);
 	return SUCCESS;
 }
 
@@ -1854,10 +1855,10 @@ static void ibmvscsi_handle_crq(struct viosrp_crq *crq,
 	 * Lock the host_lock before messing with these structures, since we
 	 * are running in a task context
 	 */
-	spin_lock_irqsave(evt_struct->hostdata->host->host_lock, flags);
+	spin_lock_irqsave(&evt_struct->hostdata->host->host_lock, flags);
 	list_del(&evt_struct->list);
 	free_event_struct(&evt_struct->hostdata->pool, evt_struct);
-	spin_unlock_irqrestore(evt_struct->hostdata->host->host_lock, flags);
+	spin_unlock_irqrestore(&evt_struct->hostdata->host->host_lock, flags);
 }
 
 /**
@@ -1875,12 +1876,12 @@ static int ibmvscsi_sdev_configure(struct scsi_device *sdev,
 	struct Scsi_Host *shost = sdev->host;
 	unsigned long lock_flags = 0;
 
-	spin_lock_irqsave(shost->host_lock, lock_flags);
+	spin_lock_irqsave(&shost->host_lock, lock_flags);
 	if (sdev->type == TYPE_DISK) {
 		sdev->allow_restart = 1;
 		blk_queue_rq_timeout(sdev->request_queue, 120 * HZ);
 	}
-	spin_unlock_irqrestore(shost->host_lock, lock_flags);
+	spin_unlock_irqrestore(&shost->host_lock, lock_flags);
 	return 0;
 }
 
@@ -2130,35 +2131,35 @@ static void ibmvscsi_do_work(struct ibmvscsi_host_data *hostdata)
 	int rc;
 	char *action = "reset";
 
-	spin_lock_irqsave(hostdata->host->host_lock, flags);
+	spin_lock_irqsave(&hostdata->host->host_lock, flags);
 	switch (hostdata->action) {
 	case IBMVSCSI_HOST_ACTION_UNBLOCK:
 		rc = 0;
 		break;
 	case IBMVSCSI_HOST_ACTION_RESET:
-		spin_unlock_irqrestore(hostdata->host->host_lock, flags);
+		spin_unlock_irqrestore(&hostdata->host->host_lock, flags);
 		rc = ibmvscsi_reset_crq_queue(&hostdata->queue, hostdata);
-		spin_lock_irqsave(hostdata->host->host_lock, flags);
+		spin_lock_irqsave(&hostdata->host->host_lock, flags);
 		if (!rc)
 			rc = ibmvscsi_send_crq(hostdata, 0xC001000000000000LL, 0);
 		vio_enable_interrupts(to_vio_dev(hostdata->dev));
 		break;
 	case IBMVSCSI_HOST_ACTION_REENABLE:
 		action = "enable";
-		spin_unlock_irqrestore(hostdata->host->host_lock, flags);
+		spin_unlock_irqrestore(&hostdata->host->host_lock, flags);
 		rc = ibmvscsi_reenable_crq_queue(&hostdata->queue, hostdata);
-		spin_lock_irqsave(hostdata->host->host_lock, flags);
+		spin_lock_irqsave(&hostdata->host->host_lock, flags);
 		if (!rc)
 			rc = ibmvscsi_send_crq(hostdata, 0xC001000000000000LL, 0);
 		break;
 	case IBMVSCSI_HOST_ACTION_NONE:
 	default:
-		spin_unlock_irqrestore(hostdata->host->host_lock, flags);
+		spin_unlock_irqrestore(&hostdata->host->host_lock, flags);
 		return;
 	}
 
 	hostdata->action = IBMVSCSI_HOST_ACTION_NONE;
-	spin_unlock_irqrestore(hostdata->host->host_lock, flags);
+	spin_unlock_irqrestore(&hostdata->host->host_lock, flags);
 
 	if (rc) {
 		ibmvscsi_set_request_limit(hostdata, -1);
@@ -2190,9 +2191,9 @@ static int ibmvscsi_work_to_do(struct ibmvscsi_host_data *hostdata)
 	unsigned long flags;
 	int rc;
 
-	spin_lock_irqsave(hostdata->host->host_lock, flags);
+	spin_lock_irqsave(&hostdata->host->host_lock, flags);
 	rc = __ibmvscsi_work_to_do(hostdata);
-	spin_unlock_irqrestore(hostdata->host->host_lock, flags);
+	spin_unlock_irqrestore(&hostdata->host->host_lock, flags);
 
 	return rc;
 }

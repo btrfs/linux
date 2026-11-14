@@ -273,7 +273,7 @@ static int mtk_hdmi_ddc_probe(struct platform_device *pdev)
 	struct resource *mem;
 	int ret;
 
-	ddc = devm_kzalloc(dev, sizeof(struct mtk_hdmi_ddc), GFP_KERNEL);
+	ddc = devm_kzalloc_obj(dev, struct mtk_hdmi_ddc);
 	if (!ddc)
 		return -ENOMEM;
 
@@ -328,7 +328,7 @@ static const struct of_device_id mtk_hdmi_ddc_match[] = {
 };
 MODULE_DEVICE_TABLE(of, mtk_hdmi_ddc_match);
 
-struct platform_driver mtk_hdmi_ddc_driver = {
+static struct platform_driver mtk_hdmi_ddc_driver = {
 	.probe = mtk_hdmi_ddc_probe,
 	.remove = mtk_hdmi_ddc_remove,
 	.driver = {

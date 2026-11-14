@@ -31,7 +31,7 @@ static ssize_t protocol_id_show(struct device *dev,
 {
 	struct gbphy_device *gbphy_dev = to_gbphy_dev(dev);
 
-	return sprintf(buf, "0x%02x\n", gbphy_dev->cport_desc->protocol_id);
+	return sysfs_emit(buf, "0x%02x\n", gbphy_dev->cport_desc->protocol_id);
 }
 static DEVICE_ATTR_RO(protocol_id);
 
@@ -229,7 +229,7 @@ static struct gbphy_device *gb_gbphy_create_dev(struct gb_bundle *bundle,
 	if (id < 0)
 		return ERR_PTR(id);
 
-	gbphy_dev = kzalloc(sizeof(*gbphy_dev), GFP_KERNEL);
+	gbphy_dev = kzalloc_obj(*gbphy_dev);
 	if (!gbphy_dev) {
 		ida_free(&gbphy_id, id);
 		return ERR_PTR(-ENOMEM);
@@ -282,7 +282,7 @@ static int gb_gbphy_probe(struct gb_bundle *bundle,
 	if (bundle->num_cports == 0)
 		return -ENODEV;
 
-	gbphy_host = kzalloc(sizeof(*gbphy_host), GFP_KERNEL);
+	gbphy_host = kzalloc_obj(*gbphy_host);
 	if (!gbphy_host)
 		return -ENOMEM;
 

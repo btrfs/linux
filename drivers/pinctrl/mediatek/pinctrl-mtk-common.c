@@ -7,6 +7,7 @@
 
 #include <linux/io.h>
 #include <linux/gpio/driver.h>
+#include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_irq.h>
 #include <linux/pinctrl/consumer.h>
@@ -190,6 +191,7 @@ int mtk_pconf_spec_set_ies_smt_range(struct regmap *regmap,
 	regmap_write(regmap, reg_addr, bit);
 	return 0;
 }
+EXPORT_SYMBOL_NS_GPL(mtk_pconf_spec_set_ies_smt_range, "MTK_PINCTRL");
 
 static const struct mtk_pin_drv_grp *mtk_find_pin_drv_grp_by_pin(
 		struct mtk_pinctrl *pctl,  unsigned long pin) {
@@ -297,6 +299,7 @@ int mtk_pctrl_spec_pull_set_samereg(struct regmap *regmap,
 
 	return 0;
 }
+EXPORT_SYMBOL_NS_GPL(mtk_pctrl_spec_pull_set_samereg, "MTK_PINCTRL");
 
 static int mtk_pconf_set_pull_select(struct mtk_pinctrl *pctl,
 		unsigned int pin, bool enable, bool isup, unsigned int arg)
@@ -802,20 +805,27 @@ static const struct pinmux_ops mtk_pmx_ops = {
 	.get_function_name	= mtk_pmx_get_func_name,
 	.get_function_groups	= mtk_pmx_get_func_groups,
 	.set_mux		= mtk_pmx_set_mux,
-	.gpio_set_direction	= mtk_pmx_gpio_set_direction,
 	.gpio_request_enable	= mtk_pmx_gpio_request_enable,
 };
+
+static int mtk_gpio_direction_input(struct gpio_chip *chip, unsigned offset)
+{
+	struct mtk_pinctrl *pctl = gpiochip_get_data(chip);
+
+	return mtk_pmx_gpio_set_direction(pctl->pctl_dev, NULL, offset, true);
+}
 
 static int mtk_gpio_direction_output(struct gpio_chip *chip,
 					unsigned offset, int value)
 {
+	struct mtk_pinctrl *pctl = gpiochip_get_data(chip);
 	int ret;
 
 	ret = mtk_gpio_set(chip, offset, value);
 	if (ret)
 		return ret;
 
-	return pinctrl_gpio_direction_output(chip, offset);
+	return mtk_pmx_gpio_set_direction(pctl->pctl_dev, NULL, offset, false);
 }
 
 static int mtk_gpio_get_direction(struct gpio_chip *chip, unsigned offset)
@@ -895,7 +905,7 @@ static const struct gpio_chip mtk_gpio_chip = {
 	.request		= gpiochip_generic_request,
 	.free			= gpiochip_generic_free,
 	.get_direction		= mtk_gpio_get_direction,
-	.direction_input	= pinctrl_gpio_direction_input,
+	.direction_input	= mtk_gpio_direction_input,
 	.direction_output	= mtk_gpio_direction_output,
 	.get			= mtk_gpio_get,
 	.set			= mtk_gpio_set,
@@ -929,14 +939,14 @@ static int mtk_pctrl_build_state(struct platform_device *pdev)
 	pctl->ngroups = pctl->devdata->npins;
 
 	/* Allocate groups */
-	pctl->groups = devm_kcalloc(&pdev->dev, pctl->ngroups,
-				    sizeof(*pctl->groups), GFP_KERNEL);
+	pctl->groups = devm_kzalloc_objs(&pdev->dev, *pctl->groups,
+					 pctl->ngroups);
 	if (!pctl->groups)
 		return -ENOMEM;
 
 	/* We assume that one pin is one group, use pin name as group name. */
-	pctl->grp_names = devm_kcalloc(&pdev->dev, pctl->ngroups,
-				       sizeof(*pctl->grp_names), GFP_KERNEL);
+	pctl->grp_names = devm_kzalloc_objs(&pdev->dev, *pctl->grp_names,
+					    pctl->ngroups);
 	if (!pctl->grp_names)
 		return -ENOMEM;
 
@@ -1016,13 +1026,13 @@ static int mtk_eint_init(struct mtk_pinctrl *pctl, struct platform_device *pdev)
 	if (!of_property_read_bool(np, "interrupt-controller"))
 		return -ENODEV;
 
-	pctl->eint = devm_kzalloc(pctl->dev, sizeof(*pctl->eint), GFP_KERNEL);
+	pctl->eint = devm_kzalloc_obj(pctl->dev, *pctl->eint);
 	if (!pctl->eint)
 		return -ENOMEM;
 
 	pctl->eint->nbase = 1;
 	/* mtk-eint expects an array */
-	pctl->eint->base = devm_kzalloc(pctl->dev, sizeof(pctl->eint->base), GFP_KERNEL);
+	pctl->eint->base = devm_kzalloc_obj(pctl->dev, *pctl->eint->base);
 	if (!pctl->eint->base)
 		return -ENOMEM;
 
@@ -1058,7 +1068,7 @@ int mtk_pctrl_init(struct platform_device *pdev,
 	struct device_node *np = pdev->dev.of_node, *node;
 	int ret, i;
 
-	pctl = devm_kzalloc(&pdev->dev, sizeof(*pctl), GFP_KERNEL);
+	pctl = devm_kzalloc_obj(&pdev->dev, *pctl);
 	if (!pctl)
 		return -ENOMEM;
 
@@ -1090,8 +1100,7 @@ int mtk_pctrl_init(struct platform_device *pdev,
 	if (ret)
 		return dev_err_probe(dev, ret, "build state failed\n");
 
-	pins = devm_kcalloc(&pdev->dev, pctl->devdata->npins, sizeof(*pins),
-			    GFP_KERNEL);
+	pins = devm_kzalloc_objs(&pdev->dev, *pins, pctl->devdata->npins);
 	if (!pins)
 		return -ENOMEM;
 
@@ -1113,7 +1122,7 @@ int mtk_pctrl_init(struct platform_device *pdev,
 		return dev_err_probe(dev, PTR_ERR(pctl->pctl_dev),
 				     "Couldn't register pinctrl driver\n");
 
-	pctl->chip = devm_kzalloc(&pdev->dev, sizeof(*pctl->chip), GFP_KERNEL);
+	pctl->chip = devm_kzalloc_obj(&pdev->dev, *pctl->chip);
 	if (!pctl->chip)
 		return -ENOMEM;
 
@@ -1123,28 +1132,26 @@ int mtk_pctrl_init(struct platform_device *pdev,
 	pctl->chip->parent = &pdev->dev;
 	pctl->chip->base = -1;
 
-	ret = gpiochip_add_data(pctl->chip, pctl);
+	ret = devm_gpiochip_add_data(&pdev->dev, pctl->chip, pctl);
 	if (ret)
 		return -EINVAL;
 
 	/* Register the GPIO to pin mappings. */
 	ret = gpiochip_add_pin_range(pctl->chip, dev_name(&pdev->dev),
 			0, 0, pctl->devdata->npins);
-	if (ret) {
-		ret = -EINVAL;
-		goto chip_error;
+	if (ret)
+		return -EINVAL;
+
+	/* Only initialize EINT if we have EINT pins */
+	if (data->eint_hw.ap_num > 0) {
+		ret = mtk_eint_init(pctl, pdev);
+		if (ret)
+			return ret;
 	}
 
-	ret = mtk_eint_init(pctl, pdev);
-	if (ret)
-		goto chip_error;
-
 	return 0;
-
-chip_error:
-	gpiochip_remove(pctl->chip);
-	return ret;
 }
+EXPORT_SYMBOL_NS_GPL(mtk_pctrl_init, "MTK_PINCTRL");
 
 int mtk_pctrl_common_probe(struct platform_device *pdev)
 {
@@ -1156,3 +1163,7 @@ int mtk_pctrl_common_probe(struct platform_device *pdev)
 
 	return mtk_pctrl_init(pdev, data, NULL);
 }
+EXPORT_SYMBOL_NS_GPL(mtk_pctrl_common_probe, "MTK_PINCTRL");
+
+MODULE_DESCRIPTION("MediaTek Pinctrl Common Driver");
+MODULE_LICENSE("GPL v2");

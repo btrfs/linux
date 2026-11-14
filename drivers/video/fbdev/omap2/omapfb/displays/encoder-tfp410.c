@@ -9,7 +9,6 @@
 #include <linux/err.h>
 #include <linux/gpio/consumer.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 
@@ -173,7 +172,7 @@ static int tfp410_probe(struct platform_device *pdev)
 	if (!pdev->dev.of_node)
 		return -ENODEV;
 
-	ddata = devm_kzalloc(&pdev->dev, sizeof(*ddata), GFP_KERNEL);
+	ddata = devm_kzalloc_obj(&pdev->dev, *ddata);
 	if (!ddata)
 		return -ENOMEM;
 

@@ -174,26 +174,30 @@ static irqreturn_t mchp_ipc_cluster_aggr_isr(int irq, void *data)
 	struct mchp_ipc_msg ipc_msg;
 	struct mchp_ipc_status status_msg;
 	int ret;
-	unsigned long hartid;
 	u32 i, chan_index, chan_id;
+	bool found = false;
 
 	/* Find out the hart that originated the irq */
 	for_each_online_cpu(i) {
-		hartid = cpuid_to_hartid_map(i);
-		if (irq == ipc->cluster_cfg[hartid].irq)
+		if (irq == ipc->cluster_cfg[i].irq) {
+			found = true;
 			break;
+		}
 	}
 
-	status_msg.cluster = hartid;
-	memcpy(ipc->cluster_cfg[hartid].buf_base, &status_msg, sizeof(struct mchp_ipc_status));
+	if (unlikely(!found))
+		return IRQ_NONE;
 
-	ret = mchp_ipc_sbi_send(SBI_EXT_IPC_STATUS, ipc->cluster_cfg[hartid].buf_base_addr);
+	status_msg.cluster = cpuid_to_hartid_map(i);
+	memcpy(ipc->cluster_cfg[i].buf_base, &status_msg, sizeof(struct mchp_ipc_status));
+
+	ret = mchp_ipc_sbi_send(SBI_EXT_IPC_STATUS, ipc->cluster_cfg[i].buf_base_addr);
 	if (ret < 0) {
 		dev_err_ratelimited(ipc->dev, "could not get IHC irq status ret=%d\n", ret);
 		return IRQ_HANDLED;
 	}
 
-	memcpy(&status_msg, ipc->cluster_cfg[hartid].buf_base, sizeof(struct mchp_ipc_status));
+	memcpy(&status_msg, ipc->cluster_cfg[i].buf_base, sizeof(struct mchp_ipc_status));
 
 	/*
 	 * Iterate over each bit set in the IHC interrupt status register (IRQ_STATUS) to identify
@@ -321,13 +325,6 @@ static int mchp_ipc_startup(struct mbox_chan *chan)
 		goto fail_free_buf_msg_rx;
 	}
 
-	if (ret) {
-		dev_err(ipc->dev, "failed to register interrupt(s)\n");
-		goto fail_free_buf_msg_rx;
-	}
-
-	return ret;
-
 fail_free_buf_msg_rx:
 	kfree(chan_info->msg_buf_rx);
 fail_free_buf_msg_tx:
@@ -381,25 +378,26 @@ static int mchp_ipc_get_cluster_aggr_irq(struct mchp_ipc_sbi_mbox *ipc)
 	for_each_online_cpu(cpuid) {
 		hartid = cpuid_to_hartid_map(cpuid);
 		irq_name = devm_kasprintf(ipc->dev, GFP_KERNEL, "hart-%lu", hartid);
+		if (!irq_name)
+			return -ENOMEM;
 		ret = platform_get_irq_byname_optional(pdev, irq_name);
 		if (ret <= 0)
 			continue;
 
-		ipc->cluster_cfg[hartid].irq = ret;
-		ret = devm_request_irq(ipc->dev, ipc->cluster_cfg[hartid].irq,
+		ipc->cluster_cfg[cpuid].irq = ret;
+		ret = devm_request_irq(ipc->dev, ipc->cluster_cfg[cpuid].irq,
 				       mchp_ipc_cluster_aggr_isr, IRQF_SHARED,
 				       "miv-ihc-irq", ipc);
 		if (ret)
 			return ret;
 
-		ipc->cluster_cfg[hartid].buf_base = devm_kmalloc(ipc->dev,
-								 sizeof(struct mchp_ipc_status),
-								 GFP_KERNEL);
+		ipc->cluster_cfg[cpuid].buf_base = devm_kmalloc_obj(ipc->dev,
+								    struct mchp_ipc_status);
 
-		if (!ipc->cluster_cfg[hartid].buf_base)
+		if (!ipc->cluster_cfg[cpuid].buf_base)
 			return -ENOMEM;
 
-		ipc->cluster_cfg[hartid].buf_base_addr = __pa(ipc->cluster_cfg[hartid].buf_base);
+		ipc->cluster_cfg[cpuid].buf_base_addr = __pa(ipc->cluster_cfg[cpuid].buf_base);
 
 		irq_found = true;
 	}
@@ -419,15 +417,15 @@ static int mchp_ipc_probe(struct platform_device *pdev)
 
 	ret = sbi_probe_extension(SBI_EXT_MICROCHIP_TECHNOLOGY);
 	if (ret <= 0)
-		return dev_err_probe(dev, ret, "Microchip SBI extension not detected\n");
+		return dev_err_probe(dev, -ENODEV, "Microchip SBI extension not detected\n");
 
-	ipc = devm_kzalloc(dev, sizeof(*ipc), GFP_KERNEL);
+	ipc = devm_kzalloc_obj(dev, *ipc);
 	if (!ipc)
 		return -ENOMEM;
 
 	platform_set_drvdata(pdev, ipc);
 
-	ipc->buf_base = devm_kmalloc(dev, sizeof(struct mchp_ipc_mbox_info), GFP_KERNEL);
+	ipc->buf_base = devm_kmalloc_obj(dev, struct mchp_ipc_mbox_info);
 	if (!ipc->buf_base)
 		return -ENOMEM;
 
@@ -441,7 +439,8 @@ static int mchp_ipc_probe(struct platform_device *pdev)
 	ipc->controller.num_chans = ipc_info.num_channels;
 	ipc->hw_type = ipc_info.hw_type;
 
-	ipc->chans = devm_kcalloc(dev, ipc->controller.num_chans, sizeof(*ipc->chans), GFP_KERNEL);
+	ipc->chans = devm_kzalloc_objs(dev, *ipc->chans,
+				       ipc->controller.num_chans);
 	if (!ipc->chans)
 		return -ENOMEM;
 
@@ -453,7 +452,7 @@ static int mchp_ipc_probe(struct platform_device *pdev)
 	ipc->controller.of_xlate = mchp_ipc_mbox_xlate;
 
 	for (chan_id = 0; chan_id < ipc->controller.num_chans; chan_id++) {
-		priv = devm_kmalloc(dev, sizeof(*priv), GFP_KERNEL);
+		priv = devm_kmalloc_obj(dev, *priv);
 		if (!priv)
 			return -ENOMEM;
 
@@ -462,9 +461,9 @@ static int mchp_ipc_probe(struct platform_device *pdev)
 	}
 
 	if (ipc->hw_type == MIV_IHC) {
-		ipc->cluster_cfg = devm_kcalloc(dev, num_online_cpus(),
-						sizeof(struct mchp_ipc_cluster_cfg),
-						GFP_KERNEL);
+		ipc->cluster_cfg = devm_kzalloc_objs(dev,
+						     struct mchp_ipc_cluster_cfg,
+						     num_online_cpus());
 		if (!ipc->cluster_cfg)
 			return -ENOMEM;
 

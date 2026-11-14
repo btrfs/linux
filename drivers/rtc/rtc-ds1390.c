@@ -134,7 +134,7 @@ static int ds1390_read_time(struct device *dev, struct rtc_time *dt)
 	chip->txrx_buf[0] = DS1390_REG_SECONDS;
 
 	/* do the i/o */
-	status = spi_write_then_read(spi, chip->txrx_buf, 1, chip->txrx_buf, 8);
+	status = spi_write_then_read(spi, chip->txrx_buf, 1, chip->txrx_buf, 7);
 	if (status != 0)
 		return status;
 
@@ -188,7 +188,7 @@ static int ds1390_probe(struct spi_device *spi)
 	spi->bits_per_word = 8;
 	spi_setup(spi);
 
-	chip = devm_kzalloc(&spi->dev, sizeof(*chip), GFP_KERNEL);
+	chip = devm_kzalloc_obj(&spi->dev, *chip);
 	if (!chip)
 		return -ENOMEM;
 

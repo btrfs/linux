@@ -25,6 +25,7 @@
 #include <scsi/scsicam.h>
 #include <scsi/scsi_transport.h>
 #include <scsi/scsi_transport_fc.h>
+#include <net/netdev_lock.h>
 #include <net/rtnetlink.h>
 
 #include <scsi/fc/fc_encaps.h>
@@ -737,7 +738,9 @@ static int fcoe_netdev_config(struct fc_lport *lport, struct net_device *netdev)
 	port->fcoe_pending_queue_active = 0;
 	timer_setup(&port->timer, fcoe_queue_timer, 0);
 
+	netdev_lock_ops(netdev);
 	fcoe_link_speed_update(lport);
+	netdev_unlock_ops(netdev);
 
 	if (!lport->vport) {
 		if (fcoe_get_wwn(netdev, &wwnn, NETDEV_FCOE_WWNN))
@@ -820,7 +823,7 @@ static void fcoe_fdmi_info(struct fc_lport *lport, struct net_device *netdev)
 
 	if (realdev->netdev_ops->ndo_fcoe_get_hbainfo) {
 		struct netdev_fcoe_hbainfo *fdmi;
-		fdmi = kzalloc(sizeof(*fdmi), GFP_KERNEL);
+		fdmi = kzalloc_obj(*fdmi);
 		if (!fdmi)
 			return;
 
@@ -1841,6 +1844,7 @@ static int fcoe_device_notification(struct notifier_block *notifier,
 		break;
 	case NETDEV_UP:
 	case NETDEV_CHANGE:
+		fcoe_link_speed_update(lport);
 		break;
 	case NETDEV_CHANGEMTU:
 		if (netdev->fcoe_mtu)
@@ -1870,8 +1874,6 @@ static int fcoe_device_notification(struct notifier_block *notifier,
 		FCOE_NETDEV_DBG(netdev, "Unknown event %ld "
 				"from netdev netlink\n", event);
 	}
-
-	fcoe_link_speed_update(lport);
 
 	cdev = fcoe_ctlr_to_ctlr_dev(ctlr);
 
@@ -2438,7 +2440,7 @@ static int __init fcoe_init(void)
 	unsigned int cpu;
 	int rc = 0;
 
-	fcoe_wq = alloc_workqueue("fcoe", 0, 0);
+	fcoe_wq = alloc_workqueue("fcoe", WQ_PERCPU, 0);
 	if (!fcoe_wq)
 		return -ENOMEM;
 
@@ -2703,7 +2705,7 @@ static void fcoe_vport_remove(struct fc_lport *lport)
 	fc_host = shost_to_fc_host(shost);
 
 	/* Loop through all the vports and mark them for deletion */
-	spin_lock_irqsave(shost->host_lock, flags);
+	spin_lock_irqsave(&shost->host_lock, flags);
 	list_for_each_entry_safe(vport, next_vport, &fc_host->vports, peers) {
 		if (vport->flags & (FC_VPORT_DEL | FC_VPORT_CREATING)) {
 			continue;
@@ -2713,7 +2715,7 @@ static void fcoe_vport_remove(struct fc_lport *lport)
 				   &vport->vport_delete_work);
 		}
 	}
-	spin_unlock_irqrestore(shost->host_lock, flags);
+	spin_unlock_irqrestore(&shost->host_lock, flags);
 
 	flush_workqueue(fc_host_work_q(shost));
 }

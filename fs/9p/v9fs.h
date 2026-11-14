@@ -10,6 +10,9 @@
 
 #include <linux/backing-dev.h>
 #include <linux/netfs.h>
+#include <linux/fs_parser.h>
+#include <net/9p/client.h>
+#include <net/9p/transport.h>
 
 /**
  * enum p9_session_flags - option flags for each 9P session
@@ -18,30 +21,43 @@
  * @V9FS_ACCESS_SINGLE: only the mounting user can access the hierarchy
  * @V9FS_ACCESS_USER: a new attach will be issued for every user (default)
  * @V9FS_ACCESS_CLIENT: Just like user, but access check is performed on client.
- * @V9FS_ACCESS_ANY: use a single attach for all users
- * @V9FS_ACCESS_MASK: bit mask of different ACCESS options
  * @V9FS_POSIX_ACL: POSIX ACLs are enforced
+ * @V9FS_NO_XATTR: do not offer xattr functions on this mount
+ * @V9FS_IGNORE_QV: ignore qid.version==0 as a marker to disable data cache
+ * @V9FS_DIRECT_IO: disable data read/write cache
+ * @V9FS_SYNC: disable data write cache
+ * @V9FS_NDENTRY_TIMEOUT_SET: Has negative dentry timeout retention time been
+ *                            overridden by negtimeout mount option
  *
  * Session flags reflect options selected by users at mount time
+ */
+enum p9_session_flags {
+	V9FS_PROTO_2000U         = 0x01,
+	V9FS_PROTO_2000L         = 0x02,
+	V9FS_ACCESS_SINGLE       = 0x04,
+	V9FS_ACCESS_USER         = 0x08,
+	V9FS_ACCESS_CLIENT       = 0x10,
+	V9FS_POSIX_ACL           = 0x20,
+	V9FS_NO_XATTR            = 0x40,
+	V9FS_IGNORE_QV           = 0x80, /* ignore qid.version for cache hints */
+	V9FS_DIRECT_IO           = 0x100,
+	V9FS_SYNC                = 0x200,
+	V9FS_NDENTRY_TIMEOUT_SET = 0x400,
+};
+
+/**
+ * V9FS_ACCESS_ANY - use a single attach for all users
  */
 #define	V9FS_ACCESS_ANY (V9FS_ACCESS_SINGLE | \
 			 V9FS_ACCESS_USER |   \
 			 V9FS_ACCESS_CLIENT)
-#define V9FS_ACCESS_MASK V9FS_ACCESS_ANY
-#define V9FS_ACL_MASK V9FS_POSIX_ACL
 
-enum p9_session_flags {
-	V9FS_PROTO_2000U    = 0x01,
-	V9FS_PROTO_2000L    = 0x02,
-	V9FS_ACCESS_SINGLE  = 0x04,
-	V9FS_ACCESS_USER    = 0x08,
-	V9FS_ACCESS_CLIENT  = 0x10,
-	V9FS_POSIX_ACL      = 0x20,
-	V9FS_NO_XATTR       = 0x40,
-	V9FS_IGNORE_QV      = 0x80, /* ignore qid.version for cache hints */
-	V9FS_DIRECT_IO      = 0x100,
-	V9FS_SYNC           = 0x200
-};
+/**
+ * V9FS_ACCESS_MASK - bit mask of different ACCESS options
+ */
+#define V9FS_ACCESS_MASK V9FS_ACCESS_ANY
+
+#define V9FS_ACL_MASK V9FS_POSIX_ACL
 
 /**
  * enum p9_cache_shortcuts - human readable cache preferences
@@ -88,6 +104,7 @@ enum p9_cache_bits {
  * @debug: debug level
  * @afid: authentication handle
  * @cache: cache mode of type &p9_cache_bits
+ * @ndentry_timeout: Negative dentry lookup cache retention time in ms
  * @cachetag: the tag of the cache associated with this session
  * @fscache: session cookie associated with FS-Cache
  * @uname: string user name to mount hierarchy as
@@ -98,6 +115,7 @@ enum p9_cache_bits {
  * @uid: if %V9FS_ACCESS_SINGLE, the numeric uid which mounted the hierarchy
  * @clnt: reference to 9P network client instantiated for this session
  * @slist: reference to list of registered 9p sessions
+ * @ndentry_timeout_ms: Negative dentry caching retention time
  *
  * This structure holds state for each session instance established during
  * a sys_mount() .
@@ -113,6 +131,7 @@ struct v9fs_session_info {
 	unsigned short debug;
 	unsigned int afid;
 	unsigned int cache;
+	unsigned int ndentry_timeout_ms;
 #ifdef CONFIG_9P_FSCACHE
 	char *cachetag;
 	struct fscache_volume *fscache;
@@ -128,7 +147,10 @@ struct v9fs_session_info {
 	struct list_head slist; /* list of sessions registered with v9fs */
 	struct rw_semaphore rename_sem;
 	long session_lock_timeout; /* retry interval for blocking locks */
+	struct rcu_head rcu;	/* v9fs_vfs_get_link_dotl() reads ->cache in rcu pathwalk */
 };
+
+#define NDENTRY_TIMEOUT_NEVER (-1U)
 
 /* cache_validity flags */
 #define V9FS_INO_INVALID_ATTR 0x01
@@ -163,11 +185,13 @@ static inline struct fscache_volume *v9fs_session_cache(struct v9fs_session_info
 #endif
 }
 
+extern const struct fs_parameter_spec v9fs_param_spec[];
 
+extern int v9fs_parse_param(struct fs_context *fc, struct fs_parameter *param);
 extern int v9fs_show_options(struct seq_file *m, struct dentry *root);
 
 struct p9_fid *v9fs_session_init(struct v9fs_session_info *v9ses,
-				 const char *dev_name, char *data);
+				 struct fs_context *fc);
 extern void v9fs_session_close(struct v9fs_session_info *v9ses);
 extern void v9fs_session_cancel(struct v9fs_session_info *v9ses);
 extern void v9fs_session_begin_cancel(struct v9fs_session_info *v9ses);
@@ -175,7 +199,7 @@ extern struct dentry *v9fs_vfs_lookup(struct inode *dir, struct dentry *dentry,
 				      unsigned int flags);
 extern int v9fs_vfs_unlink(struct inode *i, struct dentry *d);
 extern int v9fs_vfs_rmdir(struct inode *i, struct dentry *d);
-extern int v9fs_vfs_rename(struct mnt_idmap *idmap,
+extern int v9fs_vfs_rename(const struct mnt_idmap *idmap,
 			   struct inode *old_dir, struct dentry *old_dentry,
 			   struct inode *new_dir, struct dentry *new_dentry,
 			   unsigned int flags);

@@ -10,6 +10,7 @@
 #define _ASM_S390_LOWCORE_H
 
 #include <linux/types.h>
+#include <asm/tod_types.h>
 #include <asm/machine.h>
 #include <asm/ptrace.h>
 #include <asm/ctlreg.h>
@@ -20,7 +21,7 @@
 #define LC_ORDER 1
 #define LC_PAGES 2
 
-#define LOWCORE_ALT_ADDRESS	_AC(0x70000, UL)
+#define LOWCORE_ALT_ADDRESS	0x70000
 
 #ifndef __ASSEMBLER__
 
@@ -100,7 +101,8 @@ struct lowcore {
 
 	/* Save areas. */
 	__u64	save_area[8];			/* 0x0200 */
-	__u8	pad_0x0240[0x0280-0x0240];	/* 0x0240 */
+	__u64	stack_canary;			/* 0x0240 */
+	__u8	pad_0x0248[0x0280-0x0248];	/* 0x0248 */
 	__u64	save_area_restart[1];		/* 0x0280 */
 
 	__u64	pcpu;				/* 0x0288 */
@@ -124,8 +126,7 @@ struct lowcore {
 	__u64	avg_steal_timer;		/* 0x0300 */
 	__u64	last_update_timer;		/* 0x0308 */
 	__u64	last_update_clock;		/* 0x0310 */
-	__u64	int_clock;			/* 0x0318 */
-	__u8	pad_0x0320[0x0328-0x0320];	/* 0x0320 */
+	union tod_clock int_clock;		/* 0x0318 */
 	__u64	clock_comparator;		/* 0x0328 */
 	__u8	pad_0x0330[0x0340-0x0330];	/* 0x0330 */
 
@@ -159,12 +160,18 @@ struct lowcore {
 	/* SMP info area */
 	__u32	cpu_nr;				/* 0x03a0 */
 	__u32	softirq_pending;		/* 0x03a4 */
-	__s32	preempt_count;			/* 0x03a8 */
-	__u32	spinlock_lockval;		/* 0x03ac */
-	__u32	spinlock_index;			/* 0x03b0 */
-	__u8	pad_0x03b4[0x03b8-0x03b4];	/* 0x03b4 */
+	union {
+		struct {
+			__u32	need_resched;	/* 0x03a8 */
+			__u32	count;		/* 0x03ac */
+		} preempt;
+		__u64	preempt_count;		/* 0x03a8 */
+	};
+	__u32	spinlock_lockval;		/* 0x03b0 */
+	__u32	spinlock_index;			/* 0x03b4 */
 	__u64	percpu_offset;			/* 0x03b8 */
-	__u8	pad_0x03c0[0x0400-0x03c0];	/* 0x03c0 */
+	__u8	percpu_register;		/* 0x03c0 */
+	__u8	pad_0x03c1[0x0400-0x03c1];	/* 0x03c1 */
 
 	__u32	return_lpswe;			/* 0x0400 */
 	__u32	return_mcck_lpswe;		/* 0x0404 */
@@ -214,6 +221,9 @@ struct lowcore {
 	struct pgm_tdb pgm_tdb;			/* 0x1800 */
 	__u8	pad_0x1900[0x2000-0x1900];	/* 0x1900 */
 } __packed __aligned(8192);
+
+#define LC_PERCPU_OFFSET	offsetof(struct lowcore, percpu_offset)
+#define LC_PERCPU_REGISTER	offsetof(struct lowcore, percpu_register)
 
 static __always_inline struct lowcore *get_lowcore(void)
 {

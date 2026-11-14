@@ -13,7 +13,6 @@
 #include <net/gre.h>
 #include <net/ip.h>
 #include <net/ip6_route.h>
-#include <net/ipv6_stubs.h>
 
 struct bpf_lwt_prog {
 	struct bpf_prog *prog;
@@ -86,6 +85,32 @@ static int run_lwt_bpf(struct sk_buff *skb, struct bpf_lwt_prog *lwt,
 	return ret;
 }
 
+/*
+ * skb->cb still describes the IP header that was the first one before the
+ * prog ran. The option offsets in IPCB(skb)->opt are wrong for a pushed
+ * header, and a header of the other family needs the other layout. iif
+ * stays: behind a VRF skb->skb_iif is the L3 master and not the port.
+ * bpf_lwt_push_encap() cannot do this, because bpf_prog_run_save_cb() can
+ * restore skb->cb after the prog.
+ */
+static void bpf_lwt_reset_cb(struct sk_buff *skb, __be16 proto)
+{
+	int iif;
+
+	if (skb->protocol == proto) {
+		if (proto == htons(ETH_P_IP))
+			memset(&IPCB(skb)->opt, 0, sizeof(IPCB(skb)->opt));
+	} else if (skb->protocol == htons(ETH_P_IP)) {
+		iif = IP6CB(skb)->iif;
+		memset(IPCB(skb), 0, sizeof(*IPCB(skb)));
+		IPCB(skb)->iif = iif;
+	} else {
+		iif = IPCB(skb)->iif;
+		memset(IP6CB(skb), 0, sizeof(*IP6CB(skb)));
+		IP6CB(skb)->iif = iif;
+	}
+}
+
 static int bpf_lwt_input_reroute(struct sk_buff *skb)
 {
 	enum skb_drop_reason reason;
@@ -103,7 +128,12 @@ static int bpf_lwt_input_reroute(struct sk_buff *skb)
 		dev_put(dev);
 	} else if (skb->protocol == htons(ETH_P_IPV6)) {
 		skb_dst_drop(skb);
-		err = ipv6_stub->ipv6_route_input(skb);
+		if (ipv6_mod_enabled()) {
+			ip6_route_input(skb);
+			err = skb_dst(skb)->error;
+		} else {
+			err = -EAFNOSUPPORT;
+		}
 	} else {
 		err = -EAFNOSUPPORT;
 	}
@@ -120,6 +150,8 @@ err:
 static int bpf_input(struct sk_buff *skb)
 {
 	struct dst_entry *dst = skb_dst(skb);
+	__be16 proto = skb->protocol;
+	unsigned int len = skb->len;
 	struct bpf_lwt *bpf;
 	int ret;
 
@@ -128,8 +160,21 @@ static int bpf_input(struct sk_buff *skb)
 		ret = run_lwt_bpf(skb, &bpf->in, dst, NO_REDIRECT);
 		if (ret < 0)
 			return ret;
+		/* An lwt_in prog can change the length only with a push. */
+		if (skb->len != len)
+			bpf_lwt_reset_cb(skb, proto);
 		if (ret == BPF_LWT_REROUTE)
 			return bpf_lwt_input_reroute(skb);
+		/*
+		 * orig_input() is for the old protocol only, see bpf_xmit().
+		 * It also needs a dst of the old family. BPF_LWT_ENCAP_SEG6
+		 * puts an IPv6 dst into the skb.
+		 */
+		if (skb->protocol != proto ||
+		    skb_dst(skb)->ops->family != dst->ops->family) {
+			kfree_skb(skb);
+			return -EINVAL;
+		}
 	}
 
 	if (unlikely(!dst->lwtstate->orig_input)) {
@@ -163,10 +208,10 @@ static int bpf_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 	return dst->lwtstate->orig_output(net, sk, skb);
 }
 
-static int xmit_check_hhlen(struct sk_buff *skb, int hh_len)
+static int xmit_check_headroom(struct sk_buff *skb, int hroom)
 {
-	if (skb_headroom(skb) < hh_len) {
-		int nhead = HH_DATA_ALIGN(hh_len - skb_headroom(skb));
+	if (skb_headroom(skb) < hroom) {
+		int nhead = hroom - skb_headroom(skb);
 
 		if (pskb_expand_head(skb, nhead, 0, GFP_ATOMIC))
 			return -ENOMEM;
@@ -233,7 +278,7 @@ static int bpf_lwt_xmit_reroute(struct sk_buff *skb)
 		fl6.daddr = iph6->daddr;
 		fl6.saddr = iph6->saddr;
 
-		dst = ipv6_stub->ipv6_dst_lookup_flow(net, skb->sk, &fl6, NULL);
+		dst = ip6_dst_lookup_flow(net, skb->sk, &fl6, NULL);
 		if (IS_ERR(dst)) {
 			err = PTR_ERR(dst);
 			goto err;
@@ -251,8 +296,10 @@ static int bpf_lwt_xmit_reroute(struct sk_buff *skb)
 	 * if there is enough header space in skb.
 	 */
 	err = skb_cow_head(skb, LL_RESERVED_SPACE(dst->dev));
-	if (unlikely(err))
+	if (unlikely(err)) {
+		dst_release(dst);
 		goto err;
+	}
 
 	skb_dst_drop(skb);
 	skb_dst_set(skb, dst);
@@ -276,7 +323,7 @@ static int bpf_xmit(struct sk_buff *skb)
 
 	bpf = bpf_lwt_lwtunnel(dst->lwtstate);
 	if (bpf->xmit.prog) {
-		int hh_len = dst->dev->hard_header_len;
+		int hroom = LL_RESERVED_SPACE(dst->dev);
 		__be16 proto = skb->protocol;
 		int ret;
 
@@ -292,16 +339,23 @@ static int bpf_xmit(struct sk_buff *skb)
 				return -EINVAL;
 			}
 			/* If the header was expanded, headroom might be too
-			 * small for L2 header to come, expand as needed.
+			 * small for the L2 header to come, expand as needed.
+			 * neigh_hh_output() copies the cached header in
+			 * HH_DATA_MOD aligned chunks, so match the reservation
+			 * made before LWT xmit.
 			 */
-			ret = xmit_check_hhlen(skb, hh_len);
-			if (unlikely(ret))
+			ret = xmit_check_headroom(skb, hroom);
+			if (unlikely(ret)) {
+				kfree_skb(skb);
 				return ret;
+			}
 
 			return LWTUNNEL_XMIT_CONTINUE;
 		case BPF_REDIRECT:
 			return LWTUNNEL_XMIT_DONE;
 		case BPF_LWT_REROUTE:
+			/* An lwt_xmit prog can also write to the options. */
+			bpf_lwt_reset_cb(skb, proto);
 			return bpf_lwt_xmit_reroute(skb);
 		default:
 			return ret;
@@ -595,6 +649,7 @@ static int handle_gso_encap(struct sk_buff *skb, bool ipv4, int encap_len)
 
 int bpf_lwt_push_ip_encap(struct sk_buff *skb, void *hdr, u32 len, bool ingress)
 {
+	bool is_udp_tunnel;
 	struct iphdr *iph;
 	bool ipv4;
 	int err;
@@ -608,9 +663,15 @@ int bpf_lwt_push_ip_encap(struct sk_buff *skb, void *hdr, u32 len, bool ingress)
 		ipv4 = true;
 		if (unlikely(len < iph->ihl * 4))
 			return -EINVAL;
+		is_udp_tunnel = iph->protocol == IPPROTO_UDP;
+		if (unlikely(is_udp_tunnel && len < iph->ihl * 4 + sizeof(struct udphdr)))
+			return -EINVAL;
 	} else if (iph->version == 6) {
 		ipv4 = false;
 		if (unlikely(len < sizeof(struct ipv6hdr)))
+			return -EINVAL;
+		is_udp_tunnel = ((struct ipv6hdr *)iph)->nexthdr == NEXTHDR_UDP;
+		if (unlikely(is_udp_tunnel && len < sizeof(struct ipv6hdr) + sizeof(struct udphdr)))
 			return -EINVAL;
 	} else {
 		return -EINVAL;
@@ -633,6 +694,19 @@ int bpf_lwt_push_ip_encap(struct sk_buff *skb, void *hdr, u32 len, bool ingress)
 	if (ingress)
 		skb_postpush_rcsum(skb, iph, len);
 	skb_reset_network_header(skb);
+	/*
+	 * The new header goes over the MAC header. On ingress move it first.
+	 * On egress the packet gets a new one, so forget the old one.
+	 */
+	if (ingress)
+		skb_mac_header_rebuild(skb);
+	else
+		skb_unset_mac_header(skb);
+	if (is_udp_tunnel) {
+		size_t iph_sz = ipv4 ? iph->ihl * 4 : sizeof(struct ipv6hdr);
+
+		skb_set_transport_header(skb, skb_network_offset(skb) + iph_sz);
+	}
 	memcpy(skb_network_header(skb), hdr, len);
 	bpf_compute_data_pointers(skb);
 	skb_clear_hash(skb);

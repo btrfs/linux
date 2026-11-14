@@ -189,11 +189,8 @@ static int vp_vdpa_request_irq(struct vp_vdpa *vp_vdpa)
 				       vp_vdpa_vq_handler,
 				       0, vp_vdpa->vring[i].msix_name,
 				       &vp_vdpa->vring[i]);
-		if (ret) {
-			dev_err(&pdev->dev,
-				"vp_vdpa: fail to request irq for vq %d\n", i);
+		if (ret)
 			goto err;
-		}
 		vp_modern_queue_vector(mdev, i, msix_vec);
 		vp_vdpa->vring[i].irq = irq;
 		msix_vec++;
@@ -204,11 +201,8 @@ static int vp_vdpa_request_irq(struct vp_vdpa *vp_vdpa)
 	irq = pci_irq_vector(pdev, msix_vec);
 	ret = devm_request_irq(&pdev->dev, irq,	vp_vdpa_config_handler, 0,
 			       vp_vdpa->msix_name, vp_vdpa);
-	if (ret) {
-		dev_err(&pdev->dev,
-			"vp_vdpa: fail to request irq for config: %d\n", ret);
-			goto err;
-	}
+	if (ret)
+		goto err;
 	vp_modern_config_vector(mdev, msix_vec);
 	vp_vdpa->config_irq = irq;
 
@@ -546,9 +540,8 @@ static int vp_vdpa_dev_add(struct vdpa_mgmt_dev *v_mdev, const char *name,
 		goto err;
 	}
 
-	vp_vdpa->vring = devm_kcalloc(&pdev->dev, vp_vdpa->queues,
-				      sizeof(*vp_vdpa->vring),
-				      GFP_KERNEL);
+	vp_vdpa->vring = devm_kzalloc_objs(&pdev->dev, *vp_vdpa->vring,
+					   vp_vdpa->queues);
 	if (!vp_vdpa->vring) {
 		ret = -ENOMEM;
 		dev_err(&pdev->dev, "Fail to allocate virtqueues\n");
@@ -608,7 +601,7 @@ static int vp_vdpa_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	struct virtio_device_id *mdev_id = NULL;
 	int err;
 
-	vp_vdpa_mgtdev = kzalloc(sizeof(*vp_vdpa_mgtdev), GFP_KERNEL);
+	vp_vdpa_mgtdev = kzalloc_obj(*vp_vdpa_mgtdev);
 	if (!vp_vdpa_mgtdev)
 		return -ENOMEM;
 
@@ -616,7 +609,7 @@ static int vp_vdpa_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	mgtdev->ops = &vp_vdpa_mdev_ops;
 	mgtdev->device = dev;
 
-	mdev = kzalloc(sizeof(struct virtio_pci_modern_device), GFP_KERNEL);
+	mdev = kzalloc_obj(struct virtio_pci_modern_device);
 	if (!mdev) {
 		err = -ENOMEM;
 		goto mdev_err;
@@ -626,7 +619,7 @@ static int vp_vdpa_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	 * id_table should be a null terminated array, so allocate one additional
 	 * entry here, see vdpa_mgmtdev_get_classes().
 	 */
-	mdev_id = kcalloc(2, sizeof(struct virtio_device_id), GFP_KERNEL);
+	mdev_id = kzalloc_objs(struct virtio_device_id, 2);
 	if (!mdev_id) {
 		err = -ENOMEM;
 		goto mdev_id_err;

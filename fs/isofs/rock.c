@@ -9,6 +9,7 @@
 
 #include <linux/slab.h>
 #include <linux/pagemap.h>
+#include <linux/blkdev.h>
 
 #include "isofs.h"
 #include "rock.h"
@@ -84,6 +85,10 @@ static void init_rock_state(struct rock_state *rs, struct inode *inode)
  */
 static int rock_continue(struct rock_state *rs)
 {
+	struct super_block *sb = rs->inode->i_sb;
+	struct isofs_sb_info *sbi = ISOFS_SB(sb);
+	sector_t session_end = sbi->s_session_start +
+		((sector_t)sbi->s_nzones << (ISOFS_BLOCK_BITS - sb->s_blocksize_bits));
 	int ret = 1;
 	int blocksize = 1 << rs->inode->i_blkbits;
 	const int min_de_size = offsetof(struct rock_ridge, u);
@@ -97,6 +102,17 @@ static int rock_continue(struct rock_state *rs)
 		printk(KERN_NOTICE "rock: corrupted directory entry. "
 			"extent=%d, offset=%d, size=%d\n",
 			rs->cont_extent, rs->cont_offset, rs->cont_size);
+		ret = -EIO;
+		goto out;
+	}
+
+	if (rs->cont_extent &&
+	    (rs->cont_extent < sbi->s_session_start ||
+	     rs->cont_extent >= session_end)) {
+		printk(KERN_NOTICE "rock: corrupted directory entry. "
+			"extent=%u out of volume (nzones=%lu)\n",
+			(unsigned)rs->cont_extent,
+			sbi->s_nzones);
 		ret = -EIO;
 		goto out;
 	}
@@ -193,10 +209,14 @@ static int rock_check_overflow(struct rock_state *rs, int sig)
 }
 
 /*
+ * Build the Rock Ridge name of @de in @retname, a buffer of @retnamesize
+ * bytes.  From the first NM entry that does not fit along with the
+ * terminator, the rest of the name is dropped.
+ *
  * return length of name field; 0: not found, -1: to be ignored
  */
 int get_rock_ridge_filename(struct iso_directory_record *de,
-			    char *retname, struct inode *inode)
+			    char *retname, int retnamesize, struct inode *inode)
 {
 	struct rock_state rs;
 	struct rock_ridge *rr;
@@ -271,7 +291,7 @@ repeat:
 				break;
 			}
 			len = rr->len - 5;
-			if (retnamlen + len >= 254) {
+			if (retnamlen + len >= retnamesize) {
 				truncate = 1;
 				break;
 			}
@@ -457,6 +477,9 @@ repeat:
 				inode->i_size = symlink_len;
 				while (slen > 1) {
 					rootflag = 0;
+					/* keep the component within the SL record */
+					if (slp->len + 2 > slen)
+						goto eio;
 					switch (slp->flags & ~1) {
 					case 0:
 						inode->i_size +=
@@ -612,6 +635,14 @@ static char *get_symlink_chunk(char *rpnt, struct rock_ridge *rr, char *plimit)
 	slp = &rr->u.SL.link;
 	while (slen > 1) {
 		rootflag = 0;
+		/*
+		 * A component is slp->len + 2 bytes (a two-byte header plus
+		 * len bytes of text).  If it does not fit in the bytes left in
+		 * the SL record the record is malformed: fail like the plimit
+		 * checks below so readlink() returns -EIO, not a truncated path.
+		 */
+		if (slp->len + 2 > slen)
+			return NULL;
 		switch (slp->flags & ~1) {
 		case 0:
 			if (slp->len > plimit - rpnt)

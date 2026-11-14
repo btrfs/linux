@@ -24,8 +24,7 @@
 #include <drm/drm_fourcc.h>
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_gem_atomic_helper.h>
-
-#include "uapi/drm/vc4_drm.h"
+#include <drm/drm_print.h>
 
 #include "vc4_drv.h"
 #include "vc4_regs.h"
@@ -364,20 +363,17 @@ static void vc4_plane_destroy_state(struct drm_plane *plane,
 }
 
 /* Called during init to allocate the plane's atomic state. */
-static void vc4_plane_reset(struct drm_plane *plane)
+static struct drm_plane_state *vc4_plane_create_state(struct drm_plane *plane)
 {
 	struct vc4_plane_state *vc4_state;
 
-	if (plane->state)
-		__drm_atomic_helper_plane_destroy_state(plane->state);
-
-	kfree(plane->state);
-
-	vc4_state = kzalloc(sizeof(*vc4_state), GFP_KERNEL);
+	vc4_state = kzalloc_obj(*vc4_state);
 	if (!vc4_state)
-		return;
+		return ERR_PTR(-ENOMEM);
 
-	__drm_atomic_helper_plane_reset(plane, &vc4_state->base);
+	__drm_atomic_helper_plane_state_init(&vc4_state->base, plane);
+
+	return &vc4_state->base;
 }
 
 static void vc4_dlist_counter_increment(struct vc4_plane_state *vc4_state)
@@ -497,8 +493,7 @@ static int vc4_plane_setup_clipping_and_scaling(struct drm_plane_state *state)
 	u32 v_subsample = fb->format->vsub;
 	int ret;
 
-	crtc_state = drm_atomic_get_existing_crtc_state(state->state,
-							state->crtc);
+	crtc_state = drm_atomic_get_new_crtc_state(state->state, state->crtc);
 	if (!crtc_state) {
 		DRM_DEBUG_KMS("Invalid crtc state\n");
 		return -EINVAL;
@@ -875,8 +870,7 @@ static void vc4_plane_calc_load(struct drm_plane_state *state)
 	unsigned int vscale_factor;
 
 	vc4_state = to_vc4_plane_state(state);
-	crtc_state = drm_atomic_get_existing_crtc_state(state->state,
-							state->crtc);
+	crtc_state = drm_atomic_get_new_crtc_state(state->state, state->crtc);
 	vrefresh = drm_mode_vrefresh(&crtc_state->adjusted_mode);
 
 	/* The HVS is able to process 2 pixels/cycle when scaling the source,
@@ -2126,7 +2120,7 @@ static int vc6_plane_mode_set(struct drm_plane *plane,
  * in the CRTC's flush.
  */
 static int vc4_plane_atomic_check(struct drm_plane *plane,
-				  struct drm_atomic_state *state)
+				  struct drm_atomic_commit *state)
 {
 	struct vc4_dev *vc4 = to_vc4_dev(plane->dev);
 	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state,
@@ -2172,7 +2166,7 @@ static int vc4_plane_atomic_check(struct drm_plane *plane,
 }
 
 static void vc4_plane_atomic_update(struct drm_plane *plane,
-				    struct drm_atomic_state *state)
+				    struct drm_atomic_commit *state)
 {
 	/* No contents here.  Since we don't know where in the CRTC's
 	 * dlist we should be stored, our dlist is uploaded to the
@@ -2264,7 +2258,7 @@ void vc4_plane_async_set_fb(struct drm_plane *plane, struct drm_framebuffer *fb)
 }
 
 static void vc4_plane_atomic_async_update(struct drm_plane *plane,
-					  struct drm_atomic_state *state)
+					  struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state,
 										 plane);
@@ -2338,7 +2332,7 @@ static void vc4_plane_atomic_async_update(struct drm_plane *plane,
 }
 
 static int vc4_plane_atomic_async_check(struct drm_plane *plane,
-					struct drm_atomic_state *state, bool flip)
+					struct drm_atomic_commit *state, bool flip)
 {
 	struct vc4_dev *vc4 = to_vc4_dev(plane->dev);
 	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state,
@@ -2498,7 +2492,7 @@ static bool vc4_format_mod_supported(struct drm_plane *plane,
 static const struct drm_plane_funcs vc4_plane_funcs = {
 	.update_plane = drm_atomic_helper_update_plane,
 	.disable_plane = drm_atomic_helper_disable_plane,
-	.reset = vc4_plane_reset,
+	.atomic_create_state = vc4_plane_create_state,
 	.atomic_duplicate_state = vc4_plane_duplicate_state,
 	.atomic_destroy_state = vc4_plane_destroy_state,
 	.format_mod_supported = vc4_format_mod_supported,

@@ -153,10 +153,9 @@ static int rk808_clkout_probe(struct platform_device *pdev)
 	struct rk808_clkout *rk808_clkout;
 	int ret;
 
-	dev->of_node = pdev->dev.parent->of_node;
+	device_set_of_node_from_dev(dev, dev->parent);
 
-	rk808_clkout = devm_kzalloc(dev,
-				    sizeof(*rk808_clkout), GFP_KERNEL);
+	rk808_clkout = devm_kzalloc_obj(dev, *rk808_clkout);
 	if (!rk808_clkout)
 		return -ENOMEM;
 

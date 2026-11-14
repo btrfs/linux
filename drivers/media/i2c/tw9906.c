@@ -170,7 +170,7 @@ static int tw9906_probe(struct i2c_client *client)
 	v4l_info(client, "chip found @ 0x%02x (%s)\n",
 			client->addr << 1, client->adapter->name);
 
-	dec = devm_kzalloc(&client->dev, sizeof(*dec), GFP_KERNEL);
+	dec = devm_kzalloc_obj(&client->dev, *dec);
 	if (dec == NULL)
 		return -ENOMEM;
 	sd = &dec->sd;
@@ -196,6 +196,7 @@ static int tw9906_probe(struct i2c_client *client)
 
 	if (write_regs(sd, initial_registers) < 0) {
 		v4l2_err(client, "error initializing TW9906\n");
+		v4l2_ctrl_handler_free(hdl);
 		return -EINVAL;
 	}
 
@@ -213,7 +214,7 @@ static void tw9906_remove(struct i2c_client *client)
 /* ----------------------------------------------------------------------- */
 
 static const struct i2c_device_id tw9906_id[] = {
-	{ "tw9906" },
+	{ .name = "tw9906" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tw9906_id);

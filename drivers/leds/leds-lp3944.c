@@ -378,8 +378,7 @@ static int lp3944_probe(struct i2c_client *client)
 		return -ENODEV;
 	}
 
-	data = devm_kzalloc(&client->dev, sizeof(struct lp3944_data),
-			GFP_KERNEL);
+	data = devm_kzalloc_obj(&client->dev, struct lp3944_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -417,8 +416,8 @@ static void lp3944_remove(struct i2c_client *client)
 
 /* lp3944 i2c driver struct */
 static const struct i2c_device_id lp3944_id[] = {
-	{ "lp3944" },
-	{}
+	{ .name = "lp3944" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, lp3944_id);

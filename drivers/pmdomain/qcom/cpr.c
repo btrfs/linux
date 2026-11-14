@@ -239,7 +239,6 @@ struct cpr_drv {
 	u32			gcnt;
 	unsigned long		flags;
 
-	struct fuse_corner	*fuse_corners;
 	struct corner		*corners;
 
 	const struct cpr_desc *desc;
@@ -247,6 +246,8 @@ struct cpr_drv {
 	const struct cpr_fuse *cpr_fuses;
 
 	struct dentry *debugfs;
+
+	struct fuse_corner	fuse_corners[];
 };
 
 static bool cpr_is_allowed(struct cpr_drv *drv)
@@ -1085,9 +1086,8 @@ static int cpr_corner_init(struct cpr_drv *drv)
 	corner = drv->corners;
 	end = &corner[drv->num_corners - 1];
 
-	cdata = devm_kcalloc(drv->dev, drv->num_corners,
-			     sizeof(struct corner_data),
-			     GFP_KERNEL);
+	cdata = devm_kzalloc_objs(drv->dev, struct corner_data,
+				  drv->num_corners);
 	if (!cdata)
 		return -ENOMEM;
 
@@ -1219,9 +1219,8 @@ static const struct cpr_fuse *cpr_get_fuses(struct cpr_drv *drv)
 	struct cpr_fuse *fuses;
 	int i;
 
-	fuses = devm_kcalloc(drv->dev, desc->num_fuse_corners,
-			     sizeof(struct cpr_fuse),
-			     GFP_KERNEL);
+	fuses = devm_kzalloc_objs(drv->dev, struct cpr_fuse,
+				  desc->num_fuse_corners);
 	if (!fuses)
 		return ERR_PTR(-ENOMEM);
 
@@ -1488,9 +1487,8 @@ static int cpr_pd_attach_dev(struct generic_pm_domain *domain,
 		return -EINVAL;
 	}
 
-	drv->corners = devm_kcalloc(drv->dev, drv->num_corners,
-				    sizeof(*drv->corners),
-				    GFP_KERNEL);
+	drv->corners = devm_kzalloc_objs(drv->dev, *drv->corners,
+					 drv->num_corners);
 	if (!drv->corners)
 		return -ENOMEM;
 
@@ -1600,18 +1598,13 @@ static int cpr_probe(struct platform_device *pdev)
 	if (!data || !data->cpr_desc || !data->acc_desc)
 		return -EINVAL;
 
-	drv = devm_kzalloc(dev, sizeof(*drv), GFP_KERNEL);
+	drv = devm_kzalloc_flex(dev, *drv, fuse_corners,
+				data->cpr_desc->num_fuse_corners);
 	if (!drv)
 		return -ENOMEM;
 	drv->dev = dev;
 	drv->desc = data->cpr_desc;
 	drv->acc_desc = data->acc_desc;
-
-	drv->fuse_corners = devm_kcalloc(dev, drv->desc->num_fuse_corners,
-					 sizeof(*drv->fuse_corners),
-					 GFP_KERNEL);
-	if (!drv->fuse_corners)
-		return -ENOMEM;
 
 	np = of_parse_phandle(dev->of_node, "acc-syscon", 0);
 	if (!np)

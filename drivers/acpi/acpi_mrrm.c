@@ -36,17 +36,11 @@ static u32 mrrm_mem_entry_num;
 
 static int get_node_num(struct mrrm_mem_range_entry *e)
 {
-	unsigned int nid;
+	struct zone *zone;
 
-	for_each_online_node(nid) {
-		for (int z = 0; z < MAX_NR_ZONES; z++) {
-			struct zone *zone = NODE_DATA(nid)->node_zones + z;
-
-			if (!populated_zone(zone))
-				continue;
-			if (zone_intersects(zone, PHYS_PFN(e->base), PHYS_PFN(e->length)))
-				return zone_to_nid(zone);
-		}
+	for_each_populated_zone(zone) {
+		if (zone_intersects(zone, PHYS_PFN(e->base), PHYS_PFN(e->length)))
+			return zone_to_nid(zone);
 	}
 
 	return -ENOENT;
@@ -81,8 +75,8 @@ static __init int acpi_parse_mrrm(struct acpi_table_header *table)
 		return -EINVAL;
 	}
 
-	mrrm_mem_range_entry = kmalloc_array(mre_count, sizeof(*mrrm_mem_range_entry),
-					     GFP_KERNEL | __GFP_ZERO);
+	mrrm_mem_range_entry = kmalloc_objs(*mrrm_mem_range_entry, mre_count,
+					    GFP_KERNEL | __GFP_ZERO);
 	if (!mrrm_mem_range_entry)
 		return -ENOMEM;
 
@@ -161,7 +155,7 @@ static __init int add_boot_memory_ranges(void)
 	if (!pkobj)
 		return -ENOMEM;
 
-	kobjs = kcalloc(mrrm_mem_entry_num, sizeof(*kobjs), GFP_KERNEL);
+	kobjs = kzalloc_objs(*kobjs, mrrm_mem_entry_num);
 	if (!kobjs) {
 		kobject_put(pkobj);
 		return -ENOMEM;

@@ -208,7 +208,7 @@ static int ks_sa_rng_probe(struct platform_device *pdev)
 	struct device		*dev = &pdev->dev;
 	int			ret;
 
-	ks_sa_rng = devm_kzalloc(dev, sizeof(*ks_sa_rng), GFP_KERNEL);
+	ks_sa_rng = devm_kzalloc_obj(dev, *ks_sa_rng);
 	if (!ks_sa_rng)
 		return -ENOMEM;
 
@@ -242,7 +242,14 @@ static int ks_sa_rng_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, ret, "Failed to enable SA power-domain\n");
 	}
 
-	return devm_hwrng_register(&pdev->dev, &ks_sa_rng->rng);
+	ret = devm_hwrng_register(dev, &ks_sa_rng->rng);
+	if (ret) {
+		pm_runtime_put_sync(dev);
+		pm_runtime_disable(dev);
+		return ret;
+	}
+
+	return 0;
 }
 
 static void ks_sa_rng_remove(struct platform_device *pdev)

@@ -73,10 +73,21 @@ properties:
 
   dma-coherent: true
 
+  interconnects:
+    maxItems: 2
+
+  interconnect-names:
+    items:
+      - const: cpu-mac
+      - const: mac-mem
+
   phys: true
 
   phy-names:
     const: serdes
+
+  power-domains:
+    maxItems: 1
 
 required:
   - compatible

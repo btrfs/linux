@@ -180,7 +180,7 @@ static int ad7414_probe(struct i2c_client *client)
 				     I2C_FUNC_SMBUS_READ_WORD_DATA))
 		return -EOPNOTSUPP;
 
-	data = devm_kzalloc(dev, sizeof(struct ad7414_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct ad7414_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -205,8 +205,8 @@ static int ad7414_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ad7414_id[] = {
-	{ "ad7414" },
-	{}
+	{ .name = "ad7414" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ad7414_id);
 

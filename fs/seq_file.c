@@ -11,6 +11,7 @@
 #include <linux/cache.h>
 #include <linux/fs.h>
 #include <linux/export.h>
+#include <linux/hex.h>
 #include <linux/seq_file.h>
 #include <linux/vmalloc.h>
 #include <linux/slab.h>
@@ -427,7 +428,7 @@ EXPORT_SYMBOL(seq_bprintf);
 #endif /* CONFIG_BINARY_PRINTF */
 
 /**
- *	mangle_path -	mangle and copy path to buffer beginning
+ *	seq_mangle_path -	mangle and copy path to buffer beginning
  *	@s: buffer start
  *	@p: beginning of path in above buffer
  *	@esc: set of characters that need escaping
@@ -437,7 +438,7 @@ EXPORT_SYMBOL(seq_bprintf);
  *      Returns pointer past last written character in @s, or NULL in case of
  *      failure.
  */
-char *mangle_path(char *s, const char *p, const char *esc)
+char *seq_mangle_path(char *s, const char *p, const char *esc)
 {
 	while (s <= p) {
 		char c = *p++;
@@ -456,7 +457,6 @@ char *mangle_path(char *s, const char *p, const char *esc)
 	}
 	return NULL;
 }
-EXPORT_SYMBOL(mangle_path);
 
 /**
  * seq_path - seq_file interface to print a pathname
@@ -476,7 +476,7 @@ int seq_path(struct seq_file *m, const struct path *path, const char *esc)
 	if (size) {
 		char *p = d_path(path, buf, size);
 		if (!IS_ERR(p)) {
-			char *end = mangle_path(buf, p, esc);
+			char *end = seq_mangle_path(buf, p, esc);
 			if (end)
 				res = end - buf;
 		}
@@ -519,7 +519,7 @@ int seq_path_root(struct seq_file *m, const struct path *path,
 			return SEQ_SKIP;
 		res = PTR_ERR(p);
 		if (!IS_ERR(p)) {
-			char *end = mangle_path(buf, p, esc);
+			char *end = seq_mangle_path(buf, p, esc);
 			if (end)
 				res = end - buf;
 			else
@@ -543,7 +543,7 @@ int seq_dentry(struct seq_file *m, struct dentry *dentry, const char *esc)
 	if (size) {
 		char *p = dentry_path(dentry, buf, size);
 		if (!IS_ERR(p)) {
-			char *end = mangle_path(buf, p, esc);
+			char *end = seq_mangle_path(buf, p, esc);
 			if (end)
 				res = end - buf;
 		}
@@ -572,7 +572,7 @@ static void single_stop(struct seq_file *p, void *v)
 int single_open(struct file *file, int (*show)(struct seq_file *, void *),
 		void *data)
 {
-	struct seq_operations *op = kmalloc(sizeof(*op), GFP_KERNEL_ACCOUNT);
+	struct seq_operations *op = kmalloc_obj(*op, GFP_KERNEL_ACCOUNT);
 	int res = -ENOMEM;
 
 	if (op) {

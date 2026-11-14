@@ -422,24 +422,24 @@ static int navss_psil_unpair(struct udma_dev *ud, u32 src_thread,
 
 static void k3_configure_chan_coherency(struct dma_chan *chan, u32 asel)
 {
-	struct device *chan_dev = &chan->dev->device;
+	struct device *chan_dev = dmaengine_chan_dev(chan);
 
 	if (asel == 0) {
 		/* No special handling for the channel */
-		chan->dev->chan_dma_dev = false;
+		chan->chan_dev->chan_dma_dev = false;
 
-		chan_dev->dma_coherent = false;
+		dev_clear_dma_coherent(chan_dev);
 		chan_dev->dma_parms = NULL;
 	} else if (asel == 14 || asel == 15) {
-		chan->dev->chan_dma_dev = true;
+		chan->chan_dev->chan_dma_dev = true;
 
-		chan_dev->dma_coherent = true;
+		dev_set_dma_coherent(chan_dev);
 		dma_coerce_mask_and_coherent(chan_dev, DMA_BIT_MASK(48));
 		chan_dev->dma_parms = chan_dev->parent->dma_parms;
 	} else {
 		dev_warn(chan->device->dev, "Invalid ASEL value: %u\n", asel);
 
-		chan_dev->dma_coherent = false;
+		dev_clear_dma_coherent(chan_dev);
 		chan_dev->dma_parms = NULL;
 	}
 }
@@ -3241,7 +3241,7 @@ udma_prep_slave_sg_pkt(struct udma_chan *uc, struct scatterlist *sgl,
 	unsigned int i;
 	u64 asel;
 
-	d = kzalloc(struct_size(d, hwdesc, sglen), GFP_NOWAIT);
+	d = kzalloc_flex(*d, hwdesc, sglen, GFP_NOWAIT);
 	if (!d)
 		return NULL;
 
@@ -3408,7 +3408,7 @@ static int udma_set_metadata_len(struct dma_async_tx_descriptor *desc,
 	return 0;
 }
 
-static struct dma_descriptor_metadata_ops metadata_ops = {
+static const struct dma_descriptor_metadata_ops metadata_ops = {
 	.attach = udma_attach_metadata,
 	.get_ptr = udma_get_metadata_ptr,
 	.set_len = udma_set_metadata_len,
@@ -3588,7 +3588,7 @@ udma_prep_dma_cyclic_pkt(struct udma_chan *uc, dma_addr_t buf_addr,
 	if (period_len >= SZ_4M)
 		return NULL;
 
-	d = kzalloc(struct_size(d, hwdesc, periods), GFP_NOWAIT);
+	d = kzalloc_flex(*d, hwdesc, periods, GFP_NOWAIT);
 	if (!d)
 		return NULL;
 
@@ -4613,26 +4613,19 @@ static int udma_setup_resources(struct udma_dev *ud)
 	ud->rchan_tpl.start_idx[0] = ud->tchan_tpl.start_idx[0];
 	ud->rchan_tpl.start_idx[1] = ud->tchan_tpl.start_idx[1];
 
-	ud->tchan_map = devm_kmalloc_array(dev, BITS_TO_LONGS(ud->tchan_cnt),
-					   sizeof(unsigned long), GFP_KERNEL);
-	ud->tchans = devm_kcalloc(dev, ud->tchan_cnt, sizeof(*ud->tchans),
-				  GFP_KERNEL);
-	ud->rchan_map = devm_kmalloc_array(dev, BITS_TO_LONGS(ud->rchan_cnt),
-					   sizeof(unsigned long), GFP_KERNEL);
-	ud->rchans = devm_kcalloc(dev, ud->rchan_cnt, sizeof(*ud->rchans),
-				  GFP_KERNEL);
-	ud->rflow_gp_map = devm_kmalloc_array(dev, BITS_TO_LONGS(ud->rflow_cnt),
-					      sizeof(unsigned long),
-					      GFP_KERNEL);
-	ud->rflow_gp_map_allocated = devm_kcalloc(dev,
-						  BITS_TO_LONGS(ud->rflow_cnt),
-						  sizeof(unsigned long),
-						  GFP_KERNEL);
-	ud->rflow_in_use = devm_kcalloc(dev, BITS_TO_LONGS(ud->rflow_cnt),
-					sizeof(unsigned long),
-					GFP_KERNEL);
-	ud->rflows = devm_kcalloc(dev, ud->rflow_cnt, sizeof(*ud->rflows),
-				  GFP_KERNEL);
+	ud->tchan_map = devm_kmalloc_objs(dev, unsigned long,
+					  BITS_TO_LONGS(ud->tchan_cnt));
+	ud->tchans = devm_kzalloc_objs(dev, *ud->tchans, ud->tchan_cnt);
+	ud->rchan_map = devm_kmalloc_objs(dev, unsigned long,
+					  BITS_TO_LONGS(ud->rchan_cnt));
+	ud->rchans = devm_kzalloc_objs(dev, *ud->rchans, ud->rchan_cnt);
+	ud->rflow_gp_map = devm_kmalloc_objs(dev, unsigned long,
+					     BITS_TO_LONGS(ud->rflow_cnt));
+	ud->rflow_gp_map_allocated = devm_kzalloc_objs(dev, unsigned long,
+						       BITS_TO_LONGS(ud->rflow_cnt));
+	ud->rflow_in_use = devm_kzalloc_objs(dev, unsigned long,
+					     BITS_TO_LONGS(ud->rflow_cnt));
+	ud->rflows = devm_kzalloc_objs(dev, *ud->rflows, ud->rflow_cnt);
 
 	if (!ud->tchan_map || !ud->rchan_map || !ud->rflow_gp_map ||
 	    !ud->rflow_gp_map_allocated || !ud->tchans || !ud->rchans ||
@@ -4686,7 +4679,7 @@ static int udma_setup_resources(struct udma_dev *ud)
 		irq_res.sets += rm_res->sets;
 	}
 
-	irq_res.desc = kcalloc(irq_res.sets, sizeof(*irq_res.desc), GFP_KERNEL);
+	irq_res.desc = kzalloc_objs(*irq_res.desc, irq_res.sets);
 	if (!irq_res.desc)
 		return -ENOMEM;
 	rm_res = tisci_rm->rm_ranges[RM_RANGE_TCHAN];
@@ -4787,24 +4780,19 @@ static int bcdma_setup_resources(struct udma_dev *ud)
 		ud->tchan_tpl.levels = 1;
 	}
 
-	ud->bchan_map = devm_kmalloc_array(dev, BITS_TO_LONGS(ud->bchan_cnt),
-					   sizeof(unsigned long), GFP_KERNEL);
-	ud->bchans = devm_kcalloc(dev, ud->bchan_cnt, sizeof(*ud->bchans),
-				  GFP_KERNEL);
-	ud->tchan_map = devm_kmalloc_array(dev, BITS_TO_LONGS(ud->tchan_cnt),
-					   sizeof(unsigned long), GFP_KERNEL);
-	ud->tchans = devm_kcalloc(dev, ud->tchan_cnt, sizeof(*ud->tchans),
-				  GFP_KERNEL);
-	ud->rchan_map = devm_kmalloc_array(dev, BITS_TO_LONGS(ud->rchan_cnt),
-					   sizeof(unsigned long), GFP_KERNEL);
-	ud->rchans = devm_kcalloc(dev, ud->rchan_cnt, sizeof(*ud->rchans),
-				  GFP_KERNEL);
+	ud->bchan_map = devm_kmalloc_objs(dev, unsigned long,
+					  BITS_TO_LONGS(ud->bchan_cnt));
+	ud->bchans = devm_kzalloc_objs(dev, *ud->bchans, ud->bchan_cnt);
+	ud->tchan_map = devm_kmalloc_objs(dev, unsigned long,
+					  BITS_TO_LONGS(ud->tchan_cnt));
+	ud->tchans = devm_kzalloc_objs(dev, *ud->tchans, ud->tchan_cnt);
+	ud->rchan_map = devm_kmalloc_objs(dev, unsigned long,
+					  BITS_TO_LONGS(ud->rchan_cnt));
+	ud->rchans = devm_kzalloc_objs(dev, *ud->rchans, ud->rchan_cnt);
 	/* BCDMA do not really have flows, but the driver expect it */
-	ud->rflow_in_use = devm_kcalloc(dev, BITS_TO_LONGS(ud->rchan_cnt),
-					sizeof(unsigned long),
-					GFP_KERNEL);
-	ud->rflows = devm_kcalloc(dev, ud->rchan_cnt, sizeof(*ud->rflows),
-				  GFP_KERNEL);
+	ud->rflow_in_use = devm_kzalloc_objs(dev, unsigned long,
+					     BITS_TO_LONGS(ud->rchan_cnt));
+	ud->rflows = devm_kzalloc_objs(dev, *ud->rflows, ud->rchan_cnt);
 
 	if (!ud->bchan_map || !ud->tchan_map || !ud->rchan_map ||
 	    !ud->rflow_in_use || !ud->bchans || !ud->tchans || !ud->rchans ||
@@ -4878,7 +4866,7 @@ static int bcdma_setup_resources(struct udma_dev *ud)
 		}
 	}
 
-	irq_res.desc = kcalloc(irq_res.sets, sizeof(*irq_res.desc), GFP_KERNEL);
+	irq_res.desc = kzalloc_objs(*irq_res.desc, irq_res.sets);
 	if (!irq_res.desc)
 		return -ENOMEM;
 	if (ud->bchan_cnt) {
@@ -4999,21 +4987,17 @@ static int pktdma_setup_resources(struct udma_dev *ud)
 	ud->rchan_tpl.start_idx[0] = ud->tchan_tpl.start_idx[0];
 	ud->rchan_tpl.start_idx[1] = ud->tchan_tpl.start_idx[1];
 
-	ud->tchan_map = devm_kmalloc_array(dev, BITS_TO_LONGS(ud->tchan_cnt),
-					   sizeof(unsigned long), GFP_KERNEL);
-	ud->tchans = devm_kcalloc(dev, ud->tchan_cnt, sizeof(*ud->tchans),
-				  GFP_KERNEL);
-	ud->rchan_map = devm_kmalloc_array(dev, BITS_TO_LONGS(ud->rchan_cnt),
-					   sizeof(unsigned long), GFP_KERNEL);
-	ud->rchans = devm_kcalloc(dev, ud->rchan_cnt, sizeof(*ud->rchans),
-				  GFP_KERNEL);
-	ud->rflow_in_use = devm_kcalloc(dev, BITS_TO_LONGS(ud->rflow_cnt),
-					sizeof(unsigned long),
-					GFP_KERNEL);
-	ud->rflows = devm_kcalloc(dev, ud->rflow_cnt, sizeof(*ud->rflows),
-				  GFP_KERNEL);
-	ud->tflow_map = devm_kmalloc_array(dev, BITS_TO_LONGS(ud->tflow_cnt),
-					   sizeof(unsigned long), GFP_KERNEL);
+	ud->tchan_map = devm_kmalloc_objs(dev, unsigned long,
+					  BITS_TO_LONGS(ud->tchan_cnt));
+	ud->tchans = devm_kzalloc_objs(dev, *ud->tchans, ud->tchan_cnt);
+	ud->rchan_map = devm_kmalloc_objs(dev, unsigned long,
+					  BITS_TO_LONGS(ud->rchan_cnt));
+	ud->rchans = devm_kzalloc_objs(dev, *ud->rchans, ud->rchan_cnt);
+	ud->rflow_in_use = devm_kzalloc_objs(dev, unsigned long,
+					     BITS_TO_LONGS(ud->rflow_cnt));
+	ud->rflows = devm_kzalloc_objs(dev, *ud->rflows, ud->rflow_cnt);
+	ud->tflow_map = devm_kmalloc_objs(dev, unsigned long,
+					  BITS_TO_LONGS(ud->tflow_cnt));
 
 	if (!ud->tchan_map || !ud->rchan_map || !ud->tflow_map || !ud->tchans ||
 	    !ud->rchans || !ud->rflows || !ud->rflow_in_use)
@@ -5080,7 +5064,7 @@ static int pktdma_setup_resources(struct udma_dev *ud)
 		irq_res.sets += rm_res->sets;
 	}
 
-	irq_res.desc = kcalloc(irq_res.sets, sizeof(*irq_res.desc), GFP_KERNEL);
+	irq_res.desc = kzalloc_objs(*irq_res.desc, irq_res.sets);
 	if (!irq_res.desc)
 		return -ENOMEM;
 	rm_res = tisci_rm->rm_ranges[RM_RANGE_TFLOW];
@@ -5158,8 +5142,7 @@ static int setup_resources(struct udma_dev *ud)
 	if (!ch_count)
 		return -ENODEV;
 
-	ud->channels = devm_kcalloc(dev, ch_count, sizeof(*ud->channels),
-				    GFP_KERNEL);
+	ud->channels = devm_kzalloc_objs(dev, *ud->channels, ch_count);
 	if (!ud->channels)
 		return -ENOMEM;
 
@@ -5418,7 +5401,7 @@ static int udma_probe(struct platform_device *pdev)
 	if (ret)
 		dev_err(dev, "failed to set dma mask stuff\n");
 
-	ud = devm_kzalloc(dev, sizeof(*ud), GFP_KERNEL);
+	ud = devm_kzalloc_obj(dev, *ud);
 	if (!ud)
 		return -ENOMEM;
 

@@ -8,7 +8,6 @@
 #include <linux/device.h>
 #include <linux/io.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/nvmem-provider.h>
 #include <linux/platform_device.h>
 
@@ -37,7 +36,7 @@ static int uniphier_efuse_probe(struct platform_device *pdev)
 	struct nvmem_config econfig = {};
 	struct uniphier_efuse_priv *priv;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

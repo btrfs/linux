@@ -546,9 +546,7 @@ static int pm8xxx_probe(struct platform_device *pdev)
 	}
 	pr_info("PMIC revision 2: %02X\n", val);
 
-	chip = devm_kzalloc(&pdev->dev,
-			    struct_size(chip, config, data->num_irqs),
-			    GFP_KERNEL);
+	chip = devm_kzalloc_flex(&pdev->dev, *chip, config, data->num_irqs);
 	if (!chip)
 		return -ENOMEM;
 
@@ -577,17 +575,11 @@ static int pm8xxx_probe(struct platform_device *pdev)
 	return rc;
 }
 
-static int pm8xxx_remove_child(struct device *dev, void *unused)
-{
-	platform_device_unregister(to_platform_device(dev));
-	return 0;
-}
-
 static void pm8xxx_remove(struct platform_device *pdev)
 {
 	struct pm_irq_chip *chip = platform_get_drvdata(pdev);
 
-	device_for_each_child(&pdev->dev, NULL, pm8xxx_remove_child);
+	of_platform_depopulate(&pdev->dev);
 	irq_domain_remove(chip->irqdomain);
 }
 

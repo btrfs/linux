@@ -326,9 +326,6 @@ static int axp20x_ac_power_probe(struct platform_device *pdev)
 	const struct axp_data *axp_data;
 	int i, irq, ret;
 
-	if (!of_device_is_available(pdev->dev.of_node))
-		return -ENODEV;
-
 	if (!axp20x) {
 		dev_err(&pdev->dev, "Parent drvdata not set\n");
 		return -EINVAL;
@@ -336,9 +333,8 @@ static int axp20x_ac_power_probe(struct platform_device *pdev)
 
 	axp_data = of_device_get_match_data(&pdev->dev);
 
-	power = devm_kzalloc(&pdev->dev,
-			     struct_size(power, irqs, axp_data->num_irq_names),
-			     GFP_KERNEL);
+	power = devm_kzalloc_flex(&pdev->dev, *power, irqs,
+				  axp_data->num_irq_names);
 	if (!power)
 		return -ENOMEM;
 
@@ -383,11 +379,8 @@ static int axp20x_ac_power_probe(struct platform_device *pdev)
 		ret = devm_request_any_context_irq(&pdev->dev, power->irqs[i],
 						   axp20x_ac_power_irq, 0,
 						   DRVNAME, power);
-		if (ret < 0) {
-			dev_err(&pdev->dev, "Error requesting %s IRQ: %d\n",
-				axp_data->irq_names[i], ret);
+		if (ret < 0)
 			return ret;
-		}
 	}
 
 	return 0;
@@ -421,3 +414,4 @@ module_platform_driver(axp20x_ac_power_driver);
 MODULE_AUTHOR("Quentin Schulz <quentin.schulz@free-electrons.com>");
 MODULE_DESCRIPTION("AXP20X and AXP22X PMICs' AC power supply driver");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("IIO_CONSUMER");

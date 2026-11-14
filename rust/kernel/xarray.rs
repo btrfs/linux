@@ -5,10 +5,16 @@
 //! C header: [`include/linux/xarray.h`](srctree/include/linux/xarray.h)
 
 use crate::{
-    alloc, bindings, build_assert,
+    alloc,
+    bindings,
+    build_assert::build_assert,
     error::{Error, Result},
     ffi::c_void,
-    types::{ForeignOwnable, NotThreadSafe, Opaque},
+    types::{
+        ForeignOwnable,
+        NotThreadSafe,
+        Opaque, //
+    }, //
 };
 use core::{iter, marker::PhantomData, pin::Pin, ptr::NonNull};
 use pin_init::{pin_data, pin_init, pinned_drop, PinInit};
@@ -172,6 +178,7 @@ pub struct StoreError<T> {
 }
 
 impl<T> From<StoreError<T>> for Error {
+    #[inline]
     fn from(value: StoreError<T>) -> Self {
         value.error
     }

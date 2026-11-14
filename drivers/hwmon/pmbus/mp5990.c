@@ -148,8 +148,8 @@ static struct pmbus_driver_info mp5998_info = {
 };
 
 static const struct i2c_device_id mp5990_id[] = {
-	{"mp5990", mp5990},
-	{"mp5998", mp5998},
+	{ .name = "mp5990", .driver_data = mp5990 },
+	{ .name = "mp5998", .driver_data = mp5998 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mp5990_id);
@@ -161,8 +161,7 @@ static int mp5990_probe(struct i2c_client *client)
 	enum chips chip;
 	int ret;
 
-	data = devm_kzalloc(&client->dev, sizeof(struct mp5990_data),
-			    GFP_KERNEL);
+	data = devm_kzalloc_obj(&client->dev, struct mp5990_data);
 	if (!data)
 		return -ENOMEM;
 

@@ -20,7 +20,7 @@ static inline struct quota_info *sb_dqopt(struct super_block *sb)
 }
 
 /* i_rwsem must being held */
-static inline bool is_quota_modification(struct mnt_idmap *idmap,
+static inline bool is_quota_modification(const struct mnt_idmap *idmap,
 					 struct inode *inode, struct iattr *ia)
 {
 	return ((ia->ia_valid & ATTR_SIZE) ||
@@ -40,18 +40,12 @@ void __quota_error(struct super_block *sb, const char *func,
 /*
  * declaration of quota_function calls in kernel.
  */
+void dquot_cache_init(void);
 int dquot_initialize(struct inode *inode);
 bool dquot_initialize_needed(struct inode *inode);
 void dquot_drop(struct inode *inode);
 struct dquot *dqget(struct super_block *sb, struct kqid qid);
-static inline struct dquot *dqgrab(struct dquot *dquot)
-{
-	/* Make sure someone else has active reference to dquot */
-	WARN_ON_ONCE(!atomic_read(&dquot->dq_count));
-	WARN_ON_ONCE(!test_bit(DQ_ACTIVE_B, &dquot->dq_flags));
-	atomic_inc(&dquot->dq_count);
-	return dquot;
-}
+struct dquot *dqgrab(struct dquot *dquot);
 
 static inline bool dquot_is_busy(struct dquot *dquot)
 {
@@ -116,7 +110,7 @@ int dquot_set_dqblk(struct super_block *sb, struct kqid id,
 		struct qc_dqblk *di);
 
 int __dquot_transfer(struct inode *inode, struct dquot **transfer_to);
-int dquot_transfer(struct mnt_idmap *idmap, struct inode *inode,
+int dquot_transfer(const struct mnt_idmap *idmap, struct inode *inode,
 		   struct iattr *iattr);
 
 static inline struct mem_dqinfo *sb_dqinfo(struct super_block *sb, int type)
@@ -213,6 +207,10 @@ static inline int sb_has_quota_active(struct super_block *sb, int type)
 	return 0;
 }
 
+static inline void dquot_cache_init(void)
+{
+}
+
 static inline int dquot_initialize(struct inode *inode)
 {
 	return 0;
@@ -236,7 +234,7 @@ static inline void dquot_free_inode(struct inode *inode)
 {
 }
 
-static inline int dquot_transfer(struct mnt_idmap *idmap,
+static inline int dquot_transfer(const struct mnt_idmap *idmap,
 				 struct inode *inode, struct iattr *iattr)
 {
 	return 0;

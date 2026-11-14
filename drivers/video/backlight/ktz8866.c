@@ -131,7 +131,7 @@ static int ktz8866_probe(struct i2c_client *client)
 	struct ktz8866 *ktz;
 	int ret = 0;
 
-	ktz = devm_kzalloc(&client->dev, sizeof(*ktz), GFP_KERNEL);
+	ktz = devm_kzalloc_obj(&client->dev, *ktz);
 	if (!ktz)
 		return -ENOMEM;
 
@@ -179,8 +179,8 @@ static void ktz8866_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ktz8866_ids[] = {
-	{ "ktz8866" },
-	{}
+	{ .name = "ktz8866" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ktz8866_ids);
 

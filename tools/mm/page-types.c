@@ -73,7 +73,6 @@
 #define KPF_RESERVED		32
 #define KPF_MLOCKED		33
 #define KPF_OWNER_2		34
-#define KPF_PRIVATE		35
 #define KPF_PRIVATE_2		36
 #define KPF_OWNER_PRIVATE	37
 #define KPF_ARCH		38
@@ -131,7 +130,6 @@ static const char * const page_flag_names[] = {
 	[KPF_RESERVED]		= "r:reserved",
 	[KPF_MLOCKED]		= "m:mlocked",
 	[KPF_OWNER_2]		= "d:owner_2",
-	[KPF_PRIVATE]		= "P:private",
 	[KPF_PRIVATE_2]		= "p:private_2",
 	[KPF_OWNER_PRIVATE]	= "O:owner_private",
 	[KPF_ARCH]		= "h:arch",
@@ -997,10 +995,10 @@ static void walk_file_range(const char *name, int fd,
 
 		/* turn off readahead */
 		if (madvise(ptr, len, MADV_RANDOM))
-			fatal("madvice failed: %s", name);
+			fatal("madvise failed: %s", name);
 
 		if (sigsetjmp(sigbus_jmp, 1)) {
-			end = off + sigbus_addr ? sigbus_addr - ptr : 0;
+			end = off + (sigbus_addr ? sigbus_addr - ptr : 0);
 			fprintf(stderr, "got sigbus at offset %lld: %s\n",
 					(long long)end, name);
 			goto got_sigbus;
@@ -1015,7 +1013,7 @@ got_sigbus:
 
 		/* turn off harvesting reference bits */
 		if (madvise(ptr, len, MADV_SEQUENTIAL))
-			fatal("madvice failed: %s", name);
+			fatal("madvise failed: %s", name);
 
 		if (pagemap_read(buf, (unsigned long)ptr / page_size,
 					nr_pages) != nr_pages)
@@ -1261,7 +1259,7 @@ static const struct option opts[] = {
 	{ "no-summary", 0, NULL, 'N' },
 	{ "hwpoison"  , 0, NULL, 'X' },
 	{ "unpoison"  , 0, NULL, 'x' },
-	{ "kpageflags", 0, NULL, 'F' },
+	{ "kpageflags", 1, NULL, 'F' },
 	{ "help"      , 0, NULL, 'h' },
 	{ NULL        , 0, NULL, 0 }
 };

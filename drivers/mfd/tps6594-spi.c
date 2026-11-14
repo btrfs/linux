@@ -12,7 +12,6 @@
 
 #include <linux/crc8.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/of_device.h>
 #include <linux/regmap.h>
 #include <linux/spi/spi.h>
@@ -98,7 +97,7 @@ static int tps6594_spi_probe(struct spi_device *spi)
 	struct tps6594 *tps;
 	const struct of_device_id *match;
 
-	tps = devm_kzalloc(dev, sizeof(*tps), GFP_KERNEL);
+	tps = devm_kzalloc_obj(dev, *tps);
 	if (!tps)
 		return -ENOMEM;
 

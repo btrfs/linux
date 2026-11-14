@@ -51,7 +51,7 @@ config DRM_I915_DEBUG
 	select DRM_DEBUG_MM if DRM=y
 	select DRM_EXPORT_FOR_TESTS if m
 	select DRM_KUNIT_TEST if KUNIT
-	select DMABUF_SELFTESTS
+	select DMABUF_KUNIT_TEST if KUNIT
 	select SW_SYNC # signaling validation framework (igt/syncobj*)
 	select DRM_I915_WERROR
 	select DRM_I915_DEBUG_GEM
@@ -217,6 +217,18 @@ config DRM_I915_SELFTEST_BROKEN
 	  rules given in the HW specification. For science.
 
 	  Recommended for masochistic driver developers only.
+
+	  If in doubt, say "N".
+
+config DRM_I915_KUNIT_TEST
+	tristate "KUnit tests for the drm i915 driver" if !KUNIT_ALL_TESTS
+	depends on DRM_I915 && KUNIT && DEBUG_FS
+	default KUNIT_ALL_TESTS
+	help
+	  Choose this option to allow the driver to perform selftests under
+	  the kunit framework
+
+	  Recommended for driver developers only.
 
 	  If in doubt, say "N".
 

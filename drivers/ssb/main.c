@@ -3,7 +3,7 @@
  * Subsystem core
  *
  * Copyright 2005, Broadcom Corporation
- * Copyright 2006, 2007, Michael Buesch <m@bues.ch>
+ * Copyright 2006, 2007, Michael Buesch
  *
  * Licensed under the GNU/GPL. See COPYING for details.
  */
@@ -481,7 +481,7 @@ static int ssb_devices_register(struct ssb_bus *bus)
 			continue;
 		}
 
-		devwrap = kzalloc(sizeof(*devwrap), GFP_KERNEL);
+		devwrap = kzalloc_obj(*devwrap);
 		if (!devwrap) {
 			err = -ENOMEM;
 			goto error;

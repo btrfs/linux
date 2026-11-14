@@ -87,7 +87,7 @@ static irqreturn_t mconsole_interrupt(int irq, void *dev_id)
 		if (req.cmd->context == MCONSOLE_INTR)
 			(*req.cmd->handler)(&req);
 		else {
-			new = kmalloc(sizeof(*new), GFP_NOWAIT);
+			new = kmalloc_obj(*new, GFP_NOWAIT);
 			if (new == NULL)
 				mconsole_reply(&req, "Out of memory", 1, 0);
 			else {
@@ -106,9 +106,9 @@ void mconsole_version(struct mc_request *req)
 {
 	char version[256];
 
-	sprintf(version, "%s %s %s %s %s", utsname()->sysname,
-		utsname()->nodename, utsname()->release, utsname()->version,
-		utsname()->machine);
+	snprintf(version, sizeof(version), "%s %s %s %s %s",
+		 utsname()->sysname, utsname()->nodename, utsname()->release,
+		 utsname()->version, utsname()->machine);
 	mconsole_reply(req, version, 0, 0);
 }
 
@@ -117,10 +117,12 @@ void mconsole_log(struct mc_request *req)
 	int len;
 	char *ptr = req->request.data;
 
-	ptr += strlen("log ");
+	ptr += strlen(req->cmd->command);
+	ptr = skip_spaces(ptr);
 
-	len = req->len - (ptr - req->request.data);
-	printk(KERN_WARNING "%.*s", len, ptr);
+	len = req->request.len - (ptr - req->request.data);
+	if (len > 0)
+		printk(KERN_WARNING "%.*s", len, ptr);
 	mconsole_reply(req, "", 0, 0);
 }
 

@@ -17,7 +17,7 @@
 #include <string.h>
 #include <pthread.h>
 
-#include "../kselftest.h"
+#include "kselftest.h"
 #include "cgroup_util.h"
 
 static bool nsdelegate;
@@ -87,7 +87,7 @@ static int test_cgcore_destroy(const char *root)
 	int ret = KSFT_FAIL;
 	char *cg_test = NULL;
 	int child_pid;
-	char buf[PAGE_SIZE];
+	char buf[BUF_SIZE];
 
 	cg_test = cg_name(root, "cg_test");
 
@@ -233,7 +233,8 @@ static int test_cgcore_populated(const char *root)
 	if (err)
 		goto cleanup;
 
-	if (cg_read_strcmp(cg_test_d, "cgroup.events", "populated 0\n"))
+	if (cg_read_strcmp_wait(cg_test_d, "cgroup.events",
+				   "populated 0\n"))
 		goto cleanup;
 
 	/* Remove cgroup. */
@@ -425,7 +426,6 @@ static int test_cgcore_no_internal_process_constraint_on_threads(const char *roo
 	ret = KSFT_PASS;
 
 cleanup:
-	cg_enter_current(root);
 	cg_enter_current(root);
 	if (child)
 		cg_destroy(child);
@@ -794,10 +794,9 @@ static int lesser_ns_open_thread_fn(void *arg)
 static int test_cgcore_lesser_ns_open(const char *root)
 {
 	static char stack[65536];
-	const uid_t test_euid = 65534;	/* usually nobody, any !root is fine */
 	int ret = KSFT_FAIL;
 	char *cg_test_a = NULL, *cg_test_b = NULL;
-	char *cg_test_a_procs = NULL, *cg_test_b_procs = NULL;
+	char *cg_test_b_procs = NULL;
 	int cg_test_b_procs_fd = -1;
 	struct lesser_ns_open_thread_arg targ = { .fd = -1 };
 	pid_t pid;
@@ -812,20 +811,15 @@ static int test_cgcore_lesser_ns_open(const char *root)
 	if (!cg_test_a || !cg_test_b)
 		goto cleanup;
 
-	cg_test_a_procs = cg_name(cg_test_a, "cgroup.procs");
 	cg_test_b_procs = cg_name(cg_test_b, "cgroup.procs");
 
-	if (!cg_test_a_procs || !cg_test_b_procs)
+	if (!cg_test_b_procs)
 		goto cleanup;
 
 	if (cg_create(cg_test_a) || cg_create(cg_test_b))
 		goto cleanup;
 
 	if (cg_enter_current(cg_test_b))
-		goto cleanup;
-
-	if (chown(cg_test_a_procs, test_euid, -1) ||
-	    chown(cg_test_b_procs, test_euid, -1))
 		goto cleanup;
 
 	targ.path = cg_test_b_procs;
@@ -862,7 +856,6 @@ cleanup:
 	if (cg_test_a)
 		cg_destroy(cg_test_a);
 	free(cg_test_b_procs);
-	free(cg_test_a_procs);
 	free(cg_test_b);
 	free(cg_test_a);
 	return ret;
@@ -923,8 +916,9 @@ struct corecg_test {
 int main(int argc, char *argv[])
 {
 	char root[PATH_MAX];
-	int i, ret = EXIT_SUCCESS;
+	int i;
 
+	ksft_print_header();
 	if (cg_find_unified_root(root, sizeof(root), &nsdelegate)) {
 		if (setup_named_v1_root(root, sizeof(root), CG_NAMED_NAME))
 			ksft_exit_skip("cgroup v2 isn't mounted and could not setup named v1 hierarchy\n");
@@ -937,6 +931,7 @@ int main(int argc, char *argv[])
 			ksft_exit_skip("Failed to set memory controller\n");
 
 post_v2_setup:
+	ksft_set_plan(ARRAY_SIZE(tests));
 	for (i = 0; i < ARRAY_SIZE(tests); i++) {
 		switch (tests[i].fn(root)) {
 		case KSFT_PASS:
@@ -946,12 +941,11 @@ post_v2_setup:
 			ksft_test_result_skip("%s\n", tests[i].name);
 			break;
 		default:
-			ret = EXIT_FAILURE;
 			ksft_test_result_fail("%s\n", tests[i].name);
 			break;
 		}
 	}
 
 	cleanup_named_v1_root(root);
-	return ret;
+	ksft_finished();
 }

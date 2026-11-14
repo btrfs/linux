@@ -424,8 +424,8 @@ static const struct clk_ops pcf8563_clkout_ops = {
 
 static struct clk *pcf8563_clkout_register_clk(struct pcf8563 *pcf8563)
 {
-	struct device_node *node = pcf8563->rtc->dev.of_node;
-	struct clk_init_data init;
+	struct device_node *node = pcf8563->rtc->dev.parent->of_node;
+	struct clk_init_data init = {};
 	struct clk *clk;
 	int ret;
 
@@ -449,7 +449,9 @@ static struct clk *pcf8563_clkout_register_clk(struct pcf8563 *pcf8563)
 	clk = devm_clk_register(&pcf8563->rtc->dev, &pcf8563->clkout_hw);
 
 	if (!IS_ERR(clk))
-		of_clk_add_provider(node, of_clk_src_simple_get, clk);
+		devm_of_clk_add_hw_provider(pcf8563->rtc->dev.parent,
+					    of_clk_hw_simple_get,
+					    &pcf8563->clkout_hw);
 
 	return clk;
 }
@@ -477,11 +479,11 @@ static int pcf8563_probe(struct i2c_client *client)
 
 	dev_dbg(&client->dev, "%s\n", __func__);
 
-	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C))
+	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C) &&
+	    !i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_I2C_BLOCK))
 		return -ENODEV;
 
-	pcf8563 = devm_kzalloc(&client->dev, sizeof(struct pcf8563),
-				GFP_KERNEL);
+	pcf8563 = devm_kzalloc_obj(&client->dev, struct pcf8563);
 	if (!pcf8563)
 		return -ENOMEM;
 
@@ -529,7 +531,7 @@ static int pcf8563_probe(struct i2c_client *client)
 		err = devm_request_threaded_irq(&client->dev, client->irq,
 				NULL, pcf8563_irq,
 				IRQF_SHARED | IRQF_ONESHOT | irqflags,
-				pcf8563_driver.driver.name, client);
+				pcf8563_driver.driver.name, pcf8563);
 		if (err) {
 			dev_err(&client->dev, "unable to request IRQ %d\n",
 								client->irq);
@@ -557,9 +559,9 @@ static int pcf8563_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id pcf8563_id[] = {
-	{ "pcf8563" },
-	{ "rtc8564" },
-	{ "pca8565" },
+	{ .name = "pcf8563" },
+	{ .name = "rtc8564" },
+	{ .name = "pca8565" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, pcf8563_id);

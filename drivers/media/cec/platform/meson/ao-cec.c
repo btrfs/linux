@@ -609,7 +609,7 @@ static int meson_ao_cec_probe(struct platform_device *pdev)
 	if (IS_ERR(hdmi_dev))
 		return PTR_ERR(hdmi_dev);
 
-	ao_cec = devm_kzalloc(&pdev->dev, sizeof(*ao_cec), GFP_KERNEL);
+	ao_cec = devm_kzalloc_obj(&pdev->dev, *ao_cec);
 	if (!ao_cec)
 		return -ENOMEM;
 
@@ -636,10 +636,8 @@ static int meson_ao_cec_probe(struct platform_device *pdev)
 					meson_ao_cec_irq,
 					meson_ao_cec_irq_thread,
 					0, NULL, ao_cec);
-	if (ret) {
-		dev_err(&pdev->dev, "irq request failed\n");
+	if (ret)
 		goto out_probe_adapter;
-	}
 
 	ao_cec->core = devm_clk_get(&pdev->dev, "core");
 	if (IS_ERR(ao_cec->core)) {

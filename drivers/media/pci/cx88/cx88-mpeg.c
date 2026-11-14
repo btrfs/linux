@@ -392,7 +392,8 @@ static int cx8802_init_common(struct cx8802_dev *dev)
 	err = dma_set_mask(&dev->pci->dev, DMA_BIT_MASK(32));
 	if (err) {
 		pr_err("Oops: no 32bit PCI DMA ???\n");
-		return -EIO;
+		err = -EIO;
+		goto fail_disable_device;
 	}
 
 	dev->pci_rev = dev->pci->revision;
@@ -413,13 +414,17 @@ static int cx8802_init_common(struct cx8802_dev *dev)
 			  IRQF_SHARED, dev->core->name, dev);
 	if (err < 0) {
 		pr_err("can't get IRQ %d\n", dev->pci->irq);
-		return err;
+		goto fail_disable_device;
 	}
 	cx_set(MO_PCI_INTMSK, core->pci_irqmask);
 
 	/* everything worked */
 	pci_set_drvdata(dev->pci, dev);
 	return 0;
+
+fail_disable_device:
+	pci_disable_device(dev->pci);
+	return err;
 }
 
 static void cx8802_fini_common(struct cx8802_dev *dev)
@@ -619,7 +624,7 @@ int cx8802_register_driver(struct cx8802_driver *drv)
 			dev->core->boardnr);
 
 		/* Bring up a new struct for each driver instance */
-		driver = kzalloc(sizeof(*drv), GFP_KERNEL);
+		driver = kzalloc_obj(*drv);
 		if (!driver) {
 			err = -ENOMEM;
 			goto out;
@@ -640,6 +645,7 @@ int cx8802_register_driver(struct cx8802_driver *drv)
 			list_add_tail(&driver->drvlist, &dev->drvlist);
 		} else {
 			pr_err("cx8802 probe failed, err = %d\n", err);
+			kfree(driver);
 		}
 		mutex_unlock(&drv->core->lock);
 	}
@@ -715,7 +721,7 @@ static int cx8802_probe(struct pci_dev *pci_dev,
 		goto fail_core;
 
 	err = -ENOMEM;
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev)
 		goto fail_core;
 	dev->pci = pci_dev;
@@ -787,10 +793,7 @@ static void cx8802_remove(struct pci_dev *pci_dev)
 
 static const struct pci_device_id cx8802_pci_tbl[] = {
 	{
-		.vendor       = 0x14f1,
-		.device       = 0x8802,
-		.subvendor    = PCI_ANY_ID,
-		.subdevice    = PCI_ANY_ID,
+		PCI_DEVICE(0x14f1, 0x8802),
 	}, {
 		/* --- end of list --- */
 	}

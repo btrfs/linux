@@ -199,7 +199,7 @@ static int xhci_histb_probe(struct platform_device *pdev)
 		return -ENODEV;
 
 	driver = &xhci_histb_hc_driver;
-	histb = devm_kzalloc(dev, sizeof(*histb), GFP_KERNEL);
+	histb = devm_kzalloc_obj(dev, *histb);
 	if (!histb)
 		return -ENOMEM;
 
@@ -276,7 +276,7 @@ static int xhci_histb_probe(struct platform_device *pdev)
 	if (ret)
 		goto put_usb3_hcd;
 
-	if (HCC_MAX_PSA(xhci->hcc_params) >= 4)
+	if (GET_MAX_PSA_SIZE(xhci->hcc_params) >= 4)
 		xhci->shared_hcd->can_do_streams = 1;
 
 	ret = usb_add_hcd(xhci->shared_hcd, irq, IRQF_SHARED);

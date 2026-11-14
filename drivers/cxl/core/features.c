@@ -94,9 +94,10 @@ get_supported_features(struct cxl_features_state *cxlfs)
 		return NULL;
 
 	struct cxl_feat_entries *entries __free(kvfree) =
-		kvmalloc(struct_size(entries, ent, count), GFP_KERNEL);
+		kvmalloc_flex(*entries, ent, count);
 	if (!entries)
 		return NULL;
+	entries->num_features = count;
 
 	struct cxl_mbox_get_sup_feats_out *mbox_out __free(kvfree) =
 		kvmalloc(cxl_mbox->payload_size, GFP_KERNEL);
@@ -174,7 +175,6 @@ get_supported_features(struct cxl_features_state *cxlfs)
 		start += num_entries;
 	} while (remain_feats);
 
-	entries->num_features = count;
 	entries->num_user_features = user_feats;
 
 	return no_free_ptr(entries);
@@ -204,7 +204,7 @@ int devm_cxl_setup_features(struct cxl_dev_state *cxlds)
 		return -ENODEV;
 
 	struct cxl_features_state *cxlfs __free(kfree) =
-		kzalloc(sizeof(*cxlfs), GFP_KERNEL);
+		kzalloc_obj(*cxlfs);
 	if (!cxlfs)
 		return -ENOMEM;
 
@@ -220,26 +220,30 @@ int devm_cxl_setup_features(struct cxl_dev_state *cxlds)
 }
 EXPORT_SYMBOL_NS_GPL(devm_cxl_setup_features, "CXL");
 
-size_t cxl_get_feature(struct cxl_mailbox *cxl_mbox, const uuid_t *feat_uuid,
-		       enum cxl_get_feat_selection selection,
-		       void *feat_out, size_t feat_out_size, u16 offset,
-		       u16 *return_code)
+ssize_t cxl_get_feature(struct cxl_mailbox *cxl_mbox, const uuid_t *feat_uuid,
+			enum cxl_get_feat_selection selection,
+			void *feat_out, size_t feat_out_size, u16 offset,
+			u16 *return_code)
 {
-	size_t data_to_rd_size, size_out;
+	size_t data_to_rd_size;
 	struct cxl_mbox_get_feat_in pi;
 	struct cxl_mbox_cmd mbox_cmd;
 	size_t data_rcvd_size = 0;
 	int rc;
 
 	if (return_code)
-		*return_code = CXL_MBOX_CMD_RC_INPUT;
+		*return_code = CXL_MBOX_CMD_RC_SUCCESS;
 
 	if (!feat_out || !feat_out_size)
-		return 0;
+		return -EINVAL;
 
-	size_out = min(feat_out_size, cxl_mbox->payload_size);
+	if (feat_out_size > U16_MAX - offset)
+		return -EINVAL;
+
 	uuid_copy(&pi.uuid, feat_uuid);
 	pi.selection = selection;
+
+	guard(mutex)(&cxl_mbox->feat_mutex);
 	do {
 		data_to_rd_size = min(feat_out_size - data_rcvd_size,
 				      cxl_mbox->payload_size);
@@ -250,21 +254,29 @@ size_t cxl_get_feature(struct cxl_mailbox *cxl_mbox, const uuid_t *feat_uuid,
 			.opcode = CXL_MBOX_OP_GET_FEATURE,
 			.size_in = sizeof(pi),
 			.payload_in = &pi,
-			.size_out = size_out,
+			.size_out = data_to_rd_size,
 			.payload_out = feat_out + data_rcvd_size,
 			.min_out = data_to_rd_size,
 		};
 		rc = cxl_internal_send_cmd(cxl_mbox, &mbox_cmd);
+		/*
+		 * Per CXL r4.0 8.2.10.6.2, when Offset + Count runs past the
+		 * end of the Feature the device returns only the bytes up to
+		 * the Feature size. cxl_internal_send_cmd() reports that as
+		 * -EIO with a short payload, so stop and return what arrived.
+		 */
+		if (rc == -EIO && mbox_cmd.size_out &&
+		    mbox_cmd.size_out < data_to_rd_size) {
+			data_rcvd_size += mbox_cmd.size_out;
+			break;
+		}
 		if (rc < 0 || !mbox_cmd.size_out) {
 			if (return_code)
 				*return_code = mbox_cmd.return_code;
-			return 0;
+			return rc < 0 ? rc : -EIO;
 		}
 		data_rcvd_size += mbox_cmd.size_out;
 	} while (data_rcvd_size < feat_out_size);
-
-	if (return_code)
-		*return_code = CXL_MBOX_CMD_RC_SUCCESS;
 
 	return data_rcvd_size;
 }
@@ -285,7 +297,10 @@ int cxl_set_feature(struct cxl_mailbox *cxl_mbox,
 	size_t hdr_size;
 
 	if (return_code)
-		*return_code = CXL_MBOX_CMD_RC_INPUT;
+		*return_code = CXL_MBOX_CMD_RC_SUCCESS;
+
+	if (feat_data_size > U16_MAX - offset)
+		return -EINVAL;
 
 	struct cxl_mbox_set_feat_in *pi __free(kfree) =
 			kzalloc(cxl_mbox->payload_size, GFP_KERNEL);
@@ -314,6 +329,7 @@ int cxl_set_feature(struct cxl_mailbox *cxl_mbox,
 		data_in_size = cxl_mbox->payload_size - hdr_size;
 	}
 
+	guard(mutex)(&cxl_mbox->feat_mutex);
 	do {
 		int rc;
 
@@ -332,11 +348,8 @@ int cxl_set_feature(struct cxl_mailbox *cxl_mbox,
 		}
 
 		data_sent_size += data_in_size;
-		if (data_sent_size >= feat_data_size) {
-			if (return_code)
-				*return_code = CXL_MBOX_CMD_RC_SUCCESS;
+		if (data_sent_size >= feat_data_size)
 			return 0;
-		}
 
 		if ((feat_data_size - data_sent_size) <= (cxl_mbox->payload_size - hdr_size)) {
 			data_in_size = feat_data_size - data_sent_size;
@@ -423,6 +436,7 @@ static void *cxlctl_get_supported_features(struct cxl_features_state *cxlfs,
 
 	rpc_out->size = struct_size(feat_out, ents, requested);
 	feat_out = &rpc_out->get_sup_feats_out;
+	feat_out->num_entries = cpu_to_le16(requested);
 
 	for (i = start, pos = &feat_out->ents[0];
 	     i < cxlfs->entries->num_features; i++, pos++) {
@@ -444,7 +458,6 @@ static void *cxlctl_get_supported_features(struct cxl_features_state *cxlfs,
 		}
 	}
 
-	feat_out->num_entries = cpu_to_le16(requested);
 	feat_out->supported_feats = cpu_to_le16(cxlfs->entries->num_features);
 	rpc_out->retval = CXL_MBOX_CMD_RC_SUCCESS;
 	*out_len = out_size;
@@ -460,6 +473,7 @@ static void *cxlctl_get_feature(struct cxl_features_state *cxlfs,
 	const struct cxl_mbox_get_feat_in *feat_in;
 	u16 offset, count, return_code;
 	size_t out_size = *out_len;
+	ssize_t data_size;
 
 	if (rpc_in->op_size != sizeof(*feat_in))
 		return ERR_PTR(-EINVAL);
@@ -471,21 +485,29 @@ static void *cxlctl_get_feature(struct cxl_features_state *cxlfs,
 	if (!count)
 		return ERR_PTR(-EINVAL);
 
+	if (out_size < offsetof(struct fwctl_rpc_cxl_out, payload) ||
+	    count > out_size - offsetof(struct fwctl_rpc_cxl_out, payload))
+		return ERR_PTR(-EINVAL);
+
 	struct fwctl_rpc_cxl_out *rpc_out __free(kvfree) =
 		kvzalloc(out_size, GFP_KERNEL);
 	if (!rpc_out)
 		return ERR_PTR(-ENOMEM);
 
-	out_size = cxl_get_feature(cxl_mbox, &feat_in->uuid,
-				   feat_in->selection, rpc_out->payload,
-				   count, offset, &return_code);
+	data_size = cxl_get_feature(cxl_mbox, &feat_in->uuid,
+				    feat_in->selection, rpc_out->payload,
+				    count, offset, &return_code);
+	if (data_size <= 0 &&
+	    return_code == CXL_MBOX_CMD_RC_SUCCESS)
+		return ERR_PTR(data_size ?: -EIO);
 	*out_len = sizeof(struct fwctl_rpc_cxl_out);
-	if (!out_size) {
+	if (data_size <= 0) {
 		rpc_out->size = 0;
 		rpc_out->retval = return_code;
 		return no_free_ptr(rpc_out);
 	}
 
+	out_size = data_size;
 	rpc_out->size = out_size;
 	rpc_out->retval = CXL_MBOX_CMD_RC_SUCCESS;
 	*out_len += out_size;
@@ -516,6 +538,9 @@ static void *cxlctl_set_feature(struct cxl_features_state *cxlfs,
 	flags = le32_to_cpu(feat_in->flags);
 	out_size = *out_len;
 
+	if (out_size < offsetof(struct fwctl_rpc_cxl_out, payload))
+		return ERR_PTR(-EINVAL);
+
 	struct fwctl_rpc_cxl_out *rpc_out __free(kvfree) =
 		kvzalloc(out_size, GFP_KERNEL);
 	if (!rpc_out)
@@ -527,6 +552,8 @@ static void *cxlctl_set_feature(struct cxl_features_state *cxlfs,
 	rc = cxl_set_feature(cxl_mbox, &feat_in->uuid,
 			     feat_in->version, feat_in->feat_data,
 			     data_size, flags, offset, &return_code);
+	if (rc && return_code == CXL_MBOX_CMD_RC_SUCCESS)
+		return ERR_PTR(rc);
 	*out_len = sizeof(*rpc_out);
 	if (rc) {
 		rpc_out->retval = return_code;
@@ -649,7 +676,13 @@ static void *cxlctl_fw_rpc(struct fwctl_uctx *uctx, enum fwctl_rpc_scope scope,
 	struct cxl_memdev *cxlmd = fwctl_to_memdev(fwctl_dev);
 	struct cxl_features_state *cxlfs = to_cxlfs(cxlmd->cxlds);
 	const struct fwctl_rpc_cxl *rpc_in = in;
-	u16 opcode = rpc_in->opcode;
+	u16 opcode;
+
+	if (in_len < sizeof(rpc_in->hdr) ||
+	    rpc_in->op_size > in_len - sizeof(rpc_in->hdr))
+		return ERR_PTR(-EINVAL);
+
+	opcode = rpc_in->opcode;
 
 	if (!cxlctl_validate_hw_command(cxlfs, rpc_in, scope, opcode))
 		return ERR_PTR(-EINVAL);

@@ -100,7 +100,7 @@
 
 /*
  * The slots are sorted by the size of the biggest continuous free area.
- * 1-31 bytes share the same slot.
+ * [PCPU_MIN_ALLOC_SIZE..15] bytes share the same slot.
  */
 #define PCPU_SLOT_BASE_SHIFT		5
 /* chunks in slots below this are subject to being sidelined on failed alloc */
@@ -758,7 +758,6 @@ static void pcpu_chunk_refresh_hint(struct pcpu_chunk *chunk, bool full_scan)
 		chunk_md->contig_hint = 0;
 	}
 
-	bits = 0;
 	pcpu_for_each_md_free_region(chunk, bit_off, bits)
 		pcpu_block_update(chunk_md, bit_off, bit_off + bits);
 }
@@ -1122,7 +1121,6 @@ static int pcpu_find_block_fit(struct pcpu_chunk *chunk, int alloc_bits,
 		return -1;
 
 	bit_off = pcpu_next_hint(chunk_md, alloc_bits);
-	bits = 0;
 	pcpu_for_each_fit_region(chunk, alloc_bits, align, bit_off, bits) {
 		if (!pop_only || pcpu_is_populated(chunk, bit_off, bits,
 						   &next_off))
@@ -1279,11 +1277,15 @@ static int pcpu_free_area(struct pcpu_chunk *chunk, int off)
 	int bit_off, bits, end, oslot, freed;
 
 	lockdep_assert_held(&pcpu_lock);
-	pcpu_stats_area_dealloc(chunk);
 
 	oslot = pcpu_chunk_slot(chunk);
 
 	bit_off = off / PCPU_MIN_ALLOC_SIZE;
+
+	/* check invalid free */
+	if (!test_bit(bit_off, chunk->alloc_map) ||
+	    !test_bit(bit_off, chunk->bound_map))
+		return 0;
 
 	/* find end index */
 	end = find_next_bit(chunk->bound_map, pcpu_chunk_map_bits(chunk),
@@ -1302,6 +1304,8 @@ static int pcpu_free_area(struct pcpu_chunk *chunk, int off)
 	pcpu_block_update_hint_free(chunk, bit_off, bits);
 
 	pcpu_chunk_relocate(chunk, oslot);
+
+	pcpu_stats_area_dealloc(chunk);
 
 	return freed;
 }
@@ -1616,7 +1620,7 @@ static bool pcpu_memcg_pre_alloc_hook(size_t size, gfp_t gfp,
 		return true;
 
 	objcg = current_obj_cgroup();
-	if (!objcg)
+	if (!objcg || obj_cgroup_is_root(objcg))
 		return true;
 
 	if (obj_cgroup_charge(objcg, gfp, pcpu_obj_full_size(size)))
@@ -1692,14 +1696,15 @@ static void pcpu_alloc_tag_alloc_hook(struct pcpu_chunk *chunk, int off,
 {
 	if (mem_alloc_profiling_enabled() && likely(chunk->obj_exts)) {
 		alloc_tag_add(&chunk->obj_exts[off >> PCPU_MIN_ALLOC_SHIFT].tag,
-			      current->alloc_tag, size);
+			      current->alloc_tag, pcpu_obj_full_size(size));
 	}
 }
 
 static void pcpu_alloc_tag_free_hook(struct pcpu_chunk *chunk, int off, size_t size)
 {
 	if (mem_alloc_profiling_enabled() && likely(chunk->obj_exts))
-		alloc_tag_sub(&chunk->obj_exts[off >> PCPU_MIN_ALLOC_SHIFT].tag, size);
+		alloc_tag_sub(&chunk->obj_exts[off >> PCPU_MIN_ALLOC_SHIFT].tag,
+			      pcpu_obj_full_size(size));
 }
 #else
 static void pcpu_alloc_tag_alloc_hook(struct pcpu_chunk *chunk, int off,
@@ -1720,9 +1725,8 @@ static void pcpu_alloc_tag_free_hook(struct pcpu_chunk *chunk, int off, size_t s
  * @gfp: allocation flags
  *
  * Allocate percpu area of @size bytes aligned at @align.  If @gfp doesn't
- * contain %GFP_KERNEL, the allocation is atomic. If @gfp has __GFP_NOWARN
- * then no warning will be triggered on invalid or failed allocation
- * requests.
+ * allow blocking, the allocation is atomic. If @gfp has __GFP_NOWARN then no
+ * warning will be triggered on invalid or failed allocation requests.
  *
  * RETURNS:
  * Percpu pointer to the allocated area on success, NULL on failure.
@@ -1743,8 +1747,17 @@ void __percpu *pcpu_alloc_noprof(size_t size, size_t align, bool reserved,
 	size_t bits, bit_align;
 
 	gfp = current_gfp_context(gfp);
-	/* whitelisted flags that can be passed to the backing allocators */
-	pcpu_gfp = gfp & (GFP_KERNEL | __GFP_NORETRY | __GFP_NOWARN);
+	/*
+	 * Allowlisted flags that can be passed to the backing allocators.
+	 * Backing allocations under pcpu_alloc_mutex must not recurse into
+	 * IO/FS reclaim.  Otherwise a GFP_KERNEL caller holding the mutex can
+	 * block on reclaim while a GFP_NOIO/NOFS caller holding an IO/FS lock
+	 * waits for the same mutex.
+	 *
+	 * Do not pass __GFP_NOFAIL.  A small percpu allocation may need many
+	 * backing pages, making nofail reclaim too costly under NOIO/NOFS.
+	 */
+	pcpu_gfp = gfp & (GFP_NOIO | __GFP_NORETRY | __GFP_NOWARN);
 	is_atomic = !gfpflags_allow_blocking(gfp);
 	do_warn = !(gfp & __GFP_NOWARN);
 
@@ -2242,6 +2255,13 @@ void free_percpu(void __percpu *ptr)
 
 	spin_lock_irqsave(&pcpu_lock, flags);
 	size = pcpu_free_area(chunk, off);
+	if (size == 0) {
+		spin_unlock_irqrestore(&pcpu_lock, flags);
+
+		/* invalid percpu free */
+		WARN_ON_ONCE(1);
+		return;
+	}
 
 	pcpu_alloc_tag_free_hook(chunk, off, size);
 
@@ -2798,7 +2818,7 @@ static struct pcpu_alloc_info * __init __flatten pcpu_build_alloc_info(
 	static int group_cnt[NR_CPUS] __initdata;
 	static struct cpumask mask __initdata;
 	const size_t static_size = __per_cpu_end - __per_cpu_start;
-	int nr_groups = 1, nr_units = 0;
+	int nr_groups, nr_units = 0;
 	size_t size_sum, min_unit_size, alloc_size;
 	int upa, max_upa, best_upa;	/* units_per_alloc */
 	int last_allocs, group, unit;
@@ -2809,7 +2829,6 @@ static struct pcpu_alloc_info * __init __flatten pcpu_build_alloc_info(
 	/* this function may be called multiple times */
 	memset(group_map, 0, sizeof(group_map));
 	memset(group_cnt, 0, sizeof(group_cnt));
-	cpumask_clear(&mask);
 
 	/* calculate size_sum and ensure dyn_size is enough for early alloc */
 	size_sum = PFN_ALIGN(static_size + reserved_size +
@@ -3160,8 +3179,6 @@ void __init __weak pcpu_populate_pte(unsigned long addr)
 		new = memblock_alloc_or_panic(PTE_TABLE_SIZE, PTE_TABLE_SIZE);
 		pmd_populate_kernel(&init_mm, pmd, new);
 	}
-
-	return;
 }
 
 /**
@@ -3243,7 +3260,7 @@ int __init pcpu_page_first_chunk(size_t reserved_size, pcpu_fc_cpu_to_node_fn_t 
 
 		/* pte already populated, the following shouldn't fail */
 		rc = __pcpu_map_pages(unit_addr, &pages[unit * unit_pages],
-				      unit_pages);
+				      unit_pages, GFP_KERNEL);
 		if (rc < 0)
 			panic("failed to map percpu area, err=%d\n", rc);
 

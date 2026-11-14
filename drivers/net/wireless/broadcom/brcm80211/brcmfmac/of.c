@@ -37,7 +37,7 @@ static int brcmf_of_get_country_codes(struct device *dev,
 		return (count == -EINVAL) ? 0 : count;
 	}
 
-	cc = devm_kzalloc(dev, struct_size(cc, table, count), GFP_KERNEL);
+	cc = devm_kzalloc_flex(dev, *cc, table, count);
 	if (!cc)
 		return -ENOMEM;
 
@@ -128,7 +128,9 @@ int brcmf_of_probe(struct device *dev, enum brcmf_bus_type bus_type,
 	if (err)
 		brcmf_err("failed to get OF country code map (err=%d)\n", err);
 
-	of_get_mac_address(np, settings->mac);
+	err = of_get_mac_address(np, settings->mac);
+	if (err == -EPROBE_DEFER)
+		return err;
 
 	if (bus_type != BRCMF_BUSTYPE_SDIO)
 		return 0;

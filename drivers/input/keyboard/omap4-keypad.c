@@ -193,7 +193,6 @@ static irqreturn_t omap4_keypad_irq_thread_fn(int irq, void *dev_id)
 	kbd_write_irqreg(keypad_data, OMAP4_KBD_IRQSTATUS,
 			 kbd_read_irqreg(keypad_data, OMAP4_KBD_IRQSTATUS));
 
-	pm_runtime_mark_last_busy(dev);
 	pm_runtime_put_autosuspend(dev);
 
 	return IRQ_HANDLED;
@@ -231,7 +230,6 @@ static int omap4_keypad_open(struct input_dev *input)
 	enable_irq(keypad_data->irq);
 
 out:
-	pm_runtime_mark_last_busy(dev);
 	pm_runtime_put_autosuspend(dev);
 
 	return error;
@@ -265,7 +263,6 @@ static void omap4_keypad_close(struct input_dev *input)
 	enable_irq(keypad_data->irq);
 	clk_disable_unprepare(keypad_data->fck);
 
-	pm_runtime_mark_last_busy(dev);
 	pm_runtime_put_autosuspend(dev);
 }
 
@@ -355,7 +352,7 @@ static int omap4_keypad_probe(struct platform_device *pdev)
 	if (irq < 0)
 		return irq;
 
-	keypad_data = devm_kzalloc(dev, sizeof(*keypad_data), GFP_KERNEL);
+	keypad_data = devm_kzalloc_obj(dev, *keypad_data);
 	if (!keypad_data) {
 		dev_err(dev, "keypad_data memory allocation failed\n");
 		return -ENOMEM;
@@ -404,7 +401,6 @@ static int omap4_keypad_probe(struct platform_device *pdev)
 		omap4_keypad_stop(keypad_data);
 	}
 
-	pm_runtime_mark_last_busy(dev);
 	pm_runtime_put_autosuspend(dev);
 	if (error)
 		return error;
@@ -431,10 +427,8 @@ static int omap4_keypad_probe(struct platform_device *pdev)
 
 	keypad_data->row_shift = get_count_order(keypad_data->cols);
 	max_keys = keypad_data->rows << keypad_data->row_shift;
-	keypad_data->keymap = devm_kcalloc(dev,
-					   max_keys,
-					   sizeof(keypad_data->keymap[0]),
-					   GFP_KERNEL);
+	keypad_data->keymap = devm_kzalloc_objs(dev, keypad_data->keymap[0],
+						max_keys);
 	if (!keypad_data->keymap) {
 		dev_err(dev, "Not enough memory for keymap\n");
 		return -ENOMEM;

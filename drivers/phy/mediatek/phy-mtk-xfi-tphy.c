@@ -353,7 +353,7 @@ static int mtk_xfi_tphy_power_on(struct phy *phy)
  * Disable and unprepare all clocks previously enabled.
  *
  * Return:
- * See clk_bulk_prepare_disable().
+ * See clk_bulk_disable_unprepare().
  */
 static int mtk_xfi_tphy_power_off(struct phy *phy)
 {
@@ -399,7 +399,7 @@ static int mtk_xfi_tphy_probe(struct platform_device *pdev)
 	if (!np)
 		return -ENODEV;
 
-	xfi_tphy = devm_kzalloc(&pdev->dev, sizeof(*xfi_tphy), GFP_KERNEL);
+	xfi_tphy = devm_kzalloc_obj(&pdev->dev, *xfi_tphy);
 	if (!xfi_tphy)
 		return -ENOMEM;
 

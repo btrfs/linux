@@ -1499,6 +1499,13 @@ static int soctherm_clk_enable(struct platform_device *pdev, bool enable)
 	return 0;
 }
 
+static void soctherm_clk_disable(void *data)
+{
+	struct platform_device *pdev = data;
+
+	soctherm_clk_enable(pdev, false);
+}
+
 static int throt_get_cdev_max_state(struct thermal_cooling_device *cdev,
 				    unsigned long *max_state)
 {
@@ -1554,7 +1561,7 @@ static int soctherm_thermtrips_parse(struct platform_device *pdev)
 
 	n = min(max_num_prop, n);
 
-	tlb = devm_kcalloc(&pdev->dev, max_num_prop, sizeof(u32), GFP_KERNEL);
+	tlb = devm_kzalloc_objs(&pdev->dev, u32, max_num_prop);
 	if (!tlb)
 		return -ENOMEM;
 	ret = of_property_read_u32_array(dev->of_node, "nvidia,thermtrips",
@@ -1700,9 +1707,9 @@ static void soctherm_init_hw_throt_cdev(struct platform_device *pdev)
 			stc->init = true;
 		} else {
 
-			tcd = thermal_of_cooling_device_register(np_stcc,
-							 (char *)name, ts,
-							 &throt_cooling_ops);
+			tcd = devm_thermal_of_child_cooling_device_register(dev, np_stcc,
+									    (char *)name, ts,
+									    &throt_cooling_ops);
 			if (IS_ERR_OR_NULL(tcd)) {
 				dev_err(dev,
 					"throttle-cfg: %s: failed to register cooling device\n",
@@ -2000,10 +2007,8 @@ static int soctherm_interrupts_init(struct platform_device *pdev,
 					IRQF_ONESHOT,
 					dev_name(&pdev->dev),
 					tegra);
-	if (ret < 0) {
-		dev_err(&pdev->dev, "request_irq 'thermal_irq' failed.\n");
+	if (ret < 0)
 		return ret;
-	}
 
 	ret = devm_request_threaded_irq(&pdev->dev,
 					tegra->edp_irq,
@@ -2012,10 +2017,8 @@ static int soctherm_interrupts_init(struct platform_device *pdev,
 					IRQF_ONESHOT,
 					"soctherm_edp",
 					tegra);
-	if (ret < 0) {
-		dev_err(&pdev->dev, "request_irq 'edp_irq' failed.\n");
+	if (ret < 0)
 		return ret;
-	}
 
 	return 0;
 }
@@ -2098,7 +2101,7 @@ static int tegra_soctherm_probe(struct platform_device *pdev)
 	if (soc->num_ttgs > TEGRA124_SOCTHERM_SENSOR_NUM)
 		return -EINVAL;
 
-	tegra = devm_kzalloc(&pdev->dev, sizeof(*tegra), GFP_KERNEL);
+	tegra = devm_kzalloc_obj(&pdev->dev, *tegra);
 	if (!tegra)
 		return -ENOMEM;
 
@@ -2145,9 +2148,7 @@ static int tegra_soctherm_probe(struct platform_device *pdev)
 		return PTR_ERR(tegra->clock_soctherm);
 	}
 
-	tegra->calib = devm_kcalloc(&pdev->dev,
-				    soc->num_tsensors, sizeof(u32),
-				    GFP_KERNEL);
+	tegra->calib = devm_kzalloc_objs(&pdev->dev, u32, soc->num_tsensors);
 	if (!tegra->calib)
 		return -ENOMEM;
 
@@ -2165,13 +2166,15 @@ static int tegra_soctherm_probe(struct platform_device *pdev)
 			return err;
 	}
 
-	tegra->thermctl_tzs = devm_kcalloc(&pdev->dev,
-					   soc->num_ttgs, sizeof(z),
-					   GFP_KERNEL);
+	tegra->thermctl_tzs = devm_kzalloc_objs(&pdev->dev, z, soc->num_ttgs);
 	if (!tegra->thermctl_tzs)
 		return -ENOMEM;
 
 	err = soctherm_clk_enable(pdev, true);
+	if (err)
+		return err;
+
+	err = devm_add_action_or_reset(&pdev->dev, soctherm_clk_disable, pdev);
 	if (err)
 		return err;
 
@@ -2182,12 +2185,10 @@ static int tegra_soctherm_probe(struct platform_device *pdev)
 	soctherm_init(pdev);
 
 	for (i = 0; i < soc->num_ttgs; ++i) {
-		struct tegra_thermctl_zone *zone =
-			devm_kzalloc(&pdev->dev, sizeof(*zone), GFP_KERNEL);
-		if (!zone) {
-			err = -ENOMEM;
-			goto disable_clocks;
-		}
+		struct tegra_thermctl_zone *zone = devm_kzalloc_obj(&pdev->dev,
+								    *zone);
+		if (!zone)
+			return -ENOMEM;
 
 		zone->reg = tegra->regs + soc->ttgs[i]->sensor_temp_offset;
 		zone->dev = &pdev->dev;
@@ -2201,7 +2202,7 @@ static int tegra_soctherm_probe(struct platform_device *pdev)
 			err = PTR_ERR(z);
 			dev_err(&pdev->dev, "failed to register sensor: %d\n",
 				err);
-			goto disable_clocks;
+			return err;
 		}
 
 		zone->tz = z;
@@ -2210,7 +2211,7 @@ static int tegra_soctherm_probe(struct platform_device *pdev)
 		/* Configure hw trip points */
 		err = tegra_soctherm_set_hwtrips(&pdev->dev, soc->ttgs[i], z);
 		if (err)
-			goto disable_clocks;
+			return err;
 	}
 
 	err = soctherm_interrupts_init(pdev, tegra);
@@ -2218,11 +2219,6 @@ static int tegra_soctherm_probe(struct platform_device *pdev)
 	soctherm_debug_init(pdev);
 
 	return 0;
-
-disable_clocks:
-	soctherm_clk_enable(pdev, false);
-
-	return err;
 }
 
 static void tegra_soctherm_remove(struct platform_device *pdev)
@@ -2230,8 +2226,6 @@ static void tegra_soctherm_remove(struct platform_device *pdev)
 	struct tegra_soctherm *tegra = platform_get_drvdata(pdev);
 
 	debugfs_remove_recursive(tegra->debugfs_dir);
-
-	soctherm_clk_enable(pdev, false);
 }
 
 static int __maybe_unused soctherm_suspend(struct device *dev)

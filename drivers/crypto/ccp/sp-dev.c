@@ -178,7 +178,7 @@ struct sp_device *sp_alloc_struct(struct device *dev)
 {
 	struct sp_device *sp;
 
-	sp = devm_kzalloc(dev, sizeof(*sp), GFP_KERNEL);
+	sp = devm_kzalloc_obj(dev, *sp);
 	if (!sp)
 		return NULL;
 
@@ -228,6 +228,18 @@ int sp_resume(struct sp_device *sp)
 	}
 
 	return 0;
+}
+
+int sp_restore(struct sp_device *sp)
+{
+	if (sp->psp_data) {
+		int ret = psp_restore(sp);
+
+		if (ret)
+			return ret;
+	}
+
+	return sp_resume(sp);
 }
 
 struct sp_device *sp_get_psp_master_device(void)

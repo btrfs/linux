@@ -29,6 +29,8 @@
 
 #define IH_RING_SIZE	(256 * 1024)
 #define IH_SW_RING_SIZE	(16 * 1024)	/* enough for 512 CAM entries */
+#define IH_PSP_RING_SIZE (SZ_4K)
+#define IH_UALINK_RING_SIZE    (256 * 1024)
 
 struct amdgpu_device;
 struct amdgpu_iv_entry;
@@ -91,6 +93,12 @@ struct amdgpu_ih_funcs {
 	uint64_t (*decode_iv_ts)(struct amdgpu_ih_ring *ih, u32 rptr,
 				 signed int offset);
 	void (*set_rptr)(struct amdgpu_device *adev, struct amdgpu_ih_ring *ih);
+	/* Decode IH cookie node_id into a human-readable die name string.
+	 * Returns buf, or NULL if this IH version does not support node_id decoding.
+	 */
+	const char *(*node_id_to_die_name)(struct amdgpu_device *adev,
+					   unsigned int node_id,
+					   char *buf, size_t size);
 };
 
 #define amdgpu_ih_get_wptr(adev, ih) (adev)->irq.ih_funcs->get_wptr((adev), (ih))

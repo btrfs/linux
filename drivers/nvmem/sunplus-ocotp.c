@@ -13,7 +13,6 @@
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/nvmem-provider.h>
 #include <linux/platform_device.h>
 
@@ -161,7 +160,7 @@ static int sp_ocotp_probe(struct platform_device *pdev)
 	struct sp_ocotp_priv *otp;
 	int ret;
 
-	otp = devm_kzalloc(dev, sizeof(*otp), GFP_KERNEL);
+	otp = devm_kzalloc_obj(dev, *otp);
 	if (!otp)
 		return -ENOMEM;
 

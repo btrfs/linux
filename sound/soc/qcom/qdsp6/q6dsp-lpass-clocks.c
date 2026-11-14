@@ -12,7 +12,7 @@
 #include <dt-bindings/sound/qcom,q6dsp-lpass-ports.h>
 #include "q6dsp-lpass-clocks.h"
 
-#define Q6DSP_MAX_CLK_ID			104
+#define Q6DSP_MAX_CLK_ID			105
 #define Q6DSP_LPASS_CLK_ROOT_DEFAULT		0
 
 
@@ -134,7 +134,7 @@ int q6dsp_clock_dev_probe(struct platform_device *pdev)
 	const struct q6dsp_clk_desc *desc;
 	int i, ret;
 
-	cc = devm_kzalloc(dev, sizeof(*cc), GFP_KERNEL);
+	cc = devm_kzalloc_obj(dev, *cc);
 	if (!cc)
 		return -ENOMEM;
 
@@ -153,7 +153,7 @@ int q6dsp_clock_dev_probe(struct platform_device *pdev)
 		};
 		struct q6dsp_clk *clk;
 
-		clk = devm_kzalloc(dev, sizeof(*clk), GFP_KERNEL);
+		clk = devm_kzalloc_obj(dev, *clk);
 		if (!clk)
 			return -ENOMEM;
 

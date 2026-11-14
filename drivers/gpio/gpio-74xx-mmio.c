@@ -9,7 +9,6 @@
 #include <linux/err.h>
 #include <linux/gpio/driver.h>
 #include <linux/gpio/generic.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -113,7 +112,7 @@ static int mmio_74xx_gpio_probe(struct platform_device *pdev)
 	void __iomem *dat;
 	int err;
 
-	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&pdev->dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

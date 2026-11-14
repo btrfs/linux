@@ -4,6 +4,7 @@
  */
 
 #include <linux/fs.h>
+#include <linux/capability.h>
 #include <linux/filelock.h>
 #include <linux/miscdevice.h>
 #include <linux/poll.h>
@@ -102,7 +103,7 @@ static int do_lock_cancel(const struct dlm_plock_info *orig_info)
 	struct plock_op *op;
 	int rv;
 
-	op = kzalloc(sizeof(*op), GFP_NOFS);
+	op = kzalloc_obj(*op, GFP_NOFS);
 	if (!op)
 		return -ENOMEM;
 
@@ -131,7 +132,7 @@ int dlm_posix_lock(dlm_lockspace_t *lockspace, u64 number, struct file *file,
 	if (!ls)
 		return -EINVAL;
 
-	op = kzalloc(sizeof(*op), GFP_NOFS);
+	op = kzalloc_obj(*op, GFP_NOFS);
 	if (!op) {
 		rv = -ENOMEM;
 		goto out;
@@ -148,7 +149,7 @@ int dlm_posix_lock(dlm_lockspace_t *lockspace, u64 number, struct file *file,
 	op->info.owner = (__u64)(long) fl->c.flc_owner;
 	/* async handling */
 	if (fl->fl_lmops && fl->fl_lmops->lm_grant) {
-		op_data = kzalloc(sizeof(*op_data), GFP_NOFS);
+		op_data = kzalloc_obj(*op_data, GFP_NOFS);
 		if (!op_data) {
 			dlm_release_plock_op(op);
 			rv = -ENOMEM;
@@ -297,7 +298,7 @@ int dlm_posix_unlock(dlm_lockspace_t *lockspace, u64 number, struct file *file,
 	if (!ls)
 		return -EINVAL;
 
-	op = kzalloc(sizeof(*op), GFP_NOFS);
+	op = kzalloc_obj(*op, GFP_NOFS);
 	if (!op) {
 		rv = -ENOMEM;
 		goto out;
@@ -430,7 +431,7 @@ int dlm_posix_get(dlm_lockspace_t *lockspace, u64 number, struct file *file,
 	if (!ls)
 		return -EINVAL;
 
-	op = kzalloc(sizeof(*op), GFP_NOFS);
+	op = kzalloc_obj(*op, GFP_NOFS);
 	if (!op) {
 		rv = -ENOMEM;
 		goto out;
@@ -476,6 +477,15 @@ out:
 	return rv;
 }
 EXPORT_SYMBOL_GPL(dlm_posix_get);
+
+static int dev_open(struct inode *inode, struct file *file)
+{
+	/* Userspace plock daemon is a privileged cluster component. */
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	return 0;
+}
 
 /* a read copies out one plock request from the send list */
 static ssize_t dev_read(struct file *file, char __user *u, size_t count,
@@ -598,6 +608,7 @@ static __poll_t dev_poll(struct file *file, poll_table *wait)
 }
 
 static const struct file_operations dev_fops = {
+	.open    = dev_open,
 	.read    = dev_read,
 	.write   = dev_write,
 	.poll    = dev_poll,
@@ -608,7 +619,8 @@ static const struct file_operations dev_fops = {
 static struct miscdevice plock_dev_misc = {
 	.minor = MISC_DYNAMIC_MINOR,
 	.name = DLM_PLOCK_MISC_NAME,
-	.fops = &dev_fops
+	.fops = &dev_fops,
+	.mode = 0600,
 };
 
 int dlm_plock_init(void)

@@ -173,7 +173,7 @@ static int gpio_exar_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	exar_gpio = devm_kzalloc(dev, sizeof(*exar_gpio), GFP_KERNEL);
+	exar_gpio = devm_kzalloc_obj(dev, *exar_gpio);
 	if (!exar_gpio)
 		return -ENOMEM;
 
@@ -199,6 +199,7 @@ static int gpio_exar_probe(struct platform_device *pdev)
 	index = ida_alloc(&ida_index, GFP_KERNEL);
 	if (index < 0)
 		return index;
+	exar_gpio->index = index;
 
 	ret = devm_add_action_or_reset(dev, exar_devm_ida_free, exar_gpio);
 	if (ret)
@@ -214,7 +215,6 @@ static int gpio_exar_probe(struct platform_device *pdev)
 	exar_gpio->gpio_chip.set = exar_set_value;
 	exar_gpio->gpio_chip.base = -1;
 	exar_gpio->gpio_chip.ngpio = ngpios;
-	exar_gpio->index = index;
 	exar_gpio->first_pin = first_pin;
 
 	ret = devm_gpiochip_add_data(dev, &exar_gpio->gpio_chip, exar_gpio);

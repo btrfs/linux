@@ -185,7 +185,7 @@ int batadv_send_skb_to_orig(struct sk_buff *skb,
 	/* Check if the skb is too large to send in one piece and fragment
 	 * it if needed.
 	 */
-	if (atomic_read(&bat_priv->fragmentation) &&
+	if (READ_ONCE(bat_priv->fragmentation) &&
 	    skb->len > neigh_node->if_incoming->net_dev->mtu) {
 		/* Fragment and send packet. */
 		ret = batadv_frag_send_packet(skb, orig_node, neigh_node);
@@ -222,7 +222,7 @@ batadv_send_skb_push_fill_unicast(struct sk_buff *skb, int hdr_size,
 				  struct batadv_orig_node *orig_node)
 {
 	struct batadv_unicast_packet *unicast_packet;
-	u8 ttvn = (u8)atomic_read(&orig_node->last_ttvn);
+	u8 ttvn = READ_ONCE(orig_node->last_ttvn);
 
 	if (batadv_skb_head_push(skb, hdr_size) < 0)
 		return false;
@@ -271,8 +271,8 @@ bool batadv_send_skb_prepare_unicast_4addr(struct batadv_priv *bat_priv,
 					   struct batadv_orig_node *orig,
 					   int packet_subtype)
 {
-	struct batadv_hard_iface *primary_if;
 	struct batadv_unicast_4addr_packet *uc_4addr_packet;
+	struct batadv_hard_iface *primary_if;
 	bool ret = false;
 
 	primary_if = batadv_primary_if_get_selected(bat_priv);
@@ -322,8 +322,9 @@ int batadv_send_skb_unicast(struct batadv_priv *bat_priv,
 			    unsigned short vid)
 {
 	struct batadv_unicast_packet *unicast_packet;
-	struct ethhdr *ethhdr;
 	int ret = NET_XMIT_DROP;
+	struct ethhdr *ethhdr;
+	int res;
 
 	if (!orig_node)
 		goto out;
@@ -360,7 +361,10 @@ int batadv_send_skb_unicast(struct batadv_priv *bat_priv,
 	if (batadv_tt_global_client_is_roaming(bat_priv, ethhdr->h_dest, vid))
 		unicast_packet->ttvn = unicast_packet->ttvn - 1;
 
-	ret = batadv_send_skb_to_orig(skb, orig_node, NULL);
+	res = batadv_send_skb_to_orig(skb, orig_node, NULL);
+	if (res == NET_XMIT_SUCCESS)
+		ret = NET_XMIT_SUCCESS;
+
 	 /* skb was consumed */
 	skb = NULL;
 
@@ -394,7 +398,8 @@ int batadv_send_skb_via_tt_generic(struct batadv_priv *bat_priv,
 {
 	struct ethhdr *ethhdr = (struct ethhdr *)skb->data;
 	struct batadv_orig_node *orig_node;
-	u8 *src, *dst;
+	u8 *src;
+	u8 *dst;
 	int ret;
 
 	src = ethhdr->h_source;
@@ -503,7 +508,7 @@ batadv_forw_packet_alloc(struct batadv_hard_iface *if_incoming,
 		return NULL;
 	}
 
-	forw_packet = kmalloc(sizeof(*forw_packet), GFP_ATOMIC);
+	forw_packet = kmalloc_obj(*forw_packet, GFP_ATOMIC);
 	if (!forw_packet)
 		goto err;
 
@@ -629,7 +634,7 @@ static void batadv_forw_packet_list_free(struct hlist_head *head)
 
 	hlist_for_each_entry_safe(forw_packet, safe_tmp_node, head,
 				  cleanup_list) {
-		cancel_delayed_work_sync(&forw_packet->delayed_work);
+		disable_delayed_work_sync(&forw_packet->delayed_work);
 
 		hlist_del(&forw_packet->cleanup_list);
 		batadv_forw_packet_free(forw_packet, true);
@@ -1047,7 +1052,7 @@ static void batadv_send_outstanding_bcast_packet(struct work_struct *work)
 				   delayed_work);
 	bat_priv = netdev_priv(forw_packet->if_incoming->mesh_iface);
 
-	if (atomic_read(&bat_priv->mesh_state) == BATADV_MESH_DEACTIVATING) {
+	if (READ_ONCE(bat_priv->mesh_state) == BATADV_MESH_DEACTIVATING) {
 		dropped = true;
 		goto out;
 	}

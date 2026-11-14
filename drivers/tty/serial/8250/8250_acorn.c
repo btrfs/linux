@@ -8,6 +8,7 @@
 #include <linux/types.h>
 #include <linux/tty.h>
 #include <linux/serial_core.h>
+#include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
 #include <linux/slab.h>
@@ -31,7 +32,7 @@ struct serial_card_type {
 
 struct serial_card_info {
 	unsigned int	num_ports;
-	int		ports[MAX_PORTS];
+	struct uart_8250_port *ports[MAX_PORTS];
 	void __iomem *vaddr;
 };
 
@@ -44,7 +45,7 @@ serial_card_probe(struct expansion_card *ec, const struct ecard_id *id)
 	unsigned long bus_addr;
 	unsigned int i;
 
-	info = kzalloc(sizeof(struct serial_card_info), GFP_KERNEL);
+	info = kzalloc_obj(struct serial_card_info);
 	if (!info)
 		return -ENOMEM;
 
@@ -85,7 +86,7 @@ static void serial_card_remove(struct expansion_card *ec)
 	ecard_set_drvdata(ec, NULL);
 
 	for (i = 0; i < info->num_ports; i++)
-		if (info->ports[i] > 0)
+		if (!IS_ERR_OR_NULL(info->ports[i]))
 			serial8250_unregister_port(info->ports[i]);
 
 	kfree(info);

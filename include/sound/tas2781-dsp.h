@@ -56,6 +56,10 @@ enum tasdevice_dsp_dev_idx {
 	TASDEVICE_DSP_TAS_2781_QUAD,
 	TASDEVICE_DSP_TAS_5825_MONO,
 	TASDEVICE_DSP_TAS_5825_DUAL,
+	TASDEVICE_DSP_TAS_2573_MONO,
+	TASDEVICE_DSP_TAS_2573_DUAL,
+	TASDEVICE_DSP_TAS_2573_21,
+	TASDEVICE_DSP_TAS_2573_QUAD,
 	TASDEVICE_DSP_TAS_MAX_DEVICE
 };
 
@@ -142,6 +146,7 @@ struct tasdevice_fw {
 	struct tasdevice_calibration *calibrations;
 	struct fct_param_address fct_par_addr;
 	struct device *dev;
+	int calibration_config_id;
 };
 
 enum tasdevice_fw_state {
@@ -202,6 +207,19 @@ struct tasdevice_rca {
 	struct tasdevice_config_info **cfg_info;
 	int profile_cfg_id;
 	/*
+	 * Used among SmartAMP for PDM microphone recording or IV data
+	 * capture.
+	 */
+	int capture_profile_id;
+	/*
+	 * Primarily designed for speaker calibration scenarios with special
+	 * requirements. For regular use cases, when the default value -1 is
+	 * set, calibration will directly reuse the current playback
+	 * configuration; non-negative values can be customized for special
+	 * calibration demands.
+	 */
+	int calibration_profile_id;
+	/*
 	 * Since version 0x105, the keyword 'init' was introduced into the
 	 * profile, which is used for chip initialization, particularly to
 	 * store common settings for other non-initialization profiles.
@@ -222,7 +240,7 @@ void tasdevice_calbin_remove(void *context);
 int tasdevice_select_tuningprm_cfg(void *context, int prm,
 	int cfg_no, int rca_conf_no);
 int tasdevice_prmg_load(void *context, int prm_no);
-void tasdevice_tuning_switch(void *context, int state);
+void tasdevice_tuning_switch(void *context, int state, bool is_cap);
 int tas2781_load_calibration(void *context, char *file_name,
 	unsigned short i);
 

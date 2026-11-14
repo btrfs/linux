@@ -210,7 +210,7 @@ static int ltc2990_i2c_probe(struct i2c_client *i2c)
 				     I2C_FUNC_SMBUS_WORD_DATA))
 		return -ENODEV;
 
-	data = devm_kzalloc(&i2c->dev, sizeof(struct ltc2990_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(&i2c->dev, struct ltc2990_data);
 	if (unlikely(!data))
 		return -ENOMEM;
 
@@ -259,8 +259,8 @@ static int ltc2990_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id ltc2990_i2c_id[] = {
-	{ "ltc2990" },
-	{}
+	{ .name = "ltc2990" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ltc2990_i2c_id);
 

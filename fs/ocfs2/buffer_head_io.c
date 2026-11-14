@@ -62,18 +62,18 @@ int ocfs2_write_block(struct ocfs2_super *osb, struct buffer_head *bh,
 	/* remove from dirty list before I/O. */
 	clear_buffer_dirty(bh);
 
-	get_bh(bh); /* for end_buffer_write_sync() */
-	bh->b_end_io = end_buffer_write_sync;
-	submit_bh(REQ_OP_WRITE, bh);
+	bh_submit(bh, REQ_OP_WRITE, bh_end_write);
 
 	wait_on_buffer(bh);
 
-	if (buffer_uptodate(bh)) {
+	if (!buffer_write_io_error(bh)) {
 		ocfs2_set_buffer_uptodate(ci, bh);
 	} else {
-		/* We don't need to remove the clustered uptodate
-		 * information for this bh as it's not marked locally
-		 * uptodate. */
+		/*
+		 * The buffer still holds what we tried to write, but it did
+		 * not reach the disk, so don't advertise it to the cluster
+		 * as up to date.
+		 */
 		ret = -EIO;
 		mlog_errno(ret);
 	}
@@ -145,9 +145,7 @@ int ocfs2_read_blocks_sync(struct ocfs2_super *osb, u64 block,
 #endif
 		}
 
-		get_bh(bh); /* for end_buffer_read_sync() */
-		bh->b_end_io = end_buffer_read_sync;
-		submit_bh(REQ_OP_READ, bh);
+		bh_submit(bh, REQ_OP_READ, bh_end_read);
 	}
 
 read_failure:
@@ -323,11 +321,9 @@ int ocfs2_read_blocks(struct ocfs2_caching_info *ci, u64 block, int nr,
 				continue;
 			}
 
-			get_bh(bh); /* for end_buffer_read_sync() */
 			if (validate)
 				set_buffer_needs_validate(bh);
-			bh->b_end_io = end_buffer_read_sync;
-			submit_bh(REQ_OP_READ, bh);
+			bh_submit(bh, REQ_OP_READ, bh_end_read);
 			continue;
 		}
 	}
@@ -350,8 +346,6 @@ read_failure:
 						wait_on_buffer(bh);
 					put_bh(bh);
 					bhs[i] = NULL;
-				} else if (bh && buffer_uptodate(bh)) {
-					clear_buffer_uptodate(bh);
 				}
 				continue;
 			}
@@ -380,8 +374,11 @@ read_failure:
 				BUG_ON(buffer_jbd(bh));
 				clear_buffer_needs_validate(bh);
 				status = validate(sb, bh);
-				if (status)
+				if (status) {
+					if (buffer_uptodate(bh))
+						clear_buffer_uptodate(bh);
 					goto read_failure;
+				}
 			}
 		}
 
@@ -434,7 +431,7 @@ int ocfs2_write_super_or_backup(struct ocfs2_super *osb,
 	BUG_ON(buffer_jbd(bh));
 	ocfs2_check_super_or_backup(osb->sb, bh->b_blocknr);
 
-	if (ocfs2_is_hard_readonly(osb) || ocfs2_is_soft_readonly(osb)) {
+	if (unlikely(ocfs2_emergency_state(osb))) {
 		ret = -EROFS;
 		mlog_errno(ret);
 		goto out;
@@ -446,14 +443,12 @@ int ocfs2_write_super_or_backup(struct ocfs2_super *osb,
 	/* remove from dirty list before I/O. */
 	clear_buffer_dirty(bh);
 
-	get_bh(bh); /* for end_buffer_write_sync() */
-	bh->b_end_io = end_buffer_write_sync;
 	ocfs2_compute_meta_ecc(osb->sb, bh->b_data, &di->i_check);
-	submit_bh(REQ_OP_WRITE, bh);
+	bh_submit(bh, REQ_OP_WRITE, bh_end_write);
 
 	wait_on_buffer(bh);
 
-	if (!buffer_uptodate(bh)) {
+	if (buffer_write_io_error(bh)) {
 		ret = -EIO;
 		mlog_errno(ret);
 	}

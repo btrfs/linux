@@ -342,7 +342,7 @@ static int sony_btf_mpx_probe(struct i2c_client *client)
 	v4l_info(client, "chip found @ 0x%x (%s)\n",
 			client->addr << 1, client->adapter->name);
 
-	t = devm_kzalloc(&client->dev, sizeof(*t), GFP_KERNEL);
+	t = devm_kzalloc_obj(&client->dev, *t);
 	if (t == NULL)
 		return -ENOMEM;
 
@@ -366,7 +366,7 @@ static void sony_btf_mpx_remove(struct i2c_client *client)
 /* ----------------------------------------------------------------------- */
 
 static const struct i2c_device_id sony_btf_mpx_id[] = {
-	{ "sony-btf-mpx" },
+	{ .name = "sony-btf-mpx" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, sony_btf_mpx_id);

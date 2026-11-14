@@ -115,8 +115,7 @@ static int altr_a10sr_spi_probe(struct spi_device *spi)
 	int ret;
 	struct altr_a10sr *a10sr;
 
-	a10sr = devm_kzalloc(&spi->dev, sizeof(*a10sr),
-			     GFP_KERNEL);
+	a10sr = devm_kzalloc_obj(&spi->dev, *a10sr);
 	if (!a10sr)
 		return -ENOMEM;
 
@@ -155,7 +154,7 @@ MODULE_DEVICE_TABLE(of, altr_a10sr_spi_of_match);
 
 static const struct spi_device_id altr_a10sr_spi_ids[] = {
 	{ .name = "a10sr" },
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, altr_a10sr_spi_ids);
 

@@ -7,8 +7,7 @@
  * Copyright IBM Corp. 2002, 2023
  */
 
-#define KMSG_COMPONENT "zfcp"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "zfcp: " fmt
 
 #include <linux/blktrace_api.h>
 #include <linux/jiffies.h>
@@ -807,7 +806,7 @@ static struct zfcp_fsf_req *zfcp_fsf_alloc(mempool_t *pool)
 	if (likely(pool))
 		req = mempool_alloc(pool, GFP_ATOMIC);
 	else
-		req = kmalloc(sizeof(*req), GFP_ATOMIC);
+		req = kmalloc_obj(*req, GFP_ATOMIC);
 
 	if (unlikely(!req))
 		return NULL;
@@ -2486,13 +2485,16 @@ static void zfcp_fsf_fcp_cmnd_handler(struct zfcp_fsf_req *req)
 		set_host_byte(scpnt, DID_ERROR);
 		goto skip_fsfstatus;
 	case FSF_BLOCK_GUARD_CHECK_FAILURE:
-		zfcp_scsi_dif_sense_error(scpnt, 0x1);
+		zfcp_scsi_dif_sense_error(scpnt,
+				LOGICAL_BLOCK_GUARD_CHECK_FAILED);
 		goto skip_fsfstatus;
 	case FSF_APP_TAG_CHECK_FAILURE:
-		zfcp_scsi_dif_sense_error(scpnt, 0x2);
+		zfcp_scsi_dif_sense_error(scpnt,
+				LOGICAL_BLOCK_APPLICATION_TAG_CHECK_FAILED);
 		goto skip_fsfstatus;
 	case FSF_REF_TAG_CHECK_FAILURE:
-		zfcp_scsi_dif_sense_error(scpnt, 0x3);
+		zfcp_scsi_dif_sense_error(scpnt,
+				LOGICAL_BLOCK_REFERENCE_TAG_CHECK_FAILED);
 		goto skip_fsfstatus;
 	}
 	BUILD_BUG_ON(sizeof(struct fcp_resp_with_ext) > FSF_FCP_RSP_SIZE);

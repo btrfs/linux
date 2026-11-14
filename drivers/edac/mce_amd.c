@@ -689,36 +689,46 @@ static void decode_mc6_mce(struct mce *m)
 }
 
 static const char * const smca_long_names[] = {
-	[SMCA_LS ... SMCA_LS_V2]	= "Load Store Unit",
-	[SMCA_IF]			= "Instruction Fetch Unit",
-	[SMCA_L2_CACHE]			= "L2 Cache",
+	[SMCA_CS ... SMCA_CS_V2]	= "Coherent Station",
+	[SMCA_DACC_BE]			= "DACC Back-end Unit",
+	[SMCA_DACC_FE]			= "DACC Front-end Unit",
 	[SMCA_DE]			= "Decode Unit",
-	[SMCA_RESERVED]			= "Reserved",
+	[SMCA_EDDR5CMN]			= "eDDR5 CMN Unit",
 	[SMCA_EX]			= "Execution Unit",
 	[SMCA_FP]			= "Floating Point Unit",
+	[SMCA_GMI_PCS]			= "Global Memory Interconnect PCS Unit",
+	[SMCA_GMI_PHY]			= "Global Memory Interconnect PHY Unit",
+	[SMCA_IF]			= "Instruction Fetch Unit",
+	[SMCA_L2_CACHE]			= "L2 Cache",
 	[SMCA_L3_CACHE]			= "L3 Cache",
-	[SMCA_CS ... SMCA_CS_V2]	= "Coherent Slave",
+	[SMCA_LS ... SMCA_LS_V2]	= "Load Store Unit",
+	[SMCA_MP5]			= "Microprocessor 5 Unit",
+	[SMCA_MPART]			= "MPART Unit",
+	[SMCA_MPASP ... SMCA_MPASP_V2]	= "MPASP Unit",
+	[SMCA_MPDACC]			= "MPDACC Unit",
+	[SMCA_MPDMA]			= "MPDMA Unit",
+	[SMCA_MPM]			= "MPM Unit",
+	[SMCA_MPRAS]			= "MPRAS Unit",
+	[SMCA_NBIF]			= "NBIF Unit",
+	[SMCA_NBIO]			= "Northbridge IO Unit",
+	[SMCA_PB]			= "Parameter Block",
+	[SMCA_PCIE ... SMCA_PCIE_V2]	= "PCI Express Unit",
+	[SMCA_PCIE_PL]			= "PCIe Link Unit",
 	[SMCA_PIE]			= "Power, Interrupts, etc.",
+	[SMCA_PSP ... SMCA_PSP_V2]	= "Platform Security Processor",
+	[SMCA_RESERVED]			= "Reserved",
+	[SMCA_SATA]			= "SATA Unit",
+	[SMCA_SHUB]			= "System Hub Unit",
+	[SMCA_SMU ... SMCA_SMU_V2]	= "System Management Unit",
+	[SMCA_SSBDCI]			= "Die to Die Interconnect Unit",
 
 	/* UMC v2 is separate because both of them can exist in a single system. */
 	[SMCA_UMC]			= "Unified Memory Controller",
 	[SMCA_UMC_V2]			= "Unified Memory Controller v2",
-	[SMCA_PB]			= "Parameter Block",
-	[SMCA_PSP ... SMCA_PSP_V2]	= "Platform Security Processor",
-	[SMCA_SMU ... SMCA_SMU_V2]	= "System Management Unit",
-	[SMCA_MP5]			= "Microprocessor 5 Unit",
-	[SMCA_MPDMA]			= "MPDMA Unit",
-	[SMCA_NBIO]			= "Northbridge IO Unit",
-	[SMCA_PCIE ... SMCA_PCIE_V2]	= "PCI Express Unit",
-	[SMCA_XGMI_PCS]			= "Ext Global Memory Interconnect PCS Unit",
-	[SMCA_NBIF]			= "NBIF Unit",
-	[SMCA_SHUB]			= "System Hub Unit",
-	[SMCA_SATA]			= "SATA Unit",
 	[SMCA_USB]			= "USB Unit",
-	[SMCA_GMI_PCS]			= "Global Memory Interconnect PCS Unit",
-	[SMCA_XGMI_PHY]			= "Ext Global Memory Interconnect PHY Unit",
 	[SMCA_WAFL_PHY]			= "WAFL PHY Unit",
-	[SMCA_GMI_PHY]			= "Global Memory Interconnect PHY Unit",
+	[SMCA_XGMI_PCS]			= "Ext Global Memory Interconnect PCS Unit",
+	[SMCA_XGMI_PHY]			= "Ext Global Memory Interconnect PHY Unit",
 };
 
 static const char *smca_get_long_name(enum smca_bank_types t)
@@ -796,7 +806,7 @@ amd_decode_mce(struct notifier_block *nb, unsigned long val, void *data)
 	struct mce *m = (struct mce *)data;
 	struct mce_hw_err *err = to_mce_hw_err(m);
 	unsigned int fam = x86_family(m->cpuid);
-	u32 mca_config_lo = 0, dummy;
+	u64 mca_config = 0;
 	int ecc;
 
 	if (m->kflags & MCE_HANDLED_CEC)
@@ -816,9 +826,9 @@ amd_decode_mce(struct notifier_block *nb, unsigned long val, void *data)
 		((m->status & MCI_STATUS_PCC)	? "PCC"	  : "-"));
 
 	if (boot_cpu_has(X86_FEATURE_SMCA)) {
-		rdmsr_safe(MSR_AMD64_SMCA_MCx_CONFIG(m->bank), &mca_config_lo, &dummy);
+		rdmsrq_safe(MSR_AMD64_SMCA_MCx_CONFIG(m->bank), &mca_config);
 
-		if (mca_config_lo & MCI_CONFIG_MCAX)
+		if (mca_config & MCI_CONFIG_MCAX)
 			pr_cont("|%s", ((m->status & MCI_STATUS_TCC) ? "TCC" : "-"));
 
 		pr_cont("|%s", ((m->status & MCI_STATUS_SYNDV) ? "SyndV" : "-"));
@@ -853,7 +863,7 @@ amd_decode_mce(struct notifier_block *nb, unsigned long val, void *data)
 
 		if (m->status & MCI_STATUS_SYNDV) {
 			pr_cont(", Syndrome: 0x%016llx\n", m->synd);
-			if (mca_config_lo & MCI_CONFIG_FRUTEXT) {
+			if (mca_config & MCI_CONFIG_FRUTEXT) {
 				char frutext[17];
 
 				frutext[16] = '\0';

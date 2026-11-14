@@ -173,7 +173,7 @@ static int spear_pinctrl_dt_node_to_map(struct pinctrl_dev *pctldev,
 		return -ENODEV;
 	}
 
-	*map = kcalloc(count, sizeof(**map), GFP_KERNEL);
+	*map = kzalloc_objs(**map, count);
 	if (!*map)
 		return -ENOMEM;
 
@@ -360,7 +360,7 @@ int spear_pinctrl_probe(struct platform_device *pdev,
 	if (!machdata)
 		return -ENODEV;
 
-	pmx = devm_kzalloc(&pdev->dev, sizeof(*pmx), GFP_KERNEL);
+	pmx = devm_kzalloc_obj(&pdev->dev, *pmx);
 	if (!pmx)
 		return -ENOMEM;
 

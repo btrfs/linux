@@ -309,15 +309,7 @@ static void stac_gpio_set(struct hda_codec *codec, unsigned int mask,
 	/* Configure GPIOx as CMOS */
 	snd_hda_codec_write(codec, fg, 0, 0x7e7, 0);
 
-	snd_hda_codec_write(codec, fg, 0,
-			    AC_VERB_SET_GPIO_MASK, gpiomask);
-	snd_hda_codec_read(codec, fg, 0,
-			   AC_VERB_SET_GPIO_DIRECTION, gpiodir); /* sync */
-
-	msleep(1);
-
-	snd_hda_codec_read(codec, fg, 0,
-			   AC_VERB_SET_GPIO_DATA, gpiostate); /* sync */
+	snd_hda_codec_set_gpio(codec, gpiomask, gpiodir, gpiostate, 1);
 }
 
 /* hook for controlling mic-mute LED GPIO */
@@ -369,7 +361,7 @@ static unsigned int stac_vref_led_power_filter(struct hda_codec *codec,
 	return snd_hda_gen_path_power_filter(codec, nid, power_state);
 }
 
-/* update mute-LED accoring to the master switch */
+/* update mute-LED according to the master switch */
 static void stac_update_led_status(struct hda_codec *codec, bool muted)
 {
 	struct sigmatel_spec *spec = codec->spec;
@@ -1718,7 +1710,7 @@ static const struct hda_pintbl ref92hd73xx_pin_configs[] = {
 	{ 0x11, 0x01014030 },
 	// CD in
 	{ 0x12, 0x02319040 },
-	// Digial Mic ins
+	// Digital Mic ins
 	{ 0x13, 0x90a000f0 },
 	{ 0x14, 0x90a000f0 },
 	// Digital outs
@@ -3825,7 +3817,7 @@ static const struct hda_pintbl dell_3st_pin_configs[] = {
 static void stac927x_fixup_ref_no_jd(struct hda_codec *codec,
 				     const struct hda_fixup *fix, int action)
 {
-	/* no jack detecion for ref-no-jd model */
+	/* no jack detection for ref-no-jd model */
 	if (action == HDA_FIXUP_ACT_PRE_PROBE)
 		codec->no_jack_detect = 1;
 }
@@ -4456,7 +4448,7 @@ static int alloc_stac_spec(struct hda_codec *codec)
 {
 	struct sigmatel_spec *spec;
 
-	spec = kzalloc(sizeof(*spec), GFP_KERNEL);
+	spec = kzalloc_obj(*spec);
 	if (!spec)
 		return -ENOMEM;
 	snd_hda_gen_spec_init(&spec->gen);

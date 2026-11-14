@@ -9,7 +9,6 @@
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/rtc.h>
 #include <linux/regmap.h>
@@ -208,7 +207,7 @@ static int ssd202d_rtc_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct ssd202d_rtc *priv;
 
-	priv = devm_kzalloc(&pdev->dev, sizeof(struct ssd202d_rtc), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&pdev->dev, struct ssd202d_rtc);
 	if (!priv)
 		return -ENOMEM;
 

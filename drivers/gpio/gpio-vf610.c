@@ -83,6 +83,7 @@ static const struct of_device_id vf610_gpio_dt_ids[] = {
 	{ .compatible = "fsl,imx8ulp-gpio",	.data = &imx8ulp_data, },
 	{ /* sentinel */ }
 };
+MODULE_DEVICE_TABLE(of, vf610_gpio_dt_ids);
 
 static inline void vf610_gpio_writel(u32 val, void __iomem *reg)
 {
@@ -225,7 +226,7 @@ static int vf610_gpio_probe(struct platform_device *pdev)
 	int ret;
 	bool dual_base;
 
-	port = devm_kzalloc(dev, sizeof(*port), GFP_KERNEL);
+	port = devm_kzalloc_obj(dev, *port);
 	if (!port)
 		return -ENOMEM;
 
@@ -332,9 +333,7 @@ static int vf610_gpio_probe(struct platform_device *pdev)
 	gpio_irq_chip_set_chip(girq, &vf610_irqchip);
 	girq->parent_handler = vf610_gpio_irq_handler;
 	girq->num_parents = 1;
-	girq->parents = devm_kcalloc(&pdev->dev, 1,
-				     sizeof(*girq->parents),
-				     GFP_KERNEL);
+	girq->parents = devm_kzalloc_objs(&pdev->dev, *girq->parents, 1);
 	if (!girq->parents)
 		return -ENOMEM;
 	girq->parents[0] = port->irq;

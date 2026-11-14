@@ -248,7 +248,7 @@ static irqreturn_t acp63_irq_handler(int irq, void *dev_id)
 	if (sdw_dma_irq_flag)
 		return IRQ_WAKE_THREAD;
 
-	if (irq_flag | wake_irq_flag)
+	if (irq_flag || wake_irq_flag)
 		return IRQ_HANDLED;
 	else
 		return IRQ_NONE;
@@ -329,12 +329,19 @@ static struct snd_soc_acpi_mach *acp63_sdw_machine_select(struct device *dev)
 					break;
 			}
 			if (i == acp_data->info.count || !link->num_adr)
-				break;
+				if (!mach->machine_check || mach->machine_check(acp_data->sdw))
+					break;
 		}
 		if (mach && mach->link_mask) {
 			mach->mach_params.links = mach->links;
 			mach->mach_params.link_mask = mach->link_mask;
 			mach->mach_params.subsystem_rev = acp_data->acp_rev;
+			mach->mach_params.subsystem_vendor = acp_data->subsystem_vendor;
+			mach->mach_params.subsystem_device = acp_data->subsystem_device;
+			mach->mach_params.subsystem_id_set = true;
+
+			dev_dbg(dev, "SSID %x%04x\n", mach->mach_params.subsystem_vendor,
+				mach->mach_params.subsystem_device);
 			return mach;
 		}
 	}
@@ -473,7 +480,7 @@ static int create_acp63_platform_devs(struct pci_dev *pci, struct acp63_dev_data
 	parent = &pci->dev;
 
 	if (adata->is_sdw_dev || adata->is_pdm_dev) {
-		adata->res = devm_kzalloc(&pci->dev, sizeof(struct resource), GFP_KERNEL);
+		adata->res = devm_kzalloc_obj(&pci->dev, struct resource);
 		if (!adata->res) {
 			ret = -ENOMEM;
 			goto de_init;
@@ -543,8 +550,7 @@ de_init:
 
 static int acp_hw_init_ops(struct acp63_dev_data *adata, struct pci_dev *pci)
 {
-	adata->hw_ops = devm_kzalloc(&pci->dev, sizeof(struct acp_hw_ops),
-				     GFP_KERNEL);
+	adata->hw_ops = devm_kzalloc_obj(&pci->dev, struct acp_hw_ops);
 	if (!adata->hw_ops)
 		return -ENOMEM;
 
@@ -595,13 +601,12 @@ static int snd_acp63_probe(struct pci_dev *pci,
 		return -ENODEV;
 	}
 
-	ret = pci_request_regions(pci, "AMD ACP6.2 audio");
+	ret = pci_request_regions(pci, "AMD ACP6.3 audio");
 	if (ret < 0) {
 		dev_err(&pci->dev, "pci_request_regions failed\n");
 		goto disable_pci;
 	}
-	adata = devm_kzalloc(&pci->dev, sizeof(struct acp63_dev_data),
-			     GFP_KERNEL);
+	adata = devm_kzalloc_obj(&pci->dev, struct acp63_dev_data);
 	if (!adata) {
 		ret = -ENOMEM;
 		goto release_regions;
@@ -617,6 +622,9 @@ static int snd_acp63_probe(struct pci_dev *pci,
 	adata->addr = addr;
 	adata->reg_range = ACP63_REG_END - ACP63_REG_START;
 	adata->acp_rev = pci->revision;
+	adata->subsystem_vendor = pci->subsystem_vendor;
+	adata->subsystem_device = pci->subsystem_device;
+
 	pci_set_master(pci);
 	pci_set_drvdata(pci, adata);
 	mutex_init(&adata->acp_lock);
@@ -683,8 +691,37 @@ static int snd_acp_runtime_resume(struct device *dev)
 	return acp_hw_runtime_resume(dev);
 }
 
+static void acp_disable_msi_on_resume(struct pci_dev *pdev)
+{
+	u16 control;
+
+	if (!pdev->msi_cap)
+		return;
+
+	pci_read_config_word(pdev, pdev->msi_cap + PCI_MSI_FLAGS, &control);
+	if (control & PCI_MSI_FLAGS_ENABLE) {
+		dev_warn(&pdev->dev,
+			 "ACP: MSI unexpectedly enabled after resume (flags=0x%04x), disabling\n",
+			 control);
+		control &= ~PCI_MSI_FLAGS_ENABLE;
+		pci_write_config_word(pdev, pdev->msi_cap + PCI_MSI_FLAGS, control);
+	}
+}
+
 static int snd_acp_resume(struct device *dev)
 {
+	struct pci_dev *pdev = to_pci_dev(dev);
+
+	/*
+	 * BIOS/firmware may re-enable MSI in PCI config space during
+	 * system resume even though this driver only uses legacy INTx
+	 * interrupts. If MSI is left enabled with stale address/data
+	 * registers, the device will write interrupts to a bogus address
+	 * causing IOMMU IO_PAGE_FAULT and interrupt delivery failure.
+	 * Explicitly clear the MSI Enable bit before reinitializing
+	 * the ACP hardware.
+	 */
+	acp_disable_msi_on_resume(pdev);
 	return acp_hw_resume(dev);
 }
 
@@ -699,6 +736,8 @@ static void snd_acp63_remove(struct pci_dev *pci)
 	int ret;
 
 	adata = pci_get_drvdata(pci);
+	acp_hw_disable_interrupts(adata);
+	devm_free_irq(&pci->dev, pci->irq, adata);
 	if (adata->sdw) {
 		amd_sdw_exit(adata);
 		platform_device_unregister(adata->sdw_dma_dev);

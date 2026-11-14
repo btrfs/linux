@@ -112,7 +112,7 @@ static int emit_fiemap_extent(struct fiemap_extent_info *fieinfo,
 	u64 cache_end;
 
 	/* Set at the end of extent_fiemap(). */
-	ASSERT((flags & FIEMAP_EXTENT_LAST) == 0);
+	ASSERT((flags & FIEMAP_EXTENT_LAST) == 0, "flags=0x%u", flags);
 
 	if (!cache->cached)
 		goto assign;
@@ -228,7 +228,8 @@ static int emit_fiemap_extent(struct fiemap_extent_info *fieinfo,
 	 *
 	 * 3) Share same flags
 	 */
-	if (cache->offset + cache->len  == offset &&
+	if (!(flags & FIEMAP_EXTENT_ENCODED) &&
+	    cache->offset + cache->len == offset &&
 	    cache->phys + cache->len == phys  &&
 	    cache->flags == flags) {
 		cache->len += len;
@@ -620,6 +621,8 @@ static int fiemap_find_last_extent_offset(struct btrfs_inode *inode,
 		leaf = path->nodes[0];
 		ei = btrfs_item_ptr(leaf, path->slots[0],
 				    struct btrfs_file_extent_item);
+		if (btrfs_file_extent_type(leaf, ei) == BTRFS_FILE_EXTENT_INLINE)
+			break;
 		disk_bytenr = btrfs_file_extent_disk_bytenr(leaf, ei);
 	}
 
@@ -641,14 +644,13 @@ static int extent_fiemap(struct btrfs_inode *inode,
 	u64 prev_extent_end;
 	u64 range_start;
 	u64 range_end;
-	const u64 sectorsize = inode->root->fs_info->sectorsize;
+	const u32 sectorsize = inode->root->fs_info->sectorsize;
 	bool stopped = false;
 	int ret;
 
 	cache.entries_size = PAGE_SIZE / sizeof(struct btrfs_fiemap_entry);
-	cache.entries = kmalloc_array(cache.entries_size,
-				      sizeof(struct btrfs_fiemap_entry),
-				      GFP_KERNEL);
+	cache.entries = kmalloc_objs(struct btrfs_fiemap_entry,
+				     cache.entries_size);
 	backref_ctx = btrfs_alloc_backref_share_check_ctx();
 	path = btrfs_alloc_path();
 	if (!cache.entries || !backref_ctx || !path) {
@@ -661,7 +663,7 @@ restart:
 	range_end = round_up(start + len, sectorsize);
 	prev_extent_end = range_start;
 
-	btrfs_lock_extent(&inode->io_tree, range_start, range_end, &cached_state);
+	btrfs_lock_extent(&inode->io_tree, range_start, range_end - 1, &cached_state);
 
 	ret = fiemap_find_last_extent_offset(inode, path, &last_extent_end);
 	if (ret < 0)
@@ -841,7 +843,7 @@ check_eof_delalloc:
 	}
 
 out_unlock:
-	btrfs_unlock_extent(&inode->io_tree, range_start, range_end, &cached_state);
+	btrfs_unlock_extent(&inode->io_tree, range_start, range_end - 1, &cached_state);
 
 	if (ret == BTRFS_FIEMAP_FLUSH_CACHE) {
 		btrfs_release_path(path);

@@ -126,7 +126,7 @@ static int trace_filter_parse(struct snd_sof_dev *sdev, char *string,
 		capacity += TRACE_FILTER_ELEMENTS_PER_ENTRY;
 		entry = strchr(entry + 1, entry_delimiter[0]);
 	}
-	*out = kmalloc_array(capacity, sizeof(**out), GFP_KERNEL);
+	*out = kmalloc_objs(**out, capacity);
 	if (!*out)
 		return -ENOMEM;
 
@@ -171,7 +171,12 @@ static int ipc3_trace_update_filter(struct snd_sof_dev *sdev, int num_elems,
 		dev_err(sdev->dev, "enabling device failed: %d\n", ret);
 		goto error;
 	}
-	ret = sof_ipc_tx_message_no_reply(sdev->ipc, msg, msg->hdr.size);
+
+	/* Make sure the DSP/firmware is booted up */
+	ret = snd_sof_boot_dsp_firmware(sdev);
+	if (!ret)
+		ret = sof_ipc_tx_message_no_reply(sdev->ipc, msg, msg->hdr.size);
+
 	pm_runtime_put_autosuspend(sdev->dev);
 
 error:
@@ -227,7 +232,7 @@ static int debugfs_create_trace_filter(struct snd_sof_dev *sdev)
 {
 	struct snd_sof_dfsentry *dfse;
 
-	dfse = devm_kzalloc(sdev->dev, sizeof(*dfse), GFP_KERNEL);
+	dfse = devm_kzalloc_obj(sdev->dev, *dfse);
 	if (!dfse)
 		return -ENOMEM;
 
@@ -404,7 +409,7 @@ static int debugfs_create_dtrace(struct snd_sof_dev *sdev)
 	if (ret < 0)
 		dev_warn(sdev->dev, "failed to create filter debugfs file: %d", ret);
 
-	dfse = devm_kzalloc(sdev->dev, sizeof(*dfse), GFP_KERNEL);
+	dfse = devm_kzalloc_obj(sdev->dev, *dfse);
 	if (!dfse)
 		return -ENOMEM;
 
@@ -501,7 +506,7 @@ static int ipc3_dtrace_init(struct snd_sof_dev *sdev)
 		return -EBUSY;
 	}
 
-	priv = devm_kzalloc(sdev->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(sdev->dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -529,7 +534,7 @@ static int ipc3_dtrace_init(struct snd_sof_dev *sdev)
 
 	/* create compressed page table for audio firmware */
 	ret = snd_sof_create_page_table(sdev->dev, &priv->dmatb,
-					priv->dmatp.area, priv->dmatb.bytes);
+					&priv->dmatp, priv->dmatb.bytes);
 	if (ret < 0)
 		goto table_err;
 

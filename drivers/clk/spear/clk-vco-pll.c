@@ -284,7 +284,7 @@ struct clk *clk_register_vco_pll(const char *vco_name, const char *pll_name,
 	struct clk_vco *vco;
 	struct clk_pll *pll;
 	struct clk *vco_clk, *tpll_clk, *tvco_gate_clk;
-	struct clk_init_data vco_init, pll_init;
+	struct clk_init_data vco_init = {}, pll_init = {};
 	const char **vco_parent_name;
 
 	if (!vco_name || !pll_name || !parent_name || !mode_reg || !cfg_reg ||
@@ -293,11 +293,11 @@ struct clk *clk_register_vco_pll(const char *vco_name, const char *pll_name,
 		return ERR_PTR(-EINVAL);
 	}
 
-	vco = kzalloc(sizeof(*vco), GFP_KERNEL);
+	vco = kzalloc_obj(*vco);
 	if (!vco)
 		return ERR_PTR(-ENOMEM);
 
-	pll = kzalloc(sizeof(*pll), GFP_KERNEL);
+	pll = kzalloc_obj(*pll);
 	if (!pll)
 		goto free_vco;
 
@@ -343,13 +343,15 @@ struct clk *clk_register_vco_pll(const char *vco_name, const char *pll_name,
 
 	tpll_clk = clk_register(NULL, &pll->hw);
 	if (IS_ERR_OR_NULL(tpll_clk))
-		goto free_pll;
+		goto unregister_clk;
 
 	if (pll_clk)
 		*pll_clk = tpll_clk;
 
 	return vco_clk;
 
+unregister_clk:
+	clk_unregister(vco_clk);
 free_pll:
 	kfree(pll);
 free_vco:

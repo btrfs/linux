@@ -11,12 +11,14 @@
 static const unsigned int *gen7_0_0_external_core_regs[] __always_unused;
 static const unsigned int *gen7_2_0_external_core_regs[] __always_unused;
 static const unsigned int *gen7_9_0_external_core_regs[] __always_unused;
+static const unsigned int *gen7_17_0_external_core_regs[] __always_unused;
 static const struct gen7_sptp_cluster_registers gen7_9_0_sptp_clusters[] __always_unused;
 static const u32 gen7_9_0_cx_debugbus_blocks[] __always_unused;
 
 #include "adreno_gen7_0_0_snapshot.h"
 #include "adreno_gen7_2_0_snapshot.h"
 #include "adreno_gen7_9_0_snapshot.h"
+#include "adreno_gen7_17_0_snapshot.h"
 
 struct a6xx_gpu_state_obj {
 	const void *handle;
@@ -57,7 +59,7 @@ struct a6xx_gpu_state {
 	struct msm_gpu_state_bo *gmu_hfi;
 	struct msm_gpu_state_bo *gmu_debug;
 
-	s32 hfi_queue_history[2][HFI_HISTORY_SZ];
+	s32 hfi_queue_history[HFI_MAX_QUEUES][HFI_HISTORY_SZ];
 
 	struct list_head objs;
 
@@ -361,15 +363,13 @@ static void a6xx_get_debugbus_blocks(struct msm_gpu *gpu,
 			sizeof(*a6xx_state->debugbus));
 
 	if (a6xx_state->debugbus) {
-		int i;
+		int i, j;
 
 		for (i = 0; i < ARRAY_SIZE(a6xx_debugbus_blocks); i++)
 			a6xx_get_debugbus_block(gpu,
 				a6xx_state,
 				&a6xx_debugbus_blocks[i],
 				&a6xx_state->debugbus[i]);
-
-		a6xx_state->nr_debugbus = ARRAY_SIZE(a6xx_debugbus_blocks);
 
 		/*
 		 * GBIF has same debugbus as of other GPU blocks, fall back to
@@ -381,17 +381,19 @@ static void a6xx_get_debugbus_blocks(struct msm_gpu *gpu,
 				&a6xx_gbif_debugbus_block,
 				&a6xx_state->debugbus[i]);
 
-			a6xx_state->nr_debugbus += 1;
+			i++;
 		}
 
 
 		if (adreno_is_a650_family(to_adreno_gpu(gpu))) {
-			for (i = 0; i < ARRAY_SIZE(a650_debugbus_blocks); i++)
+			for (j = 0; j < ARRAY_SIZE(a650_debugbus_blocks); i++, j++)
 				a6xx_get_debugbus_block(gpu,
 					a6xx_state,
-					&a650_debugbus_blocks[i],
+					&a650_debugbus_blocks[j],
 					&a6xx_state->debugbus[i]);
 		}
+
+		a6xx_state->nr_debugbus = i;
 	}
 }
 
@@ -404,8 +406,13 @@ static void a7xx_get_debugbus_blocks(struct msm_gpu *gpu,
 	int i;
 
 	if (adreno_gpu->info->family == ADRENO_7XX_GEN1) {
-		debugbus_blocks = gen7_0_0_debugbus_blocks;
-		debugbus_blocks_count = ARRAY_SIZE(gen7_0_0_debugbus_blocks);
+		if (adreno_is_a722(adreno_gpu)) {
+			debugbus_blocks = gen7_17_0_debugbus_blocks;
+			debugbus_blocks_count = ARRAY_SIZE(gen7_17_0_debugbus_blocks);
+		} else {
+			debugbus_blocks = gen7_0_0_debugbus_blocks;
+			debugbus_blocks_count = ARRAY_SIZE(gen7_0_0_debugbus_blocks);
+		}
 		gbif_debugbus_blocks = a7xx_gbif_debugbus_blocks;
 		gbif_debugbus_blocks_count = ARRAY_SIZE(a7xx_gbif_debugbus_blocks);
 	} else if (adreno_gpu->info->family == ADRENO_7XX_GEN2) {
@@ -678,8 +685,13 @@ static void a7xx_get_dbgahb_clusters(struct msm_gpu *gpu,
 	unsigned dbgahb_clusters_size;
 
 	if (adreno_gpu->info->family == ADRENO_7XX_GEN1) {
-		dbgahb_clusters = gen7_0_0_sptp_clusters;
-		dbgahb_clusters_size = ARRAY_SIZE(gen7_0_0_sptp_clusters);
+		if (adreno_is_a722(adreno_gpu)) {
+			dbgahb_clusters = gen7_17_0_sptp_clusters;
+			dbgahb_clusters_size = ARRAY_SIZE(gen7_17_0_sptp_clusters);
+		} else {
+			dbgahb_clusters = gen7_0_0_sptp_clusters;
+			dbgahb_clusters_size = ARRAY_SIZE(gen7_0_0_sptp_clusters);
+		}
 	} else if (adreno_gpu->info->family == ADRENO_7XX_GEN2) {
 		dbgahb_clusters = gen7_2_0_sptp_clusters;
 		dbgahb_clusters_size = ARRAY_SIZE(gen7_2_0_sptp_clusters);
@@ -839,8 +851,13 @@ static void a7xx_get_clusters(struct msm_gpu *gpu,
 	unsigned clusters_size;
 
 	if (adreno_gpu->info->family == ADRENO_7XX_GEN1) {
-		clusters = gen7_0_0_clusters;
-		clusters_size = ARRAY_SIZE(gen7_0_0_clusters);
+		if (adreno_is_a722(adreno_gpu)) {
+			clusters = gen7_17_0_clusters;
+			clusters_size = ARRAY_SIZE(gen7_17_0_clusters);
+		} else {
+			clusters = gen7_0_0_clusters;
+			clusters_size = ARRAY_SIZE(gen7_0_0_clusters);
+		}
 	} else if (adreno_gpu->info->family == ADRENO_7XX_GEN2) {
 		clusters = gen7_2_0_clusters;
 		clusters_size = ARRAY_SIZE(gen7_2_0_clusters);
@@ -977,8 +994,13 @@ static void a7xx_get_shaders(struct msm_gpu *gpu,
 	int i;
 
 	if (adreno_gpu->info->family == ADRENO_7XX_GEN1) {
-		shader_blocks = gen7_0_0_shader_blocks;
-		num_shader_blocks = ARRAY_SIZE(gen7_0_0_shader_blocks);
+		if (adreno_is_a722(adreno_gpu)) {
+			shader_blocks = gen7_17_0_shader_blocks;
+			num_shader_blocks = ARRAY_SIZE(gen7_17_0_shader_blocks);
+		} else {
+			shader_blocks = gen7_0_0_shader_blocks;
+			num_shader_blocks = ARRAY_SIZE(gen7_0_0_shader_blocks);
+		}
 	} else if (adreno_gpu->info->family == ADRENO_7XX_GEN2) {
 		shader_blocks = gen7_2_0_shader_blocks;
 		num_shader_blocks = ARRAY_SIZE(gen7_2_0_shader_blocks);
@@ -1013,7 +1035,7 @@ static void a6xx_get_crashdumper_hlsq_registers(struct msm_gpu *gpu,
 	u64 out = dumper->iova + A6XX_CD_DATA_OFFSET;
 	int i, regcount = 0;
 
-	in += CRASHDUMP_WRITE(in, REG_A6XX_HLSQ_DBG_READ_SEL, regs->val1);
+	in += CRASHDUMP_WRITE(in, REG_A6XX_HLSQ_DBG_READ_SEL, (regs->val1 & 0xff) << 8);
 
 	for (i = 0; i < regs->count; i += 2) {
 		u32 count = RANGE(regs->registers, i);
@@ -1244,18 +1266,21 @@ static void a6xx_get_gmu_registers(struct msm_gpu *gpu,
 	_a6xx_get_gmu_registers(gpu, a6xx_state, &a6xx_gmu_reglist[1],
 		&a6xx_state->gmu_registers[1], true);
 
-	if (adreno_is_a621(adreno_gpu) || adreno_is_a623(adreno_gpu))
+	if (adreno_is_a621(adreno_gpu))
 		_a6xx_get_gmu_registers(gpu, a6xx_state, &a621_gpucc_reg,
+			&a6xx_state->gmu_registers[2], false);
+	else if (adreno_is_a623(adreno_gpu) || adreno_is_a663(adreno_gpu))
+		_a6xx_get_gmu_registers(gpu, a6xx_state, &a623_gpucc_reg,
 			&a6xx_state->gmu_registers[2], false);
 	else
 		_a6xx_get_gmu_registers(gpu, a6xx_state, &a6xx_gpucc_reg,
 			&a6xx_state->gmu_registers[2], false);
 
-	if (!a6xx_gmu_gx_is_on(&a6xx_gpu->gmu))
+	if (!adreno_gpu->funcs->gx_is_on(adreno_gpu))
 		return;
 
 	/* Set the fence to ALLOW mode so we can access the registers */
-	gpu_write(gpu, REG_A6XX_GMU_AO_AHB_FENCE_CTRL, 0);
+	gmu_write(&a6xx_gpu->gmu, REG_A6XX_GMU_AO_AHB_FENCE_CTRL, 0);
 
 	_a6xx_get_gmu_registers(gpu, a6xx_state, &a6xx_gmu_reglist[2],
 		&a6xx_state->gmu_registers[3], false);
@@ -1376,8 +1401,13 @@ static void a7xx_get_registers(struct msm_gpu *gpu,
 	const struct gen7_reg_list *reglist;
 
 	if (adreno_gpu->info->family == ADRENO_7XX_GEN1) {
-		reglist = gen7_0_0_reg_list;
-		pre_crashdumper_regs = gen7_0_0_pre_crashdumper_gpu_registers;
+		if (adreno_is_a722(adreno_gpu)) {
+			reglist = gen7_17_0_reg_list;
+			pre_crashdumper_regs = gen7_9_0_pre_crashdumper_gpu_registers;
+		} else {
+			reglist = gen7_0_0_reg_list;
+			pre_crashdumper_regs = gen7_0_0_pre_crashdumper_gpu_registers;
+		}
 	} else if (adreno_gpu->info->family == ADRENO_7XX_GEN2) {
 		reglist = gen7_2_0_reg_list;
 		pre_crashdumper_regs = gen7_0_0_pre_crashdumper_gpu_registers;
@@ -1433,7 +1463,9 @@ static void a7xx_get_post_crashdumper_registers(struct msm_gpu *gpu,
 	const u32 *regs;
 
 	BUG_ON(adreno_gpu->info->family > ADRENO_7XX_GEN3);
-	regs = gen7_0_0_post_crashdumper_registers;
+	regs = adreno_is_a722(adreno_gpu) ?
+		gen7_17_0_post_crashdumper_registers :
+		gen7_0_0_post_crashdumper_registers;
 
 	a7xx_get_ahb_gpu_registers(gpu,
 		a6xx_state, regs,
@@ -1540,18 +1572,34 @@ static void a7xx_get_indexed_registers(struct msm_gpu *gpu,
 {
 	struct adreno_gpu *adreno_gpu = to_adreno_gpu(gpu);
 	const struct a6xx_indexed_registers *indexed_regs;
+	const struct a6xx_indexed_registers *mempool_regs;
 	int i, indexed_count, mempool_count;
+	bool concurrent_binning;
 
-	if (adreno_gpu->info->family <= ADRENO_7XX_GEN2) {
+	if (adreno_is_a722(adreno_gpu)) {
+		/*
+		 * Eliza has no BV or LPAC SQE — skip the BV/LPAC indexed
+		 * registers and the BV mempool
+		 */
+		indexed_regs = gen7_17_0_cp_indexed_reglist;
+		indexed_count = ARRAY_SIZE(gen7_17_0_cp_indexed_reglist);
+		mempool_regs = a7xx_cp_mempool_indexed;
+		mempool_count = ARRAY_SIZE(a7xx_cp_mempool_indexed);
+		concurrent_binning = false;
+	} else if (adreno_gpu->info->family <= ADRENO_7XX_GEN2) {
 		indexed_regs = a7xx_indexed_reglist;
 		indexed_count = ARRAY_SIZE(a7xx_indexed_reglist);
+		mempool_regs = a7xx_cp_bv_mempool_indexed;
+		mempool_count = ARRAY_SIZE(a7xx_cp_bv_mempool_indexed);
+		concurrent_binning = true;
 	} else {
 		BUG_ON(adreno_gpu->info->family != ADRENO_7XX_GEN3);
 		indexed_regs = gen7_9_0_cp_indexed_reg_list;
 		indexed_count = ARRAY_SIZE(gen7_9_0_cp_indexed_reg_list);
+		mempool_regs = a7xx_cp_bv_mempool_indexed;
+		mempool_count = ARRAY_SIZE(a7xx_cp_bv_mempool_indexed);
+		concurrent_binning = true;
 	}
-
-	mempool_count = ARRAY_SIZE(a7xx_cp_bv_mempool_indexed);
 
 	a6xx_state->indexed_regs = state_kcalloc(a6xx_state,
 					indexed_count + mempool_count,
@@ -1567,15 +1615,17 @@ static void a7xx_get_indexed_registers(struct msm_gpu *gpu,
 			&a6xx_state->indexed_regs[i]);
 
 	gpu_rmw(gpu, REG_A6XX_CP_CHICKEN_DBG, 0, BIT(2));
-	gpu_rmw(gpu, REG_A7XX_CP_BV_CHICKEN_DBG, 0, BIT(2));
+	if (concurrent_binning)
+		gpu_rmw(gpu, REG_A7XX_CP_BV_CHICKEN_DBG, 0, BIT(2));
 
 	/* Get the contents of the CP_BV mempool */
 	for (i = 0; i < mempool_count; i++)
-		a6xx_get_indexed_regs(gpu, a6xx_state, &a7xx_cp_bv_mempool_indexed[i],
+		a6xx_get_indexed_regs(gpu, a6xx_state, &mempool_regs[i],
 			&a6xx_state->indexed_regs[indexed_count + i]);
 
 	gpu_rmw(gpu, REG_A6XX_CP_CHICKEN_DBG, BIT(2), 0);
-	gpu_rmw(gpu, REG_A7XX_CP_BV_CHICKEN_DBG, BIT(2), 0);
+	if (concurrent_binning)
+		gpu_rmw(gpu, REG_A7XX_CP_BV_CHICKEN_DBG, BIT(2), 0);
 	return;
 }
 
@@ -1584,8 +1634,7 @@ struct msm_gpu_state *a6xx_gpu_state_get(struct msm_gpu *gpu)
 	struct a6xx_crashdumper _dumper = { 0 }, *dumper = NULL;
 	struct adreno_gpu *adreno_gpu = to_adreno_gpu(gpu);
 	struct a6xx_gpu *a6xx_gpu = to_a6xx_gpu(adreno_gpu);
-	struct a6xx_gpu_state *a6xx_state = kzalloc(sizeof(*a6xx_state),
-		GFP_KERNEL);
+	struct a6xx_gpu_state *a6xx_state = kzalloc_obj(*a6xx_state);
 	bool stalled;
 
 	if (!a6xx_state)
@@ -1596,7 +1645,8 @@ struct msm_gpu_state *a6xx_gpu_state_get(struct msm_gpu *gpu)
 	/* Get the generic state from the adreno core */
 	adreno_gpu_state_get(gpu, &a6xx_state->base);
 
-	if (!adreno_has_gmu_wrapper(adreno_gpu)) {
+	if (!adreno_has_gmu_wrapper(adreno_gpu) &&
+	    !adreno_has_rgmu(adreno_gpu)) {
 		a6xx_get_gmu_registers(gpu, a6xx_state);
 
 		a6xx_state->gmu_log = a6xx_snapshot_gmu_bo(a6xx_state, &a6xx_gpu->gmu.log);
@@ -1607,7 +1657,7 @@ struct msm_gpu_state *a6xx_gpu_state_get(struct msm_gpu *gpu)
 	}
 
 	/* If GX isn't on the rest of the data isn't going to be accessible */
-	if (!a6xx_gmu_gx_is_on(&a6xx_gpu->gmu))
+	if (!adreno_gpu->funcs->gx_is_on(adreno_gpu))
 		return &a6xx_state->base;
 
 	/* Halt SQE first */

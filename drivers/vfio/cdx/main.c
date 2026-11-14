@@ -8,6 +8,23 @@
 
 #include "private.h"
 
+static int vfio_cdx_init_dev(struct vfio_device *core_vdev)
+{
+	struct vfio_cdx_device *vdev =
+		container_of(core_vdev, struct vfio_cdx_device, vdev);
+
+	mutex_init(&vdev->cdx_irqs_lock);
+	return 0;
+}
+
+static void vfio_cdx_release_dev(struct vfio_device *core_vdev)
+{
+	struct vfio_cdx_device *vdev =
+		container_of(core_vdev, struct vfio_cdx_device, vdev);
+
+	mutex_destroy(&vdev->cdx_irqs_lock);
+}
+
 static int vfio_cdx_open_device(struct vfio_device *core_vdev)
 {
 	struct vfio_cdx_device *vdev =
@@ -16,8 +33,8 @@ static int vfio_cdx_open_device(struct vfio_device *core_vdev)
 	int count = cdx_dev->res_count;
 	int i, ret;
 
-	vdev->regions = kcalloc(count, sizeof(struct vfio_cdx_region),
-				GFP_KERNEL_ACCOUNT);
+	vdev->regions = kzalloc_objs(struct vfio_cdx_region, count,
+				     GFP_KERNEL_ACCOUNT);
 	if (!vdev->regions)
 		return -ENOMEM;
 
@@ -129,28 +146,22 @@ static int vfio_cdx_ioctl_get_info(struct vfio_cdx_device *vdev,
 	return copy_to_user(arg, &info, minsz) ? -EFAULT : 0;
 }
 
-static int vfio_cdx_ioctl_get_region_info(struct vfio_cdx_device *vdev,
-					  struct vfio_region_info __user *arg)
+static int vfio_cdx_ioctl_get_region_info(struct vfio_device *core_vdev,
+					  struct vfio_region_info *info,
+					  struct vfio_info_cap *caps)
 {
-	unsigned long minsz = offsetofend(struct vfio_region_info, offset);
+	struct vfio_cdx_device *vdev =
+		container_of(core_vdev, struct vfio_cdx_device, vdev);
 	struct cdx_device *cdx_dev = to_cdx_device(vdev->vdev.dev);
-	struct vfio_region_info info;
 
-	if (copy_from_user(&info, arg, minsz))
-		return -EFAULT;
-
-	if (info.argsz < minsz)
-		return -EINVAL;
-
-	if (info.index >= cdx_dev->res_count)
+	if (info->index >= cdx_dev->res_count)
 		return -EINVAL;
 
 	/* map offset to the physical address */
-	info.offset = vfio_cdx_index_to_offset(info.index);
-	info.size = vdev->regions[info.index].size;
-	info.flags = vdev->regions[info.index].flags;
-
-	return copy_to_user(arg, &info, minsz) ? -EFAULT : 0;
+	info->offset = vfio_cdx_index_to_offset(info->index);
+	info->size = vdev->regions[info->index].size;
+	info->flags = vdev->regions[info->index].flags;
+	return 0;
 }
 
 static int vfio_cdx_ioctl_get_irq_info(struct vfio_cdx_device *vdev,
@@ -219,8 +230,6 @@ static long vfio_cdx_ioctl(struct vfio_device *core_vdev,
 	switch (cmd) {
 	case VFIO_DEVICE_GET_INFO:
 		return vfio_cdx_ioctl_get_info(vdev, uarg);
-	case VFIO_DEVICE_GET_REGION_INFO:
-		return vfio_cdx_ioctl_get_region_info(vdev, uarg);
 	case VFIO_DEVICE_GET_IRQ_INFO:
 		return vfio_cdx_ioctl_get_irq_info(vdev, uarg);
 	case VFIO_DEVICE_SET_IRQS:
@@ -245,10 +254,10 @@ static int vfio_cdx_mmap_mmio(struct vfio_cdx_region region,
 	if (base + size > region.size)
 		return -EINVAL;
 
-	vma->vm_pgoff = (region.addr >> PAGE_SHIFT) + pgoff;
 	vma->vm_page_prot = pgprot_device(vma->vm_page_prot);
 
-	return io_remap_pfn_range(vma, vma->vm_start, vma->vm_pgoff,
+	return io_remap_pfn_range(vma, vma->vm_start,
+				  (region.addr >> PAGE_SHIFT) + pgoff,
 				  size, vma->vm_page_prot);
 }
 
@@ -262,6 +271,9 @@ static int vfio_cdx_mmap(struct vfio_device *core_vdev,
 
 	index = vma->vm_pgoff >> (VFIO_CDX_OFFSET_SHIFT - PAGE_SHIFT);
 
+	if (!(vma->vm_flags & VM_SHARED))
+		return -EINVAL;
+
 	if (index >= cdx_dev->res_count)
 		return -EINVAL;
 
@@ -272,18 +284,25 @@ static int vfio_cdx_mmap(struct vfio_device *core_vdev,
 	    (vma->vm_flags & VM_READ))
 		return -EPERM;
 
-	if (!(vdev->regions[index].flags & VFIO_REGION_INFO_FLAG_WRITE) &&
-	    (vma->vm_flags & VM_WRITE))
-		return -EPERM;
+	/* Prevent read-only region mappings from being upgraded with mprotect() */
+	if (!(vdev->regions[index].flags & VFIO_REGION_INFO_FLAG_WRITE)) {
+		if (vma->vm_flags & VM_WRITE)
+			return -EPERM;
+
+		vm_flags_clear(vma, VM_MAYWRITE);
+	}
 
 	return vfio_cdx_mmap_mmio(vdev->regions[index], vma);
 }
 
 static const struct vfio_device_ops vfio_cdx_ops = {
 	.name		= "vfio-cdx",
+	.init		= vfio_cdx_init_dev,
+	.release	= vfio_cdx_release_dev,
 	.open_device	= vfio_cdx_open_device,
 	.close_device	= vfio_cdx_close_device,
 	.ioctl		= vfio_cdx_ioctl,
+	.get_region_info_caps = vfio_cdx_ioctl_get_region_info,
 	.device_feature = vfio_cdx_ioctl_feature,
 	.mmap		= vfio_cdx_mmap,
 	.bind_iommufd	= vfio_iommufd_physical_bind,

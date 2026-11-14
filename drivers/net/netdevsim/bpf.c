@@ -123,12 +123,6 @@ int nsim_bpf_setup_tc_block_cb(enum tc_setup_type type,
 	struct netdevsim *ns = cb_priv;
 	struct bpf_prog *oldprog;
 
-	if (type != TC_SETUP_CLSBPF) {
-		NSIM_EA(cls_bpf->common.extack,
-			"only offload of BPF classifiers supported");
-		return -EOPNOTSUPP;
-	}
-
 	if (!tc_cls_can_offload_and_chain0(ns->netdev, &cls_bpf->common))
 		return -EOPNOTSUPP;
 
@@ -148,6 +142,17 @@ int nsim_bpf_setup_tc_block_cb(enum tc_setup_type type,
 		NSIM_EA(cls_bpf->common.extack,
 			"netdevsim configured to reject unbound programs");
 		return -EOPNOTSUPP;
+	}
+
+	/* A dev-bound program can be replayed here when a netdev joins
+	 * a shared block, after the core attach-time check has run;
+	 * enforce the device match as nfp does.
+	 */
+	if (prog && bpf_prog_is_dev_bound(prog->aux) &&
+	    !bpf_offload_dev_match(prog, ns->netdev)) {
+		NSIM_EA(cls_bpf->common.extack,
+			"program bound to a different device");
+		return -EINVAL;
 	}
 
 	if (cls_bpf->command != TC_CLSBPF_OFFLOAD)
@@ -222,7 +227,7 @@ static int nsim_bpf_create_prog(struct nsim_dev *nsim_dev,
 	char name[16];
 	int ret;
 
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	state = kzalloc_obj(*state);
 	if (!state)
 		return -ENOMEM;
 
@@ -244,7 +249,9 @@ static int nsim_bpf_create_prog(struct nsim_dev *nsim_dev,
 			    &state->state, &nsim_bpf_string_fops);
 	debugfs_create_bool("loaded", 0400, state->ddir, &state->is_loaded);
 
+	mutex_lock(&nsim_dev->progs_list_lock);
 	list_add_tail(&state->l, &nsim_dev->bpf_bound_progs);
+	mutex_unlock(&nsim_dev->progs_list_lock);
 
 	prog->aux->offload->dev_priv = state;
 
@@ -273,12 +280,16 @@ static int nsim_bpf_translate(struct bpf_prog *prog)
 static void nsim_bpf_destroy_prog(struct bpf_prog *prog)
 {
 	struct nsim_bpf_bound_prog *state;
+	struct nsim_dev *nsim_dev;
 
 	state = prog->aux->offload->dev_priv;
+	nsim_dev = state->nsim_dev;
 	WARN(state->is_loaded,
 	     "offload state destroyed while program still bound");
 	debugfs_remove_recursive(state->ddir);
+	mutex_lock(&nsim_dev->progs_list_lock);
 	list_del(&state->l);
+	mutex_unlock(&nsim_dev->progs_list_lock);
 	kfree(state);
 }
 
@@ -495,7 +506,7 @@ nsim_bpf_map_alloc(struct netdevsim *ns, struct bpf_offloaded_map *offmap)
 	if (offmap->map.map_flags)
 		return -EINVAL;
 
-	nmap = kzalloc(sizeof(*nmap), GFP_KERNEL_ACCOUNT);
+	nmap = kzalloc_obj(*nmap, GFP_KERNEL_ACCOUNT);
 	if (!nmap)
 		return -ENOMEM;
 

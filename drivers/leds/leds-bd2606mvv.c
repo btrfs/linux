@@ -13,7 +13,6 @@
 #include <linux/i2c.h>
 #include <linux/leds.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
@@ -79,7 +78,7 @@ static int bd2606mvv_probe(struct i2c_client *client)
 	if (!dev_fwnode(dev))
 		return -ENODEV;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

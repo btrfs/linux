@@ -214,7 +214,7 @@ static void mmc_omap_select_slot(struct mmc_omap_slot *slot, int claimed)
 	host->mmc = slot->mmc;
 	spin_unlock_irqrestore(&host->slot_lock, flags);
 no_claim:
-	timer_delete(&host->clk_timer);
+	timer_delete_sync(&host->clk_timer);
 	if (host->current_slot != slot || !claimed)
 		mmc_omap_fclk_offdelay(host->current_slot);
 
@@ -273,7 +273,7 @@ static void mmc_omap_release_slot(struct mmc_omap_slot *slot, int clk_enabled)
 		/* Keeps clock running for at least 8 cycles on valid freq */
 		mod_timer(&host->clk_timer, jiffies  + HZ/10);
 	else {
-		timer_delete(&host->clk_timer);
+		timer_delete_sync(&host->clk_timer);
 		mmc_omap_fclk_offdelay(slot);
 		mmc_omap_fclk_enable(host, 0);
 	}
@@ -326,7 +326,7 @@ mmc_omap_show_cover_switch(struct device *dev, struct device_attribute *attr,
 		       "closed");
 }
 
-static DEVICE_ATTR(cover_switch, S_IRUGO, mmc_omap_show_cover_switch, NULL);
+static DEVICE_ATTR(cover_switch, 0444, mmc_omap_show_cover_switch, NULL);
 
 static ssize_t
 mmc_omap_show_slot_name(struct device *dev, struct device_attribute *attr,
@@ -338,7 +338,7 @@ mmc_omap_show_slot_name(struct device *dev, struct device_attribute *attr,
 	return sprintf(buf, "%s\n", slot->pdata->name);
 }
 
-static DEVICE_ATTR(slot_name, S_IRUGO, mmc_omap_show_slot_name, NULL);
+static DEVICE_ATTR(slot_name, 0444, mmc_omap_show_slot_name, NULL);
 
 static void
 mmc_omap_start_command(struct mmc_omap_host *host, struct mmc_command *cmd)
@@ -1383,8 +1383,7 @@ static int mmc_omap_probe(struct platform_device *pdev)
 		return -EPROBE_DEFER;
 	}
 
-	host = devm_kzalloc(&pdev->dev, sizeof(struct mmc_omap_host),
-			    GFP_KERNEL);
+	host = devm_kzalloc_obj(&pdev->dev, struct mmc_omap_host);
 	if (host == NULL)
 		return -ENOMEM;
 
@@ -1477,7 +1476,7 @@ static int mmc_omap_probe(struct platform_device *pdev)
 	host->nr_slots = pdata->nr_slots;
 	host->reg_shift = (mmc_omap7xx() ? 1 : 2);
 
-	host->mmc_omap_wq = alloc_workqueue("mmc_omap", 0, 0);
+	host->mmc_omap_wq = alloc_workqueue("mmc_omap", WQ_PERCPU, 0);
 	if (!host->mmc_omap_wq) {
 		ret = -ENOMEM;
 		goto err_plat_cleanup;

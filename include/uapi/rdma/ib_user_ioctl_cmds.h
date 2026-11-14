@@ -56,6 +56,8 @@ enum uverbs_default_objects {
 	UVERBS_OBJECT_COUNTERS,
 	UVERBS_OBJECT_ASYNC_EVENT,
 	UVERBS_OBJECT_DMAH,
+	UVERBS_OBJECT_DMABUF,
+	UVERBS_OBJECT_COMP_CNTR,
 };
 
 enum {
@@ -73,6 +75,8 @@ enum uverbs_methods_device {
 	UVERBS_METHOD_QUERY_CONTEXT,
 	UVERBS_METHOD_QUERY_GID_TABLE,
 	UVERBS_METHOD_QUERY_GID_ENTRY,
+	UVERBS_METHOD_QUERY_PORT_SPEED,
+	UVERBS_METHOD_QUERY_COMP_CNTR_CAPS,
 };
 
 enum uverbs_attrs_invoke_write_cmd_attr_ids {
@@ -84,6 +88,17 @@ enum uverbs_attrs_invoke_write_cmd_attr_ids {
 enum uverbs_attrs_query_port_cmd_attr_ids {
 	UVERBS_ATTR_QUERY_PORT_PORT_NUM,
 	UVERBS_ATTR_QUERY_PORT_RESP,
+};
+
+enum uverbs_attrs_query_port_speed_cmd_attr_ids {
+	UVERBS_ATTR_QUERY_PORT_SPEED_PORT_NUM,
+	UVERBS_ATTR_QUERY_PORT_SPEED_RESP,
+};
+
+enum uverbs_attrs_query_comp_cntr_caps_attr_ids {
+	UVERBS_ATTR_QUERY_COMP_CNTR_CAPS_MAX_COUNTERS,
+	UVERBS_ATTR_QUERY_COMP_CNTR_CAPS_MAX_VALUE,
+	UVERBS_ATTR_QUERY_COMP_CNTR_CAPS_SUPPORTED_QP_ATTACH_OPS,
 };
 
 enum uverbs_attrs_get_context_attr_ids {
@@ -110,6 +125,7 @@ enum uverbs_attrs_create_cq_cmd_attr_ids {
 	UVERBS_ATTR_CREATE_CQ_BUFFER_LENGTH,
 	UVERBS_ATTR_CREATE_CQ_BUFFER_FD,
 	UVERBS_ATTR_CREATE_CQ_BUFFER_OFFSET,
+	UVERBS_ATTR_CREATE_CQ_BUF_UMEM,
 };
 
 enum uverbs_attrs_destroy_cq_cmd_attr_ids {
@@ -151,6 +167,9 @@ enum uverbs_attrs_create_qp_cmd_attr_ids {
 	UVERBS_ATTR_CREATE_QP_EVENT_FD,
 	UVERBS_ATTR_CREATE_QP_RESP_CAP,
 	UVERBS_ATTR_CREATE_QP_RESP_QP_NUM,
+	UVERBS_ATTR_CREATE_QP_BUF_UMEM,
+	UVERBS_ATTR_CREATE_QP_RQ_BUF_UMEM,
+	UVERBS_ATTR_CREATE_QP_SQ_BUF_UMEM,
 };
 
 enum uverbs_attrs_destroy_qp_cmd_attr_ids {
@@ -158,9 +177,16 @@ enum uverbs_attrs_destroy_qp_cmd_attr_ids {
 	UVERBS_ATTR_DESTROY_QP_RESP,
 };
 
+enum uverbs_attrs_qp_attach_comp_cntr_cmd_attr_ids {
+	UVERBS_ATTR_QP_ATTACH_COMP_CNTR_HANDLE,
+	UVERBS_ATTR_QP_ATTACH_COMP_CNTR_CNTR_HANDLE,
+	UVERBS_ATTR_QP_ATTACH_COMP_CNTR_OP_MASK,
+};
+
 enum uverbs_methods_qp {
 	UVERBS_METHOD_QP_CREATE,
 	UVERBS_METHOD_QP_DESTROY,
+	UVERBS_METHOD_QP_ATTACH_COMP_CNTR,
 };
 
 enum uverbs_attrs_create_srq_cmd_attr_ids {
@@ -178,6 +204,7 @@ enum uverbs_attrs_create_srq_cmd_attr_ids {
 	UVERBS_ATTR_CREATE_SRQ_RESP_MAX_WR,
 	UVERBS_ATTR_CREATE_SRQ_RESP_MAX_SGE,
 	UVERBS_ATTR_CREATE_SRQ_RESP_SRQ_NUM,
+	UVERBS_ATTR_CREATE_SRQ_BUF_UMEM,
 };
 
 enum uverbs_attrs_destroy_srq_cmd_attr_ids {
@@ -255,6 +282,15 @@ enum uverbs_attrs_free_dmah_cmd_attr_ids {
 enum uverbs_methods_dmah {
 	UVERBS_METHOD_DMAH_ALLOC,
 	UVERBS_METHOD_DMAH_FREE,
+};
+
+enum uverbs_attrs_alloc_dmabuf_cmd_attr_ids {
+	UVERBS_ATTR_ALLOC_DMABUF_HANDLE,
+	UVERBS_ATTR_ALLOC_DMABUF_PGOFF,
+};
+
+enum uverbs_methods_dmabuf {
+	UVERBS_METHOD_DMABUF_ALLOC,
 };
 
 enum uverbs_attrs_reg_dm_mr_cmd_attr_ids {
@@ -416,6 +452,34 @@ enum uverbs_attrs_query_gid_entry_cmd_attr_ids {
 	UVERBS_ATTR_QUERY_GID_ENTRY_GID_INDEX,
 	UVERBS_ATTR_QUERY_GID_ENTRY_FLAGS,
 	UVERBS_ATTR_QUERY_GID_ENTRY_RESP_ENTRY,
+};
+
+enum uverbs_methods_comp_cntr {
+	UVERBS_METHOD_COMP_CNTR_CREATE,
+	UVERBS_METHOD_COMP_CNTR_DESTROY,
+	UVERBS_METHOD_COMP_CNTR_MODIFY,
+	UVERBS_METHOD_COMP_CNTR_READ,
+};
+
+enum uverbs_attrs_create_comp_cntr_cmd_attr_ids {
+	UVERBS_ATTR_CREATE_COMP_CNTR_HANDLE,
+};
+
+enum uverbs_attrs_destroy_comp_cntr_cmd_attr_ids {
+	UVERBS_ATTR_DESTROY_COMP_CNTR_HANDLE,
+};
+
+enum uverbs_attrs_modify_comp_cntr_cmd_attr_ids {
+	UVERBS_ATTR_MODIFY_COMP_CNTR_HANDLE,
+	UVERBS_ATTR_MODIFY_COMP_CNTR_ENTRY,
+	UVERBS_ATTR_MODIFY_COMP_CNTR_OP,
+	UVERBS_ATTR_MODIFY_COMP_CNTR_VALUE,
+};
+
+enum uverbs_attrs_read_comp_cntr_cmd_attr_ids {
+	UVERBS_ATTR_READ_COMP_CNTR_HANDLE,
+	UVERBS_ATTR_READ_COMP_CNTR_ENTRY,
+	UVERBS_ATTR_READ_COMP_CNTR_RESP_VALUE,
 };
 
 #endif

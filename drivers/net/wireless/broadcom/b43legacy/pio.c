@@ -5,7 +5,7 @@
 
   PIO Transmission
 
-  Copyright (c) 2005 Michael Buesch <m@bues.ch>
+  Copyright (c) 2005 Michael Buesch
 
 
 */
@@ -320,7 +320,7 @@ struct b43legacy_pioqueue *b43legacy_setup_pioqueue(struct b43legacy_wldev *dev,
 	u32 value;
 	u16 qsize;
 
-	queue = kzalloc(sizeof(*queue), GFP_KERNEL);
+	queue = kzalloc_obj(*queue);
 	if (!queue)
 		goto out;
 

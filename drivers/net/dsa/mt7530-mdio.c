@@ -48,6 +48,9 @@ mt7530_regmap_read(void *context, unsigned int reg, unsigned int *val)
 	u16 page, r, lo, hi;
 	int ret;
 
+	/* Callers do not check for errors, keep the value deterministic */
+	*val = 0;
+
 	page = (reg >> 6) & 0x3ff;
 	r = (reg >> 2) & 0xf;
 
@@ -55,8 +58,15 @@ mt7530_regmap_read(void *context, unsigned int reg, unsigned int *val)
 	if (ret < 0)
 		return ret;
 
-	lo = bus->read(bus, priv->mdiodev->addr, r);
-	hi = bus->read(bus, priv->mdiodev->addr, 0x10);
+	ret = bus->read(bus, priv->mdiodev->addr, r);
+	if (ret < 0)
+		return ret;
+	lo = ret;
+
+	ret = bus->read(bus, priv->mdiodev->addr, 0x10);
+	if (ret < 0)
+		return ret;
+	hi = ret;
 
 	*val = (hi << 16) | (lo & 0xffff);
 
@@ -89,9 +99,8 @@ mt7531_create_sgmii(struct mt7530_priv *priv)
 	int i, ret = 0;
 
 	for (i = priv->p5_sgmii ? 0 : 1; i < 2; i++) {
-		mt7531_pcs_config[i] = devm_kzalloc(priv->dev,
-						    sizeof(struct regmap_config),
-						    GFP_KERNEL);
+		mt7531_pcs_config[i] = devm_kzalloc_obj(priv->dev,
+							struct regmap_config);
 		if (!mt7531_pcs_config[i]) {
 			ret = -ENOMEM;
 			break;
@@ -113,8 +122,8 @@ mt7531_create_sgmii(struct mt7530_priv *priv)
 			ret = PTR_ERR(regmap);
 			break;
 		}
-		pcs = mtk_pcs_lynxi_create(priv->dev, regmap,
-					   MT7531_PHYA_CTRL_SIGNAL3, 0);
+		pcs = mtk_pcs_lynxi_create(priv->dev, NULL, regmap,
+					   MT7531_PHYA_CTRL_SIGNAL3);
 		if (!pcs) {
 			ret = -ENXIO;
 			break;
@@ -132,7 +141,7 @@ static const struct of_device_id mt7530_of_match[] = {
 	{ .compatible = "mediatek,mt7621", .data = &mt753x_table[ID_MT7621], },
 	{ .compatible = "mediatek,mt7530", .data = &mt753x_table[ID_MT7530], },
 	{ .compatible = "mediatek,mt7531", .data = &mt753x_table[ID_MT7531], },
-	{ /* sentinel */ },
+	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, mt7530_of_match);
 
@@ -141,19 +150,21 @@ static const struct regmap_config regmap_config = {
 	.val_bits = 32,
 	.reg_stride = 4,
 	.max_register = MT7530_CREV,
-	.disable_locking = true,
+	.lock = mt7530_mdio_regmap_lock,
+	.unlock = mt7530_mdio_regmap_unlock,
 };
 
 static int
 mt7530_probe(struct mdio_device *mdiodev)
 {
+	struct regmap_config rc = regmap_config;
 	struct mt7530_priv *priv;
 	struct device_node *dn;
 	int ret;
 
 	dn = mdiodev->dev.of_node;
 
-	priv = devm_kzalloc(&mdiodev->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&mdiodev->dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -200,8 +211,9 @@ mt7530_probe(struct mdio_device *mdiodev)
 			return PTR_ERR(priv->io_pwr);
 	}
 
-	priv->regmap = devm_regmap_init(priv->dev, &mt7530_regmap_bus, priv,
-					&regmap_config);
+	rc.lock_arg = &priv->bus->mdio_lock;
+	priv->regmap = devm_regmap_init(priv->dev, &mt7530_regmap_bus,
+					priv, &rc);
 	if (IS_ERR(priv->regmap))
 		return PTR_ERR(priv->regmap);
 
@@ -220,15 +232,17 @@ mt7530_remove(struct mdio_device *mdiodev)
 	if (!priv)
 		return;
 
-	ret = regulator_disable(priv->core_pwr);
-	if (ret < 0)
-		dev_err(priv->dev,
-			"Failed to disable core power: %d\n", ret);
+	if (priv->id == ID_MT7530) {
+		ret = regulator_disable(priv->core_pwr);
+		if (ret < 0)
+			dev_err(priv->dev,
+				"Failed to disable core power: %d\n", ret);
 
-	ret = regulator_disable(priv->io_pwr);
-	if (ret < 0)
-		dev_err(priv->dev, "Failed to disable io pwr: %d\n",
-			ret);
+		ret = regulator_disable(priv->io_pwr);
+		if (ret < 0)
+			dev_err(priv->dev, "Failed to disable io pwr: %d\n",
+				ret);
+	}
 
 	mt7530_remove_common(priv);
 
