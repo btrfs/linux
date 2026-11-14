@@ -14,6 +14,7 @@
 #include <linux/spinlock.h>
 #include <linux/cpu.h>
 #include <linux/slab.h>
+#include <linux/sysfs.h>
 #include <linux/of.h>
 
 #include "of_helpers.h"
@@ -53,7 +54,7 @@ static struct property *dlpar_parse_cc_property(struct cc_workarea *ccwa)
 	char *name;
 	char *value;
 
-	prop = kzalloc(sizeof(*prop), GFP_KERNEL);
+	prop = kzalloc_obj(*prop);
 	if (!prop)
 		return NULL;
 
@@ -80,7 +81,7 @@ static struct device_node *dlpar_parse_cc_node(struct cc_workarea *ccwa)
 	struct device_node *dn;
 	const char *name;
 
-	dn = kzalloc(sizeof(*dn), GFP_KERNEL);
+	dn = kzalloc_obj(*dn);
 	if (!dn)
 		return NULL;
 
@@ -633,7 +634,7 @@ void queue_hotplug_event(struct pseries_hp_errorlog *hp_errlog)
 	if (!hp_errlog_copy)
 		return;
 
-	work = kmalloc(sizeof(struct pseries_hp_work), GFP_ATOMIC);
+	work = kmalloc_obj(struct pseries_hp_work, GFP_ATOMIC);
 	if (work) {
 		INIT_WORK((struct work_struct *)work, pseries_hp_work_fn);
 		work->errlog = hp_errlog_copy;
@@ -798,7 +799,7 @@ dlpar_store_out:
 static ssize_t dlpar_show(const struct class *class, const struct class_attribute *attr,
 			  char *buf)
 {
-	return sprintf(buf, "%s\n", "memory,cpu,dt");
+	return sysfs_emit(buf, "%s\n", "memory,cpu,dt");
 }
 
 static CLASS_ATTR_RW(dlpar);

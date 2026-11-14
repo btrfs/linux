@@ -501,7 +501,7 @@ void sprd_dpu_stop(struct sprd_dpu *dpu)
 }
 
 static int sprd_plane_atomic_check(struct drm_plane *plane,
-				   struct drm_atomic_state *state)
+				   struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *plane_state = drm_atomic_get_new_plane_state(state,
 									     plane);
@@ -526,7 +526,7 @@ static int sprd_plane_atomic_check(struct drm_plane *plane,
 }
 
 static void sprd_plane_atomic_update(struct drm_plane *drm_plane,
-				     struct drm_atomic_state *state)
+				     struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *new_state = drm_atomic_get_new_plane_state(state,
 									   drm_plane);
@@ -537,7 +537,7 @@ static void sprd_plane_atomic_update(struct drm_plane *drm_plane,
 }
 
 static void sprd_plane_atomic_disable(struct drm_plane *drm_plane,
-				      struct drm_atomic_state *state)
+				      struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *old_state = drm_atomic_get_old_plane_state(state,
 									   drm_plane);
@@ -578,7 +578,7 @@ static const struct drm_plane_funcs sprd_plane_funcs = {
 	.update_plane = drm_atomic_helper_update_plane,
 	.disable_plane	= drm_atomic_helper_disable_plane,
 	.destroy = drm_plane_cleanup,
-	.reset = drm_atomic_helper_plane_reset,
+	.atomic_create_state = drm_atomic_helper_plane_create_state,
 	.atomic_duplicate_state = drm_atomic_helper_plane_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_plane_destroy_state,
 };
@@ -636,7 +636,7 @@ static void sprd_crtc_mode_set_nofb(struct drm_crtc *crtc)
 }
 
 static void sprd_crtc_atomic_enable(struct drm_crtc *crtc,
-				    struct drm_atomic_state *state)
+				    struct drm_atomic_commit *state)
 {
 	struct sprd_dpu *dpu = to_sprd_crtc(crtc);
 
@@ -646,7 +646,7 @@ static void sprd_crtc_atomic_enable(struct drm_crtc *crtc,
 }
 
 static void sprd_crtc_atomic_disable(struct drm_crtc *crtc,
-				     struct drm_atomic_state *state)
+				     struct drm_atomic_commit *state)
 {
 	struct sprd_dpu *dpu = to_sprd_crtc(crtc);
 	struct drm_device *drm = dpu->base.dev;
@@ -664,7 +664,7 @@ static void sprd_crtc_atomic_disable(struct drm_crtc *crtc,
 }
 
 static void sprd_crtc_atomic_flush(struct drm_crtc *crtc,
-				   struct drm_atomic_state *state)
+				   struct drm_atomic_commit *state)
 
 {
 	struct sprd_dpu *dpu = to_sprd_crtc(crtc);
@@ -707,7 +707,7 @@ static const struct drm_crtc_funcs sprd_crtc_funcs = {
 	.destroy	= drm_crtc_cleanup,
 	.set_config	= drm_atomic_helper_set_config,
 	.page_flip	= drm_atomic_helper_page_flip,
-	.reset		= drm_atomic_helper_crtc_reset,
+	.atomic_create_state = drm_atomic_helper_crtc_create_state,
 	.atomic_duplicate_state	= drm_atomic_helper_crtc_duplicate_state,
 	.atomic_destroy_state	= drm_atomic_helper_crtc_destroy_state,
 	.enable_vblank	= sprd_crtc_enable_vblank,

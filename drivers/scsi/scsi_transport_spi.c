@@ -112,9 +112,8 @@ static int spi_execute(struct scsi_device *sdev, const void *cmd,
 			REQ_FAILFAST_DRIVER;
 	struct scsi_failure failure_defs[] = {
 		{
-			.sense = UNIT_ATTENTION,
-			.asc = SCMD_FAILURE_ASC_ANY,
-			.ascq = SCMD_FAILURE_ASCQ_ANY,
+			.sense_key = UNIT_ATTENTION,
+			.sense_code = SCMD_FAILURE_SENSE_CODE_ANY,
 			.allowed = DV_RETRIES,
 			.result = SAM_STAT_CHECK_CONDITION,
 		},
@@ -680,10 +679,9 @@ spi_dv_device_echo_buffer(struct scsi_device *sdev, u8 *buffer,
 		if (result || !scsi_device_online(sdev)) {
 
 			scsi_device_set_state(sdev, SDEV_QUIESCE);
-			if (result > 0 && scsi_sense_valid(&sshdr)
-			    && sshdr.sense_key == ILLEGAL_REQUEST
-			    /* INVALID FIELD IN CDB */
-			    && sshdr.asc == 0x24 && sshdr.ascq == 0x00)
+			if (result > 0 && scsi_sense_valid(&sshdr) &&
+			    sshdr.sense_key == ILLEGAL_REQUEST &&
+			    sshdr.sense_code == INVALID_FIELD_IN_CDB)
 				/* This would mean that the drive lied
 				 * to us about supporting an echo
 				 * buffer (unfortunately some Western
@@ -1096,7 +1094,7 @@ void
 spi_schedule_dv_device(struct scsi_device *sdev)
 {
 	struct work_queue_wrapper *wqw =
-		kmalloc(sizeof(struct work_queue_wrapper), GFP_ATOMIC);
+		kmalloc_obj(struct work_queue_wrapper, GFP_ATOMIC);
 
 	if (unlikely(!wqw))
 		return;
@@ -1570,8 +1568,7 @@ static int spi_target_configure(struct transport_container *tc,
 struct scsi_transport_template *
 spi_attach_transport(struct spi_function_template *ft)
 {
-	struct spi_internal *i = kzalloc(sizeof(struct spi_internal),
-					 GFP_KERNEL);
+	struct spi_internal *i = kzalloc_obj(struct spi_internal);
 
 	if (unlikely(!i))
 		return NULL;
@@ -1622,7 +1619,7 @@ static __init int spi_transport_init(void)
 	error = transport_class_register(&spi_transport_class);
 	if (error)
 		return error;
-	error = anon_transport_class_register(&spi_device_class);
+	anon_transport_class_register(&spi_device_class);
 	return transport_class_register(&spi_host_class);
 }
 

@@ -197,7 +197,7 @@ lm73_probe(struct i2c_client *client)
 	struct lm73_data *data;
 	int ctrl;
 
-	data = devm_kzalloc(dev, sizeof(struct lm73_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct lm73_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -220,7 +220,7 @@ lm73_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id lm73_ids[] = {
-	{ "lm73" },
+	{ .name = "lm73" },
 	{ /* LIST END */ }
 };
 MODULE_DEVICE_TABLE(i2c, lm73_ids);

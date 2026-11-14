@@ -209,11 +209,16 @@ int media_entity_pads_init(struct media_entity *entity, u16 num_pads,
 		mutex_lock(&mdev->graph_mutex);
 
 	media_entity_for_each_pad(entity, iter) {
+		const u32 pad_flags = iter->flags & (MEDIA_PAD_FL_SINK |
+						     MEDIA_PAD_FL_SOURCE |
+						     MEDIA_PAD_FL_INTERNAL);
+
 		iter->entity = entity;
 		iter->index = i++;
 
-		if (hweight32(iter->flags & (MEDIA_PAD_FL_SINK |
-					     MEDIA_PAD_FL_SOURCE)) != 1) {
+		if (pad_flags != MEDIA_PAD_FL_SINK &&
+		    pad_flags != (MEDIA_PAD_FL_SINK | MEDIA_PAD_FL_INTERNAL) &&
+		    pad_flags != MEDIA_PAD_FL_SOURCE) {
 			ret = -EINVAL;
 			break;
 		}
@@ -587,7 +592,7 @@ static int media_pipeline_add_pad(struct media_pipeline *pipe,
 		}
 	}
 
-	ppad = kzalloc(sizeof(*ppad), GFP_KERNEL);
+	ppad = kzalloc_obj(*ppad);
 	if (!ppad)
 		return -ENOMEM;
 
@@ -977,7 +982,7 @@ __must_check int media_pipeline_alloc_start(struct media_pad *pad)
 	 */
 	pipe = media_pad_pipeline(pad);
 	if (!pipe) {
-		new_pipe = kzalloc(sizeof(*new_pipe), GFP_KERNEL);
+		new_pipe = kzalloc_obj(*new_pipe);
 		if (!new_pipe) {
 			ret = -ENOMEM;
 			goto out;
@@ -1061,7 +1066,7 @@ static struct media_link *media_add_link(struct list_head *head)
 {
 	struct media_link *link;
 
-	link = kzalloc(sizeof(*link), GFP_KERNEL);
+	link = kzalloc_obj(*link);
 	if (link == NULL)
 		return NULL;
 
@@ -1118,7 +1123,8 @@ int media_get_pad_index(struct media_entity *entity, u32 pad_type,
 
 	for (i = 0; i < entity->num_pads; i++) {
 		if ((entity->pads[i].flags &
-		     (MEDIA_PAD_FL_SINK | MEDIA_PAD_FL_SOURCE)) != pad_type)
+		     (MEDIA_PAD_FL_SINK | MEDIA_PAD_FL_SOURCE |
+		      MEDIA_PAD_FL_INTERNAL)) != pad_type)
 			continue;
 
 		if (entity->pads[i].sig_type == sig_type)
@@ -1147,6 +1153,9 @@ media_create_pad_link(struct media_entity *source, u16 source_pad,
 	if (WARN_ON(!(source->pads[source_pad].flags & MEDIA_PAD_FL_SOURCE)))
 		return -EINVAL;
 	if (WARN_ON(!(sink->pads[sink_pad].flags & MEDIA_PAD_FL_SINK)))
+		return -EINVAL;
+	if (WARN_ON(source->pads[source_pad].flags & MEDIA_PAD_FL_INTERNAL) ||
+	    WARN_ON(sink->pads[sink_pad].flags & MEDIA_PAD_FL_INTERNAL))
 		return -EINVAL;
 
 	link = media_add_link(&source->links);
@@ -1547,7 +1556,7 @@ struct media_intf_devnode *media_devnode_create(struct media_device *mdev,
 {
 	struct media_intf_devnode *devnode;
 
-	devnode = kzalloc(sizeof(*devnode), GFP_KERNEL);
+	devnode = kzalloc_obj(*devnode);
 	if (!devnode)
 		return NULL;
 

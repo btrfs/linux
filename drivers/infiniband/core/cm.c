@@ -34,7 +34,6 @@ MODULE_AUTHOR("Sean Hefty");
 MODULE_DESCRIPTION("InfiniBand CM");
 MODULE_LICENSE("Dual BSD/GPL");
 
-#define CM_DESTROY_ID_WAIT_TIMEOUT 10000 /* msecs */
 #define CM_DIRECT_RETRY_CTX ((void *) 1UL)
 #define CM_MRA_SETTING 24 /* 4.096us * 2^24 = ~68.7 seconds */
 
@@ -531,6 +530,7 @@ static int cm_init_av_by_path(struct sa_path_rec *path,
 	struct rdma_ah_attr new_ah_attr;
 	struct cm_device *cm_dev;
 	struct cm_port *port;
+	u16 pkey_index;
 	int ret;
 
 	port = get_cm_port_from_path(path, sgid_attr);
@@ -539,11 +539,9 @@ static int cm_init_av_by_path(struct sa_path_rec *path,
 	cm_dev = port->cm_dev;
 
 	ret = ib_find_cached_pkey(cm_dev->ib_device, port->port_num,
-				  be16_to_cpu(path->pkey), &av->pkey_index);
+				  be16_to_cpu(path->pkey), &pkey_index);
 	if (ret)
 		return ret;
-
-	cm_set_av_port(av, port);
 
 	/*
 	 * av->ah_attr might be initialized based on wc or during
@@ -559,6 +557,8 @@ static int cm_init_av_by_path(struct sa_path_rec *path,
 	if (ret)
 		return ret;
 
+	av->pkey_index = pkey_index;
+	cm_set_av_port(av, port);
 	av->timeout = path->packet_life_time + 1;
 	rdma_move_ah_attr(&av->ah_attr, &new_ah_attr);
 	return 0;
@@ -828,7 +828,7 @@ static struct cm_id_private *cm_alloc_id_priv(struct ib_device *device,
 	u32 id;
 	int ret;
 
-	cm_id_priv = kzalloc(sizeof *cm_id_priv, GFP_KERNEL);
+	cm_id_priv = kzalloc_obj(*cm_id_priv);
 	if (!cm_id_priv)
 		return ERR_PTR(-ENOMEM);
 
@@ -977,7 +977,7 @@ static struct cm_timewait_info *cm_create_timewait_info(__be32 local_id)
 {
 	struct cm_timewait_info *timewait_info;
 
-	timewait_info = kzalloc(sizeof *timewait_info, GFP_KERNEL);
+	timewait_info = kzalloc_obj(*timewait_info);
 	if (!timewait_info)
 		return ERR_PTR(-ENOMEM);
 
@@ -1057,6 +1057,7 @@ static void cm_destroy_id(struct ib_cm_id *cm_id, int err)
 {
 	struct cm_id_private *cm_id_priv;
 	enum ib_cm_state old_state;
+	unsigned long timeout;
 	struct cm_work *work;
 	int ret;
 
@@ -1167,10 +1168,9 @@ retest:
 
 	xa_erase(&cm.local_id_table, cm_local_id(cm_id->local_id));
 	cm_deref_id(cm_id_priv);
+	timeout = msecs_to_jiffies((cm_id_priv->max_cm_retries * cm_id_priv->timeout_ms * 5) / 4);
 	do {
-		ret = wait_for_completion_timeout(&cm_id_priv->comp,
-						  msecs_to_jiffies(
-						  CM_DESTROY_ID_WAIT_TIMEOUT));
+		ret = wait_for_completion_timeout(&cm_id_priv->comp, timeout);
 		if (!ret) /* timeout happened */
 			cm_destroy_id_wait_timeout(cm_id, old_state);
 	} while (!ret);
@@ -2185,8 +2185,10 @@ static int cm_req_handler(struct cm_work *work)
 				 cm_id_priv->av.ah_attr.roce.dmac);
 	work->path[0].hop_limit = grh->hop_limit;
 
-	/* This destroy call is needed to pair with cm_init_av_for_response */
-	cm_destroy_av(&cm_id_priv->av);
+	/*
+	 * cm_init_av_by_path() will internally pair with the above
+	 * cm_init_av_for_response() if it succeeds.
+	 */
 	ret = cm_init_av_by_path(&work->path[0], gid_attr, &cm_id_priv->av);
 	if (ret) {
 		int err;
@@ -3903,7 +3905,7 @@ static int cm_establish(struct ib_cm_id *cm_id)
 	if (!cm_dev)
 		return -ENODEV;
 
-	work = kmalloc(sizeof *work, GFP_ATOMIC);
+	work = kmalloc_obj(*work, GFP_ATOMIC);
 	if (!work)
 		return -ENOMEM;
 
@@ -4051,7 +4053,7 @@ static void cm_recv_handler(struct ib_mad_agent *mad_agent,
 	attr_id = be16_to_cpu(mad_recv_wc->recv_buf.mad->mad_hdr.attr_id);
 	atomic_long_inc(&port->counters[CM_RECV][attr_id - CM_ATTR_ID_OFFSET]);
 
-	work = kmalloc(struct_size(work, path, paths), GFP_KERNEL);
+	work = kmalloc_flex(*work, path, paths);
 	if (!work) {
 		ib_free_recv_mad(mad_recv_wc);
 		return;
@@ -4349,8 +4351,7 @@ static int cm_add_one(struct ib_device *ib_device)
 	int count = 0;
 	u32 i;
 
-	cm_dev = kzalloc(struct_size(cm_dev, port, ib_device->phys_port_cnt),
-			 GFP_KERNEL);
+	cm_dev = kzalloc_flex(*cm_dev, port, ib_device->phys_port_cnt);
 	if (!cm_dev)
 		return -ENOMEM;
 
@@ -4367,7 +4368,7 @@ static int cm_add_one(struct ib_device *ib_device)
 		if (!rdma_cap_ib_cm(ib_device, i))
 			continue;
 
-		port = kzalloc(sizeof *port, GFP_KERNEL);
+		port = kzalloc_obj(*port);
 		if (!port) {
 			ret = -ENOMEM;
 			goto error1;
@@ -4518,7 +4519,7 @@ static int __init ib_cm_init(void)
 	get_random_bytes(&cm.random_id_operand, sizeof cm.random_id_operand);
 	INIT_LIST_HEAD(&cm.timewait_list);
 
-	cm.wq = alloc_workqueue("ib_cm", 0, 1);
+	cm.wq = alloc_workqueue("ib_cm", WQ_PERCPU, 1);
 	if (!cm.wq) {
 		ret = -ENOMEM;
 		goto error2;

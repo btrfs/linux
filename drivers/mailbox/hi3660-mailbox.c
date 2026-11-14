@@ -15,8 +15,6 @@
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 
-#include "mailbox.h"
-
 #define MBOX_CHAN_MAX			32
 
 #define MBOX_RX				0x0
@@ -242,7 +240,7 @@ static int hi3660_mbox_probe(struct platform_device *pdev)
 	unsigned long ch;
 	int err;
 
-	mbox = devm_kzalloc(dev, sizeof(*mbox), GFP_KERNEL);
+	mbox = devm_kzalloc_obj(dev, *mbox);
 	if (!mbox)
 		return -ENOMEM;
 

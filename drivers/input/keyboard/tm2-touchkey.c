@@ -193,7 +193,7 @@ static int tm2_touchkey_probe(struct i2c_client *client)
 		return -EIO;
 	}
 
-	touchkey = devm_kzalloc(&client->dev, sizeof(*touchkey), GFP_KERNEL);
+	touchkey = devm_kzalloc_obj(&client->dev, *touchkey);
 	if (!touchkey)
 		return -ENOMEM;
 
@@ -326,7 +326,7 @@ static DEFINE_SIMPLE_DEV_PM_OPS(tm2_touchkey_pm_ops,
 				tm2_touchkey_suspend, tm2_touchkey_resume);
 
 static const struct i2c_device_id tm2_touchkey_id_table[] = {
-	{ TM2_TOUCHKEY_DEV_NAME },
+	{ .name = TM2_TOUCHKEY_DEV_NAME },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tm2_touchkey_id_table);

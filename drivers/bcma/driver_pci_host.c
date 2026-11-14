@@ -3,7 +3,7 @@
  * PCI Core in hostmode
  *
  * Copyright 2005 - 2011, Broadcom Corporation
- * Copyright 2006, 2007, Michael Buesch <m@bues.ch>
+ * Copyright 2006, 2007, Michael Buesch
  * Copyright 2011, 2012, Hauke Mehrtens <hauke@hauke-m.de>
  *
  * Licensed under the GNU/GPL. See COPYING for details.
@@ -399,7 +399,7 @@ void bcma_core_pci_hostmode_init(struct bcma_drv_pci *pc)
 		return;
 	}
 
-	pc_host = kzalloc(sizeof(*pc_host), GFP_KERNEL);
+	pc_host = kzalloc_obj(*pc_host);
 	if (!pc_host)  {
 		bcma_err(bus, "can not allocate memory");
 		return;

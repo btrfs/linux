@@ -9,7 +9,8 @@
 #define QUOTE(str) #str
 #define EXPAND_QUOTE(str) QUOTE(str)
 
-/* This set of attributes controls behavior of the
+/*
+ * This set of attributes controls behavior of the
  * test_loader.c:test_loader__run_subtests().
  *
  * The test_loader sequentially loads each program in a skeleton.
@@ -41,6 +42,10 @@
  *                   Same regex syntax as for __msg is supported.
  * __msg_unpriv      Same as __msg but for unprivileged mode.
  * __not_msg_unpriv  Same as __not_msg but for unprivileged mode.
+ *
+ * __msg_next        Same as __msg but expects the match to be on the next
+ * __msg_next_unpriv log line compared to the last match, not just some line
+ *                   after the last match.
  *
  * __stderr          Message expected to be found in bpf stderr stream. The
  *                   same regex rules apply like __msg.
@@ -103,8 +108,13 @@
  *                   - TEST_DATA_LEN
  * __retval_unpriv   Same, but load program in unprivileged mode.
  *
- * __description     Text to be used instead of a program name for display
- *                   and filtering purposes.
+ * __description     Text to be used for display and as an additional filter
+ *                   alias, while the original program name stays matchable.
+ *
+ * __skip            Report the test as SKIP with the given reason instead of
+ *                   running it. For placeholder programs that stand in for a
+ *                   feature the toolchain or JIT cannot provide, so a run does
+ *                   not report OK for coverage it never executed.
  *
  * __log_level       Log level to use for the program, numeric value expected.
  *
@@ -126,39 +136,59 @@
  *                   Several __arch_* annotations could be specified at once.
  *                   When test case is not run on current arch it is marked as skipped.
  * __caps_unpriv     Specify the capabilities that should be set when running the test.
+ * __prepare_priv    In unprivileged mode, prepare the object with the fixture's
+ *                   initial capabilities before dropping them for program loading.
+ *                   Preparation includes map creation and BTF/kfunc resolution;
+ *                   these operations are not tested at the reduced capabilities.
+ *                   Program loading uses the normal __caps_unpriv selection.
+ *
+ * __linear_size     Specify the size of the linear area of non-linear skbs, or
+ *                   0 for linear skbs.
  */
-#define __msg(msg)		__attribute__((btf_decl_tag("comment:test_expect_msg=" XSTR(__COUNTER__) "=" msg)))
-#define __not_msg(msg)		__attribute__((btf_decl_tag("comment:test_expect_not_msg=" XSTR(__COUNTER__) "=" msg)))
-#define __xlated(msg)		__attribute__((btf_decl_tag("comment:test_expect_xlated=" XSTR(__COUNTER__) "=" msg)))
-#define __jited(msg)		__attribute__((btf_decl_tag("comment:test_jited=" XSTR(__COUNTER__) "=" msg)))
-#define __failure		__attribute__((btf_decl_tag("comment:test_expect_failure")))
-#define __success		__attribute__((btf_decl_tag("comment:test_expect_success")))
-#define __description(desc)	__attribute__((btf_decl_tag("comment:test_description=" desc)))
-#define __msg_unpriv(msg)	__attribute__((btf_decl_tag("comment:test_expect_msg_unpriv=" XSTR(__COUNTER__) "=" msg)))
-#define __not_msg_unpriv(msg)	__attribute__((btf_decl_tag("comment:test_expect_not_msg_unpriv=" XSTR(__COUNTER__) "=" msg)))
-#define __xlated_unpriv(msg)	__attribute__((btf_decl_tag("comment:test_expect_xlated_unpriv=" XSTR(__COUNTER__) "=" msg)))
-#define __jited_unpriv(msg)	__attribute__((btf_decl_tag("comment:test_jited=" XSTR(__COUNTER__) "=" msg)))
-#define __failure_unpriv	__attribute__((btf_decl_tag("comment:test_expect_failure_unpriv")))
-#define __success_unpriv	__attribute__((btf_decl_tag("comment:test_expect_success_unpriv")))
-#define __log_level(lvl)	__attribute__((btf_decl_tag("comment:test_log_level="#lvl)))
-#define __flag(flag)		__attribute__((btf_decl_tag("comment:test_prog_flags="#flag)))
-#define __retval(val)		__attribute__((btf_decl_tag("comment:test_retval="XSTR(val))))
-#define __retval_unpriv(val)	__attribute__((btf_decl_tag("comment:test_retval_unpriv="XSTR(val))))
-#define __auxiliary		__attribute__((btf_decl_tag("comment:test_auxiliary")))
-#define __auxiliary_unpriv	__attribute__((btf_decl_tag("comment:test_auxiliary_unpriv")))
-#define __btf_path(path)	__attribute__((btf_decl_tag("comment:test_btf_path=" path)))
-#define __arch(arch)		__attribute__((btf_decl_tag("comment:test_arch=" arch)))
+#define __test_tag(tag)		__attribute__((btf_decl_tag("comment:" XSTR(__COUNTER__) ":" tag)))
+
+#define __msg(msg)		__test_tag("test_expect_msg=" msg)
+#define __not_msg(msg)		__test_tag("test_expect_not_msg=" msg)
+#define __msg_next(msg)		__test_tag("test_expect_msg_next=" msg)
+#define __xlated(msg)		__test_tag("test_expect_xlated=" msg)
+#define __jited(msg)		__test_tag("test_jited=" msg)
+#define __failure		__test_tag("test_expect_failure")
+#define __success		__test_tag("test_expect_success")
+#define __description(desc)	__test_tag("test_description=" desc)
+#define __skip(reason)		__test_tag("test_skip=" reason)
+#define __msg_unpriv(msg)	__test_tag("test_expect_msg_unpriv=" msg)
+#define __not_msg_unpriv(msg)	__test_tag("test_expect_not_msg_unpriv=" msg)
+#define __msg_next_unpriv(msg)	__test_tag("test_expect_msg_next_unpriv=" msg)
+#define __xlated_unpriv(msg)	__test_tag("test_expect_xlated_unpriv=" msg)
+#define __jited_unpriv(msg)	__test_tag("test_jited_unpriv=" msg)
+#define __failure_unpriv	__test_tag("test_expect_failure_unpriv")
+#define __success_unpriv	__test_tag("test_expect_success_unpriv")
+#define __log_level(lvl)	__test_tag("test_log_level=" #lvl)
+#define __flag(flag)		__test_tag("test_prog_flags=" #flag)
+#define __retval(val)		__test_tag("test_retval=" XSTR(val))
+#define __retval_unpriv(val)	__test_tag("test_retval_unpriv=" XSTR(val))
+#define __auxiliary		__test_tag("test_auxiliary")
+#define __auxiliary_unpriv	__test_tag("test_auxiliary_unpriv")
+#define __btf_path(path)	__test_tag("test_btf_path=" path)
+#define __btf_func_path(path)	__test_tag("test_btf_func_path=" path)
+#define __arch(arch)		__test_tag("test_arch=" arch)
 #define __arch_x86_64		__arch("X86_64")
 #define __arch_arm64		__arch("ARM64")
 #define __arch_riscv64		__arch("RISCV64")
 #define __arch_s390x		__arch("s390x")
-#define __caps_unpriv(caps)	__attribute__((btf_decl_tag("comment:test_caps_unpriv=" EXPAND_QUOTE(caps))))
-#define __load_if_JITed()	__attribute__((btf_decl_tag("comment:load_mode=jited")))
-#define __load_if_no_JITed()	__attribute__((btf_decl_tag("comment:load_mode=no_jited")))
-#define __stderr(msg)		__attribute__((btf_decl_tag("comment:test_expect_stderr=" XSTR(__COUNTER__) "=" msg)))
-#define __stderr_unpriv(msg)	__attribute__((btf_decl_tag("comment:test_expect_stderr_unpriv=" XSTR(__COUNTER__) "=" msg)))
-#define __stdout(msg)		__attribute__((btf_decl_tag("comment:test_expect_stdout=" XSTR(__COUNTER__) "=" msg)))
-#define __stdout_unpriv(msg)	__attribute__((btf_decl_tag("comment:test_expect_stdout_unpriv=" XSTR(__COUNTER__) "=" msg)))
+#define __arch_loongarch	__arch("LOONGARCH")
+#define __caps_unpriv(caps)	__test_tag("test_caps_unpriv=" EXPAND_QUOTE(caps))
+#define __prepare_priv		__test_tag("test_prepare_priv")
+#define __load_if_JITed()	__test_tag("load_mode=jited")
+#define __load_if_no_JITed()	__test_tag("load_mode=no_jited")
+/* Whether programs may use more than 512 bytes of stack on this kernel and JIT */
+#define __load_if_large_stack()		__test_tag("stack_mode=large")
+#define __load_if_no_large_stack()	__test_tag("stack_mode=small")
+#define __stderr(msg)		__test_tag("test_expect_stderr=" msg)
+#define __stderr_unpriv(msg)	__test_tag("test_expect_stderr_unpriv=" msg)
+#define __stdout(msg)		__test_tag("test_expect_stdout=" msg)
+#define __stdout_unpriv(msg)	__test_tag("test_expect_stdout_unpriv=" msg)
+#define __linear_size(sz)	__test_tag("test_linear_size=" XSTR(sz))
 
 /* Define common capabilities tested using __caps_unpriv */
 #define CAP_NET_ADMIN		12
@@ -183,6 +213,10 @@
 /* Magic constants used with __retval() */
 #define POINTER_VALUE	0xbadcafe
 #define TEST_DATA_LEN	64
+
+#ifndef __aligned
+#define __aligned(x) __attribute__((aligned(x)))
+#endif
 
 #ifndef __used
 #define __used __attribute__((used))
@@ -243,18 +277,21 @@
      (defined(__TARGET_ARCH_riscv) && __riscv_xlen == 64) ||		\
      defined(__TARGET_ARCH_arm) || defined(__TARGET_ARCH_s390) ||	\
      defined(__TARGET_ARCH_loongarch)) &&				\
-	__clang_major__ >= 18
+	(__clang_major__ >= 18 || defined(__BPF_FEATURE_GOTOL))
 #define CAN_USE_GOTOL
 #endif
 
-#if __clang_major__ >= 18
+#if __clang_major__ >= 18 || defined(__BPF_FEATURE_ST)
 #define CAN_USE_BPF_ST
 #endif
 
 #if __clang_major__ >= 18 && defined(ENABLE_ATOMICS_TESTS) &&		\
-	(defined(__TARGET_ARCH_arm64) || defined(__TARGET_ARCH_x86) ||	\
-	 (defined(__TARGET_ARCH_riscv) && __riscv_xlen == 64)) || \
-	  (defined(__TARGET_ARCH_powerpc))
+	(defined(__TARGET_ARCH_arm64) ||				\
+	 defined(__TARGET_ARCH_x86) ||					\
+	 (defined(__TARGET_ARCH_riscv) && __riscv_xlen == 64) ||	\
+	 defined(__TARGET_ARCH_s390) ||					\
+	 defined(__TARGET_ARCH_powerpc) ||				\
+	 defined(__TARGET_ARCH_loongarch))
 #define CAN_USE_LOAD_ACQ_STORE_REL
 #endif
 

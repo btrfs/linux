@@ -101,7 +101,7 @@ static int usb4604_i2c_probe(struct i2c_client *i2c)
 {
 	struct usb4604 *hub;
 
-	hub = devm_kzalloc(&i2c->dev, sizeof(*hub), GFP_KERNEL);
+	hub = devm_kzalloc_obj(&i2c->dev, *hub);
 	if (!hub)
 		return -ENOMEM;
 
@@ -135,7 +135,7 @@ static SIMPLE_DEV_PM_OPS(usb4604_i2c_pm_ops, usb4604_i2c_suspend,
 		usb4604_i2c_resume);
 
 static const struct i2c_device_id usb4604_id[] = {
-	{ "usb4604" },
+	{ .name = "usb4604" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, usb4604_id);

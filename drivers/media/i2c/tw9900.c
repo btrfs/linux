@@ -198,6 +198,7 @@ static int tw9900_get_fmt(struct v4l2_subdev *sd,
 }
 
 static int tw9900_set_fmt(struct v4l2_subdev *sd,
+			  const struct v4l2_subdev_client_info *ci,
 			  struct v4l2_subdev_state *sd_state,
 			  struct v4l2_subdev_format *fmt)
 {
@@ -657,7 +658,7 @@ static int tw9900_probe(struct i2c_client *client)
 	struct tw9900 *tw9900;
 	int ret = 0;
 
-	tw9900 = devm_kzalloc(dev, sizeof(*tw9900), GFP_KERNEL);
+	tw9900 = devm_kzalloc_obj(dev, *tw9900);
 	if (!tw9900)
 		return -ENOMEM;
 
@@ -753,7 +754,7 @@ static const struct dev_pm_ops tw9900_pm_ops = {
 };
 
 static const struct i2c_device_id tw9900_id[] = {
-	{ "tw9900" },
+	{ .name = "tw9900" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tw9900_id);

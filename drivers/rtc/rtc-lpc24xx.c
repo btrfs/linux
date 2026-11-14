@@ -9,7 +9,6 @@
 #include <linux/clk.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/rtc.h>
@@ -195,7 +194,7 @@ static int lpc24xx_rtc_probe(struct platform_device *pdev)
 	struct lpc24xx_rtc *rtc;
 	int irq, ret;
 
-	rtc = devm_kzalloc(&pdev->dev, sizeof(*rtc), GFP_KERNEL);
+	rtc = devm_kzalloc_obj(&pdev->dev, *rtc);
 	if (!rtc)
 		return -ENOMEM;
 

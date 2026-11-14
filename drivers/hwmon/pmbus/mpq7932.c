@@ -106,7 +106,7 @@ static int mpq7932_probe(struct i2c_client *client)
 	struct device *dev = &client->dev;
 	int i;
 
-	data = devm_kzalloc(dev, sizeof(struct mpq7932_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct mpq7932_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -145,9 +145,9 @@ static const struct of_device_id mpq7932_of_match[] = {
 MODULE_DEVICE_TABLE(of, mpq7932_of_match);
 
 static const struct i2c_device_id mpq7932_id[] = {
-	{ "mpq2286", },
-	{ "mpq7932", },
-	{ },
+	{ .name = "mpq2286" },
+	{ .name = "mpq7932" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mpq7932_id);
 

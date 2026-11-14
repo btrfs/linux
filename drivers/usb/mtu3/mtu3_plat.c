@@ -243,8 +243,8 @@ static int get_ssusb_rscs(struct platform_device *pdev, struct ssusb_mtk *ssusb)
 	ssusb->num_phys = of_count_phandle_with_args(node,
 			"phys", "#phy-cells");
 	if (ssusb->num_phys > 0) {
-		ssusb->phys = devm_kcalloc(dev, ssusb->num_phys,
-					sizeof(*ssusb->phys), GFP_KERNEL);
+		ssusb->phys = devm_kzalloc_objs(dev, *ssusb->phys,
+						ssusb->num_phys);
 		if (!ssusb->phys)
 			return -ENOMEM;
 	} else {
@@ -332,7 +332,7 @@ static int mtu3_probe(struct platform_device *pdev)
 	int ret = -ENOMEM;
 
 	/* all elements are set to ZERO as default value */
-	ssusb = devm_kzalloc(dev, sizeof(*ssusb), GFP_KERNEL);
+	ssusb = devm_kzalloc_obj(dev, *ssusb);
 	if (!ssusb)
 		return -ENOMEM;
 
@@ -431,7 +431,6 @@ static int mtu3_probe(struct platform_device *pdev)
 	}
 
 	device_enable_async_suspend(dev);
-	pm_runtime_mark_last_busy(dev);
 	pm_runtime_put_autosuspend(dev);
 	pm_runtime_forbid(dev);
 
@@ -545,7 +544,8 @@ static int mtu3_suspend_common(struct device *dev, pm_message_t msg)
 
 	ssusb_phy_power_off(ssusb);
 	clk_bulk_disable_unprepare(BULK_CLKS_CNT, ssusb->clks);
-	ssusb_wakeup_set(ssusb, true);
+	if (device_may_wakeup(dev) && (ssusb->is_host || PMSG_IS_AUTO(msg)))
+		ssusb_wakeup_set(ssusb, true);
 	return 0;
 
 sleep_err:

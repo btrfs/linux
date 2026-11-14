@@ -274,6 +274,12 @@ static struct hns3_dbg_cmd_info hns3_dbg_cmd[] = {
 		.init = hns3_dbg_common_init_t2,
 	},
 	{
+		.name = "fd_rule",
+		.cmd = HNAE3_DBG_CMD_FD_RULE,
+		.dentry = HNS3_DBG_DENTRY_FD,
+		.init = hns3_dbg_common_init_t2,
+	},
+	{
 		.name = "service_task_info",
 		.cmd = HNAE3_DBG_CMD_SERV_INFO,
 		.dentry = HNS3_DBG_DENTRY_COMMON,
@@ -843,8 +849,7 @@ static int hns3_dbg_bd_file_init(struct hnae3_handle *handle, u32 cmd)
 
 	entry_dir = hns3_dbg_dentry[hns3_dbg_cmd[cmd].dentry].dentry;
 	max_queue_num = hns3_get_max_available_channels(handle);
-	data = devm_kcalloc(&handle->pdev->dev, max_queue_num, sizeof(*data),
-			    GFP_KERNEL);
+	data = devm_kzalloc_objs(&handle->pdev->dev, *data, max_queue_num);
 	if (!data)
 		return -ENOMEM;
 

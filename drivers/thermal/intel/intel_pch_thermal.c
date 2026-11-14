@@ -168,7 +168,7 @@ static int intel_pch_thermal_probe(struct pci_dev *pdev,
 	u8 tsel;
 	int err;
 
-	ptd = devm_kzalloc(&pdev->dev, sizeof(*ptd), GFP_KERNEL);
+	ptd = devm_kzalloc_obj(&pdev->dev, *ptd);
 	if (!ptd)
 		return -ENOMEM;
 
@@ -269,7 +269,6 @@ static void intel_pch_thermal_remove(struct pci_dev *pdev)
 
 	thermal_zone_device_unregister(ptd->tzd);
 	iounmap(ptd->hw_base);
-	pci_set_drvdata(pdev, NULL);
 	pci_release_regions(pdev);
 	pci_disable_device(pdev);
 }

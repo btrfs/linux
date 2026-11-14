@@ -305,11 +305,18 @@ static int cpsw_purge_all_mc(struct net_device *ndev, const u8 *addr, int num)
 	return 0;
 }
 
-static void cpsw_ndo_set_rx_mode(struct net_device *ndev)
+static void cpsw_ndo_set_rx_mode_work(struct work_struct *work)
 {
-	struct cpsw_priv *priv = netdev_priv(ndev);
+	struct cpsw_priv *priv = container_of(work, struct cpsw_priv, rx_mode_work);
 	struct cpsw_common *cpsw = priv->cpsw;
+	struct net_device *ndev = priv->ndev;
 	int slave_port = -1;
+
+	rtnl_lock();
+	if (!netif_running(ndev))
+		goto unlock_rtnl;
+
+	netif_addr_lock_bh(ndev);
 
 	if (cpsw->data.dual_emac)
 		slave_port = priv->emac_port + 1;
@@ -318,7 +325,7 @@ static void cpsw_ndo_set_rx_mode(struct net_device *ndev)
 		/* Enable promiscuous mode */
 		cpsw_set_promiscious(ndev, true);
 		cpsw_ale_set_allmulti(cpsw->ale, IFF_ALLMULTI, slave_port);
-		return;
+		goto unlock_addr;
 	} else {
 		/* Disable promiscuous mode */
 		cpsw_set_promiscious(ndev, false);
@@ -331,6 +338,18 @@ static void cpsw_ndo_set_rx_mode(struct net_device *ndev)
 	/* add/remove mcast address either for real netdev or for vlan */
 	__hw_addr_ref_sync_dev(&ndev->mc, ndev, cpsw_add_mc_addr,
 			       cpsw_del_mc_addr);
+
+unlock_addr:
+	netif_addr_unlock_bh(ndev);
+unlock_rtnl:
+	rtnl_unlock();
+}
+
+static void cpsw_ndo_set_rx_mode(struct net_device *ndev)
+{
+	struct cpsw_priv *priv = netdev_priv(ndev);
+
+	schedule_work(&priv->rx_mode_work);
 }
 
 static unsigned int cpsw_rxbuf_total_len(unsigned int len)
@@ -687,7 +706,7 @@ static void cpsw_init_host_port(struct cpsw_priv *priv)
 	struct cpsw_common *cpsw = priv->cpsw;
 
 	/* soft reset the controller and initialize ale */
-	soft_reset("cpsw", &cpsw->regs->soft_reset);
+	cpsw_soft_reset("cpsw", &cpsw->regs->soft_reset);
 	cpsw_ale_start(cpsw->ale);
 
 	/* switch to vlan aware mode */
@@ -1282,10 +1301,8 @@ static int cpsw_probe_dt(struct cpsw_platform_data *data,
 	}
 	data->active_slave = prop;
 
-	data->slave_data = devm_kcalloc(&pdev->dev,
-					data->slaves,
-					sizeof(struct cpsw_slave_data),
-					GFP_KERNEL);
+	data->slave_data = devm_kzalloc_objs(&pdev->dev, struct cpsw_slave_data,
+					     data->slaves);
 	if (!data->slave_data)
 		return -ENOMEM;
 
@@ -1472,6 +1489,7 @@ static int cpsw_probe_dual_emac(struct cpsw_priv *priv)
 	priv_sl2->ndev = ndev;
 	priv_sl2->dev  = &ndev->dev;
 	priv_sl2->msg_enable = netif_msg_init(debug_level, CPSW_DEBUG);
+	INIT_WORK(&priv_sl2->rx_mode_work, cpsw_ndo_set_rx_mode_work);
 
 	if (is_valid_ether_addr(data->slave_data[1].mac_addr)) {
 		memcpy(priv_sl2->mac_addr, data->slave_data[1].mac_addr,
@@ -1504,12 +1522,29 @@ static int cpsw_probe_dual_emac(struct cpsw_priv *priv)
 	return ret;
 }
 
+static void cpsw_unregister_ports(struct cpsw_common *cpsw)
+{
+	struct net_device *ndev;
+	struct cpsw_priv *priv;
+	int i;
+
+	for (i = 0; i < cpsw->data.slaves; i++) {
+		ndev = cpsw->slaves[i].ndev;
+		if (!ndev || ndev->reg_state != NETREG_REGISTERED)
+			continue;
+
+		priv = netdev_priv(ndev);
+		unregister_netdev(ndev);
+		disable_work_sync(&priv->rx_mode_work);
+	}
+}
+
 static const struct of_device_id cpsw_of_mtable[] = {
 	{ .compatible = "ti,cpsw"},
 	{ .compatible = "ti,am335x-cpsw"},
 	{ .compatible = "ti,am4372-cpsw"},
 	{ .compatible = "ti,dra7-cpsw"},
-	{ /* sentinel */ },
+	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, cpsw_of_mtable);
 
@@ -1533,7 +1568,7 @@ static int cpsw_probe(struct platform_device *pdev)
 	int ret = 0, ch;
 	int irq;
 
-	cpsw = devm_kzalloc(dev, sizeof(struct cpsw_common), GFP_KERNEL);
+	cpsw = devm_kzalloc_obj(dev, struct cpsw_common);
 	if (!cpsw)
 		return -ENOMEM;
 
@@ -1605,9 +1640,7 @@ static int cpsw_probe(struct platform_device *pdev)
 		cpsw->quirk_irq = true;
 
 	data = &cpsw->data;
-	cpsw->slaves = devm_kcalloc(dev,
-				    data->slaves, sizeof(struct cpsw_slave),
-				    GFP_KERNEL);
+	cpsw->slaves = devm_kzalloc_objs(dev, struct cpsw_slave, data->slaves);
 	if (!cpsw->slaves) {
 		ret = -ENOMEM;
 		goto clean_dt_ret;
@@ -1653,6 +1686,7 @@ static int cpsw_probe(struct platform_device *pdev)
 	priv->dev  = dev;
 	priv->msg_enable = netif_msg_init(debug_level, CPSW_DEBUG);
 	priv->emac_port = 0;
+	INIT_WORK(&priv->rx_mode_work, cpsw_ndo_set_rx_mode_work);
 
 	if (is_valid_ether_addr(data->slave_data[0].mac_addr)) {
 		memcpy(priv->mac_addr, data->slave_data[0].mac_addr, ETH_ALEN);
@@ -1743,7 +1777,7 @@ skip_cpts:
 	return 0;
 
 clean_unregister_netdev_ret:
-	unregister_netdev(ndev);
+	cpsw_unregister_ports(cpsw);
 clean_cpts:
 	cpts_release(cpsw->cpts);
 	cpdma_ctlr_destroy(cpsw->dma);
@@ -1758,7 +1792,7 @@ clean_runtime_disable_ret:
 static void cpsw_remove(struct platform_device *pdev)
 {
 	struct cpsw_common *cpsw = platform_get_drvdata(pdev);
-	int i, ret;
+	int ret;
 
 	ret = pm_runtime_resume_and_get(&pdev->dev);
 	if (ret < 0) {
@@ -1770,9 +1804,7 @@ static void cpsw_remove(struct platform_device *pdev)
 		return;
 	}
 
-	for (i = 0; i < cpsw->data.slaves; i++)
-		if (cpsw->slaves[i].ndev)
-			unregister_netdev(cpsw->slaves[i].ndev);
+	cpsw_unregister_ports(cpsw);
 
 	cpts_release(cpsw->cpts);
 	cpdma_ctlr_destroy(cpsw->dma);

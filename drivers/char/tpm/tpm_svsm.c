@@ -49,7 +49,7 @@ static int tpm_svsm_send(struct tpm_chip *chip, u8 *buf, size_t bufsiz,
 	return svsm_vtpm_cmd_response_parse(priv->buffer, buf, bufsiz);
 }
 
-static struct tpm_class_ops tpm_chip_ops = {
+static const struct tpm_class_ops tpm_chip_ops = {
 	.flags = TPM_OPS_AUTO_STARTUP,
 	.send = tpm_svsm_send,
 };
@@ -61,7 +61,7 @@ static int __init tpm_svsm_probe(struct platform_device *pdev)
 	struct tpm_chip *chip;
 	int err;
 
-	priv = devm_kmalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kmalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

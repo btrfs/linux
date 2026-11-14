@@ -67,11 +67,11 @@ static struct clk_hw
 			     const struct ti_syscon_gate_clk_data *data)
 {
 	struct ti_syscon_gate_clk_priv *priv;
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	char *name = NULL;
 	int ret;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return ERR_PTR(-ENOMEM);
 
@@ -129,7 +129,7 @@ static int ti_syscon_gate_clk_probe(struct platform_device *pdev)
 	if (IS_ERR(base))
 		return PTR_ERR(base);
 
-	regmap = regmap_init_mmio(dev, base, &ti_syscon_regmap_cfg);
+	regmap = devm_regmap_init_mmio(dev, base, &ti_syscon_regmap_cfg);
 	if (IS_ERR(regmap))
 		return dev_err_probe(dev, PTR_ERR(regmap),
 				     "failed to get regmap\n");
@@ -145,8 +145,7 @@ static int ti_syscon_gate_clk_probe(struct platform_device *pdev)
 				     "must specify a parent clock\n");
 	}
 
-	hw_data = devm_kzalloc(dev, struct_size(hw_data, hws, num_clks),
-			       GFP_KERNEL);
+	hw_data = devm_kzalloc_flex(dev, *hw_data, hws, num_clks);
 	if (!hw_data)
 		return -ENOMEM;
 

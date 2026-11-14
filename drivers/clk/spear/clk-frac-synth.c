@@ -125,7 +125,7 @@ struct clk *clk_register_frac(const char *name, const char *parent_name,
 		unsigned long flags, void __iomem *reg,
 		struct frac_rate_tbl *rtbl, u8 rtbl_cnt, spinlock_t *lock)
 {
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	struct clk_frac *frac;
 	struct clk *clk;
 
@@ -134,7 +134,7 @@ struct clk *clk_register_frac(const char *name, const char *parent_name,
 		return ERR_PTR(-EINVAL);
 	}
 
-	frac = kzalloc(sizeof(*frac), GFP_KERNEL);
+	frac = kzalloc_obj(*frac);
 	if (!frac)
 		return ERR_PTR(-ENOMEM);
 

@@ -20,6 +20,8 @@
 #include <asm/msi.h>
 #endif
 
+#include "defs.h"
+
 struct device;
 struct irq_chip;
 struct irq_data;
@@ -41,9 +43,6 @@ union gpio_irq_fwspec {
 	msi_alloc_info_t	msiinfo;
 #endif
 };
-
-#define GPIO_LINE_DIRECTION_IN	1
-#define GPIO_LINE_DIRECTION_OUT	0
 
 /**
  * struct gpio_irq_chip - GPIO interrupt controller
@@ -344,16 +343,26 @@ struct gpio_irq_chip {
  * @direction_output: configures signal "offset" as output, returns 0 on
  *	success or a negative error number. This can be omitted on input-only
  *	or output-only gpio chips.
- * @get: returns value for signal "offset", 0=low, 1=high, or negative error
+ * @get: returns value for signal "offset", 0=low, 1=high, or negative error.
+ *	the low and high values are defined as physical low on the line
+ *	in/out to the connector such as a physical pad, pin or rail. The GPIO
+ *	library has internal logic to handle lines that are active low, such
+ *	as indicated by overstrike or #name in a schematic, and the driver
+ *	should not try to second-guess the logic value of a line.
  * @get_multiple: reads values for multiple signals defined by "mask" and
  *	stores them in "bits", returns 0 on success or negative error
  * @set: assigns output value for signal "offset", returns 0 on success or
- *       negative error value
+ *	negative error value. The output value follows the same semantic
+ *	rules as for @get.
  * @set_multiple: assigns output values for multiple signals defined by
  *                "mask", returns 0 on success or negative error value
  * @set_config: optional hook for all kinds of settings. Uses the same
  *	packed config format as generic pinconf. Must return 0 on success and
  *	a negative error number on failure.
+ * @get_config: optional hook to read back a setting. Takes the packed
+ *	generic pinconf parameter to query and returns its bare argument in
+ *	the same variable, like pinctrl_gpio_get_config(). Must return 0 on
+ *	success and a negative error number on failure.
  * @to_irq: optional hook supporting non-static gpiod_to_irq() mappings;
  *	implementation may not sleep
  * @dbg_show: optional routine to show contents in debugfs; default code
@@ -429,6 +438,9 @@ struct gpio_chip {
 	int			(*set_config)(struct gpio_chip *gc,
 					      unsigned int offset,
 					      unsigned long config);
+	int			(*get_config)(struct gpio_chip *gc,
+					      unsigned int offset,
+					      unsigned long *config);
 	int			(*to_irq)(struct gpio_chip *gc,
 						unsigned int offset);
 
@@ -703,6 +715,8 @@ int gpiochip_generic_request(struct gpio_chip *gc, unsigned int offset);
 void gpiochip_generic_free(struct gpio_chip *gc, unsigned int offset);
 int gpiochip_generic_config(struct gpio_chip *gc, unsigned int offset,
 			    unsigned long config);
+int gpiochip_generic_get_config(struct gpio_chip *gc, unsigned int offset,
+				unsigned long *config);
 
 /**
  * struct gpio_pin_range - pin range controlled by a gpio chip

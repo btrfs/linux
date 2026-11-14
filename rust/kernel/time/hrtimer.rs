@@ -66,15 +66,362 @@
 //!
 //! A `restart` operation on a timer in the **stopped** state is equivalent to a
 //! `start` operation.
+//!
+//! When a type implements both `HrTimerPointer` and `Clone`, it is possible to
+//! issue the `start` operation while the timer is in the **started** state. In
+//! this case the `start` operation is equivalent to the `restart` operation.
+//!
+//! # Examples
+//!
+//! ## Using an intrusive timer living in a [`Box`]
+//!
+//! ```
+//! # use kernel::{
+//! #     alloc::flags,
+//! #     impl_has_hr_timer,
+//! #     prelude::*,
+//! #     sync::{
+//! #         atomic::{ordering, Atomic},
+//! #         completion::Completion,
+//! #         Arc,
+//! #     },
+//! #     time::{
+//! #         hrtimer::{
+//! #             RelativeMode, HrTimer, HrTimerCallback, HrTimerPointer,
+//! #             HrTimerRestart, HrTimerCallbackContext
+//! #         },
+//! #         Delta, Monotonic,
+//! #     },
+//! # };
+//!
+//! #[pin_data]
+//! struct Shared {
+//!     #[pin]
+//!     flag: Atomic<u64>,
+//!     #[pin]
+//!     cond: Completion,
+//! }
+//!
+//! impl Shared {
+//!     fn new() -> impl PinInit<Self> {
+//!         pin_init!(Self {
+//!             flag <- Atomic::new(0),
+//!             cond <- Completion::new(),
+//!         })
+//!     }
+//! }
+//!
+//! #[pin_data]
+//! struct BoxIntrusiveHrTimer {
+//!     #[pin]
+//!     timer: HrTimer<Self>,
+//!     shared: Arc<Shared>,
+//! }
+//!
+//! impl BoxIntrusiveHrTimer {
+//!     fn new() -> impl PinInit<Self, kernel::error::Error> {
+//!         try_pin_init!(Self {
+//!             timer <- HrTimer::new(),
+//!             shared: Arc::pin_init(Shared::new(), flags::GFP_KERNEL)?,
+//!         })
+//!     }
+//! }
+//!
+//! impl HrTimerCallback for BoxIntrusiveHrTimer {
+//!     type Pointer<'a> = Pin<KBox<Self>>;
+//!
+//!     fn run(this: Pin<&mut Self>, _ctx: HrTimerCallbackContext<'_, Self>) -> HrTimerRestart {
+//!         pr_info!("Timer called\n");
+//!
+//!         let flag = this.shared.flag.fetch_add(1, ordering::Full);
+//!         this.shared.cond.complete_all();
+//!
+//!         if flag == 4 {
+//!             HrTimerRestart::NoRestart
+//!         } else {
+//!             HrTimerRestart::Restart
+//!         }
+//!     }
+//! }
+//!
+//! impl_has_hr_timer! {
+//!     impl HasHrTimer<Self> for BoxIntrusiveHrTimer {
+//!         mode: RelativeMode<Monotonic>, field: self.timer
+//!     }
+//! }
+//!
+//! let has_timer = Box::pin_init(BoxIntrusiveHrTimer::new(), GFP_KERNEL)?;
+//! let shared = has_timer.shared.clone();
+//! let _handle = has_timer.start(Delta::from_micros(200));
+//!
+//! while shared.flag.load(ordering::Relaxed) != 5 {
+//!     shared.cond.wait_for_completion();
+//! }
+//!
+//! pr_info!("Counted to 5\n");
+//! # Ok::<(), kernel::error::Error>(())
+//! ```
+//!
+//! ## Using an intrusive timer in an [`Arc`]
+//!
+//! ```
+//! # use kernel::{
+//! #     alloc::flags,
+//! #     impl_has_hr_timer,
+//! #     prelude::*,
+//! #     sync::{
+//! #         atomic::{ordering, Atomic},
+//! #         completion::Completion,
+//! #         Arc, ArcBorrow,
+//! #     },
+//! #     time::{
+//! #         hrtimer::{
+//! #             RelativeMode, HrTimer, HrTimerCallback, HrTimerPointer, HrTimerRestart,
+//! #             HasHrTimer, HrTimerCallbackContext
+//! #         },
+//! #         Delta, Monotonic,
+//! #     },
+//! # };
+//!
+//! #[pin_data]
+//! struct ArcIntrusiveHrTimer {
+//!     #[pin]
+//!     timer: HrTimer<Self>,
+//!     #[pin]
+//!     flag: Atomic<u64>,
+//!     #[pin]
+//!     cond: Completion,
+//! }
+//!
+//! impl ArcIntrusiveHrTimer {
+//!     fn new() -> impl PinInit<Self> {
+//!         pin_init!(Self {
+//!             timer <- HrTimer::new(),
+//!             flag <- Atomic::new(0),
+//!             cond <- Completion::new(),
+//!         })
+//!     }
+//! }
+//!
+//! impl HrTimerCallback for ArcIntrusiveHrTimer {
+//!     type Pointer<'a> = Arc<Self>;
+//!
+//!     fn run(
+//!         this: ArcBorrow<'_, Self>,
+//!         _ctx: HrTimerCallbackContext<'_, Self>,
+//!     ) -> HrTimerRestart {
+//!         pr_info!("Timer called\n");
+//!
+//!         let flag = this.flag.fetch_add(1, ordering::Full);
+//!         this.cond.complete_all();
+//!
+//!         if flag == 4 {
+//!             HrTimerRestart::NoRestart
+//!         } else {
+//!             HrTimerRestart::Restart
+//!         }
+//!     }
+//! }
+//!
+//! impl_has_hr_timer! {
+//!     impl HasHrTimer<Self> for ArcIntrusiveHrTimer {
+//!         mode: RelativeMode<Monotonic>, field: self.timer
+//!     }
+//! }
+//!
+//! let has_timer = Arc::pin_init(ArcIntrusiveHrTimer::new(), GFP_KERNEL)?;
+//! let _handle = has_timer.clone().start(Delta::from_micros(200));
+//!
+//! while has_timer.flag.load(ordering::Relaxed) != 5 {
+//!     has_timer.cond.wait_for_completion();
+//! }
+//!
+//! pr_info!("Counted to 5\n");
+//! # Ok::<(), kernel::error::Error>(())
+//! ```
+//!
+//! ## Using a stack-based timer
+//!
+//! ```
+//! # use kernel::{
+//! #     impl_has_hr_timer,
+//! #     prelude::*,
+//! #     sync::{
+//! #         atomic::{ordering, Atomic},
+//! #         completion::Completion,
+//! #     },
+//! #     time::{
+//! #         hrtimer::{
+//! #             ScopedHrTimerPointer, HrTimer, HrTimerCallback, HrTimerPointer, HrTimerRestart,
+//! #             HasHrTimer, RelativeMode, HrTimerCallbackContext
+//! #         },
+//! #         Delta, Monotonic,
+//! #     },
+//! # };
+//! # use pin_init::stack_pin_init;
+//!
+//! #[pin_data]
+//! struct IntrusiveHrTimer {
+//!     #[pin]
+//!     timer: HrTimer<Self>,
+//!     #[pin]
+//!     flag: Atomic<u64>,
+//!     #[pin]
+//!     cond: Completion,
+//! }
+//!
+//! impl IntrusiveHrTimer {
+//!     fn new() -> impl PinInit<Self> {
+//!         pin_init!(Self {
+//!             timer <- HrTimer::new(),
+//!             flag <- Atomic::new(0),
+//!             cond <- Completion::new(),
+//!         })
+//!     }
+//! }
+//!
+//! impl HrTimerCallback for IntrusiveHrTimer {
+//!     type Pointer<'a> = Pin<&'a Self>;
+//!
+//!     fn run(this: Pin<&Self>, _ctx: HrTimerCallbackContext<'_, Self>) -> HrTimerRestart {
+//!         pr_info!("Timer called\n");
+//!
+//!         this.flag.store(1, ordering::Release);
+//!         this.cond.complete_all();
+//!
+//!         HrTimerRestart::NoRestart
+//!     }
+//! }
+//!
+//! impl_has_hr_timer! {
+//!     impl HasHrTimer<Self> for IntrusiveHrTimer {
+//!         mode: RelativeMode<Monotonic>, field: self.timer
+//!     }
+//! }
+//!
+//! stack_pin_init!( let has_timer = IntrusiveHrTimer::new() );
+//! has_timer.as_ref().start_scoped(Delta::from_micros(200), || {
+//!     while has_timer.flag.load(ordering::Relaxed) != 1 {
+//!         has_timer.cond.wait_for_completion();
+//!     }
+//! });
+//!
+//! pr_info!("Flag raised\n");
+//! # Ok::<(), kernel::error::Error>(())
+//! ```
+//!
+//! ## Using a mutable stack-based timer
+//!
+//! ```
+//! # use kernel::{
+//! #     alloc::flags,
+//! #     impl_has_hr_timer,
+//! #     prelude::*,
+//! #     sync::{
+//! #         atomic::{ordering, Atomic},
+//! #         completion::Completion,
+//! #         Arc,
+//! #     },
+//! #     time::{
+//! #         hrtimer::{
+//! #             ScopedHrTimerPointer, HrTimer, HrTimerCallback, HrTimerPointer, HrTimerRestart,
+//! #             HasHrTimer, RelativeMode, HrTimerCallbackContext
+//! #         },
+//! #         Delta, Monotonic,
+//! #     },
+//! # };
+//! # use pin_init::stack_try_pin_init;
+//!
+//! #[pin_data]
+//! struct Shared {
+//!     #[pin]
+//!     flag: Atomic<u64>,
+//!     #[pin]
+//!     cond: Completion,
+//! }
+//!
+//! impl Shared {
+//!     fn new() -> impl PinInit<Self> {
+//!         pin_init!(Self {
+//!             flag <- Atomic::new(0),
+//!             cond <- Completion::new(),
+//!         })
+//!     }
+//! }
+//!
+//! #[pin_data]
+//! struct IntrusiveHrTimer {
+//!     #[pin]
+//!     timer: HrTimer<Self>,
+//!     shared: Arc<Shared>,
+//! }
+//!
+//! impl IntrusiveHrTimer {
+//!     fn new() -> impl PinInit<Self, kernel::error::Error> {
+//!         try_pin_init!(Self {
+//!             timer <- HrTimer::new(),
+//!             shared: Arc::pin_init(Shared::new(), flags::GFP_KERNEL)?,
+//!         })
+//!     }
+//! }
+//!
+//! impl HrTimerCallback for IntrusiveHrTimer {
+//!     type Pointer<'a> = Pin<&'a mut Self>;
+//!
+//!     fn run(this: Pin<&mut Self>, _ctx: HrTimerCallbackContext<'_, Self>) -> HrTimerRestart {
+//!         pr_info!("Timer called\n");
+//!
+//!         let flag = this.shared.flag.fetch_add(1, ordering::Full);
+//!         this.shared.cond.complete_all();
+//!
+//!         if flag == 4 {
+//!             HrTimerRestart::NoRestart
+//!         } else {
+//!             HrTimerRestart::Restart
+//!         }
+//!     }
+//! }
+//!
+//! impl_has_hr_timer! {
+//!     impl HasHrTimer<Self> for IntrusiveHrTimer {
+//!         mode: RelativeMode<Monotonic>, field: self.timer
+//!     }
+//! }
+//!
+//! stack_try_pin_init!( let has_timer =? IntrusiveHrTimer::new() );
+//! let shared = has_timer.shared.clone();
+//!
+//! has_timer.as_mut().start_scoped(Delta::from_micros(200), || {
+//!     while shared.flag.load(ordering::Relaxed) != 5 {
+//!         shared.cond.wait_for_completion();
+//!     }
+//! });
+//!
+//! pr_info!("Counted to 5\n");
+//! # Ok::<(), kernel::error::Error>(())
+//! ```
+//!
+//! [`Arc`]: kernel::sync::Arc
+// Implementation details
+//
+// The reasoning for adopting a handle based approach:
+// - If we explicitly drop the target of a timer callback in the timer callback, we
+//   may get a dangling reference.
+// - If the callback owns the last reference to the target, target may be dropped
+//   in non-sleepable context when the callback is finished.
+// - When dropping an object that is the target of an armed timer, we may drop
+//   fields accessed by the timer callback before we cancel the timer (drop order).
+//
+// By using a handle, we can make the handle own the callback target and avoid these problems.
 
-use super::{ClockSource, Delta, Instant};
+use super::{ClockId, Delta, Instant};
 use crate::{prelude::*, types::Opaque};
 use core::{marker::PhantomData, ptr::NonNull};
 use pin_init::PinInit;
 
 /// A type-alias to refer to the [`Instant<C>`] for a given `T` from [`HrTimer<T>`].
 ///
-/// Where `C` is the [`ClockSource`] of the [`HrTimer`].
+/// Where `C` is the [`ClockId`] of the [`HrTimer`].
 pub type HrTimerInstant<T> = Instant<<<T as HasHrTimer<T>>::TimerMode as HrTimerMode>::Clock>;
 
 /// A timer backed by a C `struct hrtimer`.
@@ -498,14 +845,14 @@ pub unsafe trait HasHrTimer<T> {
 #[repr(u32)]
 pub enum HrTimerRestart {
     /// Timer should not be restarted.
-    NoRestart = bindings::hrtimer_restart_HRTIMER_NORESTART,
+    NoRestart = bindings::hrtimer_restart::HRTIMER_NORESTART.0,
     /// Timer should be restarted.
-    Restart = bindings::hrtimer_restart_HRTIMER_RESTART,
+    Restart = bindings::hrtimer_restart::HRTIMER_RESTART.0,
 }
 
 impl HrTimerRestart {
     fn into_c(self) -> bindings::hrtimer_restart {
-        self as bindings::hrtimer_restart
+        bindings::hrtimer_restart(self as c_uint)
     }
 }
 
@@ -519,7 +866,7 @@ pub trait HrTimerExpires {
     fn as_nanos(&self) -> i64;
 }
 
-impl<C: ClockSource> HrTimerExpires for Instant<C> {
+impl<C: ClockId> HrTimerExpires for Instant<C> {
     #[inline]
     fn as_nanos(&self) -> i64 {
         Instant::<C>::as_nanos(self)
@@ -534,22 +881,22 @@ impl HrTimerExpires for Delta {
 }
 
 mod private {
-    use crate::time::ClockSource;
+    use crate::time::ClockId;
 
     pub trait Sealed {}
 
-    impl<C: ClockSource> Sealed for super::AbsoluteMode<C> {}
-    impl<C: ClockSource> Sealed for super::RelativeMode<C> {}
-    impl<C: ClockSource> Sealed for super::AbsolutePinnedMode<C> {}
-    impl<C: ClockSource> Sealed for super::RelativePinnedMode<C> {}
-    impl<C: ClockSource> Sealed for super::AbsoluteSoftMode<C> {}
-    impl<C: ClockSource> Sealed for super::RelativeSoftMode<C> {}
-    impl<C: ClockSource> Sealed for super::AbsolutePinnedSoftMode<C> {}
-    impl<C: ClockSource> Sealed for super::RelativePinnedSoftMode<C> {}
-    impl<C: ClockSource> Sealed for super::AbsoluteHardMode<C> {}
-    impl<C: ClockSource> Sealed for super::RelativeHardMode<C> {}
-    impl<C: ClockSource> Sealed for super::AbsolutePinnedHardMode<C> {}
-    impl<C: ClockSource> Sealed for super::RelativePinnedHardMode<C> {}
+    impl<C: ClockId> Sealed for super::AbsoluteMode<C> {}
+    impl<C: ClockId> Sealed for super::RelativeMode<C> {}
+    impl<C: ClockId> Sealed for super::AbsolutePinnedMode<C> {}
+    impl<C: ClockId> Sealed for super::RelativePinnedMode<C> {}
+    impl<C: ClockId> Sealed for super::AbsoluteSoftMode<C> {}
+    impl<C: ClockId> Sealed for super::RelativeSoftMode<C> {}
+    impl<C: ClockId> Sealed for super::AbsolutePinnedSoftMode<C> {}
+    impl<C: ClockId> Sealed for super::RelativePinnedSoftMode<C> {}
+    impl<C: ClockId> Sealed for super::AbsoluteHardMode<C> {}
+    impl<C: ClockId> Sealed for super::RelativeHardMode<C> {}
+    impl<C: ClockId> Sealed for super::AbsolutePinnedHardMode<C> {}
+    impl<C: ClockId> Sealed for super::RelativePinnedHardMode<C> {}
 }
 
 /// Operational mode of [`HrTimer`].
@@ -558,16 +905,16 @@ pub trait HrTimerMode: private::Sealed {
     const C_MODE: bindings::hrtimer_mode;
 
     /// Type representing the clock source.
-    type Clock: ClockSource;
+    type Clock: ClockId;
 
     /// Type representing the expiration specification (absolute or relative time).
     type Expires: HrTimerExpires;
 }
 
 /// Timer that expires at a fixed point in time.
-pub struct AbsoluteMode<C: ClockSource>(PhantomData<C>);
+pub struct AbsoluteMode<C: ClockId>(PhantomData<C>);
 
-impl<C: ClockSource> HrTimerMode for AbsoluteMode<C> {
+impl<C: ClockId> HrTimerMode for AbsoluteMode<C> {
     const C_MODE: bindings::hrtimer_mode = bindings::hrtimer_mode_HRTIMER_MODE_ABS;
 
     type Clock = C;
@@ -575,9 +922,9 @@ impl<C: ClockSource> HrTimerMode for AbsoluteMode<C> {
 }
 
 /// Timer that expires after a delay from now.
-pub struct RelativeMode<C: ClockSource>(PhantomData<C>);
+pub struct RelativeMode<C: ClockId>(PhantomData<C>);
 
-impl<C: ClockSource> HrTimerMode for RelativeMode<C> {
+impl<C: ClockId> HrTimerMode for RelativeMode<C> {
     const C_MODE: bindings::hrtimer_mode = bindings::hrtimer_mode_HRTIMER_MODE_REL;
 
     type Clock = C;
@@ -585,8 +932,8 @@ impl<C: ClockSource> HrTimerMode for RelativeMode<C> {
 }
 
 /// Timer with absolute expiration time, pinned to its current CPU.
-pub struct AbsolutePinnedMode<C: ClockSource>(PhantomData<C>);
-impl<C: ClockSource> HrTimerMode for AbsolutePinnedMode<C> {
+pub struct AbsolutePinnedMode<C: ClockId>(PhantomData<C>);
+impl<C: ClockId> HrTimerMode for AbsolutePinnedMode<C> {
     const C_MODE: bindings::hrtimer_mode = bindings::hrtimer_mode_HRTIMER_MODE_ABS_PINNED;
 
     type Clock = C;
@@ -594,8 +941,8 @@ impl<C: ClockSource> HrTimerMode for AbsolutePinnedMode<C> {
 }
 
 /// Timer with relative expiration time, pinned to its current CPU.
-pub struct RelativePinnedMode<C: ClockSource>(PhantomData<C>);
-impl<C: ClockSource> HrTimerMode for RelativePinnedMode<C> {
+pub struct RelativePinnedMode<C: ClockId>(PhantomData<C>);
+impl<C: ClockId> HrTimerMode for RelativePinnedMode<C> {
     const C_MODE: bindings::hrtimer_mode = bindings::hrtimer_mode_HRTIMER_MODE_REL_PINNED;
 
     type Clock = C;
@@ -603,8 +950,8 @@ impl<C: ClockSource> HrTimerMode for RelativePinnedMode<C> {
 }
 
 /// Timer with absolute expiration, handled in soft irq context.
-pub struct AbsoluteSoftMode<C: ClockSource>(PhantomData<C>);
-impl<C: ClockSource> HrTimerMode for AbsoluteSoftMode<C> {
+pub struct AbsoluteSoftMode<C: ClockId>(PhantomData<C>);
+impl<C: ClockId> HrTimerMode for AbsoluteSoftMode<C> {
     const C_MODE: bindings::hrtimer_mode = bindings::hrtimer_mode_HRTIMER_MODE_ABS_SOFT;
 
     type Clock = C;
@@ -612,8 +959,8 @@ impl<C: ClockSource> HrTimerMode for AbsoluteSoftMode<C> {
 }
 
 /// Timer with relative expiration, handled in soft irq context.
-pub struct RelativeSoftMode<C: ClockSource>(PhantomData<C>);
-impl<C: ClockSource> HrTimerMode for RelativeSoftMode<C> {
+pub struct RelativeSoftMode<C: ClockId>(PhantomData<C>);
+impl<C: ClockId> HrTimerMode for RelativeSoftMode<C> {
     const C_MODE: bindings::hrtimer_mode = bindings::hrtimer_mode_HRTIMER_MODE_REL_SOFT;
 
     type Clock = C;
@@ -621,8 +968,8 @@ impl<C: ClockSource> HrTimerMode for RelativeSoftMode<C> {
 }
 
 /// Timer with absolute expiration, pinned to CPU and handled in soft irq context.
-pub struct AbsolutePinnedSoftMode<C: ClockSource>(PhantomData<C>);
-impl<C: ClockSource> HrTimerMode for AbsolutePinnedSoftMode<C> {
+pub struct AbsolutePinnedSoftMode<C: ClockId>(PhantomData<C>);
+impl<C: ClockId> HrTimerMode for AbsolutePinnedSoftMode<C> {
     const C_MODE: bindings::hrtimer_mode = bindings::hrtimer_mode_HRTIMER_MODE_ABS_PINNED_SOFT;
 
     type Clock = C;
@@ -630,8 +977,8 @@ impl<C: ClockSource> HrTimerMode for AbsolutePinnedSoftMode<C> {
 }
 
 /// Timer with absolute expiration, pinned to CPU and handled in soft irq context.
-pub struct RelativePinnedSoftMode<C: ClockSource>(PhantomData<C>);
-impl<C: ClockSource> HrTimerMode for RelativePinnedSoftMode<C> {
+pub struct RelativePinnedSoftMode<C: ClockId>(PhantomData<C>);
+impl<C: ClockId> HrTimerMode for RelativePinnedSoftMode<C> {
     const C_MODE: bindings::hrtimer_mode = bindings::hrtimer_mode_HRTIMER_MODE_REL_PINNED_SOFT;
 
     type Clock = C;
@@ -639,8 +986,8 @@ impl<C: ClockSource> HrTimerMode for RelativePinnedSoftMode<C> {
 }
 
 /// Timer with absolute expiration, handled in hard irq context.
-pub struct AbsoluteHardMode<C: ClockSource>(PhantomData<C>);
-impl<C: ClockSource> HrTimerMode for AbsoluteHardMode<C> {
+pub struct AbsoluteHardMode<C: ClockId>(PhantomData<C>);
+impl<C: ClockId> HrTimerMode for AbsoluteHardMode<C> {
     const C_MODE: bindings::hrtimer_mode = bindings::hrtimer_mode_HRTIMER_MODE_ABS_HARD;
 
     type Clock = C;
@@ -648,8 +995,8 @@ impl<C: ClockSource> HrTimerMode for AbsoluteHardMode<C> {
 }
 
 /// Timer with relative expiration, handled in hard irq context.
-pub struct RelativeHardMode<C: ClockSource>(PhantomData<C>);
-impl<C: ClockSource> HrTimerMode for RelativeHardMode<C> {
+pub struct RelativeHardMode<C: ClockId>(PhantomData<C>);
+impl<C: ClockId> HrTimerMode for RelativeHardMode<C> {
     const C_MODE: bindings::hrtimer_mode = bindings::hrtimer_mode_HRTIMER_MODE_REL_HARD;
 
     type Clock = C;
@@ -657,8 +1004,8 @@ impl<C: ClockSource> HrTimerMode for RelativeHardMode<C> {
 }
 
 /// Timer with absolute expiration, pinned to CPU and handled in hard irq context.
-pub struct AbsolutePinnedHardMode<C: ClockSource>(PhantomData<C>);
-impl<C: ClockSource> HrTimerMode for AbsolutePinnedHardMode<C> {
+pub struct AbsolutePinnedHardMode<C: ClockId>(PhantomData<C>);
+impl<C: ClockId> HrTimerMode for AbsolutePinnedHardMode<C> {
     const C_MODE: bindings::hrtimer_mode = bindings::hrtimer_mode_HRTIMER_MODE_ABS_PINNED_HARD;
 
     type Clock = C;
@@ -666,8 +1013,8 @@ impl<C: ClockSource> HrTimerMode for AbsolutePinnedHardMode<C> {
 }
 
 /// Timer with relative expiration, pinned to CPU and handled in hard irq context.
-pub struct RelativePinnedHardMode<C: ClockSource>(PhantomData<C>);
-impl<C: ClockSource> HrTimerMode for RelativePinnedHardMode<C> {
+pub struct RelativePinnedHardMode<C: ClockId>(PhantomData<C>);
+impl<C: ClockId> HrTimerMode for RelativePinnedHardMode<C> {
     const C_MODE: bindings::hrtimer_mode = bindings::hrtimer_mode_HRTIMER_MODE_REL_PINNED_HARD;
 
     type Clock = C;

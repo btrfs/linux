@@ -384,7 +384,7 @@ static int koneplus_init_specials(struct hid_device *hdev)
 	if (intf->cur_altsetting->desc.bInterfaceProtocol
 			== USB_INTERFACE_PROTOCOL_MOUSE) {
 
-		koneplus = kzalloc(sizeof(*koneplus), GFP_KERNEL);
+		koneplus = kzalloc_obj(*koneplus);
 		if (!koneplus) {
 			hid_err(hdev, "can't alloc device descriptor\n");
 			return -ENOMEM;
@@ -521,6 +521,9 @@ static int koneplus_raw_event(struct hid_device *hdev,
 		return 0;
 
 	if (koneplus == NULL)
+		return 0;
+
+	if (size < sizeof(struct koneplus_mouse_report_button))
 		return 0;
 
 	koneplus_keep_values_up_to_date(koneplus, data);

@@ -907,9 +907,9 @@ static int allocate_cs(struct hl_device *hdev, struct hl_ctx *ctx,
 
 	cntr = &hdev->aggregated_cs_counters;
 
-	cs = kzalloc(sizeof(*cs), GFP_ATOMIC);
+	cs = kzalloc_obj(*cs, GFP_ATOMIC);
 	if (!cs)
-		cs = kzalloc(sizeof(*cs), GFP_KERNEL);
+		cs = kzalloc_obj(*cs);
 
 	if (!cs) {
 		atomic64_inc(&ctx->cs_counters.out_of_mem_drop_cnt);
@@ -936,9 +936,9 @@ static int allocate_cs(struct hl_device *hdev, struct hl_ctx *ctx,
 	kref_init(&cs->refcount);
 	spin_lock_init(&cs->job_lock);
 
-	cs_cmpl = kzalloc(sizeof(*cs_cmpl), GFP_ATOMIC);
+	cs_cmpl = kzalloc_obj(*cs_cmpl, GFP_ATOMIC);
 	if (!cs_cmpl)
-		cs_cmpl = kzalloc(sizeof(*cs_cmpl), GFP_KERNEL);
+		cs_cmpl = kzalloc_obj(*cs_cmpl);
 
 	if (!cs_cmpl) {
 		atomic64_inc(&ctx->cs_counters.out_of_mem_drop_cnt);
@@ -947,11 +947,12 @@ static int allocate_cs(struct hl_device *hdev, struct hl_ctx *ctx,
 		goto free_cs;
 	}
 
-	cs->jobs_in_queue_cnt = kcalloc(hdev->asic_prop.max_queues,
-			sizeof(*cs->jobs_in_queue_cnt), GFP_ATOMIC);
+	cs->jobs_in_queue_cnt = kzalloc_objs(*cs->jobs_in_queue_cnt,
+					     hdev->asic_prop.max_queues,
+					     GFP_ATOMIC);
 	if (!cs->jobs_in_queue_cnt)
-		cs->jobs_in_queue_cnt = kcalloc(hdev->asic_prop.max_queues,
-				sizeof(*cs->jobs_in_queue_cnt), GFP_KERNEL);
+		cs->jobs_in_queue_cnt = kzalloc_objs(*cs->jobs_in_queue_cnt,
+						     hdev->asic_prop.max_queues);
 
 	if (!cs->jobs_in_queue_cnt) {
 		atomic64_inc(&ctx->cs_counters.out_of_mem_drop_cnt);
@@ -1302,9 +1303,9 @@ struct hl_cs_job *hl_cs_allocate_job(struct hl_device *hdev,
 {
 	struct hl_cs_job *job;
 
-	job = kzalloc(sizeof(*job), GFP_ATOMIC);
+	job = kzalloc_obj(*job, GFP_ATOMIC);
 	if (!job)
-		job = kzalloc(sizeof(*job), GFP_KERNEL);
+		job = kzalloc_obj(*job);
 
 	if (!job)
 		return NULL;
@@ -1420,11 +1421,9 @@ static int hl_cs_copy_chunk_array(struct hl_device *hdev,
 		return -EINVAL;
 	}
 
-	*cs_chunk_array = kmalloc_array(num_chunks, sizeof(**cs_chunk_array),
-					GFP_ATOMIC);
+	*cs_chunk_array = kmalloc_objs(**cs_chunk_array, num_chunks, GFP_ATOMIC);
 	if (!*cs_chunk_array)
-		*cs_chunk_array = kmalloc_array(num_chunks,
-					sizeof(**cs_chunk_array), GFP_KERNEL);
+		*cs_chunk_array = kmalloc_objs(**cs_chunk_array, num_chunks);
 	if (!*cs_chunk_array) {
 		atomic64_inc(&ctx->cs_counters.out_of_mem_drop_cnt);
 		atomic64_inc(&hdev->aggregated_cs_counters.out_of_mem_drop_cnt);
@@ -1901,13 +1900,11 @@ static int cs_ioctl_extract_signal_seq(struct hl_device *hdev,
 		return -EINVAL;
 	}
 
-	signal_seq_arr = kmalloc_array(signal_seq_arr_len,
-					sizeof(*signal_seq_arr),
-					GFP_ATOMIC);
+	signal_seq_arr = kmalloc_objs(*signal_seq_arr, signal_seq_arr_len,
+				      GFP_ATOMIC);
 	if (!signal_seq_arr)
-		signal_seq_arr = kmalloc_array(signal_seq_arr_len,
-					sizeof(*signal_seq_arr),
-					GFP_KERNEL);
+		signal_seq_arr = kmalloc_objs(*signal_seq_arr,
+					      signal_seq_arr_len);
 	if (!signal_seq_arr) {
 		atomic64_inc(&ctx->cs_counters.out_of_mem_drop_cnt);
 		atomic64_inc(&hdev->aggregated_cs_counters.out_of_mem_drop_cnt);
@@ -2040,7 +2037,7 @@ static int cs_ioctl_reserve_signals(struct hl_fpriv *hpriv,
 
 	prop = &hdev->kernel_queues[q_idx].sync_stream_prop;
 
-	handle = kzalloc(sizeof(*handle), GFP_KERNEL);
+	handle = kzalloc_obj(*handle);
 	if (!handle) {
 		rc = -ENOMEM;
 		goto out;
@@ -2481,7 +2478,7 @@ static int cs_ioctl_engine_cores(struct hl_fpriv *hpriv, u64 engine_cores,
 	}
 
 	engine_cores_arr = (void __user *) (uintptr_t) engine_cores;
-	cores = kmalloc_array(num_engine_cores, sizeof(u32), GFP_KERNEL);
+	cores = kmalloc_objs(u32, num_engine_cores);
 	if (!cores)
 		return -ENOMEM;
 
@@ -2523,7 +2520,7 @@ static int cs_ioctl_engines(struct hl_fpriv *hpriv, u64 engines_arr_user_addr,
 	}
 
 	engines_arr = (void __user *) (uintptr_t) engines_arr_user_addr;
-	engines = kmalloc_array(num_engines, sizeof(u32), GFP_KERNEL);
+	engines = kmalloc_objs(u32, num_engines);
 	if (!engines)
 		return -ENOMEM;
 
@@ -3039,7 +3036,7 @@ static int hl_multi_cs_wait_ioctl(struct hl_fpriv *hpriv, void *data)
 
 	/* allocate memory for sequence array */
 	cs_seq_arr =
-		kmalloc_array(seq_arr_len, sizeof(*cs_seq_arr), GFP_KERNEL);
+		kmalloc_objs(*cs_seq_arr, seq_arr_len);
 	if (!cs_seq_arr)
 		return -ENOMEM;
 
@@ -3053,7 +3050,7 @@ static int hl_multi_cs_wait_ioctl(struct hl_fpriv *hpriv, void *data)
 	}
 
 	/* allocate array for the fences */
-	fence_arr = kmalloc_array(seq_arr_len, sizeof(struct hl_fence *), GFP_KERNEL);
+	fence_arr = kmalloc_objs(struct hl_fence *, seq_arr_len);
 	if (!fence_arr) {
 		rc = -ENOMEM;
 		goto free_seq_arr;
@@ -3412,7 +3409,7 @@ static int _hl_interrupt_wait_ioctl(struct hl_device *hdev, struct hl_ctx *ctx,
 		goto put_cq_cb;
 	}
 
-	pend = kzalloc(sizeof(*pend), GFP_KERNEL);
+	pend = kzalloc_obj(*pend);
 	if (!pend) {
 		rc = -ENOMEM;
 		goto put_cq_cb;
@@ -3521,7 +3518,7 @@ static int _hl_interrupt_wait_ioctl_user_addr(struct hl_device *hdev, struct hl_
 
 	hl_ctx_get(ctx);
 
-	pend = kzalloc(sizeof(*pend), GFP_KERNEL);
+	pend = kzalloc_obj(*pend);
 	if (!pend) {
 		hl_ctx_put(ctx);
 		return -ENOMEM;

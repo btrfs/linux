@@ -2,7 +2,7 @@
 /*
  * Generic Reed Solomon encoder / decoder library
  *
- * Copyright (C) 2004 Thomas Gleixner (tglx@linutronix.de)
+ * Copyright (C) 2004 Thomas Gleixner (tglx@kernel.org)
  *
  * Reed Solomon code lifted from reed solomon library written by Phil Karn
  * Copyright 2002 Phil Karn, KA9Q
@@ -73,7 +73,7 @@ static struct rs_codec *codec_init(int symsize, int gfpoly, int (*gffunc)(int),
 	int i, j, sr, root, iprim;
 	struct rs_codec *rs;
 
-	rs = kzalloc(sizeof(*rs), gfp);
+	rs = kzalloc_obj(*rs, gfp);
 	if (!rs)
 		return NULL;
 
@@ -88,15 +88,15 @@ static struct rs_codec *codec_init(int symsize, int gfpoly, int (*gffunc)(int),
 	rs->gffunc = gffunc;
 
 	/* Allocate the arrays */
-	rs->alpha_to = kmalloc_array(rs->nn + 1, sizeof(uint16_t), gfp);
+	rs->alpha_to = kmalloc_objs(uint16_t, rs->nn + 1, gfp);
 	if (rs->alpha_to == NULL)
 		goto err;
 
-	rs->index_of = kmalloc_array(rs->nn + 1, sizeof(uint16_t), gfp);
+	rs->index_of = kmalloc_objs(uint16_t, rs->nn + 1, gfp);
 	if (rs->index_of == NULL)
 		goto err;
 
-	rs->genpoly = kmalloc_array(rs->nroots + 1, sizeof(uint16_t), gfp);
+	rs->genpoly = kmalloc_objs(uint16_t, rs->nroots + 1, gfp);
 	if(rs->genpoly == NULL)
 		goto err;
 

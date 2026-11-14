@@ -272,11 +272,11 @@ struct atiixp {
 /*
  */
 static const struct pci_device_id snd_atiixp_ids[] = {
-	{ PCI_VDEVICE(ATI, 0x4341), 0 }, /* SB200 */
-	{ PCI_VDEVICE(ATI, 0x4361), 0 }, /* SB300 */
-	{ PCI_VDEVICE(ATI, 0x4370), 0 }, /* SB400 */
-	{ PCI_VDEVICE(ATI, 0x4382), 0 }, /* SB600 */
-	{ 0, }
+	{ PCI_VDEVICE(ATI, 0x4341) }, /* SB200 */
+	{ PCI_VDEVICE(ATI, 0x4361) }, /* SB300 */
+	{ PCI_VDEVICE(ATI, 0x4370) }, /* SB400 */
+	{ PCI_VDEVICE(ATI, 0x4382) }, /* SB600 */
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, snd_atiixp_ids);
@@ -1550,10 +1550,10 @@ static int snd_atiixp_init(struct snd_card *card, struct pci_dev *pci)
 }
 
 
-static int __snd_atiixp_probe(struct pci_dev *pci,
-			      const struct pci_device_id *pci_id)
+static int snd_atiixp_probe(struct pci_dev *pci,
+			    const struct pci_device_id *pci_id)
 {
-	struct snd_card *card;
+	struct snd_card *card __free(snd_card_free) = NULL;
 	struct atiixp *chip;
 	int err;
 
@@ -1598,13 +1598,8 @@ static int __snd_atiixp_probe(struct pci_dev *pci,
 		return err;
 
 	pci_set_drvdata(pci, card);
+	card = NULL; /* probe succeeded, don't release as error */
 	return 0;
-}
-
-static int snd_atiixp_probe(struct pci_dev *pci,
-			    const struct pci_device_id *pci_id)
-{
-	return snd_card_free_on_error(&pci->dev, __snd_atiixp_probe(pci, pci_id));
 }
 
 static struct pci_driver atiixp_driver = {

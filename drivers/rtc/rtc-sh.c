@@ -13,7 +13,6 @@
  *  Copyright (C) 1999  Tetsuya Okada & Niibe Yutaka
  */
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/kernel.h>
 #include <linux/bcd.h>
 #include <linux/rtc.h>
@@ -331,7 +330,7 @@ static int __init sh_rtc_probe(struct platform_device *pdev)
 	unsigned int tmp;
 	resource_size_t regsize;
 
-	rtc = devm_kzalloc(&pdev->dev, sizeof(*rtc), GFP_KERNEL);
+	rtc = devm_kzalloc_obj(&pdev->dev, *rtc);
 	if (unlikely(!rtc))
 		return -ENOMEM;
 
@@ -423,7 +422,6 @@ static int __init sh_rtc_probe(struct platform_device *pdev)
 	writeb(tmp, rtc->regbase + RCR1);
 
 	rtc->rtc_dev->ops = &sh_rtc_ops;
-	rtc->rtc_dev->max_user_freq = 256;
 
 	if (rtc->capabilities & RTC_CAP_4_DIGIT_YEAR) {
 		rtc->rtc_dev->range_min = RTC_TIMESTAMP_BEGIN_1900;

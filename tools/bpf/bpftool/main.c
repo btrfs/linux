@@ -31,6 +31,7 @@ bool block_mount;
 bool verifier_logs;
 bool relaxed_maps;
 bool use_loader;
+bool wait_output;
 struct btf *base_btf;
 struct hashmap *refs_table;
 bool sign_progs;
@@ -132,6 +133,11 @@ static int do_version(int argc, char **argv)
 #else
 	const bool has_skeletons = true;
 #endif
+#ifdef BPFTOOL_WITHOUT_CRYPTO
+	const bool has_crypto = false;
+#else
+	const bool has_crypto = true;
+#endif
 	bool bootstrap = false;
 	int i;
 
@@ -163,6 +169,7 @@ static int do_version(int argc, char **argv)
 		jsonw_start_object(json_wtr);	/* features */
 		jsonw_bool_field(json_wtr, "libbfd", has_libbfd);
 		jsonw_bool_field(json_wtr, "llvm", has_llvm);
+		jsonw_bool_field(json_wtr, "crypto", has_crypto);
 		jsonw_bool_field(json_wtr, "skeletons", has_skeletons);
 		jsonw_bool_field(json_wtr, "bootstrap", bootstrap);
 		jsonw_end_object(json_wtr);	/* features */
@@ -181,6 +188,7 @@ static int do_version(int argc, char **argv)
 		printf("features:");
 		print_feature("libbfd", has_libbfd, &nb_features);
 		print_feature("llvm", has_llvm, &nb_features);
+		print_feature("crypto", has_crypto, &nb_features);
 		print_feature("skeletons", has_skeletons, &nb_features);
 		print_feature("bootstrap", bootstrap, &nb_features);
 		printf("\n");
@@ -358,15 +366,19 @@ static int do_batch(int argc, char **argv)
 
 	if (json_output)
 		jsonw_start_array(json_wtr);
-	while (fgets(buf, sizeof(buf), fp)) {
-		cp = strchr(buf, '#');
-		if (cp)
-			*cp = '\0';
+	for (;;) {
+		errno = 0;
+		if (!fgets(buf, sizeof(buf), fp))
+			break;
 
 		if (strlen(buf) == sizeof(buf) - 1) {
 			errno = E2BIG;
 			break;
 		}
+
+		cp = strchr(buf, '#');
+		if (cp)
+			*cp = '\0';
 
 		/* Append continuation lines if any (coming after a line ending
 		 * with '\' in the batch file).
@@ -380,15 +392,15 @@ static int do_batch(int argc, char **argv)
 				goto err_close;
 			}
 
-			cp = strchr(contline, '#');
-			if (cp)
-				*cp = '\0';
-
 			if (strlen(buf) + strlen(contline) + 1 > sizeof(buf)) {
 				p_err("command %u is too long", lines);
 				err = -1;
 				goto err_close;
 			}
+
+			cp = strchr(contline, '#');
+			if (cp)
+				*cp = '\0';
 			buf[strlen(buf) - 2] = '\0';
 			strcat(buf, contline);
 		}
@@ -451,24 +463,16 @@ int main(int argc, char **argv)
 		{ "nomount",	no_argument,	NULL,	'n' },
 		{ "debug",	no_argument,	NULL,	'd' },
 		{ "use-loader",	no_argument,	NULL,	'L' },
+		{ "wait",	no_argument,	NULL,	'w' },
 		{ "sign",	no_argument,	NULL,	'S' },
 		{ "base-btf",	required_argument, NULL, 'B' },
 		{ 0 }
 	};
+	struct btf *new_base_btf = NULL, *root_base_btf = NULL;
 	bool version_requested = false;
 	int opt, ret;
 
 	setlinebuf(stdout);
-
-#ifdef USE_LIBCAP
-	/* Libcap < 2.63 hooks before main() to compute the number of
-	 * capabilities of the running kernel, and doing so it calls prctl()
-	 * which may fail and set errno to non-zero.
-	 * Let's reset errno to make sure this does not interfere with the
-	 * batch mode.
-	 */
-	errno = 0;
-#endif
 
 	last_do_help = do_help;
 	pretty_output = false;
@@ -478,7 +482,7 @@ int main(int argc, char **argv)
 	bin_name = "bpftool";
 
 	opterr = 0;
-	while ((opt = getopt_long(argc, argv, "VhpjfLmndSi:k:B:l",
+	while ((opt = getopt_long(argc, argv, "VhpjfLmndSi:k:B:lw",
 				  options, NULL)) >= 0) {
 		switch (opt) {
 		case 'V':
@@ -514,15 +518,22 @@ int main(int argc, char **argv)
 			verifier_logs = true;
 			break;
 		case 'B':
-			base_btf = btf__parse(optarg, NULL);
-			if (!base_btf) {
+			/* handle multi-split BTF */
+			new_base_btf = btf__parse_split(optarg, base_btf);
+			if (!new_base_btf) {
 				p_err("failed to parse base BTF at '%s': %d\n",
 				      optarg, -errno);
 				return -1;
 			}
+			base_btf = new_base_btf;
+			if (!root_base_btf)
+				root_base_btf = base_btf;
 			break;
 		case 'L':
 			use_loader = true;
+			break;
+		case 'w':
+			wait_output = true;
 			break;
 		case 'S':
 			sign_progs = true;
@@ -566,7 +577,20 @@ int main(int argc, char **argv)
 	if (json_output)
 		jsonw_destroy(&json_wtr);
 
-	btf__free(base_btf);
+	while (base_btf) {
+		bool is_root = base_btf == root_base_btf;
+
+		new_base_btf = (struct btf *)btf__base_btf(base_btf);
+		btf__free(base_btf);
+		/*
+		 * Do not free base BTF that is an owned .BTF.base ; leads
+		 * to a double-free, so only free as far as the root base
+		 * we explicitly read with -B above.
+		 */
+		if (is_root)
+			break;
+		base_btf = new_base_btf;
+	}
 
 	return ret;
 }

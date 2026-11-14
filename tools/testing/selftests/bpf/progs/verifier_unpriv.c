@@ -6,6 +6,8 @@
 #include "../../../include/linux/filter.h"
 #include "bpf_misc.h"
 
+extern const int bpf_prog_active __ksym;
+
 #define BPF_SK_LOOKUP(func) \
 	/* struct bpf_sock_tuple tuple = {} */ \
 	"r2 = 0;"			\
@@ -75,6 +77,41 @@ __naked void dummy_prog_loop1_socket(void)
 	: __imm(bpf_tail_call),
 	  __imm_addr(map_prog1_socket)
 	: __clobber_all);
+}
+
+SEC("socket")
+__description("unpriv: pseudo btf id log masks address")
+__success_unpriv
+__msg_unpriv("0: (18) r1 = 0x0")
+__not_msg_unpriv("0: (18) r1 = 0x{{[1-9a-f][0-9a-f]*}}")
+__retval_unpriv(0)
+__log_level(2)
+__naked void pseudo_btf_id_log_masks_address(void)
+{
+	asm volatile ("r1 = %[bpf_prog_active] ll;"
+		      "r0 = 0;"
+		      "exit;"
+	:
+	: __imm_addr(bpf_prog_active)
+	: __clobber_all);
+}
+
+static int pseudo_func_callback(__u32 index, void *ctx)
+{
+	return 0;
+}
+
+SEC("socket")
+__description("unpriv: pseudo function policy diagnostic")
+__success __failure_unpriv
+__msg_unpriv("loading/calling other bpf or kernel functions")
+__not_msg_unpriv("BPF-to-BPF function call")
+__msg_unpriv("policy check failed for BPF function reference")
+__msg_unpriv("avoid BPF function references in unprivileged")
+int unpriv_pseudo_func_policy(void *ctx)
+{
+	bpf_loop(1, pseudo_func_callback, NULL, 0);
+	return 0;
 }
 
 SEC("socket")
@@ -584,7 +621,7 @@ __naked void alu32_mov_u32_const(void)
 {
 	asm volatile ("					\
 	w7 = 0;						\
-	w7 &= 1;					\
+	w7 ^= w7;					\
 	w0 = w7;					\
 	if r0 == 0 goto l0_%=;				\
 	r0 = *(u64*)(r7 + 0);				\
@@ -894,7 +931,9 @@ __naked void unpriv_spectre_v1_and_v4_simple(void)
 {
 	asm volatile ("					\
 	r8 = 0;						\
+	r8 ^= r8;					\
 	r9 = 0;						\
+	r9 ^= r9;					\
 	r0 = r10;					\
 	r1 = 0;						\
 	r2 = r10;					\
@@ -932,7 +971,9 @@ __naked void unpriv_ldimm64_spectre_v1_and_v4_simple(void)
 {
 	asm volatile ("					\
 	r8 = 0;						\
+	r8 ^= r8;					\
 	r9 = 0;						\
+	r9 ^= r9;					\
 	r0 = r10;					\
 	r1 = 0;						\
 	r2 = r10;					\
@@ -946,6 +987,87 @@ l1_%=:	if r9 == 0 goto l3_%=;				\
 	r1 = 0x2020200005642020 ll;			\
 l2_%=:	*(u64 *)(r2 -64) = r1;				\
 l3_%=:	r0 = 0;						\
+	exit;						\
+"	::: __clobber_all);
+}
+
+SEC("socket")
+__description("unpriv: nospec after dead stack write in helper")
+__success __success_unpriv
+__retval(0)
+/* Dead code sanitizer rewrites the call to `goto -1`. */
+__naked void unpriv_dead_helper_stack_write_nospec_result(void)
+{
+	asm volatile ("					\
+	r0 = 0;						\
+	if r0 != 1 goto l0_%=;				\
+	r2 = 0;						\
+	r3 = r10;					\
+	r3 += -16;					\
+	r4 = 4;						\
+	r5 = 0;						\
+	call %[bpf_skb_load_bytes_relative];		\
+l0_%=:	exit;						\
+"	:
+	: __imm(bpf_skb_load_bytes_relative)
+	: __clobber_all);
+}
+
+SEC("socket")
+__description("unpriv: Spectre v4 stack write slot index")
+__success __success_unpriv
+__retval(0)
+#ifdef SPEC_V4
+__xlated_unpriv("r0 = 0")
+__xlated_unpriv("*(u32 *)(r10 -4) = r0")
+__xlated_unpriv("nospec")
+__xlated_unpriv("*(u32 *)(r10 -8) = r0")
+__xlated_unpriv("nospec")
+__xlated_unpriv("exit")
+#endif
+__naked void stack_write_nospec_slot_index(void)
+{
+	asm volatile ("					\
+	r0 = 0;					\
+	*(u32 *)(r10 - 4) = r0;			\
+	*(u32 *)(r10 - 8) = r0;			\
+	exit;					\
+"	::: __clobber_all);
+}
+
+__noinline int nospec_global_func(int x)
+{
+	return x + 1;
+}
+
+__used __naked static void nospec_call_subprog(void)
+{
+	asm volatile ("					\
+	call %[bpf_get_prandom_u32];			\
+	r0 &= 0xff;					\
+	r1 = 0;						\
+	if r0 < 0x100 goto l0_%=;			\
+	/* executed only speculatively */		\
+	r1 = r10;					\
+l0_%=:	call nospec_global_func;			\
+	exit;						\
+"	:
+	: __imm(bpf_get_prandom_u32)
+	: __clobber_all);
+}
+
+/* nospec_global_func is placed in front of nospec_call_subprog */
+SEC("socket")
+__description("unpriv: nospec in front of a call")
+__success __success_unpriv
+__caps_unpriv(CAP_BPF)
+__retval(1)
+__naked void nospec_backward_call(void)
+{
+	asm volatile ("					\
+	r1 = 0;						\
+	call nospec_global_func;			\
+	call nospec_call_subprog;			\
 	exit;						\
 "	::: __clobber_all);
 }

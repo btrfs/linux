@@ -81,8 +81,7 @@ static int alloc_rss_resource(struct net_device *netdev)
 
 	netdev_rss_key_fill(nic_dev->rss_hkey, L2NIC_RSS_KEY_SIZE);
 
-	nic_dev->rss_indir = kcalloc(L2NIC_RSS_INDIR_SIZE, sizeof(u16),
-				     GFP_KERNEL);
+	nic_dev->rss_indir = kzalloc_objs(u16, L2NIC_RSS_INDIR_SIZE);
 	if (!nic_dev->rss_indir) {
 		kfree(nic_dev->rss_hkey);
 		nic_dev->rss_hkey = NULL;
@@ -132,7 +131,7 @@ static int hinic3_rss_set_indir_tbl(struct hinic3_hwdev *hwdev,
 static int hinic3_set_rss_type(struct hinic3_hwdev *hwdev,
 			       struct hinic3_rss_type rss_type)
 {
-	struct l2nic_cmd_set_rss_ctx_tbl ctx_tbl = {};
+	struct l2nic_cmd_rss_ctx_tbl ctx_tbl = {};
 	struct mgmt_msg_params msg_params = {};
 	u32 ctx;
 	int err;

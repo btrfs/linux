@@ -30,9 +30,9 @@
 #define NUM_INSNS_RETIRED		(NUM_LOOPS * NUM_INSNS_PER_LOOP + NUM_EXTRA_INSNS)
 
 /* Track which architectural events are supported by hardware. */
-static uint32_t hardware_pmu_arch_events;
+static u32 hardware_pmu_arch_events;
 
-static uint8_t kvm_pmu_version;
+static u8 kvm_pmu_version;
 static bool kvm_has_perf_caps;
 
 #define X86_PMU_FEATURE_NULL						\
@@ -57,7 +57,7 @@ struct kvm_intel_pmu_event {
  * kvm_x86_pmu_feature use syntax that's only valid in function scope, and the
  * compiler often thinks the feature definitions aren't compile-time constants.
  */
-static struct kvm_intel_pmu_event intel_event_to_feature(uint8_t idx)
+static struct kvm_intel_pmu_event intel_event_to_feature(u8 idx)
 {
 	const struct kvm_intel_pmu_event __intel_event_to_feature[] = {
 		[INTEL_ARCH_CPU_CYCLES_INDEX]		 = { X86_PMU_FEATURE_CPU_CYCLES, X86_PMU_FEATURE_CPU_CYCLES_FIXED },
@@ -87,14 +87,18 @@ static struct kvm_intel_pmu_event intel_event_to_feature(uint8_t idx)
 	return __intel_event_to_feature[idx];
 }
 
-static struct kvm_vm *pmu_vm_create_with_one_vcpu(struct kvm_vcpu **vcpu,
-						  void *guest_code,
-						  uint8_t pmu_version,
-						  uint64_t perf_capabilities)
+static struct kvm_vm *pmu_vm_create_with_vcpus(u32 nr_vcpus, void *guest_code,
+					       u8 pmu_version,
+					       u64 perf_capabilities,
+					       struct kvm_vcpu **__vcpus[])
 {
+	struct kvm_vcpu **vcpus = calloc(nr_vcpus, sizeof(*vcpus));
 	struct kvm_vm *vm;
+	int i;
 
-	vm = vm_create_with_one_vcpu(vcpu, guest_code);
+	*__vcpus = vcpus;
+
+	vm = vm_create_with_vcpus(nr_vcpus, guest_code, vcpus);
 	sync_global_to_guest(vm, kvm_pmu_version);
 	sync_global_to_guest(vm, hardware_pmu_arch_events);
 
@@ -102,11 +106,20 @@ static struct kvm_vm *pmu_vm_create_with_one_vcpu(struct kvm_vcpu **vcpu,
 	 * Set PERF_CAPABILITIES before PMU version as KVM disallows enabling
 	 * features via PERF_CAPABILITIES if the guest doesn't have a vPMU.
 	 */
-	if (kvm_has_perf_caps)
-		vcpu_set_msr(*vcpu, MSR_IA32_PERF_CAPABILITIES, perf_capabilities);
+	for (i = 0; i < nr_vcpus; i++) {
+		if (kvm_has_perf_caps)
+			vcpu_set_msr(vcpus[i], MSR_IA32_PERF_CAPABILITIES, perf_capabilities);
 
-	vcpu_set_cpuid_property(*vcpu, X86_PROPERTY_PMU_VERSION, pmu_version);
+		vcpu_set_cpuid_property(vcpus[i], X86_PROPERTY_PMU_VERSION, pmu_version);
+	}
+
 	return vm;
+}
+
+static void pmu_vm_free(struct kvm_vm *vm, struct kvm_vcpu **vcpus)
+{
+	kvm_vm_free(vm);
+	free(vcpus);
 }
 
 static void run_vcpu(struct kvm_vcpu *vcpu)
@@ -132,7 +145,7 @@ static void run_vcpu(struct kvm_vcpu *vcpu)
 	} while (uc.cmd != UCALL_DONE);
 }
 
-static uint8_t guest_get_pmu_version(void)
+static u8 guest_get_pmu_version(void)
 {
 	/*
 	 * Return the effective PMU version, i.e. the minimum between what KVM
@@ -141,21 +154,21 @@ static uint8_t guest_get_pmu_version(void)
 	 * supported by KVM to verify KVM doesn't freak out and do something
 	 * bizarre with an architecturally valid, but unsupported, version.
 	 */
-	return min_t(uint8_t, kvm_pmu_version, this_cpu_property(X86_PROPERTY_PMU_VERSION));
+	return min_t(u8, kvm_pmu_version, this_cpu_property(X86_PROPERTY_PMU_VERSION));
 }
 
 /*
  * If an architectural event is supported and guaranteed to generate at least
- * one "hit, assert that its count is non-zero.  If an event isn't supported or
- * the test can't guarantee the associated action will occur, then all bets are
- * off regarding the count, i.e. no checks can be done.
+ * one "hit", assert that its count is non-zero.  If an event isn't supported
+ * or the test can't guarantee the associated action will occur, then all bets
+ * are off regarding the count, i.e. no checks can be done.
  *
  * Sanity check that in all cases, the event doesn't count when it's disabled,
  * and that KVM correctly emulates the write of an arbitrary value.
  */
-static void guest_assert_event_count(uint8_t idx, uint32_t pmc, uint32_t pmc_msr)
+static void guest_assert_event_count(u8 idx, u32 pmc, u32 pmc_msr)
 {
-	uint64_t count;
+	u64 count;
 
 	count = _rdpmc(pmc);
 	if (!(hardware_pmu_arch_events & BIT(idx)))
@@ -236,7 +249,7 @@ do {										\
 			     FEP "xor %%eax, %%eax\n\t"				\
 			     FEP "xor %%edx, %%edx\n\t"				\
 			     "wrmsr\n\t"					\
-			     :: "a"((uint32_t)_value), "d"(_value >> 32),	\
+			     :: "a"((u32)_value), "d"(_value >> 32),	\
 				"c"(_msr), "D"(_msr), [m]"m"(kvm_pmu_version)	\
 	);									\
 } while (0)
@@ -255,8 +268,8 @@ do {										\
 	guest_assert_event_count(_idx, _pmc, _pmc_msr);				\
 } while (0)
 
-static void __guest_test_arch_event(uint8_t idx, uint32_t pmc, uint32_t pmc_msr,
-				    uint32_t ctrl_msr, uint64_t ctrl_msr_value)
+static void __guest_test_arch_event(u8 idx, u32 pmc, u32 pmc_msr,
+				    u32 ctrl_msr, u64 ctrl_msr_value)
 {
 	GUEST_TEST_EVENT(idx, pmc, pmc_msr, ctrl_msr, ctrl_msr_value, "");
 
@@ -264,15 +277,16 @@ static void __guest_test_arch_event(uint8_t idx, uint32_t pmc, uint32_t pmc_msr,
 		GUEST_TEST_EVENT(idx, pmc, pmc_msr, ctrl_msr, ctrl_msr_value, KVM_FEP);
 }
 
-static void guest_test_arch_event(uint8_t idx)
+static void guest_test_arch_event(u8 idx)
 {
-	uint32_t nr_gp_counters = this_cpu_property(X86_PROPERTY_PMU_NR_GP_COUNTERS);
-	uint32_t pmu_version = guest_get_pmu_version();
+	u32 nr_gp_counters = this_cpu_property(X86_PROPERTY_PMU_NR_GP_COUNTERS);
+	u32 pmu_version = guest_get_pmu_version();
 	/* PERF_GLOBAL_CTRL exists only for Architectural PMU Version 2+. */
 	bool guest_has_perf_global_ctrl = pmu_version >= 2;
 	struct kvm_x86_pmu_feature gp_event, fixed_event;
-	uint32_t base_pmc_msr;
+	u32 base_pmc_msr;
 	unsigned int i;
+	u64 eventsel;
 
 	/* The host side shouldn't invoke this without a guest PMU. */
 	GUEST_ASSERT(pmu_version);
@@ -287,19 +301,16 @@ static void guest_test_arch_event(uint8_t idx)
 	GUEST_ASSERT_EQ(idx, gp_event.f.bit);
 
 	GUEST_ASSERT(nr_gp_counters);
+	i = kvm_random_u32_in_range(&kvm_rng, 0, nr_gp_counters - 1);
 
-	for (i = 0; i < nr_gp_counters; i++) {
-		uint64_t eventsel = ARCH_PERFMON_EVENTSEL_OS |
-				    ARCH_PERFMON_EVENTSEL_ENABLE |
-				    intel_pmu_arch_events[idx];
+	eventsel = ARCH_PERFMON_EVENTSEL_OS | ARCH_PERFMON_EVENTSEL_ENABLE |
+		   intel_pmu_arch_events[idx];
 
-		wrmsr(MSR_P6_EVNTSEL0 + i, 0);
-		if (guest_has_perf_global_ctrl)
-			wrmsr(MSR_CORE_PERF_GLOBAL_CTRL, BIT_ULL(i));
+	wrmsr(MSR_P6_EVNTSEL0 + i, 0);
+	if (guest_has_perf_global_ctrl)
+		wrmsr(MSR_CORE_PERF_GLOBAL_CTRL, BIT_ULL(i));
 
-		__guest_test_arch_event(idx, i, base_pmc_msr + i,
-					MSR_P6_EVNTSEL0 + i, eventsel);
-	}
+	__guest_test_arch_event(idx, i, base_pmc_msr + i, MSR_P6_EVNTSEL0 + i, eventsel);
 
 	if (!guest_has_perf_global_ctrl)
 		return;
@@ -320,7 +331,7 @@ static void guest_test_arch_event(uint8_t idx)
 
 static void guest_test_arch_events(void)
 {
-	uint8_t i;
+	u8 i;
 
 	for (i = 0; i < NR_INTEL_ARCH_EVENTS; i++)
 		guest_test_arch_event(i);
@@ -328,21 +339,10 @@ static void guest_test_arch_events(void)
 	GUEST_DONE();
 }
 
-static void test_arch_events(uint8_t pmu_version, uint64_t perf_capabilities,
-			     uint8_t length, uint32_t unavailable_mask)
+static void __test_arch_events(struct kvm_vcpu *vcpu, u8 length, u32 unavailable_mask)
 {
-	struct kvm_vcpu *vcpu;
-	struct kvm_vm *vm;
-
-	/* Testing arch events requires a vPMU (there are no negative tests). */
-	if (!pmu_version)
-		return;
-
 	unavailable_mask &= GENMASK(X86_PROPERTY_PMU_EVENTS_MASK.hi_bit,
 				    X86_PROPERTY_PMU_EVENTS_MASK.lo_bit);
-
-	vm = pmu_vm_create_with_one_vcpu(&vcpu, guest_test_arch_events,
-					 pmu_version, perf_capabilities);
 
 	vcpu_set_cpuid_property(vcpu, X86_PROPERTY_PMU_EBX_BIT_VECTOR_LENGTH,
 				length);
@@ -350,8 +350,59 @@ static void test_arch_events(uint8_t pmu_version, uint64_t perf_capabilities,
 				unavailable_mask);
 
 	run_vcpu(vcpu);
+}
 
-	kvm_vm_free(vm);
+static void test_arch_events(u8 pmu_version, u64 perf_capabilities)
+{
+	struct kvm_vcpu **vcpus;
+	struct kvm_vm *vm;
+	int i = 0;
+	u32 k;
+	u8 j;
+
+	/*
+	 * To keep the total runtime reasonable, test only a handful of select,
+	 * semi-arbitrary values for the mask of unavailable PMU events.  Test
+	 * 0 (all events available) and all ones (no events available) as well
+	 * as alternating bit sequences, e.g. to detect if KVM is checking the
+	 * wrong bit(s).
+	 */
+	const u32 unavailable_masks[] = {
+		0x0,
+		0xffffffffu,
+		0xaaaaaaaau,
+		0x55555555u,
+		0xf0f0f0f0u,
+		0x0f0f0f0fu,
+		0xa0a0a0a0u,
+		0x0a0a0a0au,
+		0x50505050u,
+		0x05050505u,
+	};
+
+	pr_info("Testing arch events, PMU version %u, perf_caps = %lx\n",
+		pmu_version, perf_capabilities);
+
+	/* Testing arch events requires a vPMU (there are no negative tests). */
+	if (!pmu_version)
+		return;
+
+	vm = pmu_vm_create_with_vcpus((NR_INTEL_ARCH_EVENTS + 2) * (ARRAY_SIZE(unavailable_masks) - 1),
+				      guest_test_arch_events, pmu_version,
+				      perf_capabilities, &vcpus);
+
+	/*
+	 * Test single bits for all PMU version and lengths up the number of
+	 * events +1 (to verify KVM doesn't do weird things if the guest length
+	 * is greater than the host length).  Explicitly test a mask of '0' and
+	 * all ones i.e. all events being available and unavailable.
+	 */
+	for (j = 0; j <= NR_INTEL_ARCH_EVENTS + 1; j++) {
+		for (k = 1; k < ARRAY_SIZE(unavailable_masks); k++)
+			__test_arch_events(vcpus[i++], j, unavailable_masks[k]);
+	}
+
+	pmu_vm_free(vm, vcpus);
 }
 
 /*
@@ -373,11 +424,11 @@ __GUEST_ASSERT(expect_gp ? vector == GP_VECTOR : !vector,			\
 		       "Expected " #insn "(0x%x) to yield 0x%lx, got 0x%lx",	\
 		       msr, expected, val);
 
-static void guest_test_rdpmc(uint32_t rdpmc_idx, bool expect_success,
-			     uint64_t expected_val)
+static void guest_test_rdpmc(u32 rdpmc_idx, bool expect_success,
+			     u64 expected_val)
 {
-	uint8_t vector;
-	uint64_t val;
+	u8 vector;
+	u64 val;
 
 	vector = rdpmc_safe(rdpmc_idx, &val);
 	GUEST_ASSERT_PMC_MSR_ACCESS(RDPMC, rdpmc_idx, !expect_success, vector);
@@ -393,19 +444,19 @@ static void guest_test_rdpmc(uint32_t rdpmc_idx, bool expect_success,
 		GUEST_ASSERT_PMC_VALUE(RDPMC, rdpmc_idx, val, expected_val);
 }
 
-static void guest_rd_wr_counters(uint32_t base_msr, uint8_t nr_possible_counters,
-				 uint8_t nr_counters, uint32_t or_mask)
+static void guest_rd_wr_counters(u32 base_msr, u8 nr_possible_counters,
+				 u8 nr_counters, u32 or_mask)
 {
 	const bool pmu_has_fast_mode = !guest_get_pmu_version();
-	uint8_t i;
+	u8 i;
 
 	for (i = 0; i < nr_possible_counters; i++) {
 		/*
 		 * TODO: Test a value that validates full-width writes and the
 		 * width of the counters.
 		 */
-		const uint64_t test_val = 0xffff;
-		const uint32_t msr = base_msr + i;
+		const u64 test_val = 0xffff;
+		const u32 msr = base_msr + i;
 
 		/*
 		 * Fixed counters are supported if the counter is less than the
@@ -418,12 +469,12 @@ static void guest_rd_wr_counters(uint32_t base_msr, uint8_t nr_possible_counters
 		 * KVM drops writes to MSR_P6_PERFCTR[0|1] if the counters are
 		 * unsupported, i.e. doesn't #GP and reads back '0'.
 		 */
-		const uint64_t expected_val = expect_success ? test_val : 0;
+		const u64 expected_val = expect_success ? test_val : 0;
 		const bool expect_gp = !expect_success && msr != MSR_P6_PERFCTR0 &&
 				       msr != MSR_P6_PERFCTR1;
-		uint32_t rdpmc_idx;
-		uint8_t vector;
-		uint64_t val;
+		u32 rdpmc_idx;
+		u8 vector;
+		u64 val;
 
 		vector = wrmsr_safe(msr, test_val);
 		GUEST_ASSERT_PMC_MSR_ACCESS(WRMSR, msr, expect_gp, vector);
@@ -461,9 +512,9 @@ static void guest_rd_wr_counters(uint32_t base_msr, uint8_t nr_possible_counters
 
 static void guest_test_gp_counters(void)
 {
-	uint8_t pmu_version = guest_get_pmu_version();
-	uint8_t nr_gp_counters = 0;
-	uint32_t base_msr;
+	u8 pmu_version = guest_get_pmu_version();
+	u8 nr_gp_counters = 0;
+	u32 base_msr;
 
 	if (pmu_version)
 		nr_gp_counters = this_cpu_property(X86_PROPERTY_PMU_NR_GP_COUNTERS);
@@ -477,7 +528,7 @@ static void guest_test_gp_counters(void)
 	 * counters, of which there are none.
 	 */
 	if (pmu_version > 1) {
-		uint64_t global_ctrl = rdmsr(MSR_CORE_PERF_GLOBAL_CTRL);
+		u64 global_ctrl = rdmsr(MSR_CORE_PERF_GLOBAL_CTRL);
 
 		if (nr_gp_counters)
 			GUEST_ASSERT_EQ(global_ctrl, GENMASK_ULL(nr_gp_counters - 1, 0));
@@ -495,28 +546,33 @@ static void guest_test_gp_counters(void)
 	GUEST_DONE();
 }
 
-static void test_gp_counters(uint8_t pmu_version, uint64_t perf_capabilities,
-			     uint8_t nr_gp_counters)
+static void test_gp_counters(u8 pmu_version, u64 perf_capabilities)
 {
-	struct kvm_vcpu *vcpu;
+	u8 nr_gp_counters = kvm_cpu_property(X86_PROPERTY_PMU_NR_GP_COUNTERS);
+	struct kvm_vcpu **vcpus;
 	struct kvm_vm *vm;
+	u8 j;
 
-	vm = pmu_vm_create_with_one_vcpu(&vcpu, guest_test_gp_counters,
-					 pmu_version, perf_capabilities);
+	pr_info("Testing %u GP counters, PMU version %u, perf_caps = %lx\n",
+		nr_gp_counters, pmu_version, perf_capabilities);
 
-	vcpu_set_cpuid_property(vcpu, X86_PROPERTY_PMU_NR_GP_COUNTERS,
-				nr_gp_counters);
+	vm = pmu_vm_create_with_vcpus(nr_gp_counters + 1, guest_test_gp_counters,
+				      pmu_version, perf_capabilities, &vcpus);
 
-	run_vcpu(vcpu);
+	for (j = 0; j <= nr_gp_counters; j++) {
+		vcpu_set_cpuid_property(vcpus[j], X86_PROPERTY_PMU_NR_GP_COUNTERS, j);
 
-	kvm_vm_free(vm);
+		run_vcpu(vcpus[j]);
+	}
+
+	pmu_vm_free(vm, vcpus);
 }
 
 static void guest_test_fixed_counters(void)
 {
-	uint64_t supported_bitmask = 0;
-	uint8_t nr_fixed_counters = 0;
-	uint8_t i;
+	u64 supported_bitmask = 0;
+	u8 nr_fixed_counters = 0;
+	u8 i;
 
 	/* Fixed counters require Architectural vPMU Version 2+. */
 	if (guest_get_pmu_version() >= 2)
@@ -533,8 +589,8 @@ static void guest_test_fixed_counters(void)
 			     nr_fixed_counters, supported_bitmask);
 
 	for (i = 0; i < MAX_NR_FIXED_COUNTERS; i++) {
-		uint8_t vector;
-		uint64_t val;
+		u8 vector;
+		u64 val;
 
 		if (i >= nr_fixed_counters && !(supported_bitmask & BIT_ULL(i))) {
 			vector = wrmsr_safe(MSR_CORE_PERF_FIXED_CTR_CTRL,
@@ -561,58 +617,51 @@ static void guest_test_fixed_counters(void)
 	GUEST_DONE();
 }
 
-static void test_fixed_counters(uint8_t pmu_version, uint64_t perf_capabilities,
-				uint8_t nr_fixed_counters,
-				uint32_t supported_bitmask)
+static void __test_fixed_counters(struct kvm_vcpu *vcpu, u8 nr_fixed_counters,
+				  u32 supported_bitmask)
 {
-	struct kvm_vcpu *vcpu;
-	struct kvm_vm *vm;
-
-	vm = pmu_vm_create_with_one_vcpu(&vcpu, guest_test_fixed_counters,
-					 pmu_version, perf_capabilities);
-
 	vcpu_set_cpuid_property(vcpu, X86_PROPERTY_PMU_FIXED_COUNTERS_BITMASK,
 				supported_bitmask);
 	vcpu_set_cpuid_property(vcpu, X86_PROPERTY_PMU_NR_FIXED_COUNTERS,
 				nr_fixed_counters);
 
 	run_vcpu(vcpu);
+}
 
-	kvm_vm_free(vm);
+static void test_fixed_counters(u8 pmu_version, u64 perf_capabilities)
+{
+	u8 nr_fixed_counters = kvm_cpu_property(X86_PROPERTY_PMU_NR_FIXED_COUNTERS);
+	struct kvm_vcpu **vcpus;
+	struct kvm_vm *vm;
+	int i = 0;
+	u32 k;
+	u8 j;
+
+	pr_info("Testing %u fixed counters, PMU version %u, perf_caps = %lx\n",
+		nr_fixed_counters, pmu_version, perf_capabilities);
+
+
+	vm = pmu_vm_create_with_vcpus((nr_fixed_counters + 1) * BIT(nr_fixed_counters),
+				      guest_test_fixed_counters,
+				      pmu_version, perf_capabilities, &vcpus);
+
+	for (j = 0; j <= nr_fixed_counters; j++) {
+		for (k = 0; k <= (BIT(nr_fixed_counters) - 1); k++)
+			__test_fixed_counters(vcpus[i++], j, k);
+	}
+
+	pmu_vm_free(vm, vcpus);
 }
 
 static void test_intel_counters(void)
 {
-	uint8_t nr_fixed_counters = kvm_cpu_property(X86_PROPERTY_PMU_NR_FIXED_COUNTERS);
-	uint8_t nr_gp_counters = kvm_cpu_property(X86_PROPERTY_PMU_NR_GP_COUNTERS);
-	uint8_t pmu_version = kvm_cpu_property(X86_PROPERTY_PMU_VERSION);
+	u8 pmu_version = kvm_cpu_property(X86_PROPERTY_PMU_VERSION);
 	unsigned int i;
-	uint8_t v, j;
-	uint32_t k;
+	u8 v;
 
-	const uint64_t perf_caps[] = {
+	const u64 perf_caps[] = {
 		0,
 		PMU_CAP_FW_WRITES,
-	};
-
-	/*
-	 * To keep the total runtime reasonable, test only a handful of select,
-	 * semi-arbitrary values for the mask of unavailable PMU events.  Test
-	 * 0 (all events available) and all ones (no events available) as well
-	 * as alternating bit sequencues, e.g. to detect if KVM is checking the
-	 * wrong bit(s).
-	 */
-	const uint32_t unavailable_masks[] = {
-		0x0,
-		0xffffffffu,
-		0xaaaaaaaau,
-		0x55555555u,
-		0xf0f0f0f0u,
-		0x0f0f0f0fu,
-		0xa0a0a0a0u,
-		0x0a0a0a0au,
-		0x50505050u,
-		0x05050505u,
 	};
 
 	/*
@@ -620,7 +669,7 @@ static void test_intel_counters(void)
 	 * Intel, i.e. is the last version that is guaranteed to be backwards
 	 * compatible with KVM's existing behavior.
 	 */
-	uint8_t max_pmu_version = max_t(typeof(pmu_version), pmu_version, 5);
+	u8 max_pmu_version = max_t(typeof(pmu_version), pmu_version, 5);
 
 	/*
 	 * Detect the existence of events that aren't supported by selftests.
@@ -650,32 +699,9 @@ static void test_intel_counters(void)
 			if (!kvm_has_perf_caps && perf_caps[i])
 				continue;
 
-			pr_info("Testing arch events, PMU version %u, perf_caps = %lx\n",
-				v, perf_caps[i]);
-
-			/*
-			 * Test single bits for all PMU version and lengths up
-			 * the number of events +1 (to verify KVM doesn't do
-			 * weird things if the guest length is greater than the
-			 * host length).  Explicitly test a mask of '0' and all
-			 * ones i.e. all events being available and unavailable.
-			 */
-			for (j = 0; j <= NR_INTEL_ARCH_EVENTS + 1; j++) {
-				for (k = 1; k < ARRAY_SIZE(unavailable_masks); k++)
-					test_arch_events(v, perf_caps[i], j, unavailable_masks[k]);
-			}
-
-			pr_info("Testing GP counters, PMU version %u, perf_caps = %lx\n",
-				v, perf_caps[i]);
-			for (j = 0; j <= nr_gp_counters; j++)
-				test_gp_counters(v, perf_caps[i], j);
-
-			pr_info("Testing fixed counters, PMU version %u, perf_caps = %lx\n",
-				v, perf_caps[i]);
-			for (j = 0; j <= nr_fixed_counters; j++) {
-				for (k = 0; k <= (BIT(nr_fixed_counters) - 1); k++)
-					test_fixed_counters(v, perf_caps[i], j, k);
-			}
+			test_arch_events(v, perf_caps[i]);
+			test_gp_counters(v, perf_caps[i]);
+			test_fixed_counters(v, perf_caps[i]);
 		}
 	}
 }

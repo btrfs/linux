@@ -17,7 +17,7 @@
  * amongst the available numa nodes on the machine.
  *
  * Migration is a command line option. When used on non-numa machines will 
- * exit with error. Test is still usefull on non-numa for testing IPIs.
+ * exit with error. Test is still useful on non-numa for testing IPIs.
  */
 #include <getopt.h>
 #include <pthread.h>
@@ -48,20 +48,20 @@
  * Incremented in the IPI handler. Provides evidence to the sender that the IPI
  * arrived at the destination
  */
-static volatile uint64_t ipis_rcvd;
+static volatile u64 ipis_rcvd;
 
 /* Data struct shared between host main thread and vCPUs */
 struct test_data_page {
-	uint32_t halter_apic_id;
-	volatile uint64_t hlt_count;
-	volatile uint64_t wake_count;
-	uint64_t ipis_sent;
-	uint64_t migrations_attempted;
-	uint64_t migrations_completed;
-	uint32_t icr;
-	uint32_t icr2;
-	uint32_t halter_tpr;
-	uint32_t halter_ppr;
+	u32 halter_apic_id;
+	volatile u64 hlt_count;
+	volatile u64 wake_count;
+	u64 ipis_sent;
+	u64 migrations_attempted;
+	u64 migrations_completed;
+	u32 icr;
+	u32 icr2;
+	u32 halter_tpr;
+	u32 halter_ppr;
 
 	/*
 	 *  Record local version register as a cross-check that APIC access
@@ -69,19 +69,19 @@ struct test_data_page {
 	 *  arch/x86/kvm/lapic.c). If test is failing, check that values match
 	 *  to determine whether APIC access exits are working.
 	 */
-	uint32_t halter_lvr;
+	u32 halter_lvr;
 };
 
 struct thread_params {
 	struct test_data_page *data;
 	struct kvm_vcpu *vcpu;
-	uint64_t *pipis_rcvd; /* host address of ipis_rcvd global */
+	u64 *pipis_rcvd; /* host address of ipis_rcvd global */
 };
 
 void verify_apic_base_addr(void)
 {
-	uint64_t msr = rdmsr(MSR_IA32_APICBASE);
-	uint64_t base = GET_APIC_BASE(msr);
+	u64 msr = rdmsr(MSR_IA32_APICBASE);
+	u64 base = GET_APIC_BASE(msr);
 
 	GUEST_ASSERT(base == APIC_DEFAULT_GPA);
 }
@@ -125,12 +125,12 @@ static void guest_ipi_handler(struct ex_regs *regs)
 
 static void sender_guest_code(struct test_data_page *data)
 {
-	uint64_t last_wake_count;
-	uint64_t last_hlt_count;
-	uint64_t last_ipis_rcvd_count;
-	uint32_t icr_val;
-	uint32_t icr2_val;
-	uint64_t tsc_start;
+	u64 last_wake_count;
+	u64 last_hlt_count;
+	u64 last_ipis_rcvd_count;
+	u32 icr_val;
+	u32 icr2_val;
+	u64 tsc_start;
 
 	verify_apic_base_addr();
 	xapic_enable();
@@ -228,71 +228,35 @@ static void *vcpu_thread(void *arg)
 	return NULL;
 }
 
-static void cancel_join_vcpu_thread(pthread_t thread, struct kvm_vcpu *vcpu)
-{
-	void *retval;
-	int r;
-
-	r = pthread_cancel(thread);
-	TEST_ASSERT(r == 0,
-		    "pthread_cancel on vcpu_id=%d failed with errno=%d",
-		    vcpu->id, r);
-
-	r = pthread_join(thread, &retval);
-	TEST_ASSERT(r == 0,
-		    "pthread_join on vcpu_id=%d failed with errno=%d",
-		    vcpu->id, r);
-	TEST_ASSERT(retval == PTHREAD_CANCELED,
-		    "expected retval=%p, got %p", PTHREAD_CANCELED,
-		    retval);
-}
-
 void do_migrations(struct test_data_page *data, int run_secs, int delay_usecs,
-		   uint64_t *pipis_rcvd)
+		   u64 *pipis_rcvd)
 {
 	long pages_not_moved;
 	unsigned long nodemask = 0;
-	unsigned long nodemasks[sizeof(nodemask) * 8];
 	int nodes = 0;
 	time_t start_time, last_update, now;
 	time_t interval_secs = 1;
-	int i, r;
 	int from, to;
-	unsigned long bit;
-	uint64_t hlt_count;
-	uint64_t wake_count;
-	uint64_t ipis_sent;
+	u64 hlt_count;
+	u64 wake_count;
+	u64 ipis_sent;
 
 	fprintf(stderr, "Calling migrate_pages every %d microseconds\n",
 		delay_usecs);
 
-	/* Get set of first 64 numa nodes available */
-	r = get_mempolicy(NULL, &nodemask, sizeof(nodemask) * 8,
-			  0, MPOL_F_MEMS_ALLOWED);
-	TEST_ASSERT(r == 0, "get_mempolicy failed errno=%d", errno);
+	nodes = kvm_get_numa_memory_nodes(&nodemask);
+	TEST_ASSERT(nodes > 1,
+		    "NUMA nodes disappeared?  nodemask = 0x%lx", nodemask);
 
 	fprintf(stderr, "Numa nodes found amongst first %lu possible nodes "
 		"(each 1-bit indicates node is present): %#lx\n",
-		sizeof(nodemask) * 8, nodemask);
-
-	/* Init array of masks containing a single-bit in each, one for each
-	 * available node. migrate_pages called below requires specifying nodes
-	 * as bit masks.
-	 */
-	for (i = 0, bit = 1; i < sizeof(nodemask) * 8; i++, bit <<= 1) {
-		if (nodemask & bit) {
-			nodemasks[nodes] = nodemask & bit;
-			nodes++;
-		}
-	}
-
-	TEST_ASSERT(nodes > 1,
-		    "Did not find at least 2 numa nodes. Can't do migration");
+		BITS_PER_TYPE(nodemask), nodemask);
 
 	fprintf(stderr, "Migrating amongst %d nodes found\n", nodes);
 
-	from = 0;
-	to = 1;
+	from = kvm_get_next_numa_node(nodemask, -1);
+	to = kvm_get_next_numa_node(nodemask, from);
+
 	start_time = time(NULL);
 	last_update = start_time;
 
@@ -301,6 +265,9 @@ void do_migrations(struct test_data_page *data, int run_secs, int delay_usecs,
 	wake_count = data->wake_count;
 
 	while ((int)(time(NULL) - start_time) < run_secs) {
+		unsigned long from_mask = BIT(from);
+		unsigned long to_mask = BIT(to);
+
 		data->migrations_attempted++;
 
 		/*
@@ -311,9 +278,8 @@ void do_migrations(struct test_data_page *data, int run_secs, int delay_usecs,
 		 * KVM_CREATE_VCPU ioctl. If that assumption ever changes this
 		 * test may break or give a false positive signal.
 		 */
-		pages_not_moved = migrate_pages(0, sizeof(nodemasks[from]),
-						&nodemasks[from],
-						&nodemasks[to]);
+		pages_not_moved = migrate_pages(0, MAXNODE_FOR_MASK(from_mask),
+						&from_mask, &to_mask);
 		if (pages_not_moved < 0)
 			fprintf(stderr,
 				"migrate_pages failed, errno=%d\n", errno);
@@ -325,9 +291,7 @@ void do_migrations(struct test_data_page *data, int run_secs, int delay_usecs,
 			data->migrations_completed++;
 
 		from = to;
-		to++;
-		if (to == nodes)
-			to = 0;
+		to = kvm_get_next_numa_node(nodemask, from);
 
 		now = time(NULL);
 		if (((now - start_time) % interval_secs == 0) &&
@@ -386,26 +350,16 @@ void get_cmdline_args(int argc, char *argv[], int *run_secs,
 	}
 }
 
-int main(int argc, char *argv[])
+static void test_xapic_ipi(int run_secs, int delay_usecs, bool migrate)
 {
-	int r;
 	int wait_secs;
 	const int max_halter_wait = 10;
-	int run_secs = 0;
-	int delay_usecs = 0;
 	struct test_data_page *data;
-	vm_vaddr_t test_data_page_vaddr;
-	bool migrate = false;
+	gva_t test_data_page_gva;
 	pthread_t threads[2];
 	struct thread_params params[2];
 	struct kvm_vm *vm;
-	uint64_t *pipis_rcvd;
-
-	get_cmdline_args(argc, argv, &run_secs, &migrate, &delay_usecs);
-	if (run_secs <= 0)
-		run_secs = DEFAULT_RUN_SECS;
-	if (delay_usecs <= 0)
-		delay_usecs = DEFAULT_DELAY_USECS;
+	u64 *pipis_rcvd;
 
 	vm = vm_create_with_one_vcpu(&params[0].vcpu, halter_guest_code);
 
@@ -415,23 +369,21 @@ int main(int argc, char *argv[])
 
 	params[1].vcpu = vm_vcpu_add(vm, 1, sender_guest_code);
 
-	test_data_page_vaddr = vm_vaddr_alloc_page(vm);
-	data = addr_gva2hva(vm, test_data_page_vaddr);
+	test_data_page_gva = vm_alloc_page(vm);
+	data = addr_gva2hva(vm, test_data_page_gva);
 	memset(data, 0, sizeof(*data));
 	params[0].data = data;
 	params[1].data = data;
 
-	vcpu_args_set(params[0].vcpu, 1, test_data_page_vaddr);
-	vcpu_args_set(params[1].vcpu, 1, test_data_page_vaddr);
+	vcpu_args_set(params[0].vcpu, 1, test_data_page_gva);
+	vcpu_args_set(params[1].vcpu, 1, test_data_page_gva);
 
-	pipis_rcvd = (uint64_t *)addr_gva2hva(vm, (uint64_t)&ipis_rcvd);
+	pipis_rcvd = (u64 *)addr_gva2hva(vm, (u64)&ipis_rcvd);
 	params[0].pipis_rcvd = pipis_rcvd;
 	params[1].pipis_rcvd = pipis_rcvd;
 
 	/* Start halter vCPU thread and wait for it to execute first HLT. */
-	r = pthread_create(&threads[0], NULL, vcpu_thread, &params[0]);
-	TEST_ASSERT(r == 0,
-		    "pthread_create halter failed errno=%d", errno);
+	kvm_pthread_create(&threads[0], NULL, vcpu_thread, &params[0]);
 	fprintf(stderr, "Halter vCPU thread started\n");
 
 	wait_secs = 0;
@@ -448,8 +400,7 @@ int main(int argc, char *argv[])
 		"Halter vCPU thread reported its APIC ID: %u after %d seconds.\n",
 		data->halter_apic_id, wait_secs);
 
-	r = pthread_create(&threads[1], NULL, vcpu_thread, &params[1]);
-	TEST_ASSERT(r == 0, "pthread_create sender failed errno=%d", errno);
+	kvm_pthread_create(&threads[1], NULL, vcpu_thread, &params[1]);
 
 	fprintf(stderr,
 		"IPI sender vCPU thread started. Letting vCPUs run for %d seconds.\n",
@@ -463,8 +414,8 @@ int main(int argc, char *argv[])
 	/*
 	 * Cancel threads and wait for them to stop.
 	 */
-	cancel_join_vcpu_thread(threads[0], params[0].vcpu);
-	cancel_join_vcpu_thread(threads[1], params[1].vcpu);
+	kvm_pthread_cancel_join_async(threads[0]);
+	kvm_pthread_cancel_join_async(threads[1]);
 
 	/*
 	 * If the host support Idle HLT, i.e. KVM *might* be using Idle HLT,
@@ -496,6 +447,31 @@ int main(int argc, char *argv[])
 		data->migrations_attempted, data->migrations_completed);
 
 	kvm_vm_free(vm);
+
+}
+
+int main(int argc, char *argv[])
+{
+	bool force_migrate = false;
+	unsigned long nodemask;
+	int run_secs = 0;
+	int delay_usecs = 0;
+
+	get_cmdline_args(argc, argv, &run_secs, &force_migrate, &delay_usecs);
+	if (run_secs <= 0)
+		run_secs = DEFAULT_RUN_SECS;
+	if (delay_usecs <= 0)
+		delay_usecs = DEFAULT_DELAY_USECS;
+
+	if (!force_migrate)
+		test_xapic_ipi(run_secs, delay_usecs, false);
+
+	if (kvm_get_numa_memory_nodes(&nodemask) > 1)
+		test_xapic_ipi(run_secs, delay_usecs, true);
+	else
+		__TEST_REQUIRE(!force_migrate,
+			       "Need at least 2 NUMA nodes to do migration (nodemask = 0x%lx)",
+			       nodemask);
 
 	return 0;
 }

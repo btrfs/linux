@@ -14,10 +14,10 @@ int refill_pi_state_cache(void)
 {
 	struct futex_pi_state *pi_state;
 
-	if (likely(current->pi_state_cache))
+	if (likely(current->futex.pi_state_cache))
 		return 0;
 
-	pi_state = kzalloc(sizeof(*pi_state), GFP_KERNEL);
+	pi_state = kzalloc_obj(*pi_state);
 
 	if (!pi_state)
 		return -ENOMEM;
@@ -28,17 +28,17 @@ int refill_pi_state_cache(void)
 	refcount_set(&pi_state->refcount, 1);
 	pi_state->key = FUTEX_KEY_INIT;
 
-	current->pi_state_cache = pi_state;
+	current->futex.pi_state_cache = pi_state;
 
 	return 0;
 }
 
 static struct futex_pi_state *alloc_pi_state(void)
 {
-	struct futex_pi_state *pi_state = current->pi_state_cache;
+	struct futex_pi_state *pi_state = current->futex.pi_state_cache;
 
 	WARN_ON(!pi_state);
-	current->pi_state_cache = NULL;
+	current->futex.pi_state_cache = NULL;
 
 	return pi_state;
 }
@@ -60,7 +60,7 @@ static void pi_state_update_owner(struct futex_pi_state *pi_state,
 	if (new_owner) {
 		raw_spin_lock(&new_owner->pi_lock);
 		WARN_ON(!list_empty(&pi_state->list));
-		list_add(&pi_state->list, &new_owner->pi_state_list);
+		list_add(&pi_state->list, &new_owner->futex.pi_state_list);
 		pi_state->owner = new_owner;
 		raw_spin_unlock(&new_owner->pi_lock);
 	}
@@ -96,7 +96,7 @@ void put_pi_state(struct futex_pi_state *pi_state)
 		raw_spin_unlock_irqrestore(&pi_state->pi_mutex.wait_lock, flags);
 	}
 
-	if (current->pi_state_cache) {
+	if (current->futex.pi_state_cache) {
 		kfree(pi_state);
 	} else {
 		/*
@@ -106,7 +106,7 @@ void put_pi_state(struct futex_pi_state *pi_state)
 		 */
 		pi_state->owner = NULL;
 		refcount_set(&pi_state->refcount, 1);
-		current->pi_state_cache = pi_state;
+		current->futex.pi_state_cache = pi_state;
 	}
 }
 
@@ -179,7 +179,7 @@ void put_pi_state(struct futex_pi_state *pi_state)
  *
  * p->pi_lock:
  *
- *	p->pi_state_list -> pi_state->list, relation
+ *	p->futex.pi_state_list -> pi_state->list, relation
  *	pi_mutex->owner -> pi_state->owner, relation
  *
  * pi_state->refcount:
@@ -193,6 +193,58 @@ void put_pi_state(struct futex_pi_state *pi_state)
  *     pi_mutex->wait_lock
  *       p->pi_lock
  *
+ * Futex kernel state:
+ *
+ * The kernel tracks the task state in p::futex::state to protect against exit()
+ * and exec(). The states are:
+ *
+ * - FUTEX_STATE_OK when the task is alive and waiters can be attached
+ *
+ * - FUTEX_STATE_EXITING when the task cleans up the robust list and PI
+ *   state. Concurrent waiters cannot attach anymore and have to wait until the
+ *   cleanup is finished to re-evaluate the potential changes caused by the
+ *   robust list and PI state cleanups.
+ *
+ * - FUTEX_STATE_DEAD when the task has cleaned up the robust list. This state
+ *   is set independent of exit() or exec(). In the exit() case the task is
+ *   gone. In the exec() case this ensures that nothing can attach to the task
+ *   after cleaning up the robust list and PI state before it has switched to
+ *   the new mm. From a futex point of view the task is dead until it sets the
+ *   state to FUTEX_STATE_OK again after switching to the new mm.
+ *
+ * The valid state transitions for exit():
+ *
+ *   FUTEX_STATE_OK -> FUTEX_STATE_EXITING -> FUTEX_STATE_DEAD
+ *
+ * The valid state transitions for exec():
+ *
+ *   FUTEX_STATE_OK -> FUTEX_STATE_EXITING -> FUTEX_STATE_DEAD -> FUTEX_STATE_OK
+ *
+ * The state has two related locks:
+ *
+ * 1) p::pi_lock
+ *
+ *    p::pi_lock has to be taken by the waiter when evaluating the state to
+ *    protect against a concurrent exit/exec cleanup by the owner. If the state
+ *    is OK then the waiter can be attached to the owner while still holding
+ *    pi_lock.
+ *
+ *    The cleanup code has to hold it for all state transitions to ensure that
+ *    the stores to the state cannot be reordered against previous stores on
+ *    which the waiter correctness depends on.
+ *
+ * 2) p::futex::exit_mutex
+ *
+ *    The mutex is acquired when the cleanup starts and released at the end. It
+ *    obviously is not serializing the owner's cleanup against itself. It is
+ *    used to avoid a live lock caused by a waiter preempting the owner's
+ *    cleanup. Such a waiter would busy loop forever waiting for the owner to
+ *    finish the cleanup.
+ *
+ *    To prevent this, waiters have to drop all locks when observing
+ *    FUTEX_STATE_EXITING and block on the mutex. When the owner releases the
+ *    mutex after finishing the cleanup the waiters make progress and
+ *    re-evaluate the situation.
  */
 
 /*
@@ -318,17 +370,9 @@ out_error:
 	return ret;
 }
 
-static int handle_exit_race(u32 __user *uaddr, u32 uval,
-			    struct task_struct *tsk)
+static int handle_exit_race(u32 __user *uaddr, u32 uval)
 {
 	u32 uval2;
-
-	/*
-	 * If the futex exit state is not yet FUTEX_STATE_DEAD, tell the
-	 * caller that the alleged owner is busy.
-	 */
-	if (tsk && tsk->futex_state != FUTEX_STATE_DEAD)
-		return -EBUSY;
 
 	/*
 	 * Reread the user space value to handle the following situation:
@@ -346,8 +390,8 @@ static int handle_exit_race(u32 __user *uaddr, u32 uval,
 	 *    *uaddr = 0xC0000000;	     tsk = get_task(PID);
 	 *   }				     if (!tsk->flags & PF_EXITING) {
 	 *  ...				       attach();
-	 *  tsk->futex_state =               } else {
-	 *	FUTEX_STATE_DEAD;              if (tsk->futex_state !=
+	 *  tsk->futex.state =               } else {
+	 *	FUTEX_STATE_DEAD;              if (tsk->futex.state !=
 	 *					  FUTEX_STATE_DEAD)
 	 *				         return -EAGAIN;
 	 *				       return -ESRCH; <--- FAIL
@@ -389,13 +433,14 @@ static void __attach_to_pi_owner(struct task_struct *p, union futex_key *key,
 	 * Initialize the pi_mutex in locked state and make @p
 	 * the owner of it:
 	 */
+	__assume_ctx_lock(&pi_state->pi_mutex.wait_lock);
 	rt_mutex_init_proxy_locked(&pi_state->pi_mutex, p);
 
 	/* Store the key for possible exit cleanups: */
 	pi_state->key = *key;
 
 	WARN_ON(!list_empty(&pi_state->list));
-	list_add(&pi_state->list, &p->pi_state_list);
+	list_add(&pi_state->list, &p->futex.pi_state_list);
 	/*
 	 * Assignment without holding pi_state->pi_mutex.wait_lock is safe
 	 * because there is no concurrency as the object is not published yet.
@@ -426,7 +471,7 @@ static int attach_to_pi_owner(u32 __user *uaddr, u32 uval, union futex_key *key,
 		return -EAGAIN;
 	p = find_get_task_by_vpid(pid);
 	if (!p)
-		return handle_exit_race(uaddr, uval, NULL);
+		return handle_exit_race(uaddr, uval);
 
 	if (unlikely(p->flags & PF_KTHREAD)) {
 		put_task_struct(p);
@@ -434,34 +479,55 @@ static int attach_to_pi_owner(u32 __user *uaddr, u32 uval, union futex_key *key,
 	}
 
 	/*
-	 * We need to look at the task state to figure out, whether the
-	 * task is exiting. To protect against the change of the task state
-	 * in futex_exit_release(), we do this protected by p->pi_lock:
+	 * We need to look at the task state to figure out whether the task is
+	 * exiting. To protect against the change of the task state from
+	 * FUTEX_STATE_OK to FUTEX_STATE_EXISTING in futex_cleanup_begin() it is
+	 * required to do this protected by p->pi_lock, which prevents the owner
+	 * from concurrently starting the exit cleanup.
+	 *
+	 * If the state is FUTEX_STATE_OK pi_lock must be held until the waiter
+	 * is attached to protect against a concurrent exit()/exec().
 	 */
 	raw_spin_lock_irq(&p->pi_lock);
-	if (unlikely(p->futex_state != FUTEX_STATE_OK)) {
+
+	/* Validate that the task is ready for futex operations. */
+	if (unlikely(p->futex.state != FUTEX_STATE_OK)) {
 		/*
-		 * The task is on the way out. When the futex state is
-		 * FUTEX_STATE_DEAD, we know that the task has finished
-		 * the cleanup:
+		 * The task is on the way out. When state is FUTEX_STATE_EXITING
+		 * the cleanup is in progress. To avoid a live lock when the
+		 * waiter preempted the owner, store the task pointer in
+		 * @exiting and keep the reference on the task. The calling code
+		 * will drop all locks, block on @p::futex::exit_mutex and wait
+		 * for the owner to finish the cleanup. Once the owner released
+		 * the mutex the waiter drops the reference count and
+		 * re-evaluates the situation.
 		 */
-		int ret = handle_exit_race(uaddr, uval, p);
+		if (p->futex.state == FUTEX_STATE_EXITING) {
+			raw_spin_unlock_irq(&p->pi_lock);
+			*exiting = p;
+			return -EBUSY;
+		}
+
+		int ret = handle_exit_race(uaddr, uval);
 
 		raw_spin_unlock_irq(&p->pi_lock);
-		/*
-		 * If the owner task is between FUTEX_STATE_EXITING and
-		 * FUTEX_STATE_DEAD then store the task pointer and keep
-		 * the reference on the task struct. The calling code will
-		 * drop all locks, wait for the task to reach
-		 * FUTEX_STATE_DEAD and then drop the refcount. This is
-		 * required to prevent a live lock when the current task
-		 * preempted the exiting task between the two states.
-		 */
-		if (ret == -EBUSY)
-			*exiting = p;
-		else
-			put_task_struct(p);
+		put_task_struct(p);
 		return ret;
+	}
+
+	if (IS_ENABLED(CONFIG_MMU) && futex_key_is_private(key)) {
+		/*
+		 * A private futex key holds a pointer to the waiter's mm
+		 * without holding a reference on it. So it must not be attached
+		 * to an owner in a different address space. Otherwise that
+		 * owner's exit cleanup could access the private hash after the
+		 * key's mm is freed.
+		 */
+		if (unlikely(p->mm != key->private.mm)) {
+			raw_spin_unlock_irq(&p->pi_lock);
+			put_task_struct(p);
+			return -EPERM;
+		}
 	}
 
 	__attach_to_pi_owner(p, key, ps);
@@ -614,6 +680,8 @@ int futex_lock_pi_atomic(u32 __user *uaddr, struct futex_hash_bucket *hb,
 static int wake_futex_pi(u32 __user *uaddr, u32 uval,
 			 struct futex_pi_state *pi_state,
 			 struct rt_mutex_waiter *top_waiter)
+	__must_hold(&pi_state->pi_mutex.wait_lock)
+	__releases(&pi_state->pi_mutex.wait_lock)
 {
 	struct task_struct *new_owner;
 	bool postunlock = false;
@@ -670,6 +738,8 @@ out_unlock:
 
 static int __fixup_pi_state_owner(u32 __user *uaddr, struct futex_q *q,
 				  struct task_struct *argowner)
+	__must_hold(&q->pi_state->pi_mutex.wait_lock)
+	__must_hold(q->lock_ptr)
 {
 	struct futex_pi_state *pi_state = q->pi_state;
 	struct task_struct *oldowner, *newowner;
@@ -918,7 +988,7 @@ int fixup_pi_owner(u32 __user *uaddr, struct futex_q *q, int locked)
 int futex_lock_pi(u32 __user *uaddr, unsigned int flags, ktime_t *time, int trylock)
 {
 	struct hrtimer_sleeper timeout, *to;
-	struct task_struct *exiting = NULL;
+	struct task_struct *exiting;
 	struct rt_mutex_waiter rt_waiter;
 	struct futex_q q = futex_q_init;
 	DEFINE_WAKE_Q(wake_q);
@@ -933,13 +1003,15 @@ int futex_lock_pi(u32 __user *uaddr, unsigned int flags, ktime_t *time, int tryl
 	to = futex_setup_timer(time, &timeout, flags, 0);
 
 retry:
+	exiting = NULL;
 	ret = get_futex_key(uaddr, flags, &q.key, FUTEX_WRITE);
 	if (unlikely(ret != 0))
 		goto out;
 
 retry_private:
 	if (1) {
-		CLASS(hb, hb)(&q.key);
+		CLASS(hbr, hbr)(&q.key);
+		auto hb = hbr.hb;
 
 		futex_q_lock(&q, hb);
 
@@ -966,6 +1038,7 @@ retry_private:
 				 * - EAGAIN: The user space value changed.
 				 */
 				futex_q_unlock(hb);
+				__release(q.lock_ptr);
 				/*
 				 * Handle the case where the owner is in the middle of
 				 * exiting. Wait for the exit to complete otherwise
@@ -997,17 +1070,11 @@ retry_private:
 		 * Caution; releasing @hb in-scope. The hb->lock is still locked
 		 * while the reference is dropped. The reference can not be dropped
 		 * after the unlock because if a user initiated resize is in progress
-		 * then we might need to wake him. This can not be done after the
-		 * rt_mutex_pre_schedule() invocation. The hb will remain valid because
-		 * the thread, performing resize, will block on hb->lock during
-		 * the requeue.
+		 * then we might need to wake him. The hb will remain valid
+		 * because the thread, performing resize, will block on
+		 * hb->lock during the requeue.
 		 */
-		futex_hash_put(no_free_ptr(hb));
-		/*
-		 * Must be done before we enqueue the waiter, here is unfortunately
-		 * under the hb lock, but that *should* work because it does nothing.
-		 */
-		rt_mutex_pre_schedule();
+		futex_private_hash_put(no_free_ptr(hbr.fph));
 
 		rt_mutex_init_waiter(&rt_waiter);
 
@@ -1073,10 +1140,6 @@ cleanup:
 		 * the
 		 */
 		futex_q_lockptr_lock(&q);
-		/*
-		 * Waiter is unqueued.
-		 */
-		rt_mutex_post_schedule();
 no_block:
 		/*
 		 * Fixup the pi_state owner and possibly acquire the lock if we
@@ -1090,21 +1153,22 @@ no_block:
 		if (res)
 			ret = (res < 0) ? res : 0;
 
+		__release(&hb->lock);
 		futex_unqueue_pi(&q);
 		spin_unlock(q.lock_ptr);
-		if (q.drop_hb_ref) {
-			CLASS(hb, hb)(&q.key);
-			/* Additional reference from futex_unlock_pi() */
-			futex_hash_put(hb);
-		}
+
+		/* Additional reference from futex_unlock_pi() */
+		futex_private_hash_put(q.drop_fph);
 		goto out;
 
 out_unlock_put_key:
 		futex_q_unlock(hb);
+		__release(q.lock_ptr);
 		goto out;
 
 uaddr_faulted:
 		futex_q_unlock(hb);
+		__release(q.lock_ptr);
 
 		ret = fault_in_user_writeable(uaddr);
 		if (ret)
@@ -1129,7 +1193,7 @@ out:
  * This is the in-kernel slowpath: we look up the PI state (if any),
  * and do the rt-mutex unlock.
  */
-int futex_unlock_pi(u32 __user *uaddr, unsigned int flags)
+static int __futex_unlock_pi(u32 __user *uaddr, unsigned int flags)
 {
 	u32 curval, uval, vpid = task_pid_vnr(current);
 	union futex_key key = FUTEX_KEY_INIT;
@@ -1138,7 +1202,6 @@ int futex_unlock_pi(u32 __user *uaddr, unsigned int flags)
 
 	if (!IS_ENABLED(CONFIG_FUTEX_PI))
 		return -ENOSYS;
-
 retry:
 	if (get_user(uval, uaddr))
 		return -EFAULT;
@@ -1152,7 +1215,8 @@ retry:
 	if (ret)
 		return ret;
 
-	CLASS(hb, hb)(&key);
+	CLASS(hbr, hbr)(&key);
+	auto hb = hbr.hb;
 	spin_lock(&hb->lock);
 retry_hb:
 
@@ -1209,8 +1273,9 @@ retry_hb:
 			 * Acquire a reference for the leaving waiter to ensure
 			 * valid futex_q::lock_ptr.
 			 */
-			futex_hash_get(hb);
-			top_waiter->drop_hb_ref = true;
+			if (futex_key_is_private(&key))
+				top_waiter->drop_fph = futex_private_hash(key.private.mm);
+
 			__futex_unqueue(top_waiter);
 			raw_spin_unlock_irq(&pi_state->pi_mutex.wait_lock);
 			goto retry_hb;
@@ -1292,3 +1357,15 @@ pi_faulted:
 	return ret;
 }
 
+int futex_unlock_pi(u32 __user *uaddr, unsigned int flags, void __user *pop)
+{
+	int ret = __futex_unlock_pi(uaddr, flags);
+
+	if (ret || !(flags & FLAGS_ROBUST_UNLOCK))
+		return ret;
+
+	if (!futex_robust_list_clear_pending(pop, flags))
+		return -EFAULT;
+
+	return 0;
+}

@@ -183,7 +183,7 @@ struct ipuv3_channel *ipu_idmac_get(struct ipu_soc *ipu, unsigned num)
 		}
 	}
 
-	channel = kzalloc(sizeof(*channel), GFP_KERNEL);
+	channel = kzalloc_obj(*channel);
 	if (!channel) {
 		channel = ERR_PTR(-ENOMEM);
 		goto out;
@@ -1290,7 +1290,7 @@ static int ipu_probe(struct platform_device *pdev)
 
 	ipu_base = res->start;
 
-	ipu = devm_kzalloc(&pdev->dev, sizeof(*ipu), GFP_KERNEL);
+	ipu = devm_kzalloc_obj(&pdev->dev, *ipu);
 	if (!ipu)
 		return -ENODEV;
 

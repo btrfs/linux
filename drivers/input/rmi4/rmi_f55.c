@@ -54,10 +54,10 @@ static int rmi_f55_detect(struct rmi_function *fn)
 	f55->num_tx_electrodes = f55->qry[F55_NUM_TX_OFFSET];
 
 	f55->cfg_num_rx_electrodes = f55->num_rx_electrodes;
-	f55->cfg_num_tx_electrodes = f55->num_rx_electrodes;
+	f55->cfg_num_tx_electrodes = f55->num_tx_electrodes;
 
 	drv_data->num_rx_electrodes = f55->cfg_num_rx_electrodes;
-	drv_data->num_tx_electrodes = f55->cfg_num_rx_electrodes;
+	drv_data->num_tx_electrodes = f55->cfg_num_tx_electrodes;
 
 	if (f55->qry[F55_PHYS_CHAR_OFFSET] & F55_CAP_SENSOR_ASSIGN) {
 		int i, total;
@@ -109,7 +109,7 @@ static int rmi_f55_probe(struct rmi_function *fn)
 {
 	struct f55_data *f55;
 
-	f55 = devm_kzalloc(&fn->dev, sizeof(struct f55_data), GFP_KERNEL);
+	f55 = devm_kzalloc_obj(&fn->dev, struct f55_data);
 	if (!f55)
 		return -ENOMEM;
 

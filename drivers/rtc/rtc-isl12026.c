@@ -445,7 +445,7 @@ static int isl12026_probe(struct i2c_client *client)
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C))
 		return -ENODEV;
 
-	priv = devm_kzalloc(&client->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&client->dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -484,6 +484,12 @@ static const struct of_device_id isl12026_dt_match[] = {
 };
 MODULE_DEVICE_TABLE(of, isl12026_dt_match);
 
+static const struct i2c_device_id isl12026_id[] = {
+	{ .name = "isl12026" },
+	{ }
+};
+MODULE_DEVICE_TABLE(i2c, isl12026_id);
+
 static struct i2c_driver isl12026_driver = {
 	.driver		= {
 		.name	= "rtc-isl12026",
@@ -491,6 +497,7 @@ static struct i2c_driver isl12026_driver = {
 	},
 	.probe		= isl12026_probe,
 	.remove		= isl12026_remove,
+	.id_table	= isl12026_id,
 };
 
 module_i2c_driver(isl12026_driver);

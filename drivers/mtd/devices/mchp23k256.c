@@ -174,7 +174,7 @@ static int mchp23k256_probe(struct spi_device *spi)
 	struct flash_platform_data *data;
 	int err;
 
-	flash = devm_kzalloc(&spi->dev, sizeof(*flash), GFP_KERNEL);
+	flash = devm_kzalloc_obj(&spi->dev, *flash);
 	if (!flash)
 		return -ENOMEM;
 
@@ -188,7 +188,7 @@ static int mchp23k256_probe(struct spi_device *spi)
 
 	data = dev_get_platdata(&spi->dev);
 
-	flash->caps = of_device_get_match_data(&spi->dev);
+	flash->caps = spi_get_device_match_data(spi);
 	if (!flash->caps)
 		flash->caps = &mchp23k256_caps;
 

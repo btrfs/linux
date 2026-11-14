@@ -68,7 +68,7 @@ static int dir685_tk_probe(struct i2c_client *client)
 	int err;
 	int i;
 
-	tk = devm_kzalloc(&client->dev, sizeof(*tk), GFP_KERNEL);
+	tk = devm_kzalloc_obj(&client->dev, *tk);
 	if (!tk)
 		return -ENOMEM;
 
@@ -128,7 +128,7 @@ static int dir685_tk_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id dir685_tk_id[] = {
-	{ "dir685tk" },
+	{ .name = "dir685tk" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, dir685_tk_id);

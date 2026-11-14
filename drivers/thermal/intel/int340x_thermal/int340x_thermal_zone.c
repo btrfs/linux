@@ -18,7 +18,11 @@ static int int340x_thermal_get_zone_temp(struct thermal_zone_device *zone,
 	unsigned long long tmp;
 	acpi_status status;
 
-	status = acpi_evaluate_integer(d->adev->handle, "_TMP", NULL, &tmp);
+	/*
+	 * On some ThinkPads _TMP switches the EC page selector without
+	 * taking the mutex the battery methods use.
+	 */
+	status = acpi_evaluate_integer_exclusive(d->adev->handle, "_TMP", NULL, &tmp);
 	if (ACPI_FAILURE(status))
 		return -EIO;
 
@@ -123,7 +127,7 @@ struct int34x_thermal_zone *int340x_thermal_zone_add(struct acpi_device *adev,
 	acpi_status status;
 	int i, ret;
 
-	int34x_zone = kzalloc(sizeof(*int34x_zone), GFP_KERNEL);
+	int34x_zone = kzalloc_obj(*int34x_zone);
 	if (!int34x_zone)
 		return ERR_PTR(-ENOMEM);
 
@@ -133,8 +137,8 @@ struct int34x_thermal_zone *int340x_thermal_zone_add(struct acpi_device *adev,
 	if (ACPI_SUCCESS(status))
 		int34x_zone->aux_trip_nr = trip_cnt;
 
-	zone_trips = kcalloc(trip_cnt + INT340X_THERMAL_MAX_TRIP_COUNT,
-			     sizeof(*zone_trips), GFP_KERNEL);
+	zone_trips = kzalloc_objs(*zone_trips,
+				  trip_cnt + INT340X_THERMAL_MAX_TRIP_COUNT);
 	if (!zone_trips) {
 		ret = -ENOMEM;
 		goto err_trips_alloc;

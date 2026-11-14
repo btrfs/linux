@@ -180,6 +180,7 @@
 #include <linux/kthread.h>
 #include <linux/sched/signal.h>
 #include <linux/limits.h>
+#include <linux/overflow.h>
 #include <linux/pagemap.h>
 #include <linux/rwsem.h>
 #include <linux/slab.h>
@@ -202,7 +203,6 @@
 /*------------------------------------------------------------------------*/
 
 #define FSG_DRIVER_DESC		"Mass Storage Function"
-#define FSG_DRIVER_VERSION	"2009/09/11"
 
 static const char fsg_string_interface[] = "Mass Storage";
 
@@ -463,7 +463,12 @@ static int fsg_setup(struct usb_function *f,
 	u16			w_value = le16_to_cpu(ctrl->wValue);
 	u16			w_length = le16_to_cpu(ctrl->wLength);
 
-	if (!fsg_is_set(fsg->common))
+	/*
+	 * fsg_is_set() warns when common->fsg is NULL, but that can happen
+	 * normally while a configuration change installs or removes the active
+	 * function.
+	 */
+	if (!fsg->common->fsg)
 		return -EOPNOTSUPP;
 
 	++fsg->common->ep0_req_tag;	/* Record arrival of a new request */
@@ -1103,9 +1108,9 @@ static int do_request_sense(struct fsg_common *common, struct fsg_buffhd *bh)
 	 * FSG normally uses option a); enable this code to use option b).
 	 */
 #if 0
-	if (curlun && curlun->unit_attention_data != SS_NO_SENSE) {
+	if (curlun && curlun->unit_attention_data != NO_SENSE) {
 		curlun->sense_data = curlun->unit_attention_data;
-		curlun->unit_attention_data = SS_NO_SENSE;
+		curlun->unit_attention_data = NO_SENSE;
 	}
 #endif
 
@@ -1118,18 +1123,18 @@ static int do_request_sense(struct fsg_common *common, struct fsg_buffhd *bh)
 		sd = curlun->sense_data;
 		sdinfo = curlun->sense_data_info;
 		valid = curlun->info_valid << 7;
-		curlun->sense_data = SS_NO_SENSE;
+		curlun->sense_data = NO_SENSE;
 		curlun->sense_data_info = 0;
 		curlun->info_valid = 0;
 	}
 
 	memset(buf, 0, 18);
 	buf[0] = valid | 0x70;			/* Valid, current error */
-	buf[2] = SK(sd);
+	buf[2] = usb_sense_key(sd);
 	put_unaligned_be32(sdinfo, &buf[3]);	/* Sense information */
 	buf[7] = 18 - 8;			/* Additional sense length */
-	buf[12] = ASC(sd);
-	buf[13] = ASCQ(sd);
+	buf[12] = usb_sense_asc(sd);
+	buf[13] = usb_sense_ascq(sd);
 	return 18;
 }
 
@@ -1678,21 +1683,23 @@ static void send_status(struct fsg_common *common)
 	if (curlun) {
 		sd = curlun->sense_data;
 		sdinfo = curlun->sense_data_info;
-	} else if (common->bad_lun_okay)
-		sd = SS_NO_SENSE;
-	else
+	} else if (common->bad_lun_okay) {
+		sd = NO_SENSE;
+	} else {
 		sd = SS_LOGICAL_UNIT_NOT_SUPPORTED;
+	}
 
 	if (common->phase_error) {
 		DBG(common, "sending phase-error status\n");
 		status = US_BULK_STAT_PHASE;
 		sd = SS_INVALID_COMMAND;
-	} else if (sd != SS_NO_SENSE) {
+	} else if (sd != NO_SENSE) {
 		DBG(common, "sending command-failure status\n");
 		status = US_BULK_STAT_FAIL;
 		VDBG(common, "  sense data: SK x%02x, ASC x%02x, ASCQ x%02x;"
 				"  info x%x\n",
-				SK(sd), ASC(sd), ASCQ(sd), sdinfo);
+		     usb_sense_key(sd), usb_sense_asc(sd),
+		     usb_sense_ascq(sd), sdinfo);
 	}
 
 	/* Store and send the Bulk-only CSW */
@@ -1798,7 +1805,7 @@ static int check_command(struct fsg_common *common, int cmnd_size,
 	curlun = common->curlun;
 	if (curlun) {
 		if (common->cmnd[0] != REQUEST_SENSE) {
-			curlun->sense_data = SS_NO_SENSE;
+			curlun->sense_data = NO_SENSE;
 			curlun->sense_data_info = 0;
 			curlun->info_valid = 0;
 		}
@@ -1820,11 +1827,11 @@ static int check_command(struct fsg_common *common, int cmnd_size,
 	 * If a unit attention condition exists, only INQUIRY and
 	 * REQUEST SENSE commands are allowed; anything else must fail.
 	 */
-	if (curlun && curlun->unit_attention_data != SS_NO_SENSE &&
+	if (curlun && curlun->unit_attention_data != NO_SENSE &&
 	    common->cmnd[0] != INQUIRY &&
 	    common->cmnd[0] != REQUEST_SENSE) {
 		curlun->sense_data = curlun->unit_attention_data;
-		curlun->unit_attention_data = SS_NO_SENSE;
+		curlun->unit_attention_data = NO_SENSE;
 		return -EINVAL;
 	}
 
@@ -1853,8 +1860,15 @@ static int check_command_size_in_blocks(struct fsg_common *common,
 		int cmnd_size, enum data_direction data_dir,
 		unsigned int mask, int needs_medium, const char *name)
 {
-	if (common->curlun)
-		common->data_size_from_cmnd <<= common->curlun->blkbits;
+	if (common->curlun) {
+		if (check_shl_overflow(common->data_size_from_cmnd,
+				       common->curlun->blkbits,
+				       &common->data_size_from_cmnd)) {
+			common->phase_error = 1;
+			return -EINVAL;
+		}
+	}
+
 	return check_command(common, cmnd_size, data_dir,
 			mask, needs_medium, name);
 }
@@ -2494,8 +2508,8 @@ static void handle_exception(struct fsg_common *common)
 			if (!curlun)
 				continue;
 			curlun->prevent_medium_removal = 0;
-			curlun->sense_data = SS_NO_SENSE;
-			curlun->unit_attention_data = SS_NO_SENSE;
+			curlun->sense_data = NO_SENSE;
+			curlun->unit_attention_data = NO_SENSE;
 			curlun->sense_data_info = 0;
 			curlun->info_valid = 0;
 		}
@@ -2699,7 +2713,7 @@ static void fsg_lun_release(struct device *dev)
 static struct fsg_common *fsg_common_setup(struct fsg_common *common)
 {
 	if (!common) {
-		common = kzalloc(sizeof(*common), GFP_KERNEL);
+		common = kzalloc_obj(*common);
 		if (!common)
 			return ERR_PTR(-ENOMEM);
 		common->free_storage_on_release = 1;
@@ -2740,7 +2754,10 @@ int fsg_common_set_num_buffers(struct fsg_common *common, unsigned int n)
 	struct fsg_buffhd *bh, *buffhds;
 	int i;
 
-	buffhds = kcalloc(n, sizeof(*buffhds), GFP_KERNEL);
+	if (n < 2)
+		return -EINVAL;
+
+	buffhds = kzalloc_objs(*buffhds, n);
 	if (!buffhds)
 		return -ENOMEM;
 
@@ -2887,7 +2904,7 @@ int fsg_common_create_lun(struct fsg_common *common, struct fsg_lun_config *cfg,
 		return -EINVAL;
 	}
 
-	lun = kzalloc(sizeof(*lun), GFP_KERNEL);
+	lun = kzalloc_obj(*lun);
 	if (!lun)
 		return -ENOMEM;
 
@@ -2953,7 +2970,7 @@ EXPORT_SYMBOL_GPL(fsg_common_create_lun);
 
 int fsg_common_create_luns(struct fsg_common *common, struct fsg_config *cfg)
 {
-	char buf[8]; /* enough for 100000000 different numbers, decimal */
+	char buf[14];
 	int i, rc;
 
 	fsg_common_remove_luns(common);
@@ -3153,7 +3170,7 @@ static void fsg_lun_attr_release(struct config_item *item)
 	kfree(lun_opts);
 }
 
-static struct configfs_item_operations fsg_lun_item_ops = {
+static const struct configfs_item_operations fsg_lun_item_ops = {
 	.release		= fsg_lun_attr_release,
 };
 
@@ -3311,7 +3328,7 @@ static struct config_group *fsg_lun_make(struct config_group *group,
 		goto out;
 	}
 
-	opts = kzalloc(sizeof(*opts), GFP_KERNEL);
+	opts = kzalloc_obj(*opts);
 	if (!opts) {
 		ret = -ENOMEM;
 		goto out;
@@ -3369,7 +3386,7 @@ static void fsg_attr_release(struct config_item *item)
 	usb_put_function_instance(&opts->func_inst);
 }
 
-static struct configfs_item_operations fsg_item_ops = {
+static const struct configfs_item_operations fsg_item_ops = {
 	.release		= fsg_attr_release,
 };
 
@@ -3462,7 +3479,7 @@ static struct configfs_attribute *fsg_attrs[] = {
 	NULL,
 };
 
-static struct configfs_group_operations fsg_group_ops = {
+static const struct configfs_group_operations fsg_group_ops = {
 	.make_group	= fsg_lun_make,
 	.drop_item	= fsg_lun_drop,
 };
@@ -3489,7 +3506,7 @@ static struct usb_function_instance *fsg_alloc_inst(void)
 	struct fsg_lun_config config;
 	int rc;
 
-	opts = kzalloc(sizeof(*opts), GFP_KERNEL);
+	opts = kzalloc_obj(*opts);
 	if (!opts)
 		return ERR_PTR(-ENOMEM);
 	mutex_init(&opts->lock);
@@ -3504,8 +3521,6 @@ static struct usb_function_instance *fsg_alloc_inst(void)
 					CONFIG_USB_GADGET_STORAGE_NUM_BUFFERS);
 	if (rc)
 		goto release_common;
-
-	pr_info(FSG_DRIVER_DESC ", version: " FSG_DRIVER_VERSION "\n");
 
 	memset(&config, 0, sizeof(config));
 	config.removable = true;
@@ -3554,7 +3569,7 @@ static struct usb_function *fsg_alloc(struct usb_function_instance *fi)
 	struct fsg_common *common = opts->common;
 	struct fsg_dev *fsg;
 
-	fsg = kzalloc(sizeof(*fsg), GFP_KERNEL);
+	fsg = kzalloc_obj(*fsg);
 	if (unlikely(!fsg))
 		return ERR_PTR(-ENOMEM);
 

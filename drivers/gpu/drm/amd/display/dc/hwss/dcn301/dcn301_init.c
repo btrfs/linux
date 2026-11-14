@@ -43,6 +43,7 @@ static const struct hw_sequencer_funcs dcn301_funcs = {
 	.wait_for_pending_cleared = dcn10_wait_for_pending_cleared,
 	.post_unlock_program_front_end = dcn20_post_unlock_program_front_end,
 	.update_plane_addr = dcn20_update_plane_addr,
+	.prepare_plane_addr_update = dcn20_prepare_plane_addr_update,
 	.update_dchub = dcn10_update_dchub,
 	.update_pending_status = dcn10_update_pending_status,
 	.program_output_csc = dcn20_program_output_csc,
@@ -58,7 +59,8 @@ static const struct hw_sequencer_funcs dcn301_funcs = {
 	.enable_audio_stream = dce110_enable_audio_stream,
 	.disable_audio_stream = dce110_disable_audio_stream,
 	.disable_plane = dcn20_disable_plane,
-	.pipe_control_lock = dcn20_pipe_control_lock,
+	.build_pipe_control_lock_sequence = dcn20_build_pipe_control_lock_sequence,
+	.tg_lock = dcn20_tg_lock,
 	.interdependent_update_lock = dcn10_lock_all_pipes,
 	.cursor_lock = dcn10_cursor_lock,
 	.prepare_bandwidth = dcn20_prepare_bandwidth,
@@ -111,6 +113,7 @@ static const struct hw_sequencer_funcs dcn301_funcs = {
 };
 
 static const struct hwseq_private_funcs dcn301_private_funcs = {
+	.build_cursor_pos_update_params = dcn10_build_cursor_pos_update_params,
 	.init_pipes = dcn10_init_pipes,
 	.plane_atomic_disconnect = dcn10_plane_atomic_disconnect,
 	.update_mpcc = dcn20_update_mpcc,
@@ -140,9 +143,10 @@ static const struct hwseq_private_funcs dcn301_private_funcs = {
 	.set_hdr_multiplier = dcn10_set_hdr_multiplier,
 	.verify_allow_pstate_change_high = dcn10_verify_allow_pstate_change_high,
 	.wait_for_blank_complete = dcn20_wait_for_blank_complete,
-	.dccg_init = dcn20_dccg_init,
 	.set_blend_lut = dcn30_set_blend_lut,
 	.set_shaper_3dlut = dcn20_set_shaper_3dlut,
+	.wait_for_pipe_update_if_needed = dcn10_wait_for_pipe_update_if_needed,
+	.set_wait_for_update_needed_for_pipe = dcn10_set_wait_for_update_needed_for_pipe,
 };
 
 void dcn301_hw_sequencer_construct(struct dc *dc)

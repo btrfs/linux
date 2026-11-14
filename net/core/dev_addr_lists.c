@@ -10,9 +10,48 @@
 #include <linux/netdevice.h>
 #include <linux/rtnetlink.h>
 #include <linux/export.h>
+#include <linux/if_addr.h>
 #include <linux/list.h>
+#include <linux/spinlock.h>
+#include <net/netlink.h>
+#include <net/rtnetlink.h>
+#include <net/sock.h>
+#include <kunit/visibility.h>
 
 #include "dev.h"
+
+/* RTM_GETMULTICAST dumps use the netns generation counter to detect
+ * changes of dev->mc between dump rounds.
+ */
+static void __hw_addr_changed(struct netdev_hw_addr_list *list)
+{
+	if (list->mc_dev)
+		atomic_inc(&dev_net(list->mc_dev)->dev_mc_genid);
+}
+
+static void __hw_addr_count_add(struct netdev_hw_addr_list *list, int value)
+{
+	list->_count += value;
+	__hw_addr_changed(list);
+}
+
+static void __hw_addr_count_inc(struct netdev_hw_addr_list *list)
+{
+	__hw_addr_count_add(list, 1);
+}
+
+static void __hw_addr_count_dec(struct netdev_hw_addr_list *list)
+{
+	__hw_addr_count_add(list, -1);
+}
+
+static void __hw_addr_count_reset(struct netdev_hw_addr_list *list)
+{
+	if (!list->_count)
+		return;
+	list->_count = 0;
+	__hw_addr_changed(list);
+}
 
 /*
  * General list handling functions
@@ -123,7 +162,7 @@ static int __hw_addr_add_ex(struct netdev_hw_addr_list *list,
 	rb_insert_color(&ha->node, &list->tree);
 
 	list_add_tail_rcu(&ha->list, &list->list);
-	list->count++;
+	__hw_addr_count_inc(list);
 
 	return 0;
 }
@@ -159,7 +198,7 @@ static int __hw_addr_del_entry(struct netdev_hw_addr_list *list,
 
 	list_del_rcu(&ha->list);
 	kfree_rcu(ha, rcu_head);
-	list->count--;
+	__hw_addr_count_dec(list);
 	return 0;
 }
 
@@ -481,7 +520,7 @@ void __hw_addr_unsync_dev(struct netdev_hw_addr_list *list,
 }
 EXPORT_SYMBOL(__hw_addr_unsync_dev);
 
-static void __hw_addr_flush(struct netdev_hw_addr_list *list)
+void __hw_addr_flush(struct netdev_hw_addr_list *list)
 {
 	struct netdev_hw_addr *ha, *tmp;
 
@@ -490,16 +529,145 @@ static void __hw_addr_flush(struct netdev_hw_addr_list *list)
 		list_del_rcu(&ha->list);
 		kfree_rcu(ha, rcu_head);
 	}
-	list->count = 0;
+	__hw_addr_count_reset(list);
 }
+EXPORT_SYMBOL_IF_KUNIT(__hw_addr_flush);
 
 void __hw_addr_init(struct netdev_hw_addr_list *list)
 {
 	INIT_LIST_HEAD(&list->list);
-	list->count = 0;
+	list->_count = 0;
 	list->tree = RB_ROOT;
+	list->mc_dev = NULL;
 }
 EXPORT_SYMBOL(__hw_addr_init);
+
+static void __hw_addr_splice(struct netdev_hw_addr_list *dst,
+			     struct netdev_hw_addr_list *src)
+{
+	src->tree = RB_ROOT;
+	list_splice_init(&src->list, &dst->list);
+	__hw_addr_count_add(dst, netdev_hw_addr_list_count(src));
+	__hw_addr_count_reset(src);
+}
+
+/**
+ *  __hw_addr_list_snapshot - create a snapshot copy of an address list
+ *  @snap: destination snapshot list (needs to be __hw_addr_init-initialized)
+ *  @list: source address list to snapshot
+ *  @addr_len: length of addresses
+ *  @cache: entry cache to reuse entries from; falls back to GFP_ATOMIC
+ *
+ *  Creates a copy of @list reusing entries from @cache when available.
+ *  Must be called under a spinlock.
+ *
+ *  Return: 0 on success, -errno on failure.
+ */
+int __hw_addr_list_snapshot(struct netdev_hw_addr_list *snap,
+			    const struct netdev_hw_addr_list *list,
+			    int addr_len, struct netdev_hw_addr_list *cache)
+{
+	struct netdev_hw_addr *ha, *entry;
+
+	list_for_each_entry(ha, &list->list, list) {
+		if (netdev_hw_addr_list_count(cache)) {
+			entry = list_first_entry(&cache->list,
+						 struct netdev_hw_addr, list);
+			list_del(&entry->list);
+			__hw_addr_count_dec(cache);
+			memcpy(entry->addr, ha->addr, addr_len);
+			entry->type = ha->type;
+			entry->global_use = false;
+			entry->synced = 0;
+		} else {
+			entry = __hw_addr_create(ha->addr, addr_len, ha->type,
+						 false, false);
+			if (!entry) {
+				__hw_addr_flush(snap);
+				return -ENOMEM;
+			}
+		}
+		entry->sync_cnt = ha->sync_cnt;
+		entry->refcount = ha->refcount;
+
+		list_add_tail(&entry->list, &snap->list);
+		__hw_addr_insert(snap, entry, addr_len);
+		__hw_addr_count_inc(snap);
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_IF_KUNIT(__hw_addr_list_snapshot);
+
+/**
+ *  __hw_addr_list_reconcile - sync snapshot changes back and free snapshots
+ *  @real_list: the real address list to update
+ *  @work: the working snapshot (modified by driver via __hw_addr_sync_dev)
+ *  @ref: the reference snapshot (untouched copy of original state)
+ *  @addr_len: length of addresses
+ *  @cache: entry cache to return snapshot entries to for reuse
+ *
+ *  Walks the reference snapshot and compares each entry against the work
+ *  snapshot to compute sync_cnt deltas. Applies those deltas to @real_list.
+ *  Returns snapshot entries to @cache for reuse; frees both snapshots.
+ *  Caller must hold netif_addr_lock_bh.
+ */
+void __hw_addr_list_reconcile(struct netdev_hw_addr_list *real_list,
+			      struct netdev_hw_addr_list *work,
+			      struct netdev_hw_addr_list *ref, int addr_len,
+			      struct netdev_hw_addr_list *cache)
+{
+	struct netdev_hw_addr *ref_ha, *tmp, *work_ha, *real_ha;
+	int delta;
+
+	list_for_each_entry_safe(ref_ha, tmp, &ref->list, list) {
+		work_ha = __hw_addr_lookup(work, ref_ha->addr, addr_len,
+					   ref_ha->type);
+		if (work_ha)
+			delta = work_ha->sync_cnt - ref_ha->sync_cnt;
+		else
+			delta = -1;
+
+		if (delta == 0)
+			continue;
+
+		real_ha = __hw_addr_lookup(real_list, ref_ha->addr, addr_len,
+					   ref_ha->type);
+		if (!real_ha) {
+			/* The real entry was concurrently removed. If the
+			 * driver synced this addr to hardware (delta > 0),
+			 * re-insert it as a stale entry so the next work
+			 * run unsyncs it from hardware.
+			 */
+			if (delta > 0) {
+				rb_erase(&ref_ha->node, &ref->tree);
+				list_del(&ref_ha->list);
+				__hw_addr_count_dec(ref);
+				ref_ha->sync_cnt = delta;
+				ref_ha->refcount = delta;
+				list_add_tail_rcu(&ref_ha->list,
+						  &real_list->list);
+				__hw_addr_insert(real_list, ref_ha,
+						 addr_len);
+				__hw_addr_count_inc(real_list);
+			}
+			continue;
+		}
+
+		real_ha->sync_cnt += delta;
+		real_ha->refcount += delta;
+		if (!real_ha->refcount) {
+			rb_erase(&real_ha->node, &real_list->tree);
+			list_del_rcu(&real_ha->list);
+			kfree_rcu(real_ha, rcu_head);
+			__hw_addr_count_dec(real_list);
+		}
+	}
+
+	__hw_addr_splice(cache, work);
+	__hw_addr_splice(cache, ref);
+}
+EXPORT_SYMBOL_IF_KUNIT(__hw_addr_list_reconcile);
 
 /*
  * Device addresses handling functions
@@ -1047,5 +1215,425 @@ EXPORT_SYMBOL(dev_mc_flush);
 void dev_mc_init(struct net_device *dev)
 {
 	__hw_addr_init(&dev->mc);
+	dev->mc.mc_dev = dev;
 }
 EXPORT_SYMBOL(dev_mc_init);
+
+static int dev_mc_fill_addr(struct sk_buff *skb, const struct net_device *dev,
+			    const struct netdev_hw_addr *ha, u32 portid,
+			    u32 seq, unsigned int flags, int netnsid)
+{
+	struct ifaddrmsg *ifm;
+	struct nlmsghdr *nlh;
+
+	nlh = nlmsg_put(skb, portid, seq, RTM_GETMULTICAST, sizeof(*ifm),
+			flags);
+	if (!nlh)
+		return -EMSGSIZE;
+
+	ifm = nlmsg_data(nlh);
+	ifm->ifa_family = AF_PACKET;
+	ifm->ifa_prefixlen = 0;
+	ifm->ifa_flags = 0;
+	ifm->ifa_scope = RT_SCOPE_LINK;
+	ifm->ifa_index = dev->ifindex;
+
+	if ((netnsid >= 0 &&
+	     nla_put_s32(skb, IFA_TARGET_NETNSID, netnsid)) ||
+	    nla_put(skb, IFA_MULTICAST, dev->addr_len, ha->addr) ||
+	    nla_put_u32(skb, IFA_MC_USERS, ha->refcount) ||
+	    nla_put_u32(skb, IFA_FLAGS, ha->global_use ? IFA_F_GLOBAL : 0)) {
+		nlmsg_cancel(skb, nlh);
+		return -EMSGSIZE;
+	}
+
+	nlmsg_end(skb, nlh);
+	return 0;
+}
+
+/* Combine dev_mc_genid and dev_base_seq to detect changes, like
+ * inet_base_seq().
+ */
+static u32 dev_mc_base_seq(const struct net *net)
+{
+	u32 res = atomic_read(&net->dev_mc_genid) +
+		  READ_ONCE(net->dev_base_seq);
+
+	/* Must not return 0 (see nl_dump_check_consistent()). */
+	if (!res)
+		res = 0x80000000;
+	return res;
+}
+
+static int dev_mc_dump_dev(struct net_device *dev, struct sk_buff *skb,
+			   struct netlink_callback *cb, int *s_addr_idx,
+			   unsigned int flags, int netnsid)
+{
+	struct netdev_hw_addr *ha;
+	int addr_idx = 0;
+	int err = 0;
+
+	netif_addr_lock_bh(dev);
+	netdev_for_each_mc_addr(ha, dev) {
+		if (addr_idx < *s_addr_idx) {
+			addr_idx++;
+			continue;
+		}
+		err = dev_mc_fill_addr(skb, dev, ha, NETLINK_CB(cb->skb).portid,
+				       cb->nlh->nlmsg_seq, flags, netnsid);
+		if (err < 0)
+			break;
+		addr_idx++;
+	}
+	netif_addr_unlock_bh(dev);
+
+	*s_addr_idx = err < 0 ? addr_idx : 0;
+
+	return err;
+}
+
+struct dev_mc_dump_filter {
+	struct net *tgt_net;
+	netns_tracker ns_tracker;
+	int netnsid;
+	int ifindex;
+};
+
+static const struct nla_policy dev_mc_dump_policy[IFA_MAX + 1] = {
+	[IFA_TARGET_NETNSID]	= { .type = NLA_S32 },
+};
+
+static int dev_mc_valid_dump_req(const struct nlmsghdr *nlh, struct sock *sk,
+				 struct dev_mc_dump_filter *filter,
+				 struct netlink_ext_ack *extack)
+{
+	struct nlattr *tb[IFA_MAX + 1];
+	struct ifaddrmsg *ifm;
+	int err;
+
+	ifm = nlmsg_payload(nlh, sizeof(*ifm));
+	if (!ifm) {
+		NL_SET_ERR_MSG(extack,
+			       "Invalid header for multicast dump request");
+		return -EINVAL;
+	}
+
+	if (ifm->ifa_prefixlen || ifm->ifa_flags || ifm->ifa_scope) {
+		NL_SET_ERR_MSG(extack,
+			       "Invalid values in multicast dump header");
+		return -EINVAL;
+	}
+
+	err = nlmsg_parse(nlh, sizeof(*ifm), tb, IFA_MAX,
+			  dev_mc_dump_policy, extack);
+	if (err < 0)
+		return err;
+
+	if (tb[IFA_TARGET_NETNSID]) {
+		struct net *net;
+
+		filter->netnsid = nla_get_s32(tb[IFA_TARGET_NETNSID]);
+		net = rtnl_get_net_ns_capable(sk, filter->netnsid);
+		if (IS_ERR(net)) {
+			NL_SET_ERR_MSG(extack,
+				       "Invalid target network namespace id");
+			return PTR_ERR(net);
+		}
+		netns_tracker_alloc(net, &filter->ns_tracker, GFP_KERNEL);
+		filter->tgt_net = net;
+	}
+
+	filter->ifindex = ifm->ifa_index;
+
+	return 0;
+}
+
+int dev_mc_dump(struct sk_buff *skb, struct netlink_callback *cb)
+{
+	struct dev_mc_dump_filter filter = {
+		.tgt_net = sock_net(skb->sk),
+		.netnsid = -1,
+	};
+	unsigned int flags = NLM_F_MULTI;
+	struct {
+		unsigned long ifindex;
+		int addr_idx;
+	} *ctx = (void *)cb->ctx;
+	unsigned long s_ifindex;
+	struct net_device *dev;
+	int err;
+
+	err = dev_mc_valid_dump_req(cb->nlh, skb->sk, &filter, cb->extack);
+	if (err < 0)
+		return err;
+
+	rcu_read_lock();
+
+	cb->seq = dev_mc_base_seq(filter.tgt_net);
+	if (filter.ifindex) {
+		cb->answer_flags |= NLM_F_DUMP_FILTERED;
+		flags |= NLM_F_DUMP_FILTERED;
+		dev = dev_get_by_index_rcu(filter.tgt_net, filter.ifindex);
+		if (dev)
+			err = dev_mc_dump_dev(dev, skb, cb, &ctx->addr_idx,
+					      flags, filter.netnsid);
+		else
+			err = -ENODEV;
+	} else {
+		s_ifindex = ctx->ifindex;
+		for_each_netdev_dump(filter.tgt_net, dev, ctx->ifindex) {
+			/* The device the dump stopped at is gone, do not
+			 * skip entries of the next one.
+			 */
+			if (dev->ifindex != s_ifindex)
+				ctx->addr_idx = 0;
+			err = dev_mc_dump_dev(dev, skb, cb, &ctx->addr_idx,
+					      flags, filter.netnsid);
+			if (err < 0)
+				break;
+		}
+	}
+	/* A round without a message has nothing to flag, the NLMSG_DONE
+	 * check then compares against the previous round.
+	 */
+	if (skb->len)
+		nl_dump_check_consistent(cb, nlmsg_hdr(skb));
+	/* Let the NLMSG_DONE check see changes made during the last round */
+	cb->seq = dev_mc_base_seq(filter.tgt_net);
+
+	rcu_read_unlock();
+	if (filter.netnsid >= 0)
+		put_net_track(filter.tgt_net, &filter.ns_tracker);
+	return err;
+}
+
+static int netif_addr_lists_snapshot(struct net_device *dev,
+				     struct netdev_hw_addr_list *uc_snap,
+				     struct netdev_hw_addr_list *mc_snap,
+				     struct netdev_hw_addr_list *uc_ref,
+				     struct netdev_hw_addr_list *mc_ref)
+{
+	int err;
+
+	err = __hw_addr_list_snapshot(uc_snap, &dev->uc, dev->addr_len,
+				      &dev->rx_mode_addr_cache);
+	if (!err)
+		err = __hw_addr_list_snapshot(uc_ref, &dev->uc, dev->addr_len,
+					      &dev->rx_mode_addr_cache);
+	if (!err)
+		err = __hw_addr_list_snapshot(mc_snap, &dev->mc,
+					      dev->addr_len,
+					      &dev->rx_mode_addr_cache);
+	if (!err)
+		err = __hw_addr_list_snapshot(mc_ref, &dev->mc, dev->addr_len,
+					      &dev->rx_mode_addr_cache);
+
+	if (err) {
+		__hw_addr_flush(uc_snap);
+		__hw_addr_flush(uc_ref);
+		__hw_addr_flush(mc_snap);
+	}
+
+	return err;
+}
+
+static void netif_addr_lists_reconcile(struct net_device *dev,
+				       struct netdev_hw_addr_list *uc_snap,
+				       struct netdev_hw_addr_list *mc_snap,
+				       struct netdev_hw_addr_list *uc_ref,
+				       struct netdev_hw_addr_list *mc_ref)
+{
+	__hw_addr_list_reconcile(&dev->uc, uc_snap, uc_ref, dev->addr_len,
+				 &dev->rx_mode_addr_cache);
+	__hw_addr_list_reconcile(&dev->mc, mc_snap, mc_ref, dev->addr_len,
+				 &dev->rx_mode_addr_cache);
+}
+
+/**
+ * netif_uc_promisc_update() - evaluate whether uc_promisc should be toggled.
+ * @dev: device
+ *
+ * Must be called under netif_addr_lock_bh.
+ * Return: +1 to enter promisc, -1 to leave, 0 for no change.
+ */
+static int netif_uc_promisc_update(struct net_device *dev)
+{
+	if (dev->priv_flags & IFF_UNICAST_FLT)
+		return 0;
+
+	if (!netdev_uc_empty(dev) && !dev->uc_promisc) {
+		dev->uc_promisc = true;
+		return 1;
+	}
+	if (netdev_uc_empty(dev) && dev->uc_promisc) {
+		dev->uc_promisc = false;
+		return -1;
+	}
+	return 0;
+}
+
+/* Total retry budget (4): 1+2+4+8 = 15 seconds */
+#define NETIF_RX_MODE_RETRY_MAX	4
+
+void netif_rx_mode_schedule_retry(struct net_device *dev)
+{
+	unsigned long delay;
+
+	netdev_assert_locked_ops_compat(dev);
+
+	if (dev->rx_mode_retry_count >= NETIF_RX_MODE_RETRY_MAX) {
+		netdev_err(dev, "rx_mode retry limit reached, giving up\n");
+		return;
+	}
+
+	delay = HZ << dev->rx_mode_retry_count;
+	if (mod_timer(&dev->rx_mode_retry_timer, jiffies + delay))
+		return;
+	if (!dev->rx_mode_retry_count)
+		netdev_info(dev, "rx_mode install failed, retrying with backoff\n");
+	dev->rx_mode_retry_count++;
+}
+EXPORT_SYMBOL_GPL(netif_rx_mode_schedule_retry);
+
+void netif_rx_mode_cancel_retry(struct net_device *dev)
+{
+	timer_delete_sync(&dev->rx_mode_retry_timer);
+	dev->rx_mode_retry_count = 0;
+}
+
+void netif_rx_mode_run(struct net_device *dev)
+{
+	struct netdev_hw_addr_list uc_snap, mc_snap, uc_ref, mc_ref;
+	const struct net_device_ops *ops = dev->netdev_ops;
+	int promisc_inc;
+	int err;
+
+	might_sleep();
+	netdev_assert_locked_ops_compat(dev);
+
+	__hw_addr_init(&uc_snap);
+	__hw_addr_init(&mc_snap);
+	__hw_addr_init(&uc_ref);
+	__hw_addr_init(&mc_ref);
+
+	if (!(dev->flags & IFF_UP) || !netif_device_present(dev))
+		return;
+
+	if (ops->ndo_set_rx_mode_async) {
+		netif_addr_lock_bh(dev);
+		err = netif_addr_lists_snapshot(dev, &uc_snap, &mc_snap,
+						&uc_ref, &mc_ref);
+		if (err) {
+			netif_addr_unlock_bh(dev);
+			netif_rx_mode_schedule_retry(dev);
+			return;
+		}
+
+		promisc_inc = netif_uc_promisc_update(dev);
+		netif_addr_unlock_bh(dev);
+	} else {
+		netif_addr_lock_bh(dev);
+		promisc_inc = netif_uc_promisc_update(dev);
+		netif_addr_unlock_bh(dev);
+	}
+
+	if (promisc_inc)
+		__dev_set_promiscuity(dev, promisc_inc, false);
+
+	if (ops->ndo_set_rx_mode_async) {
+		err = ops->ndo_set_rx_mode_async(dev, &uc_snap, &mc_snap);
+
+		netif_addr_lock_bh(dev);
+		netif_addr_lists_reconcile(dev, &uc_snap, &mc_snap,
+					   &uc_ref, &mc_ref);
+		netif_addr_unlock_bh(dev);
+
+		if (err)
+			netif_rx_mode_schedule_retry(dev);
+		else
+			dev->rx_mode_retry_count = 0;
+	} else if (ops->ndo_set_rx_mode) {
+		netif_addr_lock_bh(dev);
+		ops->ndo_set_rx_mode(dev);
+		netif_addr_unlock_bh(dev);
+	}
+}
+
+static void netif_rx_mode_queue(struct net_device *dev)
+{
+	__netdev_work_core_sched(dev, NETDEV_WORK_RX_MODE);
+}
+
+static void netif_rx_mode_retry(struct timer_list *t)
+{
+	struct net_device *dev =
+		timer_container_of(dev, t, rx_mode_retry_timer);
+
+	netif_rx_mode_queue(dev);
+}
+
+void netif_rx_mode_init(struct net_device *dev)
+{
+	__hw_addr_init(&dev->rx_mode_addr_cache);
+	timer_setup(&dev->rx_mode_retry_timer, netif_rx_mode_retry, 0);
+}
+
+/**
+ * __dev_set_rx_mode() - upload unicast and multicast address lists to device
+ * and configure RX filtering.
+ * @dev: device
+ *
+ * When the device doesn't support unicast filtering it is put in promiscuous
+ * mode while unicast addresses are present.
+ */
+void __dev_set_rx_mode(struct net_device *dev)
+{
+	const struct net_device_ops *ops = dev->netdev_ops;
+	int promisc_inc;
+
+	/* dev_open will call this function so the list will stay sane. */
+	if (!(dev->flags & IFF_UP))
+		return;
+
+	if (!netif_device_present(dev))
+		return;
+
+	if (ops->ndo_set_rx_mode_async || ops->ndo_change_rx_flags ||
+	    netdev_need_ops_lock(dev)) {
+		netif_rx_mode_queue(dev);
+		return;
+	}
+
+	/* Legacy path for non-ops-locked HW devices. */
+
+	promisc_inc = netif_uc_promisc_update(dev);
+	if (promisc_inc)
+		__dev_set_promiscuity(dev, promisc_inc, false);
+
+	if (ops->ndo_set_rx_mode)
+		ops->ndo_set_rx_mode(dev);
+}
+
+void dev_set_rx_mode(struct net_device *dev)
+{
+	netif_addr_lock_bh(dev);
+	__dev_set_rx_mode(dev);
+	netif_addr_unlock_bh(dev);
+}
+
+/**
+ * netif_rx_mode_sync() - sync rx mode inline
+ * @dev: network device
+ *
+ * Drivers implementing ndo_set_rx_mode_async() have their rx mode callback
+ * executed from a workqueue. This allows the callback to sleep, but means
+ * the hardware update is deferred and may not be visible to userspace
+ * by the time the initiating syscall returns. netif_rx_mode_sync() steals
+ * workqueue update and executes it inline. This preserves the atomicity of
+ * operations to the userspace.
+ */
+void netif_rx_mode_sync(struct net_device *dev)
+{
+	if (__netdev_work_core_cancel(dev, NETDEV_WORK_RX_MODE))
+		netif_rx_mode_run(dev);
+}

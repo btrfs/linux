@@ -101,7 +101,7 @@ struct msg_parser {
 int snd_motu_register_dsp_message_parser_new(struct snd_motu *motu)
 {
 	struct msg_parser *parser;
-	parser = devm_kzalloc(&motu->card->card_dev, sizeof(*parser), GFP_KERNEL);
+	parser = devm_kzalloc_obj(&motu->card->card_dev, *parser);
 	if (!parser)
 		return -ENOMEM;
 	spin_lock_init(&parser->lock);
@@ -386,6 +386,8 @@ unsigned int snd_motu_register_dsp_message_parser_count_event(struct snd_motu *m
 {
 	struct msg_parser *parser = motu->message_parser;
 
+	guard(spinlock_irqsave)(&parser->lock);
+
 	if (parser->pull_pos > parser->push_pos)
 		return EVENT_QUEUE_SIZE - parser->pull_pos + parser->push_pos;
 	else
@@ -395,13 +397,14 @@ unsigned int snd_motu_register_dsp_message_parser_count_event(struct snd_motu *m
 bool snd_motu_register_dsp_message_parser_copy_event(struct snd_motu *motu, u32 *event)
 {
 	struct msg_parser *parser = motu->message_parser;
-	unsigned int pos = parser->pull_pos;
-
-	if (pos == parser->push_pos)
-		return false;
+	unsigned int pos;
 
 	guard(spinlock_irqsave)(&parser->lock);
 
+	if (parser->pull_pos == parser->push_pos)
+		return false;
+
+	pos = parser->pull_pos;
 	*event = parser->event_queue[pos];
 
 	++pos;

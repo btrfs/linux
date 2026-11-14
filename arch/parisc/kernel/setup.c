@@ -120,14 +120,6 @@ void __init setup_arch(char **cmdline_p)
 #endif
 	printk(KERN_CONT ".\n");
 
-	/*
-	 * Check if initial kernel page mappings are sufficient.
-	 * panic early if not, else we may access kernel functions
-	 * and variables which can't be reached.
-	 */
-	if (__pa((unsigned long) &_end) >= KERNEL_INITIAL_SIZE)
-		panic("KERNEL_INITIAL_ORDER too small!");
-
 #ifdef CONFIG_64BIT
 	if(parisc_narrow_firmware) {
 		printk(KERN_INFO "Kernel is using PDC in 32-bit mode.\n");
@@ -139,6 +131,18 @@ void __init setup_arch(char **cmdline_p)
 	do_memory_inventory();  /* probe for physical memory */
 	parisc_cache_init();
 	paging_init();
+
+	/*
+	 * Parse early parameters before mm_core_init_early() runs.
+	 * Several early_param() handlers only record data that is consumed
+	 * from there - for example hugepages=, hugepagesz=,
+	 * default_hugepagesz=, hugetlb_cma= and hugetlb_free_vmemmap= - so
+	 * the generic parse_early_param() call in start_kernel() is too late
+	 * for them.  jump_label_init() must come first, since early param
+	 * handlers may enable or disable static keys.
+	 */
+	jump_label_init();
+	parse_early_param();
 
 #ifdef CONFIG_PA11
 	dma_ops_init();
@@ -278,6 +282,18 @@ void __init start_parisc(void)
 {
 	int ret, cpunum;
 	struct pdc_coproc_cfg coproc_cfg;
+
+	/*
+	 * Check if initial kernel page mapping is sufficient.
+	 * Print warning if not, because we may access kernel functions and
+	 * variables which can't be reached yet through the initial mappings.
+	 * Note that the panic() and printk() functions are not functional
+	 * yet, so we need to use direct iodc() firmware calls instead.
+	 */
+	const char warn1[] = "CRITICAL: Kernel may crash because "
+			     "KERNEL_INITIAL_ORDER is too small.\n";
+	if (__pa((unsigned long) &_end) >= KERNEL_INITIAL_SIZE)
+		pdc_iodc_print(warn1, sizeof(warn1) - 1);
 
 	/* check QEMU/SeaBIOS marker in PAGE0 */
 	running_on_qemu = (memcmp(&PAGE0->pad0, "SeaBIOS", 8) == 0);

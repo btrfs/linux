@@ -8,7 +8,6 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
-#include <linux/mod_devicetable.h>
 #include <linux/pinctrl/pinmux.h>
 #include <linux/pinctrl/pinconf-generic.h>
 #include <linux/pinctrl/pinctrl.h>
@@ -254,7 +253,7 @@ static int loongson2_pinctrl_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct loongson2_pinctrl *pctrl;
 
-	pctrl = devm_kzalloc(dev, sizeof(*pctrl), GFP_KERNEL);
+	pctrl = devm_kzalloc_obj(dev, *pctrl);
 	if (!pctrl)
 		return -ENOMEM;
 

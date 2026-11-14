@@ -25,11 +25,13 @@ void dso__free_a2l_libbfd(struct dso *dso);
 int symbol__disassemble_libbfd(const char *filename, struct symbol *sym,
 			     struct annotate_args *args);
 
-int libbfd__read_build_id(const char *filename, struct build_id *bid, bool block);
+int libbfd__read_build_id(const char *filename, struct build_id *bid);
 
 int libbfd_filename__read_debuglink(const char *filename, char *debuglink, size_t size);
 
 int symbol__disassemble_bpf_libbfd(struct symbol *sym, struct annotate_args *args);
+
+char *libbfd__demangle_sym(const char *str, bool params, bool modifiers);
 
 #else // !defined(HAVE_LIBBFD_SUPPORT)
 #include "annotate.h"
@@ -59,8 +61,7 @@ static inline int symbol__disassemble_libbfd(const char *filename __always_unuse
 }
 
 static inline int libbfd__read_build_id(const char *filename __always_unused,
-					struct build_id *bid __always_unused,
-					bool block __always_unused)
+					struct build_id *bid __always_unused)
 {
 	return -1;
 }
@@ -76,6 +77,13 @@ static inline int symbol__disassemble_bpf_libbfd(struct symbol *sym __always_unu
 						 struct annotate_args *args __always_unused)
 {
 	return SYMBOL_ANNOTATE_ERRNO__NO_LIBOPCODES_FOR_BPF;
+}
+
+static inline char *libbfd__demangle_sym(const char *str __always_unused,
+					 bool params __always_unused,
+					 bool modifiers __always_unused)
+{
+	return NULL;
 }
 
 #endif // defined(HAVE_LIBBFD_SUPPORT)

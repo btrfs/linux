@@ -491,7 +491,7 @@ static int dt3155_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 	if (err)
 		return -ENODEV;
-	pd = devm_kzalloc(&pdev->dev, sizeof(*pd), GFP_KERNEL);
+	pd = devm_kzalloc_obj(&pdev->dev, *pd);
 	if (!pd)
 		return -ENOMEM;
 
@@ -577,8 +577,8 @@ static void dt3155_remove(struct pci_dev *pdev)
 }
 
 static const struct pci_device_id pci_ids[] = {
-	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, DT3155_DEVICE_ID) },
-	{ 0, /* zero marks the end */ },
+	{ PCI_VDEVICE(INTEL, DT3155_DEVICE_ID) },
+	{ /* zero marks the end */ },
 };
 MODULE_DEVICE_TABLE(pci, pci_ids);
 

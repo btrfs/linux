@@ -74,7 +74,7 @@ static struct w83l785ts_data *w83l785ts_update_device(struct device *dev);
  */
 
 static const struct i2c_device_id w83l785ts_id[] = {
-	{ "w83l785ts" },
+	{ .name = "w83l785ts" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, w83l785ts_id);
@@ -168,7 +168,7 @@ static int w83l785ts_probe(struct i2c_client *client)
 	struct device *dev = &client->dev;
 	int err;
 
-	data = devm_kzalloc(dev, sizeof(struct w83l785ts_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct w83l785ts_data);
 	if (!data)
 		return -ENOMEM;
 

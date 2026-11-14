@@ -20,6 +20,7 @@
 #include <drm/drm_blend.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_framebuffer.h>
+#include <drm/drm_print.h>
 #include <drm/drm_vblank.h>
 
 #include "exynos_drm_crtc.h"
@@ -793,7 +794,7 @@ static int exynos5433_decon_probe(struct platform_device *pdev)
 	int ret;
 	int i;
 
-	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
+	ctx = devm_kzalloc_obj(dev, *ctx);
 	if (!ctx)
 		return -ENOMEM;
 

@@ -15,7 +15,6 @@
 #include <linux/i2c.h>
 #include <linux/lockdep.h>
 #include <linux/mfd/core.h>
-#include <linux/mod_devicetable.h>
 #include <linux/mutex.h>
 #include <linux/of_platform.h>
 #include <linux/regmap.h>
@@ -277,7 +276,7 @@ static int lochnagar_i2c_probe(struct i2c_client *i2c)
 	unsigned int devid, rev;
 	int ret;
 
-	lochnagar = devm_kzalloc(dev, sizeof(*lochnagar), GFP_KERNEL);
+	lochnagar = devm_kzalloc_obj(dev, *lochnagar);
 	if (!lochnagar)
 		return -ENOMEM;
 

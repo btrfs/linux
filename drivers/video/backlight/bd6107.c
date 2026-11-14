@@ -131,7 +131,7 @@ static int bd6107_probe(struct i2c_client *client)
 		return -EIO;
 	}
 
-	bd = devm_kzalloc(&client->dev, sizeof(*bd), GFP_KERNEL);
+	bd = devm_kzalloc_obj(&client->dev, *bd);
 	if (!bd)
 		return -ENOMEM;
 
@@ -179,7 +179,7 @@ static void bd6107_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id bd6107_ids[] = {
-	{ "bd6107" },
+	{ .name = "bd6107" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, bd6107_ids);

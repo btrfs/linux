@@ -334,7 +334,7 @@ static int himax_probe(struct i2c_client *client)
 		return -ENXIO;
 	}
 
-	ts = devm_kzalloc(dev, sizeof(*ts), GFP_KERNEL);
+	ts = devm_kzalloc_obj(dev, *ts);
 	if (!ts)
 		return -ENOMEM;
 
@@ -406,8 +406,8 @@ static const struct himax_chip hx83112b_chip = {
 };
 
 static const struct i2c_device_id himax_ts_id[] = {
-	{ "hx83100a", (kernel_ulong_t)&hx83100a_chip },
-	{ "hx83112b", (kernel_ulong_t)&hx83112b_chip },
+	{ .name = "hx83100a", .driver_data = (kernel_ulong_t)&hx83100a_chip },
+	{ .name = "hx83112b", .driver_data = (kernel_ulong_t)&hx83112b_chip },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(i2c, himax_ts_id);

@@ -269,6 +269,8 @@ bool ionic_notifyq_service(struct ionic_cq *cq)
 	if ((s64)(eid - lif->last_eid) <= 0)
 		return false;
 
+	dma_rmb();
+
 	lif->last_eid = eid;
 
 	dev_dbg(lif->ionic->dev, "notifyq event:\n");
@@ -283,7 +285,7 @@ bool ionic_notifyq_service(struct ionic_cq *cq)
 		if (lif->ionic->idev.fw_status_ready &&
 		    !test_bit(IONIC_LIF_F_FW_RESET, lif->state) &&
 		    !test_and_set_bit(IONIC_LIF_F_FW_STOPPING, lif->state)) {
-			work = kzalloc(sizeof(*work), GFP_ATOMIC);
+			work = kzalloc_obj(*work, GFP_ATOMIC);
 			if (!work) {
 				netdev_err(lif->netdev, "Reset event dropped\n");
 				clear_bit(IONIC_LIF_F_FW_STOPPING, lif->state);
@@ -313,6 +315,8 @@ bool ionic_adminq_service(struct ionic_cq *cq)
 
 	if (!color_match(comp->color, cq->done_color))
 		return false;
+
+	dma_rmb();
 
 	/* check for empty queue */
 	if (q->tail_idx == q->head_idx)
@@ -718,6 +722,7 @@ int ionic_port_init(struct ionic *ionic)
 {
 	struct ionic_identity *ident = &ionic->ident;
 	struct ionic_dev *idev = &ionic->idev;
+	bool allocated = false;
 	size_t sz;
 	int err;
 
@@ -729,7 +734,17 @@ int ionic_port_init(struct ionic *ionic)
 						     GFP_KERNEL);
 		if (!idev->port_info)
 			return -ENOMEM;
+
+		allocated = true;
 	}
+
+	/* If the driver knows about more "extra stats" than the firmware,
+	 * make sure these stats are marked as invalid.
+	 */
+	memset(&idev->port_info->extra_stats, 0xff,
+	       sizeof(idev->port_info->extra_stats));
+
+	WRITE_ONCE(idev->link_down_count_init, false);
 
 	sz = min(sizeof(ident->port.config), sizeof(idev->dev_cmd_regs->data));
 
@@ -745,10 +760,12 @@ int ionic_port_init(struct ionic *ionic)
 	mutex_unlock(&ionic->dev_cmd_lock);
 	if (err) {
 		dev_err(ionic->dev, "Failed to init port\n");
-		dma_free_coherent(ionic->dev, idev->port_info_sz,
-				  idev->port_info, idev->port_info_pa);
-		idev->port_info = NULL;
-		idev->port_info_pa = 0;
+		if (allocated) {
+			dma_free_coherent(ionic->dev, idev->port_info_sz,
+					  idev->port_info, idev->port_info_pa);
+			idev->port_info = NULL;
+			idev->port_info_pa = 0;
+		}
 	}
 
 	return err;

@@ -22,10 +22,12 @@ static void bnx2fc_flogi_resp(struct fc_seq *seq, struct fc_frame *fp,
 			      void *arg);
 static int bnx2fc_initiate_els(struct bnx2fc_rport *tgt, unsigned int op,
 			void *data, u32 data_len,
-			void (*cb_func)(struct bnx2fc_els_cb_arg *cb_arg),
+			void (*cb_func)(struct bnx2fc_rport *tgt,
+					struct bnx2fc_els_cb_arg *cb_arg),
 			struct bnx2fc_els_cb_arg *cb_arg, u32 timer_msec);
 
-static void bnx2fc_rrq_compl(struct bnx2fc_els_cb_arg *cb_arg)
+static void bnx2fc_rrq_compl(struct bnx2fc_rport *tgt,
+			     struct bnx2fc_els_cb_arg *cb_arg)
 {
 	struct bnx2fc_cmd *orig_io_req;
 	struct bnx2fc_cmd *rrq_req;
@@ -80,7 +82,7 @@ int bnx2fc_send_rrq(struct bnx2fc_cmd *aborted_io_req)
 		   aborted_io_req->xid);
 	memset(&rrq, 0, sizeof(rrq));
 
-	cb_arg = kzalloc(sizeof(struct bnx2fc_els_cb_arg), GFP_NOIO);
+	cb_arg = kzalloc_obj(struct bnx2fc_els_cb_arg, GFP_NOIO);
 	if (!cb_arg) {
 		printk(KERN_ERR PFX "Unable to allocate cb_arg for RRQ\n");
 		rc = -ENOMEM;
@@ -119,10 +121,10 @@ rrq_err:
 	return rc;
 }
 
-static void bnx2fc_l2_els_compl(struct bnx2fc_els_cb_arg *cb_arg)
+static void bnx2fc_l2_els_compl(struct bnx2fc_rport *tgt,
+				struct bnx2fc_els_cb_arg *cb_arg)
 {
 	struct bnx2fc_cmd *els_req;
-	struct bnx2fc_rport *tgt;
 	struct bnx2fc_mp_req *mp_req;
 	struct fc_frame_header *fc_hdr;
 	unsigned char *buf;
@@ -150,7 +152,6 @@ static void bnx2fc_l2_els_compl(struct bnx2fc_els_cb_arg *cb_arg)
 		goto free_arg;
 	}
 
-	tgt = els_req->tgt;
 	mp_req = &(els_req->mp_req);
 	fc_hdr = &(mp_req->resp_fc_hdr);
 	resp_len = mp_req->resp_len;
@@ -189,7 +190,7 @@ int bnx2fc_send_adisc(struct bnx2fc_rport *tgt, struct fc_frame *fp)
 	int rc;
 
 	fh = fc_frame_header_get(fp);
-	cb_arg = kzalloc(sizeof(struct bnx2fc_els_cb_arg), GFP_ATOMIC);
+	cb_arg = kzalloc_obj(struct bnx2fc_els_cb_arg, GFP_ATOMIC);
 	if (!cb_arg) {
 		printk(KERN_ERR PFX "Unable to allocate cb_arg for ADISC\n");
 		return -ENOMEM;
@@ -217,7 +218,7 @@ int bnx2fc_send_logo(struct bnx2fc_rport *tgt, struct fc_frame *fp)
 	int rc;
 
 	fh = fc_frame_header_get(fp);
-	cb_arg = kzalloc(sizeof(struct bnx2fc_els_cb_arg), GFP_ATOMIC);
+	cb_arg = kzalloc_obj(struct bnx2fc_els_cb_arg, GFP_ATOMIC);
 	if (!cb_arg) {
 		printk(KERN_ERR PFX "Unable to allocate cb_arg for LOGO\n");
 		return -ENOMEM;
@@ -245,7 +246,7 @@ int bnx2fc_send_rls(struct bnx2fc_rport *tgt, struct fc_frame *fp)
 	int rc;
 
 	fh = fc_frame_header_get(fp);
-	cb_arg = kzalloc(sizeof(struct bnx2fc_els_cb_arg), GFP_ATOMIC);
+	cb_arg = kzalloc_obj(struct bnx2fc_els_cb_arg, GFP_ATOMIC);
 	if (!cb_arg) {
 		printk(KERN_ERR PFX "Unable to allocate cb_arg for LOGO\n");
 		return -ENOMEM;
@@ -262,7 +263,9 @@ int bnx2fc_send_rls(struct bnx2fc_rport *tgt, struct fc_frame *fp)
 	return rc;
 }
 
-static void bnx2fc_srr_compl(struct bnx2fc_els_cb_arg *cb_arg)
+static void bnx2fc_srr_compl(struct bnx2fc_rport *tgt,
+			     struct bnx2fc_els_cb_arg *cb_arg)
+	__must_hold(&tgt->tgt_lock)
 {
 	struct bnx2fc_mp_req *mp_req;
 	struct fc_frame_header *fc_hdr, *fh;
@@ -296,7 +299,6 @@ static void bnx2fc_srr_compl(struct bnx2fc_els_cb_arg *cb_arg)
 		}
 		orig_io_req->srr_retry++;
 		if (orig_io_req->srr_retry <= SRR_RETRY_COUNT) {
-			struct bnx2fc_rport *tgt = orig_io_req->tgt;
 			spin_unlock_bh(&tgt->tgt_lock);
 			rc = bnx2fc_send_srr(orig_io_req,
 					     orig_io_req->srr_offset,
@@ -372,7 +374,9 @@ srr_compl_done:
 	kref_put(&orig_io_req->refcount, bnx2fc_cmd_release);
 }
 
-static void bnx2fc_rec_compl(struct bnx2fc_els_cb_arg *cb_arg)
+static void bnx2fc_rec_compl(struct bnx2fc_rport *tgt,
+			     struct bnx2fc_els_cb_arg *cb_arg)
+	__must_hold(&tgt->tgt_lock)
 {
 	struct bnx2fc_cmd *orig_io_req, *new_io_req;
 	struct bnx2fc_cmd *rec_req;
@@ -380,7 +384,6 @@ static void bnx2fc_rec_compl(struct bnx2fc_els_cb_arg *cb_arg)
 	struct fc_frame_header *fc_hdr, *fh;
 	struct fc_els_ls_rjt *rjt;
 	struct fc_els_rec_acc *acc;
-	struct bnx2fc_rport *tgt;
 	struct fcoe_err_report_entry *err_entry;
 	struct scsi_cmnd *sc_cmd;
 	enum fc_rctl r_ctl;
@@ -399,7 +402,6 @@ static void bnx2fc_rec_compl(struct bnx2fc_els_cb_arg *cb_arg)
 	rec_req = cb_arg->io_req;
 	orig_io_req = cb_arg->aborted_io_req;
 	BNX2FC_IO_DBG(rec_req, "rec_compl: orig xid = 0x%x", orig_io_req->xid);
-	tgt = orig_io_req->tgt;
 
 	/* Handle REC timeout case */
 	if (test_and_clear_bit(BNX2FC_FLAG_ELS_TIMEOUT, &rec_req->req_flags)) {
@@ -592,7 +594,7 @@ int bnx2fc_send_rec(struct bnx2fc_cmd *orig_io_req)
 	BNX2FC_IO_DBG(orig_io_req, "Sending REC\n");
 	memset(&rec, 0, sizeof(rec));
 
-	cb_arg = kzalloc(sizeof(struct bnx2fc_els_cb_arg), GFP_ATOMIC);
+	cb_arg = kzalloc_obj(struct bnx2fc_els_cb_arg, GFP_ATOMIC);
 	if (!cb_arg) {
 		printk(KERN_ERR PFX "Unable to allocate cb_arg for REC\n");
 		rc = -ENOMEM;
@@ -633,7 +635,7 @@ int bnx2fc_send_srr(struct bnx2fc_cmd *orig_io_req, u32 offset, u8 r_ctl)
 	BNX2FC_IO_DBG(orig_io_req, "Sending SRR\n");
 	memset(&srr, 0, sizeof(srr));
 
-	cb_arg = kzalloc(sizeof(struct bnx2fc_els_cb_arg), GFP_ATOMIC);
+	cb_arg = kzalloc_obj(struct bnx2fc_els_cb_arg, GFP_ATOMIC);
 	if (!cb_arg) {
 		printk(KERN_ERR PFX "Unable to allocate cb_arg for SRR\n");
 		rc = -ENOMEM;
@@ -669,7 +671,8 @@ srr_err:
 
 static int bnx2fc_initiate_els(struct bnx2fc_rport *tgt, unsigned int op,
 			void *data, u32 data_len,
-			void (*cb_func)(struct bnx2fc_els_cb_arg *cb_arg),
+			void (*cb_func)(struct bnx2fc_rport *tgt,
+					struct bnx2fc_els_cb_arg *cb_arg),
 			struct bnx2fc_els_cb_arg *cb_arg, u32 timer_msec)
 {
 	struct fcoe_port *port = tgt->port;
@@ -847,7 +850,7 @@ void bnx2fc_process_els_compl(struct bnx2fc_cmd *els_req,
 
 	/* Parse ELS response */
 	if ((els_req->cb_func) && (els_req->cb_arg)) {
-		els_req->cb_func(els_req->cb_arg);
+		els_req->cb_func(els_req->tgt, els_req->cb_arg);
 		els_req->cb_arg = NULL;
 	}
 

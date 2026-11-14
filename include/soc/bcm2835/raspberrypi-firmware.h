@@ -75,6 +75,7 @@ enum rpi_firmware_property_tag {
 	RPI_FIRMWARE_GET_THROTTLED =                          0x00030046,
 	RPI_FIRMWARE_GET_CLOCK_MEASURED =                     0x00030047,
 	RPI_FIRMWARE_NOTIFY_REBOOT =                          0x00030048,
+	RPI_FIRMWARE_GET_RTC_REG =                            0x00030087,
 	RPI_FIRMWARE_SET_CLOCK_STATE =                        0x00038001,
 	RPI_FIRMWARE_SET_CLOCK_RATE =                         0x00038002,
 	RPI_FIRMWARE_SET_VOLTAGE =                            0x00038003,
@@ -92,6 +93,7 @@ enum rpi_firmware_property_tag {
 	RPI_FIRMWARE_SET_POE_HAT_VAL =                        0x00030050,
 	RPI_FIRMWARE_NOTIFY_XHCI_RESET =                      0x00030058,
 	RPI_FIRMWARE_NOTIFY_DISPLAY_DONE =                    0x00030066,
+	RPI_FIRMWARE_SET_RTC_REG =                            0x00038087,
 
 	/* Dispmanx TAGS */
 	RPI_FIRMWARE_FRAMEBUFFER_ALLOCATE =                   0x00040001,
@@ -155,6 +157,31 @@ enum rpi_firmware_clk_id {
 	RPI_FIRMWARE_DISP_CLK_ID,
 	RPI_FIRMWARE_NUM_CLK_ID,
 };
+
+enum rpi_firmware_volt_id {
+	RPI_FIRMWARE_VOLT_ID_CORE = 1,
+	RPI_FIRMWARE_VOLT_ID_SDRAM_C = 2,
+	RPI_FIRMWARE_VOLT_ID_SDRAM_P = 3,
+	RPI_FIRMWARE_VOLT_ID_SDRAM_I = 4,
+	RPI_FIRMWARE_NUM_VOLT_ID,
+};
+
+/**
+ * struct rpi_firmware_get_voltage_request - Firmware request for a voltage
+ * @id:		ID of the voltage being queried
+ * @value:	Voltage in microvolts. Set by the firmware.
+ *
+ * Used by @RPI_FIRMWARE_GET_VOLTAGE.
+ */
+struct rpi_firmware_get_voltage_request {
+	__le32 id;
+	__le32 value;
+} __packed;
+
+#define RPI_FIRMWARE_GET_VOLTAGE_REQUEST(_id)	\
+	{					\
+		.id = cpu_to_le32(_id),		\
+	}
 
 /**
  * struct rpi_firmware_clk_rate_request - Firmware Request for a rate

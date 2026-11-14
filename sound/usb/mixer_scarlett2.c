@@ -192,6 +192,9 @@
 /* maximum Bluetooth volume value */
 #define SCARLETT2_MAX_BLUETOOTH_VOLUME 30
 
+/* maximum front-panel sleep time in seconds (24 hours) */
+#define SCARLETT2_MAX_FP_SLEEP_TIME 86400
+
 /* mixer range from -80dB to +12dB in 0.5dB steps */
 #define SCARLETT2_MIXER_MIN_DB -80
 #define SCARLETT2_MIXER_BIAS (-SCARLETT2_MIXER_MIN_DB * 2)
@@ -398,6 +401,7 @@ static const char *const scarlett2_autogain_status_gen4[] = {
 	"FailMaxGainLimit",
 	"FailClipped",
 	"Cancelled",
+	"Root",
 	"Invalid",
 	NULL
 };
@@ -567,6 +571,8 @@ enum {
 	SCARLETT2_CONFIG_BLUETOOTH_VOLUME,
 	SCARLETT2_CONFIG_SPDIF_MODE,
 	SCARLETT2_CONFIG_SP_HP_MUTE,
+	SCARLETT2_CONFIG_FP_BRIGHTNESS,
+	SCARLETT2_CONFIG_FP_SLEEP_TIME,
 	SCARLETT2_CONFIG_COUNT
 };
 
@@ -610,6 +616,20 @@ struct scarlett2_config_set {
 	const unsigned int *input_gain_tlv;
 	const char *const *autogain_status_texts;
 	const struct scarlett2_config items[SCARLETT2_CONFIG_COUNT];
+};
+
+/* Map firmware versions to config sets per-device.
+ *
+ * Each device lists one or more entries, sorted in ascending order of
+ * from_firmware_version. At probe time the running firmware version
+ * is looked up against this list and the last entry whose
+ * from_firmware_version is <= the running version is selected.
+ *
+ * The list is terminated by a sentinel entry with config_set == NULL.
+ */
+struct scarlett2_config_set_entry {
+	u16 from_firmware_version;
+	const struct scarlett2_config_set *config_set;
 };
 
 /* Input gain TLV dB ranges */
@@ -870,6 +890,42 @@ static const struct scarlett2_config_set scarlett2_config_set_gen4_solo = {
 	}
 };
 
+/* Solo Gen 4, firmware version 2417 and above */
+static const struct scarlett2_config_set scarlett2_config_set_gen4_solo_2417 = {
+	.notifications = scarlett4_solo_notifications,
+	.param_buf_addr = 0xd8,
+	.items = {
+		[SCARLETT2_CONFIG_MSD_SWITCH] = {
+			.offset = 0x47, .size = 8, .activate = 4 },
+
+		[SCARLETT2_CONFIG_DIRECT_MONITOR] = {
+			.offset = 0x108, .size = 8, .activate = 12, .pbuf = 1 },
+
+		[SCARLETT2_CONFIG_PHANTOM_SWITCH] = {
+			.offset = 0x46, .size = 8, .activate = 9, .pbuf = 1,
+			.mute = 1 },
+
+		[SCARLETT2_CONFIG_LEVEL_SWITCH] = {
+			.offset = 0x3d, .size = 8, .activate = 10, .pbuf = 1,
+			.mute = 1 },
+
+		[SCARLETT2_CONFIG_AIR_SWITCH] = {
+			.offset = 0x3e, .size = 8, .activate = 11, .pbuf = 1 },
+
+		[SCARLETT2_CONFIG_PCM_INPUT_SWITCH] = {
+			.offset = 0x206, .size = 8, .activate = 25, .pbuf = 1 },
+
+		[SCARLETT2_CONFIG_DIRECT_MONITOR_GAIN] = {
+			.offset = 0x232, .size = 16, .activate = 26 },
+
+		[SCARLETT2_CONFIG_FP_BRIGHTNESS] = {
+			.offset = 0x243, .size = 8, .activate = 27, .pbuf = 1 },
+
+		[SCARLETT2_CONFIG_FP_SLEEP_TIME] = {
+			.offset = 0x248, .size = 32, .activate = 29 }
+	}
+};
+
 /* 2i2 Gen 4 */
 static const struct scarlett2_config_set scarlett2_config_set_gen4_2i2 = {
 	.notifications = scarlett4_2i2_notifications,
@@ -920,6 +976,70 @@ static const struct scarlett2_config_set scarlett2_config_set_gen4_2i2 = {
 
 		[SCARLETT2_CONFIG_DIRECT_MONITOR_GAIN] = {
 			.offset = 0x2a0, .size = 16, .activate = 36 }
+	}
+};
+
+/* 2i2 Gen 4, firmware version 2417 and above
+ *
+ * Firmware 2417 shifted DIRECT_MONITOR_GAIN by 4 bytes and added
+ * front-panel brightness and sleep controls; all other offsets are
+ * unchanged from scarlett2_config_set_gen4_2i2.
+ */
+static const struct scarlett2_config_set scarlett2_config_set_gen4_2i2_2417 = {
+	.notifications = scarlett4_2i2_notifications,
+	.param_buf_addr = 0xfc,
+	.input_gain_tlv = db_scale_gen4_gain,
+	.autogain_status_texts = scarlett2_autogain_status_gen4,
+	.items = {
+		[SCARLETT2_CONFIG_MSD_SWITCH] = {
+			.offset = 0x49, .size = 8, .activate = 4 },
+
+		[SCARLETT2_CONFIG_DIRECT_MONITOR] = {
+			.offset = 0x14a, .size = 8, .activate = 16, .pbuf = 1 },
+
+		[SCARLETT2_CONFIG_AUTOGAIN_SWITCH] = {
+			.offset = 0x135, .size = 8, .activate = 10, .pbuf = 1 },
+
+		[SCARLETT2_CONFIG_AUTOGAIN_STATUS] = {
+			.offset = 0x137, .size = 8 },
+
+		[SCARLETT2_CONFIG_AG_MEAN_TARGET] = {
+			.offset = 0x131, .size = 8, .activate = 29, .pbuf = 1 },
+
+		[SCARLETT2_CONFIG_AG_PEAK_TARGET] = {
+			.offset = 0x132, .size = 8, .activate = 30, .pbuf = 1 },
+
+		[SCARLETT2_CONFIG_PHANTOM_SWITCH] = {
+			.offset = 0x48, .size = 8, .activate = 11, .pbuf = 1,
+			.mute = 1 },
+
+		[SCARLETT2_CONFIG_INPUT_GAIN] = {
+			.offset = 0x4b, .size = 8, .activate = 12, .pbuf = 1 },
+
+		[SCARLETT2_CONFIG_LEVEL_SWITCH] = {
+			.offset = 0x3c, .size = 8, .activate = 13, .pbuf = 1,
+			.mute = 1 },
+
+		[SCARLETT2_CONFIG_SAFE_SWITCH] = {
+			.offset = 0x147, .size = 8, .activate = 14, .pbuf = 1 },
+
+		[SCARLETT2_CONFIG_AIR_SWITCH] = {
+			.offset = 0x3e, .size = 8, .activate = 15, .pbuf = 1 },
+
+		[SCARLETT2_CONFIG_INPUT_SELECT_SWITCH] = {
+			.offset = 0x14b, .size = 8, .activate = 17, .pbuf = 1 },
+
+		[SCARLETT2_CONFIG_INPUT_LINK_SWITCH] = {
+			.offset = 0x14e, .size = 8, .activate = 18, .pbuf = 1 },
+
+		[SCARLETT2_CONFIG_DIRECT_MONITOR_GAIN] = {
+			.offset = 0x2a4, .size = 16, .activate = 36 },
+
+		[SCARLETT2_CONFIG_FP_BRIGHTNESS] = {
+			.offset = 0x2c7, .size = 8, .activate = 37, .pbuf = 1 },
+
+		[SCARLETT2_CONFIG_FP_SLEEP_TIME] = {
+			.offset = 0x2cc, .size = 32, .activate = 39 }
 	}
 };
 
@@ -979,6 +1099,71 @@ static const struct scarlett2_config_set scarlett2_config_set_gen4_4i4 = {
 
 		[SCARLETT2_CONFIG_POWER_LOW] = {
 			.offset = 0x16d, .size = 8 }
+	}
+};
+
+/* 4i4 Gen 4, firmware version 2417 and above */
+static const struct scarlett2_config_set scarlett2_config_set_gen4_4i4_2417 = {
+	.notifications = scarlett4_4i4_notifications,
+	.param_buf_addr = 0x130,
+	.input_gain_tlv = db_scale_gen4_gain,
+	.autogain_status_texts = scarlett2_autogain_status_gen4,
+	.items = {
+		[SCARLETT2_CONFIG_MSD_SWITCH] = {
+			.offset = 0x5c, .size = 8, .activate = 4 },
+
+		[SCARLETT2_CONFIG_AUTOGAIN_SWITCH] = {
+			.offset = 0x13e, .size = 8, .activate = 10, .pbuf = 1 },
+
+		[SCARLETT2_CONFIG_AUTOGAIN_STATUS] = {
+			.offset = 0x140, .size = 8 },
+
+		[SCARLETT2_CONFIG_AG_MEAN_TARGET] = {
+			.offset = 0x13a, .size = 8, .activate = 23, .pbuf = 1 },
+
+		[SCARLETT2_CONFIG_AG_PEAK_TARGET] = {
+			.offset = 0x13b, .size = 8, .activate = 24, .pbuf = 1 },
+
+		[SCARLETT2_CONFIG_PHANTOM_SWITCH] = {
+			.offset = 0x5a, .size = 8, .activate = 11, .pbuf = 1,
+			.mute = 1 },
+
+		[SCARLETT2_CONFIG_INPUT_GAIN] = {
+			.offset = 0x5e, .size = 8, .activate = 12, .pbuf = 1 },
+
+		[SCARLETT2_CONFIG_LEVEL_SWITCH] = {
+			.offset = 0x4e, .size = 8, .activate = 13, .pbuf = 1,
+			.mute = 1 },
+
+		[SCARLETT2_CONFIG_SAFE_SWITCH] = {
+			.offset = 0x150, .size = 8, .activate = 14, .pbuf = 1 },
+
+		[SCARLETT2_CONFIG_AIR_SWITCH] = {
+			.offset = 0x50, .size = 8, .activate = 15, .pbuf = 1 },
+
+		[SCARLETT2_CONFIG_INPUT_SELECT_SWITCH] = {
+			.offset = 0x153, .size = 8, .activate = 16, .pbuf = 1 },
+
+		[SCARLETT2_CONFIG_INPUT_LINK_SWITCH] = {
+			.offset = 0x156, .size = 8, .activate = 17, .pbuf = 1 },
+
+		[SCARLETT2_CONFIG_MASTER_VOLUME] = {
+			.offset = 0x32, .size = 16 },
+
+		[SCARLETT2_CONFIG_HEADPHONE_VOLUME] = {
+			.offset = 0x3a, .size = 16 },
+
+		[SCARLETT2_CONFIG_POWER_EXT] = {
+			.offset = 0x168, .size = 8 },
+
+		[SCARLETT2_CONFIG_POWER_LOW] = {
+			.offset = 0x16d, .size = 8 },
+
+		[SCARLETT2_CONFIG_FP_BRIGHTNESS] = {
+			.offset = 0x3a9, .size = 8, .activate = 36, .pbuf = 1 },
+
+		[SCARLETT2_CONFIG_FP_SLEEP_TIME] = {
+			.offset = 0x3ac, .size = 32, .activate = 38 }
 	}
 };
 
@@ -1100,11 +1285,8 @@ struct scarlett2_meter_entry {
 };
 
 struct scarlett2_device_info {
-	/* which set of configuration parameters the device uses */
-	const struct scarlett2_config_set *config_set;
-
-	/* minimum firmware version required */
-	u16 min_firmware_version;
+	/* which sets of configuration parameters the device uses */
+	const struct scarlett2_config_set_entry *config_sets;
 
 	/* has a downloadable device map */
 	u8 has_devmap;
@@ -1221,6 +1403,7 @@ struct scarlett2_data {
 	struct usb_mixer_interface *mixer;
 	struct mutex usb_mutex; /* prevent sending concurrent USB requests */
 	struct completion cmd_done;
+	struct urb *urb;        /* notification endpoint */
 	struct mutex data_mutex; /* lock access to this data */
 	u8 running;
 	u8 hwdep_in_use;
@@ -1328,8 +1511,6 @@ struct scarlett2_data {
 	struct snd_kcontrol *mux_ctls[SCARLETT2_MUX_MAX];
 	struct snd_kcontrol *mix_ctls[SCARLETT2_MIX_MAX];
 	struct snd_kcontrol *compressor_ctls[SCARLETT2_COMPRESSOR_CTLS_MAX];
-	struct snd_kcontrol *precomp_flt_ctls[SCARLETT2_PRECOMP_FLT_CTLS_MAX];
-	struct snd_kcontrol *peq_flt_ctls[SCARLETT2_PEQ_FLT_CTLS_MAX];
 	struct snd_kcontrol *precomp_flt_switch_ctls[SCARLETT2_DSP_SWITCH_MAX];
 	struct snd_kcontrol *peq_flt_switch_ctls[SCARLETT2_DSP_SWITCH_MAX];
 	struct snd_kcontrol *direct_monitor_ctl;
@@ -1337,6 +1518,8 @@ struct scarlett2_data {
 	struct snd_kcontrol *talkback_ctl;
 	struct snd_kcontrol *power_status_ctl;
 	struct snd_kcontrol *bluetooth_volume_ctl;
+	u8 fp_brightness;
+	u32 fp_sleep_time;
 	u8 mux[SCARLETT2_MUX_MAX];
 	u8 mix[SCARLETT2_MIX_MAX];
 	u8 monitor_mix[SCARLETT2_MONITOR_MIX_MAX];
@@ -1345,7 +1528,10 @@ struct scarlett2_data {
 /*** Model-specific data ***/
 
 static const struct scarlett2_device_info s6i6_gen2_info = {
-	.config_set = &scarlett2_config_set_gen2a,
+	.config_sets = (const struct scarlett2_config_set_entry[]) {
+		{ 0, &scarlett2_config_set_gen2a },
+		{ }
+	},
 	.level_input_count = 2,
 	.pad_input_count = 2,
 
@@ -1395,7 +1581,10 @@ static const struct scarlett2_device_info s6i6_gen2_info = {
 };
 
 static const struct scarlett2_device_info s18i8_gen2_info = {
-	.config_set = &scarlett2_config_set_gen2a,
+	.config_sets = (const struct scarlett2_config_set_entry[]) {
+		{ 0, &scarlett2_config_set_gen2a },
+		{ }
+	},
 	.level_input_count = 2,
 	.pad_input_count = 4,
 
@@ -1448,7 +1637,10 @@ static const struct scarlett2_device_info s18i8_gen2_info = {
 };
 
 static const struct scarlett2_device_info s18i20_gen2_info = {
-	.config_set = &scarlett2_config_set_gen2b,
+	.config_sets = (const struct scarlett2_config_set_entry[]) {
+		{ 0, &scarlett2_config_set_gen2b },
+		{ }
+	},
 
 	.line_out_descrs = {
 		"Monitor L",
@@ -1505,7 +1697,10 @@ static const struct scarlett2_device_info s18i20_gen2_info = {
 };
 
 static const struct scarlett2_device_info solo_gen3_info = {
-	.config_set = &scarlett2_config_set_gen3a,
+	.config_sets = (const struct scarlett2_config_set_entry[]) {
+		{ 0, &scarlett2_config_set_gen3a },
+		{ }
+	},
 	.level_input_count = 1,
 	.level_input_first = 1,
 	.air_input_count = 1,
@@ -1515,7 +1710,10 @@ static const struct scarlett2_device_info solo_gen3_info = {
 };
 
 static const struct scarlett2_device_info s2i2_gen3_info = {
-	.config_set = &scarlett2_config_set_gen3a,
+	.config_sets = (const struct scarlett2_config_set_entry[]) {
+		{ 0, &scarlett2_config_set_gen3a },
+		{ }
+	},
 	.level_input_count = 2,
 	.air_input_count = 2,
 	.phantom_count = 1,
@@ -1524,7 +1722,10 @@ static const struct scarlett2_device_info s2i2_gen3_info = {
 };
 
 static const struct scarlett2_device_info s4i4_gen3_info = {
-	.config_set = &scarlett2_config_set_gen3b,
+	.config_sets = (const struct scarlett2_config_set_entry[]) {
+		{ 0, &scarlett2_config_set_gen3b },
+		{ }
+	},
 	.level_input_count = 2,
 	.pad_input_count = 2,
 	.air_input_count = 2,
@@ -1573,7 +1774,10 @@ static const struct scarlett2_device_info s4i4_gen3_info = {
 };
 
 static const struct scarlett2_device_info s8i6_gen3_info = {
-	.config_set = &scarlett2_config_set_gen3b,
+	.config_sets = (const struct scarlett2_config_set_entry[]) {
+		{ 0, &scarlett2_config_set_gen3b },
+		{ }
+	},
 	.level_input_count = 2,
 	.pad_input_count = 2,
 	.air_input_count = 2,
@@ -1639,7 +1843,10 @@ static const char * const scarlett2_spdif_s18i8_gen3_texts[] = {
 };
 
 static const struct scarlett2_device_info s18i8_gen3_info = {
-	.config_set = &scarlett2_config_set_gen3c,
+	.config_sets = (const struct scarlett2_config_set_entry[]) {
+		{ 0, &scarlett2_config_set_gen3c },
+		{ }
+	},
 	.has_speaker_switching = 1,
 	.level_input_count = 2,
 	.pad_input_count = 4,
@@ -1731,7 +1938,10 @@ static const char * const scarlett2_spdif_s18i20_gen3_texts[] = {
 };
 
 static const struct scarlett2_device_info s18i20_gen3_info = {
-	.config_set = &scarlett2_config_set_gen3c,
+	.config_sets = (const struct scarlett2_config_set_entry[]) {
+		{ 0, &scarlett2_config_set_gen3c },
+		{ }
+	},
 	.has_speaker_switching = 1,
 	.has_talkback = 1,
 	.level_input_count = 2,
@@ -1805,8 +2015,10 @@ static const struct scarlett2_device_info s18i20_gen3_info = {
 };
 
 static const struct scarlett2_device_info vocaster_one_info = {
-	.config_set = &scarlett2_config_set_vocaster,
-	.min_firmware_version = 1769,
+	.config_sets = (const struct scarlett2_config_set_entry[]) {
+		{ 1769, &scarlett2_config_set_vocaster },
+		{ }
+	},
 	.has_devmap = 1,
 
 	.phantom_count = 1,
@@ -1849,8 +2061,10 @@ static const struct scarlett2_device_info vocaster_one_info = {
 };
 
 static const struct scarlett2_device_info vocaster_two_info = {
-	.config_set = &scarlett2_config_set_vocaster,
-	.min_firmware_version = 1769,
+	.config_sets = (const struct scarlett2_config_set_entry[]) {
+		{ 1769, &scarlett2_config_set_vocaster },
+		{ }
+	},
 	.has_devmap = 1,
 
 	.phantom_count = 2,
@@ -1894,8 +2108,11 @@ static const struct scarlett2_device_info vocaster_two_info = {
 };
 
 static const struct scarlett2_device_info solo_gen4_info = {
-	.config_set = &scarlett2_config_set_gen4_solo,
-	.min_firmware_version = 2115,
+	.config_sets = (const struct scarlett2_config_set_entry[]) {
+		{ 2115, &scarlett2_config_set_gen4_solo },
+		{ 2417, &scarlett2_config_set_gen4_solo_2417 },
+		{ }
+	},
 	.has_devmap = 1,
 
 	.level_input_count = 1,
@@ -1949,8 +2166,11 @@ static const struct scarlett2_device_info solo_gen4_info = {
 };
 
 static const struct scarlett2_device_info s2i2_gen4_info = {
-	.config_set = &scarlett2_config_set_gen4_2i2,
-	.min_firmware_version = 2115,
+	.config_sets = (const struct scarlett2_config_set_entry[]) {
+		{ 2115, &scarlett2_config_set_gen4_2i2 },
+		{ 2417, &scarlett2_config_set_gen4_2i2_2417 },
+		{ }
+	},
 	.has_devmap = 1,
 
 	.level_input_count = 2,
@@ -2004,8 +2224,11 @@ static const struct scarlett2_device_info s2i2_gen4_info = {
 };
 
 static const struct scarlett2_device_info s4i4_gen4_info = {
-	.config_set = &scarlett2_config_set_gen4_4i4,
-	.min_firmware_version = 2089,
+	.config_sets = (const struct scarlett2_config_set_entry[]) {
+		{ 2089, &scarlett2_config_set_gen4_4i4 },
+		{ 2417, &scarlett2_config_set_gen4_4i4_2417 },
+		{ }
+	},
 	.has_devmap = 1,
 
 	.level_input_count = 2,
@@ -2053,7 +2276,10 @@ static const struct scarlett2_device_info s4i4_gen4_info = {
 };
 
 static const struct scarlett2_device_info clarett_2pre_info = {
-	.config_set = &scarlett2_config_set_clarett,
+	.config_sets = (const struct scarlett2_config_set_entry[]) {
+		{ 0, &scarlett2_config_set_clarett },
+		{ }
+	},
 	.level_input_count = 2,
 	.air_input_count = 2,
 
@@ -2109,7 +2335,10 @@ static const char * const scarlett2_spdif_clarett_texts[] = {
 };
 
 static const struct scarlett2_device_info clarett_4pre_info = {
-	.config_set = &scarlett2_config_set_clarett,
+	.config_sets = (const struct scarlett2_config_set_entry[]) {
+		{ 0, &scarlett2_config_set_clarett },
+		{ }
+	},
 	.level_input_count = 2,
 	.air_input_count = 4,
 
@@ -2165,7 +2394,10 @@ static const struct scarlett2_device_info clarett_4pre_info = {
 };
 
 static const struct scarlett2_device_info clarett_8pre_info = {
-	.config_set = &scarlett2_config_set_clarett,
+	.config_sets = (const struct scarlett2_config_set_entry[]) {
+		{ 0, &scarlett2_config_set_clarett },
+		{ }
+	},
 	.level_input_count = 2,
 	.air_input_count = 8,
 
@@ -2264,7 +2496,7 @@ static const struct scarlett2_device_entry scarlett2_devices[] = {
 	{ USB_ID(0x1235, 0x820c), &clarett_8pre_info, "Clarett+" },
 
 	/* End of list */
-	{ 0, NULL },
+	{ 0, NULL, NULL },
 };
 
 /* get the starting port index number for a given port type/direction */
@@ -2371,25 +2603,25 @@ static int scarlett2_usb_rx(struct usb_device *dev, int interface,
 }
 
 /* Send a proprietary format request to the Scarlett interface */
-static int scarlett2_usb(
-	struct usb_mixer_interface *mixer, u32 cmd,
-	void *req_data, u16 req_size, void *resp_data, u16 resp_size)
+static int scarlett2_usb_nopm(struct usb_mixer_interface *mixer, u32 cmd,
+			      void *req_data, u16 req_size,
+			      void *resp_data, u16 resp_size)
 {
 	struct scarlett2_data *private = mixer->private_data;
 	struct usb_device *dev = mixer->chip->dev;
-	struct scarlett2_usb_packet *req __free(kfree) = NULL;
-	struct scarlett2_usb_packet *resp __free(kfree) = NULL;
-	size_t req_buf_size = struct_size(req, data, req_size);
-	size_t resp_buf_size = struct_size(resp, data, resp_size);
 	int retries = 0;
 	const int max_retries = 5;
 	int err;
 
-	req = kmalloc(req_buf_size, GFP_KERNEL);
+	struct scarlett2_usb_packet *req __free(kfree) = NULL;
+	size_t req_buf_size = struct_size(req, data, req_size);
+	req = kmalloc_flex(*req, data, req_size);
 	if (!req)
 		return -ENOMEM;
 
-	resp = kmalloc(resp_buf_size, GFP_KERNEL);
+	struct scarlett2_usb_packet *resp __free(kfree) = NULL;
+	size_t resp_buf_size = struct_size(resp, data, resp_size);
+	resp = kmalloc_flex(*resp, data, resp_size);
 	if (!resp)
 		return -ENOMEM;
 
@@ -2481,6 +2713,18 @@ retry:
 	return err;
 }
 
+static int scarlett2_usb(struct usb_mixer_interface *mixer, u32 cmd,
+			 void *req_data, u16 req_size,
+			 void *resp_data, u16 resp_size)
+{
+	CLASS(snd_usb_lock, pm)(mixer->chip);
+	if (pm.err < 0)
+		return -EIO;
+
+	return scarlett2_usb_nopm(mixer, cmd, req_data, req_size,
+				  resp_data, resp_size);
+}
+
 /* Send a USB message to get data; result placed in *buf */
 static int scarlett2_usb_get(
 	struct usb_mixer_interface *mixer,
@@ -2533,13 +2777,13 @@ static int scarlett2_usb_get_config(
 		err = scarlett2_usb_get(mixer, config_item->offset, buf, size);
 		if (err < 0)
 			return err;
-		if (size == 2) {
+		if (config_item->size == 16) {
 			u16 *buf_16 = buf;
 
 			for (i = 0; i < count; i++, buf_16++)
 				*buf_16 = le16_to_cpu(*(__le16 *)buf_16);
-		} else if (size == 4) {
-			u32 *buf_32 = buf;
+		} else if (config_item->size == 32) {
+			u32 *buf_32 = (u32 *)buf;
 
 			for (i = 0; i < count; i++, buf_32++)
 				*buf_32 = le32_to_cpu(*(__le32 *)buf_32);
@@ -2599,9 +2843,9 @@ static int scarlett2_usb_set_data_buf(
 		u8 data[];
 	} __packed *req;
 	int err;
-	int buf_size = struct_size(req, data, bytes);
+	size_t buf_size = struct_size(req, data, bytes);
 
-	req = kmalloc(buf_size, GFP_KERNEL);
+	req = kmalloc_flex(*req, data, bytes);
 	if (!req)
 		return -ENOMEM;
 
@@ -2788,9 +3032,21 @@ static int scarlett2_usb_set_config_buf(
 /* Send SCARLETT2_USB_DATA_CMD SCARLETT2_USB_CONFIG_SAVE */
 static void scarlett2_config_save(struct usb_mixer_interface *mixer)
 {
-	int err;
+	__le32 req = cpu_to_le32(SCARLETT2_USB_CONFIG_SAVE);
+	int err = scarlett2_usb(mixer, SCARLETT2_USB_DATA_CMD,
+				&req, sizeof(req), NULL, 0);
 
-	err = scarlett2_usb_activate_config(mixer, SCARLETT2_USB_CONFIG_SAVE);
+	if (err < 0)
+		usb_audio_err(mixer->chip, "config save failed: %d\n", err);
+}
+
+/* The USB suspend callback must not acquire another PM reference. */
+static void scarlett2_config_save_nopm(struct usb_mixer_interface *mixer)
+{
+	__le32 req = cpu_to_le32(SCARLETT2_USB_CONFIG_SAVE);
+	int err = scarlett2_usb_nopm(mixer, SCARLETT2_USB_DATA_CMD,
+				     &req, sizeof(req), NULL, 0);
+
 	if (err < 0)
 		usb_audio_err(mixer->chip, "config save failed: %d\n", err);
 }
@@ -3197,7 +3453,7 @@ static int scarlett2_add_new_ctl(struct usb_mixer_interface *mixer,
 	struct usb_mixer_elem_info *elem;
 	int err;
 
-	elem = kzalloc(sizeof(*elem), GFP_KERNEL);
+	elem = kzalloc_obj(*elem);
 	if (!elem)
 		return -ENOMEM;
 
@@ -3278,7 +3534,8 @@ static int scarlett2_min_firmware_version_ctl_get(
 	struct usb_mixer_elem_info *elem = kctl->private_data;
 	struct scarlett2_data *private = elem->head.mixer->private_data;
 
-	ucontrol->value.integer.value[0] = private->info->min_firmware_version;
+	ucontrol->value.integer.value[0] =
+		private->info->config_sets[0].from_firmware_version;
 
 	return 0;
 }
@@ -3446,7 +3703,6 @@ static int scarlett2_update_autogain(struct usb_mixer_interface *mixer)
 		else
 			private->autogain_status[i] =
 				private->num_autogain_status_texts - 1;
-
 
 	for (i = 0; i < SCARLETT2_AG_TARGET_COUNT; i++)
 		if (scarlett2_has_config_item(private,
@@ -3919,9 +4175,9 @@ static int scarlett2_input_select_ctl_info(
 	struct scarlett2_data *private = mixer->private_data;
 	int inputs = private->info->gain_input_count;
 	int i, err;
-	char **values __free(kfree) = NULL;
+	char **values __free(kfree) =
+		kcalloc(inputs, sizeof(char *), GFP_KERNEL);
 
-	values = kcalloc(inputs, sizeof(char *), GFP_KERNEL);
 	if (!values)
 		return -ENOMEM;
 
@@ -5372,8 +5628,7 @@ static int scarlett2_update_filter_values(struct usb_mixer_interface *mixer)
 
 	err = scarlett2_usb_get_config(
 		mixer, SCARLETT2_CONFIG_PEQ_FLT_SWITCH,
-		info->dsp_input_count * info->peq_flt_count,
-		private->peq_flt_switch);
+		info->dsp_input_count, private->peq_flt_switch);
 	if (err < 0)
 		return err;
 
@@ -6546,7 +6801,7 @@ static int scarlett2_add_dsp_ctls(struct usb_mixer_interface *mixer, int i)
 		err = scarlett2_add_new_ctl(
 			mixer, &scarlett2_precomp_flt_ctl,
 			i * info->precomp_flt_count + j,
-			1, s, &private->precomp_flt_switch_ctls[j]);
+			1, s, NULL);
 		if (err < 0)
 			return err;
 	}
@@ -6556,7 +6811,7 @@ static int scarlett2_add_dsp_ctls(struct usb_mixer_interface *mixer, int i)
 		err = scarlett2_add_new_ctl(
 			mixer, &scarlett2_peq_flt_ctl,
 			i * info->peq_flt_count + j,
-			1, s, &private->peq_flt_switch_ctls[j]);
+			1, s, NULL);
 		if (err < 0)
 			return err;
 	}
@@ -6711,6 +6966,8 @@ static int scarlett2_add_line_in_ctls(struct usb_mixer_interface *mixer)
 		err = scarlett2_add_new_ctl(
 			mixer, &scarlett2_autogain_status_ctl,
 			i, 1, s, &private->autogain_status_ctls[i]);
+		if (err < 0)
+			return err;
 	}
 
 	/* Add autogain target controls */
@@ -7630,6 +7887,172 @@ static int scarlett2_add_bluetooth_volume_ctl(
 				     &private->bluetooth_volume_ctl);
 }
 
+/*** Front Panel Brightness/Sleep Controls ***/
+
+static int scarlett2_update_fp(struct usb_mixer_interface *mixer)
+{
+	struct scarlett2_data *private = mixer->private_data;
+	int err;
+
+	if (scarlett2_has_config_item(private, SCARLETT2_CONFIG_FP_BRIGHTNESS)) {
+		err = scarlett2_usb_get_config(
+			mixer, SCARLETT2_CONFIG_FP_BRIGHTNESS,
+			1, &private->fp_brightness);
+		if (err < 0)
+			return err;
+	}
+
+	if (scarlett2_has_config_item(private, SCARLETT2_CONFIG_FP_SLEEP_TIME)) {
+		err = scarlett2_usb_get_config(
+			mixer, SCARLETT2_CONFIG_FP_SLEEP_TIME,
+			1, &private->fp_sleep_time);
+		if (err < 0)
+			return err;
+	}
+
+	return 0;
+}
+
+static const char * const scarlett2_fp_brightness_texts[] = {
+	"High", "Medium", "Low"
+};
+
+static int scarlett2_fp_brightness_ctl_info(
+	struct snd_kcontrol *kctl, struct snd_ctl_elem_info *uinfo)
+{
+	return snd_ctl_enum_info(uinfo, 1,
+				 ARRAY_SIZE(scarlett2_fp_brightness_texts),
+				 scarlett2_fp_brightness_texts);
+}
+
+static int scarlett2_fp_brightness_ctl_get(
+	struct snd_kcontrol *kctl, struct snd_ctl_elem_value *ucontrol)
+{
+	struct usb_mixer_elem_info *elem = kctl->private_data;
+	struct scarlett2_data *private = elem->head.mixer->private_data;
+
+	ucontrol->value.enumerated.item[0] = private->fp_brightness;
+	return 0;
+}
+
+static int scarlett2_fp_brightness_ctl_put(
+	struct snd_kcontrol *kctl, struct snd_ctl_elem_value *ucontrol)
+{
+	struct usb_mixer_elem_info *elem = kctl->private_data;
+	struct usb_mixer_interface *mixer = elem->head.mixer;
+	struct scarlett2_data *private = mixer->private_data;
+	int oval, val, err;
+
+	guard(mutex)(&private->data_mutex);
+
+	if (private->hwdep_in_use)
+		return -EBUSY;
+
+	oval = private->fp_brightness;
+	val = min(ucontrol->value.enumerated.item[0],
+		  ARRAY_SIZE(scarlett2_fp_brightness_texts) - 1);
+
+	if (oval == val)
+		return 0;
+
+	private->fp_brightness = val;
+
+	err = scarlett2_usb_set_config(
+		mixer, SCARLETT2_CONFIG_FP_BRIGHTNESS, 0, val);
+
+	return err < 0 ? err : 1;
+}
+
+static const struct snd_kcontrol_new scarlett2_fp_brightness_ctl = {
+	.iface = SNDRV_CTL_ELEM_IFACE_CARD,
+	.name = "",
+	.info = scarlett2_fp_brightness_ctl_info,
+	.get  = scarlett2_fp_brightness_ctl_get,
+	.put  = scarlett2_fp_brightness_ctl_put,
+};
+
+static int scarlett2_fp_sleep_time_ctl_info(
+	struct snd_kcontrol *kctl, struct snd_ctl_elem_info *uinfo)
+{
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
+	uinfo->count = 1;
+	uinfo->value.integer.min = 0;
+	uinfo->value.integer.max = SCARLETT2_MAX_FP_SLEEP_TIME;
+	uinfo->value.integer.step = 1;
+	return 0;
+}
+
+static int scarlett2_fp_sleep_time_ctl_get(
+	struct snd_kcontrol *kctl, struct snd_ctl_elem_value *ucontrol)
+{
+	struct usb_mixer_elem_info *elem = kctl->private_data;
+	struct scarlett2_data *private = elem->head.mixer->private_data;
+
+	ucontrol->value.integer.value[0] = private->fp_sleep_time;
+	return 0;
+}
+
+static int scarlett2_fp_sleep_time_ctl_put(
+	struct snd_kcontrol *kctl, struct snd_ctl_elem_value *ucontrol)
+{
+	struct usb_mixer_elem_info *elem = kctl->private_data;
+	struct usb_mixer_interface *mixer = elem->head.mixer;
+	struct scarlett2_data *private = mixer->private_data;
+	u32 oval, val;
+	int err;
+
+	guard(mutex)(&private->data_mutex);
+
+	if (private->hwdep_in_use)
+		return -EBUSY;
+
+	oval = private->fp_sleep_time;
+	val = clamp(ucontrol->value.integer.value[0],
+		    0L, (long)SCARLETT2_MAX_FP_SLEEP_TIME);
+
+	if (oval == val)
+		return 0;
+
+	private->fp_sleep_time = val;
+
+	err = scarlett2_usb_set_config(
+		mixer, SCARLETT2_CONFIG_FP_SLEEP_TIME, 0, val);
+
+	return err < 0 ? err : 1;
+}
+
+static const struct snd_kcontrol_new scarlett2_fp_sleep_time_ctl = {
+	.iface = SNDRV_CTL_ELEM_IFACE_CARD,
+	.name = "",
+	.info = scarlett2_fp_sleep_time_ctl_info,
+	.get  = scarlett2_fp_sleep_time_ctl_get,
+	.put  = scarlett2_fp_sleep_time_ctl_put,
+};
+
+static int scarlett2_add_fp_ctls(struct usb_mixer_interface *mixer)
+{
+	struct scarlett2_data *private = mixer->private_data;
+	int err;
+
+	if (scarlett2_has_config_item(private, SCARLETT2_CONFIG_FP_BRIGHTNESS)) {
+		err = scarlett2_add_new_ctl(
+			mixer, &scarlett2_fp_brightness_ctl, 0, 1,
+			"Front Panel Brightness", NULL);
+		if (err < 0)
+			return err;
+	}
+
+	if (scarlett2_has_config_item(private, SCARLETT2_CONFIG_FP_SLEEP_TIME)) {
+		err = scarlett2_add_new_ctl(
+			mixer, &scarlett2_fp_sleep_time_ctl, 0, 1,
+			"Front Panel Sleep Time", NULL);
+		if (err < 0)
+			return err;
+	}
+
+	return 0;
+}
+
 /*** S/PDIF Mode Controls ***/
 
 static int scarlett2_update_spdif_mode(struct usb_mixer_interface *mixer)
@@ -8167,13 +8590,70 @@ requeue:
 	}
 }
 
-/*** Cleanup/Suspend Callbacks ***/
+/*** Notification URB and Cleanup/Suspend Callbacks ***/
+
+/* Submit a URB to receive notifications from the device */
+static int scarlett2_init_notify(struct usb_mixer_interface *mixer)
+{
+	struct usb_device *dev = mixer->chip->dev;
+	struct scarlett2_data *private = mixer->private_data;
+	unsigned int pipe = usb_rcvintpipe(dev, private->bEndpointAddress);
+	void *transfer_buffer;
+	int err;
+
+	/* Already set up */
+	if (private->urb)
+		return 0;
+
+	if (usb_pipe_type_check(dev, pipe))
+		return -EINVAL;
+
+	private->urb = usb_alloc_urb(0, GFP_KERNEL);
+	if (!private->urb)
+		return -ENOMEM;
+
+	transfer_buffer = kmalloc(private->wMaxPacketSize, GFP_KERNEL);
+	if (!transfer_buffer) {
+		usb_free_urb(private->urb);
+		private->urb = NULL;
+		return -ENOMEM;
+	}
+
+	usb_fill_int_urb(private->urb, dev, pipe,
+			 transfer_buffer, private->wMaxPacketSize,
+			 scarlett2_notify, mixer, private->bInterval);
+
+	reinit_completion(&private->cmd_done);
+
+	err = usb_submit_urb(private->urb, GFP_KERNEL);
+	if (err) {
+		kfree(transfer_buffer);
+		usb_free_urb(private->urb);
+		private->urb = NULL;
+	}
+
+	return err;
+}
+
+static void scarlett2_cleanup_urb(struct usb_mixer_interface *mixer)
+{
+	struct scarlett2_data *private = mixer->private_data;
+
+	if (!private->urb)
+		return;
+
+	usb_kill_urb(private->urb);
+	kfree(private->urb->transfer_buffer);
+	usb_free_urb(private->urb);
+	private->urb = NULL;
+}
 
 static void scarlett2_private_free(struct usb_mixer_interface *mixer)
 {
 	struct scarlett2_data *private = mixer->private_data;
 
 	cancel_delayed_work_sync(&private->work);
+	scarlett2_cleanup_urb(mixer);
 	kfree(private);
 	mixer->private_data = NULL;
 }
@@ -8183,15 +8663,39 @@ static void scarlett2_private_suspend(struct usb_mixer_interface *mixer)
 	struct scarlett2_data *private = mixer->private_data;
 
 	if (cancel_delayed_work_sync(&private->work))
-		scarlett2_config_save(private->mixer);
+		scarlett2_config_save_nopm(private->mixer);
+
+	scarlett2_cleanup_urb(mixer);
 }
 
 /*** Initialisation ***/
 
+/* Select the config_set matching the running firmware version.
+ *
+ * The device info's config_sets array is ordered by ascending
+ * from_firmware_version; pick the last entry whose version is <= the
+ * running firmware version. If the running firmware is older than the
+ * first entry's from_firmware_version (i.e. older than the driver's
+ * minimum supported version for this device), the first entry's
+ * config_set is selected anyway so firmware updates can still be done
+ * (requires only the ACK handler), but the usual mixer controls
+ * aren't created.
+ */
+static void scarlett2_resolve_config_set(struct scarlett2_data *private)
+{
+	const struct scarlett2_config_set_entry *entry =
+		private->info->config_sets;
+
+	private->config_set = entry->config_set;
+	for (entry++; entry->config_set; entry++)
+		if (entry->from_firmware_version <= private->firmware_version)
+			private->config_set = entry->config_set;
+}
+
 static void scarlett2_count_io(struct scarlett2_data *private)
 {
 	const struct scarlett2_device_info *info = private->info;
-	const struct scarlett2_config_set *config_set = info->config_set;
+	const struct scarlett2_config_set *config_set = private->config_set;
 	const int (*port_count)[SCARLETT2_PORT_DIRNS] = info->port_count;
 	int port_type, srcs = 0, dsts = 0, i;
 
@@ -8255,6 +8759,8 @@ static int scarlett2_find_fc_interface(struct usb_device *dev,
 
 		if (desc->bInterfaceClass != 255)
 			continue;
+		if (desc->bNumEndpoints < 1)
+			continue;
 
 		epd = get_endpoint(intf->altsetting, 0);
 		private->bInterfaceNumber = desc->bInterfaceNumber;
@@ -8272,61 +8778,34 @@ static int scarlett2_init_private(struct usb_mixer_interface *mixer,
 				  const struct scarlett2_device_entry *entry)
 {
 	struct scarlett2_data *private =
-		kzalloc(sizeof(struct scarlett2_data), GFP_KERNEL);
+		kzalloc_obj(struct scarlett2_data);
 
 	if (!private)
 		return -ENOMEM;
 
 	mutex_init(&private->usb_mutex);
 	mutex_init(&private->data_mutex);
+	init_completion(&private->cmd_done);
 	INIT_DELAYED_WORK(&private->work, scarlett2_config_save_work);
 
 	mixer->private_data = private;
 	mixer->private_free = scarlett2_private_free;
 	mixer->private_suspend = scarlett2_private_suspend;
+	mixer->private_resume = scarlett2_init_notify;
 
 	private->info = entry->info;
-	private->config_set = entry->info->config_set;
+
+	/* Set config_set to the first entry's config_set so the
+	 * notify handler has a valid pointer while USB init runs; it
+	 * is re-resolved once the firmware version has been read.
+	 */
+	private->config_set = entry->info->config_sets[0].config_set;
+
 	private->series_name = entry->series_name;
-	scarlett2_count_io(private);
 	private->scarlett2_seq = 0;
 	private->mixer = mixer;
 
 	return scarlett2_find_fc_interface(mixer->chip->dev, private);
-}
-
-/* Submit a URB to receive notifications from the device */
-static int scarlett2_init_notify(struct usb_mixer_interface *mixer)
-{
-	struct usb_device *dev = mixer->chip->dev;
-	struct scarlett2_data *private = mixer->private_data;
-	unsigned int pipe = usb_rcvintpipe(dev, private->bEndpointAddress);
-	void *transfer_buffer;
-
-	if (mixer->urb) {
-		usb_audio_err(mixer->chip,
-			      "%s: mixer urb already in use!\n", __func__);
-		return 0;
-	}
-
-	if (usb_pipe_type_check(dev, pipe))
-		return -EINVAL;
-
-	mixer->urb = usb_alloc_urb(0, GFP_KERNEL);
-	if (!mixer->urb)
-		return -ENOMEM;
-
-	transfer_buffer = kmalloc(private->wMaxPacketSize, GFP_KERNEL);
-	if (!transfer_buffer)
-		return -ENOMEM;
-
-	usb_fill_int_urb(mixer->urb, dev, pipe,
-			 transfer_buffer, private->wMaxPacketSize,
-			 scarlett2_notify, mixer, private->bInterval);
-
-	init_completion(&private->cmd_done);
-
-	return usb_submit_urb(mixer->urb, GFP_KERNEL);
 }
 
 /* Cargo cult proprietary initialisation sequence */
@@ -8478,6 +8957,7 @@ static int scarlett2_read_configs(struct usb_mixer_interface *mixer)
 {
 	struct scarlett2_data *private = mixer->private_data;
 	const struct scarlett2_device_info *info = private->info;
+	u16 min_firmware_version = info->config_sets[0].from_firmware_version;
 	int err, i;
 
 	if (scarlett2_has_config_item(private, SCARLETT2_CONFIG_MSD_SWITCH)) {
@@ -8488,13 +8968,13 @@ static int scarlett2_read_configs(struct usb_mixer_interface *mixer)
 			return err;
 	}
 
-	if (private->firmware_version < info->min_firmware_version) {
+	if (private->firmware_version < min_firmware_version) {
 		usb_audio_err(mixer->chip,
 			      "Focusrite %s firmware version %d is too old; "
 			      "need %d",
 			      private->series_name,
 			      private->firmware_version,
-			      info->min_firmware_version);
+			      min_firmware_version);
 		return 0;
 	}
 
@@ -8648,6 +9128,10 @@ static int scarlett2_read_configs(struct usb_mixer_interface *mixer)
 	if (err < 0)
 		return err;
 
+	err = scarlett2_update_fp(mixer);
+	if (err < 0)
+		return err;
+
 	err = scarlett2_update_spdif_mode(mixer);
 	if (err < 0)
 		return err;
@@ -8678,6 +9162,7 @@ static int snd_scarlett2_controls_create(
 	const struct scarlett2_device_entry *entry)
 {
 	struct scarlett2_data *private;
+	u16 min_firmware_version;
 	int err;
 
 	/* Initialise private data */
@@ -8686,11 +9171,20 @@ static int snd_scarlett2_controls_create(
 		return err;
 
 	private = mixer->private_data;
+	min_firmware_version =
+		private->info->config_sets[0].from_firmware_version;
 
 	/* Send proprietary USB initialisation sequence */
 	err = scarlett2_usb_init(mixer);
 	if (err < 0)
 		return err;
+
+	/* Now that the firmware version is known, pick the matching
+	 * config_set
+	 */
+	scarlett2_resolve_config_set(private);
+
+	scarlett2_count_io(private);
 
 	/* Get the upgrade & settings flash segment numbers */
 	err = scarlett2_get_flash_segment_nums(mixer);
@@ -8721,7 +9215,7 @@ static int snd_scarlett2_controls_create(
 	 * old, don't create any other controls
 	 */
 	if (private->msd_switch ||
-	    private->firmware_version < private->info->min_firmware_version)
+	    private->firmware_version < min_firmware_version)
 		return 0;
 
 	/* Create the analogue output controls */
@@ -8781,6 +9275,11 @@ static int snd_scarlett2_controls_create(
 
 	/* Create the Bluetooth volume control */
 	err = scarlett2_add_bluetooth_volume_ctl(mixer);
+	if (err < 0)
+		return err;
+
+	/* Create the front-panel brightness/sleep controls */
+	err = scarlett2_add_fp_ctls(mixer);
 	if (err < 0)
 		return err;
 
@@ -9083,8 +9582,6 @@ static long scarlett2_hwdep_read(struct snd_hwdep *hw,
 		__le32 len;
 	} __packed req;
 
-	u8 *resp __free(kfree) = NULL;
-
 	/* Flash segment must first be selected */
 	if (private->flash_write_state != SCARLETT2_FLASH_WRITE_STATE_SELECTED)
 		return -EINVAL;
@@ -9122,7 +9619,8 @@ static long scarlett2_hwdep_read(struct snd_hwdep *hw,
 	req.offset = cpu_to_le32(*offset);
 	req.len = cpu_to_le32(count);
 
-	resp = kzalloc(count, GFP_KERNEL);
+	u8 *resp __free(kfree) =
+		kzalloc(count, GFP_KERNEL);
 	if (!resp)
 		return -ENOMEM;
 
@@ -9188,11 +9686,14 @@ static long scarlett2_hwdep_write(struct snd_hwdep *hw,
 	flash_size = private->flash_segment_blocks[segment_id] *
 		     SCARLETT2_FLASH_BLOCK_SIZE;
 
-	if (count < 0 || *offset < 0 || *offset + count >= flash_size)
-		return -ENOSPC;
+	if (count < 0 || *offset < 0)
+		return -EINVAL;
 
 	if (!count)
 		return 0;
+
+	if (*offset >= flash_size || count > flash_size - *offset)
+		return -ENOSPC;
 
 	/* Limit the *req size to SCARLETT2_FLASH_RW_MAX */
 	if (count > max_data_size)
@@ -9200,7 +9701,7 @@ static long scarlett2_hwdep_write(struct snd_hwdep *hw,
 
 	/* Create and send the request */
 	len = struct_size(req, data, count);
-	req = kzalloc(len, GFP_KERNEL);
+	req = kzalloc_flex(*req, data, count);
 	if (!req)
 		return -ENOMEM;
 
@@ -9267,7 +9768,6 @@ static ssize_t scarlett2_devmap_read(
 	loff_t                 pos)
 {
 	struct usb_mixer_interface *mixer = entry->private_data;
-	u8           *resp_buf __free(kfree) = NULL;
 	const size_t  block_size = SCARLETT2_DEVMAP_BLOCK_SIZE;
 	size_t        copied = 0;
 
@@ -9277,7 +9777,8 @@ static ssize_t scarlett2_devmap_read(
 	if (pos + count > entry->size)
 		count = entry->size - pos;
 
-	resp_buf = kmalloc(block_size, GFP_KERNEL);
+	u8 *resp_buf __free(kfree) =
+		kmalloc(block_size, GFP_KERNEL);
 	if (!resp_buf)
 		return -ENOMEM;
 

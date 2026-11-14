@@ -77,7 +77,7 @@ Reference
 
 10BASE-T1x MAC-PHY Serial Interface Specification,
 
-Link: https://opensig.org/download/document/OPEN_Alliance_10BASET1x_MAC-PHY_Serial_Interface_V1.1.pdf
+Link: https://opensig.org/wp-content/uploads/2023/12/OPEN_Alliance_10BASET1x_MAC-PHY_Serial_Interface_V1.1.pdf
 
 Hardware Architecture
 ---------------------
@@ -278,7 +278,7 @@ SYNC (Bit 29) - Configuration Synchronized flag. This bit reflects the
                 register (see Table 12). A zero indicates that the MAC-PHY
                 configuration may not be as expected by the SPI host.
                 Following configuration, the SPI host sets the
-                corresponding bitin the configuration register which is
+                corresponding bit in the configuration register which is
                 reflected in this field.
 
 RCA (Bit 28..24) - Receive Chunks Available. The RCA field indicates to
@@ -454,7 +454,8 @@ Device drivers API
 The include/linux/oa_tc6.h defines the following functions:
 
 .. c:function:: struct oa_tc6 *oa_tc6_init(struct spi_device *spi, \
-                                           struct net_device *netdev)
+                                           struct net_device *netdev, \
+                                           struct oa_tc6_quirks *quirks)
 
 Initialize OA TC6 lib.
 

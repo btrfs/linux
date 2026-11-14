@@ -97,7 +97,7 @@ operator are also supported as usual, e.g.:
 
 	/// ```
 	/// # use kernel::{spawn_work_item, workqueue};
-	/// spawn_work_item!(workqueue::system(), || pr_info!("x\n"))?;
+	/// spawn_work_item!(workqueue::system_dfl(), || pr_info!("x\n"))?;
 	/// # Ok::<(), Error>(())
 	/// ```
 
@@ -140,11 +140,15 @@ are also mapped to KUnit.
 These tests are introduced by the ``kunit_tests`` procedural macro, which takes
 the name of the test suite as an argument.
 
+Each test suite should be guarded by a Kconfig option in
+``rust/kernel/Kconfig.test``.
+
 For instance, assume we want to test the function ``f`` from the documentation
 tests section. We could write, in the same file where we have our function:
 
 .. code-block:: rust
 
+	#[cfg(CONFIG_RUST_MYMOD_KUNIT_TEST)]
 	#[kunit_tests(rust_kernel_mymod)]
 	mod tests {
 	    use super::*;
@@ -173,6 +177,7 @@ the unit type ``()``) or ``Result`` (i.e. any ``Result<T, E>``). For instance:
 
 .. code-block:: rust
 
+	#[cfg(CONFIG_RUST_MYMOD_KUNIT_TEST)]
 	#[kunit_tests(rust_kernel_mymod)]
 	mod tests {
 	    use super::*;

@@ -413,7 +413,7 @@ static int dw9768_probe(struct i2c_client *client)
 	unsigned int i;
 	int ret;
 
-	dw9768 = devm_kzalloc(dev, sizeof(*dw9768), GFP_KERNEL);
+	dw9768 = devm_kzalloc_obj(dev, *dw9768);
 	if (!dw9768)
 		return -ENOMEM;
 
@@ -551,6 +551,6 @@ static struct i2c_driver dw9768_i2c_driver = {
 };
 module_i2c_driver(dw9768_i2c_driver);
 
-MODULE_AUTHOR("Dongchun Zhu <dongchun.zhu@mediatek.com>");
+MODULE_AUTHOR("Dongchun Zhu");
 MODULE_DESCRIPTION("DW9768 VCM driver");
 MODULE_LICENSE("GPL v2");

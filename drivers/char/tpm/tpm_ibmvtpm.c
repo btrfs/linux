@@ -462,10 +462,7 @@ static const struct tpm_class_ops tpm_ibmvtpm = {
 	.req_canceled = tpm_ibmvtpm_req_canceled,
 };
 
-static const struct dev_pm_ops tpm_ibmvtpm_pm_ops = {
-	.suspend = tpm_ibmvtpm_suspend,
-	.resume = tpm_ibmvtpm_resume,
-};
+static SIMPLE_DEV_PM_OPS(tpm_ibmvtpm_pm_ops, tpm_ibmvtpm_suspend, tpm_ibmvtpm_resume);
 
 /**
  * ibmvtpm_crq_get_next - Get next responded crq
@@ -611,7 +608,7 @@ static int tpm_ibmvtpm_probe(struct vio_dev *vio_dev,
 	if (IS_ERR(chip))
 		return PTR_ERR(chip);
 
-	ibmvtpm = kzalloc(sizeof(struct ibmvtpm_dev), GFP_KERNEL);
+	ibmvtpm = kzalloc_obj(struct ibmvtpm_dev);
 	if (!ibmvtpm) {
 		dev_err(dev, "kzalloc for ibmvtpm failed\n");
 		goto cleanup;

@@ -1320,7 +1320,7 @@ static int max2175_probe(struct i2c_client *client)
 	}
 
 	/* Alloc tuner context */
-	ctx = devm_kzalloc(&client->dev, sizeof(*ctx), GFP_KERNEL);
+	ctx = devm_kzalloc_obj(&client->dev, *ctx);
 	if (ctx == NULL)
 		return -ENOMEM;
 
@@ -1413,8 +1413,8 @@ static void max2175_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id max2175_id[] = {
-	{ DRIVER_NAME },
-	{}
+	{ .name = DRIVER_NAME },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max2175_id);
 

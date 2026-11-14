@@ -227,7 +227,7 @@ static int stm32h7_adc_clk_sel(struct platform_device *pdev,
 	if (priv->aclk) {
 		/*
 		 * Asynchronous clock modes (e.g. ckmode == 0)
-		 * From spec: PLL output musn't exceed max rate
+		 * From spec: PLL output mustn't exceed max rate
 		 */
 		rate = clk_get_rate(priv->aclk);
 		if (!rate) {
@@ -713,7 +713,7 @@ static int stm32_adc_probe(struct platform_device *pdev)
 	if (!pdev->dev.of_node)
 		return -ENODEV;
 
-	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&pdev->dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 	platform_set_drvdata(pdev, &priv->common);

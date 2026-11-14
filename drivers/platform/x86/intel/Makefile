@@ -21,6 +21,7 @@ intel-target-$(CONFIG_INTEL_HID_EVENT)		+= hid.o
 intel-target-$(CONFIG_INTEL_VBTN)		+= vbtn.o
 
 # Intel miscellaneous drivers
+intel-target-$(CONFIG_INTEL_EHL_PSE_IO)		+= ehl_pse_io.o
 intel-target-$(CONFIG_INTEL_INT0002_VGPIO)	+= int0002_vgpio.o
 intel-target-$(CONFIG_INTEL_ISHTP_ECLITE)	+= ishtp_eclite.o
 intel-target-$(CONFIG_INTEL_OAKTRAIL)		+= oaktrail.o
@@ -39,6 +40,7 @@ intel-target-$(CONFIG_INTEL_PUNIT_IPC)		+= punit_ipc.o
 # TPMI drivers
 intel-target-$(CONFIG_INTEL_PLR_TPMI)		+= plr_tpmi.o
 intel-target-$(CONFIG_INTEL_TPMI_POWER_DOMAINS)	+= tpmi_power_domains.o
+intel-target-$(CONFIG_INTEL_TPMI_COMMON)	+= tpmi_common.o
 intel-target-$(CONFIG_INTEL_TPMI)		+= vsec_tpmi.o
 
 # Intel Uncore drivers

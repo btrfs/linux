@@ -9,7 +9,6 @@
 #include <linux/hwmon.h>
 #include <linux/mfd/intel-m10-bmc.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 
 struct m10bmc_sdata {
@@ -734,7 +733,7 @@ static int m10bmc_hwmon_probe(struct platform_device *pdev)
 	struct device *hwmon_dev, *dev = &pdev->dev;
 	struct m10bmc_hwmon *hw;
 
-	hw = devm_kzalloc(dev, sizeof(*hw), GFP_KERNEL);
+	hw = devm_kzalloc_obj(dev, *hw);
 	if (!hw)
 		return -ENOMEM;
 
@@ -773,6 +772,7 @@ static const struct platform_device_id intel_m10bmc_hwmon_ids[] = {
 	},
 	{ }
 };
+MODULE_DEVICE_TABLE(platform, intel_m10bmc_hwmon_ids);
 
 static struct platform_driver intel_m10bmc_hwmon_driver = {
 	.probe = m10bmc_hwmon_probe,
@@ -783,7 +783,6 @@ static struct platform_driver intel_m10bmc_hwmon_driver = {
 };
 module_platform_driver(intel_m10bmc_hwmon_driver);
 
-MODULE_DEVICE_TABLE(platform, intel_m10bmc_hwmon_ids);
 MODULE_AUTHOR("Intel Corporation");
 MODULE_DESCRIPTION("Intel MAX 10 BMC hardware monitor");
 MODULE_LICENSE("GPL");

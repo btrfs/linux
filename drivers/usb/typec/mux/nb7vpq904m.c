@@ -391,7 +391,7 @@ static int nb7vpq904m_probe(struct i2c_client *client)
 	struct nb7vpq904m *nb7;
 	int ret;
 
-	nb7 = devm_kzalloc(dev, sizeof(*nb7), GFP_KERNEL);
+	nb7 = devm_kzalloc_obj(dev, *nb7);
 	if (!nb7)
 		return -ENOMEM;
 
@@ -499,7 +499,7 @@ static void nb7vpq904m_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id nb7vpq904m_table[] = {
-	{ "nb7vpq904m" },
+	{ .name = "nb7vpq904m" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, nb7vpq904m_table);

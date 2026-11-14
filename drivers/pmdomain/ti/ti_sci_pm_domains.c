@@ -86,13 +86,14 @@ static inline void ti_sci_pd_set_wkup_constraint(struct device *dev)
 	const struct ti_sci_handle *ti_sci = pd->parent->ti_sci;
 	int ret;
 
-	if (device_may_wakeup(dev)) {
+	if (device_may_wakeup(dev) || device_wakeup_path(dev)) {
 		/*
 		 * If device can wakeup using IO daisy chain wakeups,
 		 * we do not want to set a constraint.
 		 */
-		if (dev->power.wakeirq) {
-			dev_dbg(dev, "%s: has wake IRQ, not setting constraints\n", __func__);
+		if (device_out_band_wakeup(dev)) {
+			dev_dbg(dev, "%s: has out of band wakeup, not setting constraints\n", \
+					__func__);
 			return;
 		}
 
@@ -227,7 +228,7 @@ static int ti_sci_pm_domain_probe(struct platform_device *pdev)
 	u32 max_id = 0;
 	int index;
 
-	pd_provider = devm_kzalloc(dev, sizeof(*pd_provider), GFP_KERNEL);
+	pd_provider = devm_kzalloc_obj(dev, *pd_provider);
 	if (!pd_provider)
 		return -ENOMEM;
 
@@ -260,7 +261,7 @@ static int ti_sci_pm_domain_probe(struct platform_device *pdev)
 					}
 				}
 
-				pd = devm_kzalloc(dev, sizeof(*pd), GFP_KERNEL);
+				pd = devm_kzalloc_obj(dev, *pd);
 				if (!pd)
 					return -ENOMEM;
 
@@ -298,9 +299,7 @@ static int ti_sci_pm_domain_probe(struct platform_device *pdev)
 	}
 
 	pd_provider->data.domains =
-		devm_kcalloc(dev, max_id + 1,
-			     sizeof(*pd_provider->data.domains),
-			     GFP_KERNEL);
+		devm_kzalloc_objs(dev, *pd_provider->data.domains, max_id + 1);
 	if (!pd_provider->data.domains)
 		return -ENOMEM;
 

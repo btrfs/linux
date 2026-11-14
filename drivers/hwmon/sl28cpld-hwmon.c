@@ -8,7 +8,6 @@
 #include <linux/bitfield.h>
 #include <linux/hwmon.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -84,7 +83,7 @@ static int sl28cpld_hwmon_probe(struct platform_device *pdev)
 	if (!pdev->dev.parent)
 		return -ENODEV;
 
-	hwmon = devm_kzalloc(&pdev->dev, sizeof(*hwmon), GFP_KERNEL);
+	hwmon = devm_kzalloc_obj(&pdev->dev, *hwmon);
 	if (!hwmon)
 		return -ENOMEM;
 

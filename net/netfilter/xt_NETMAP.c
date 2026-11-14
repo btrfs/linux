@@ -4,6 +4,8 @@
  * Copyright (c) 2011 Patrick McHardy <kaber@trash.net>
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/ip.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -42,6 +44,7 @@ netmap_tg6(struct sk_buff *skb, const struct xt_action_param *par)
 				   netmask.ip6[i];
 	}
 
+	memset(&newrange, 0, sizeof(newrange));
 	newrange.flags	= range->flags | NF_NAT_RANGE_MAP_IPS;
 	newrange.min_addr	= new_addr;
 	newrange.max_addr	= new_addr;
@@ -89,8 +92,7 @@ netmap_tg4(struct sk_buff *skb, const struct xt_action_param *par)
 		new_ip = ip_hdr(skb)->saddr & ~netmask;
 	new_ip |= mr->range[0].min_ip & netmask;
 
-	memset(&newrange.min_addr, 0, sizeof(newrange.min_addr));
-	memset(&newrange.max_addr, 0, sizeof(newrange.max_addr));
+	memset(&newrange, 0, sizeof(newrange));
 	newrange.flags	     = mr->range[0].flags | NF_NAT_RANGE_MAP_IPS;
 	newrange.min_addr.ip = new_ip;
 	newrange.max_addr.ip = new_ip;
@@ -106,11 +108,11 @@ static int netmap_tg4_check(const struct xt_tgchk_param *par)
 	const struct nf_nat_ipv4_multi_range_compat *mr = par->targinfo;
 
 	if (!(mr->range[0].flags & NF_NAT_RANGE_MAP_IPS)) {
-		pr_debug("bad MAP_IPS.\n");
+		pr_info_ratelimited("bad MAP_IPS.\n");
 		return -EINVAL;
 	}
 	if (mr->rangesize != 1) {
-		pr_debug("bad rangesize %u.\n", mr->rangesize);
+		pr_info_ratelimited("bad rangesize %u.\n", mr->rangesize);
 		return -EINVAL;
 	}
 	return nf_ct_netns_get(par->net, par->family);

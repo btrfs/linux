@@ -8,7 +8,6 @@
 
 #include <errno.h>
 #include <inttypes.h>
-#include <libgen.h>
 #include <stdlib.h>
 #include "util.h" // hex_width()
 #include "ui/ui.h"
@@ -44,6 +43,7 @@
 #include "strbuf.h"
 #include <regex.h>
 #include <linux/bitops.h>
+#include <linux/err.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/zalloc.h>
@@ -137,10 +137,23 @@ static int annotated_source__alloc_histograms(struct annotated_source *src,
 		return -1;
 
 	src->samples = hashmap__new(sym_hist_hash, sym_hist_equal, NULL);
-	if (src->samples == NULL)
+	if (IS_ERR(src->samples)) {
 		zfree(&src->histograms);
+		src->samples = NULL;
+	}
 
 	return src->histograms ? 0 : -1;
+}
+
+struct sym_hist_entry *
+annotated_source__hist_entry(struct annotated_source *src, const struct evsel *evsel, u64 offset)
+{
+	struct sym_hist_entry *entry;
+	long key = offset << 16 | evsel->core.idx;
+
+	if (!hashmap__find(src->samples, key, &entry))
+		return NULL;
+	return entry;
 }
 
 void symbol__annotate_zero_histograms(struct symbol *sym)
@@ -211,14 +224,16 @@ static int __symbol__account_cycles(struct cyc_hist *ch,
 }
 
 static int __symbol__inc_addr_samples(struct map_symbol *ms,
-				      struct annotated_source *src, struct evsel *evsel, u64 addr,
+				      struct annotated_source *src, u64 addr,
 				      struct perf_sample *sample)
 {
+	struct evsel *evsel = sample->evsel;
 	struct symbol *sym = ms->sym;
 	long hash_key;
 	u64 offset;
 	struct sym_hist *h;
 	struct sym_hist_entry *entry;
+	u64 weight = sample->weight ?: sample->ins_lat ?: sample->weight3;
 
 	pr_debug3("%s: addr=%#" PRIx64 "\n", __func__, map__unmap_ip(ms->map, addr));
 
@@ -233,7 +248,8 @@ static int __symbol__inc_addr_samples(struct map_symbol *ms,
 	h = annotated_source__histogram(src, evsel);
 	if (h == NULL) {
 		pr_debug("%s(%d): ENOMEM! sym->name=%s, start=%#" PRIx64 ", addr=%#" PRIx64 ", end=%#" PRIx64 ", func: %d\n",
-			 __func__, __LINE__, sym->name, sym->start, addr, sym->end, sym->type == STT_FUNC);
+			 __func__, __LINE__, sym->name, sym->start, addr, sym->end,
+			 symbol__type(sym) == STT_FUNC);
 		return -ENOMEM;
 	}
 
@@ -252,10 +268,28 @@ static int __symbol__inc_addr_samples(struct map_symbol *ms,
 	entry->nr_samples++;
 	entry->period += sample->period;
 
+	if (sample->evsel->core.attr.sample_type & PERF_SAMPLE_WEIGHT_TYPE) {
+		entry->weight_sum[WEIGHT_WEIGHT] += sample->weight;
+		entry->weight_num[WEIGHT_WEIGHT]++;
+		if (sample->weight)
+			sym_hist__set_weight_mask(h, BIT(WEIGHT_WEIGHT));
+	}
+	if (sample->evsel->core.attr.sample_type & PERF_SAMPLE_WEIGHT_STRUCT) {
+		entry->weight_sum[WEIGHT_INSNLAT] += sample->ins_lat;
+		entry->weight_num[WEIGHT_INSNLAT]++;
+		entry->weight_sum[WEIGHT_WEIGHT3] += sample->weight3;
+		entry->weight_num[WEIGHT_WEIGHT3]++;
+		if (sample->ins_lat)
+			sym_hist__set_weight_mask(h, BIT(WEIGHT_INSNLAT));
+		if (sample->weight3)
+			sym_hist__set_weight_mask(h, BIT(WEIGHT_WEIGHT3));
+	}
+
 	pr_debug3("%#" PRIx64 " %s: period++ [addr: %#" PRIx64 ", %#" PRIx64
-		  ", evidx=%d] => nr_samples: %" PRIu64 ", period: %" PRIu64 "\n",
+		  ", evidx=%d] => nr_samples: %" PRIu64 ", period: %" PRIu64
+		  " weight %" PRIu64 "\n",
 		  sym->start, sym->name, addr, addr - sym->start, evsel->core.idx,
-		  entry->nr_samples, entry->period);
+		  entry->nr_samples, entry->period, weight);
 	return 0;
 }
 
@@ -316,7 +350,7 @@ alloc_histograms:
 }
 
 static int symbol__inc_addr_samples(struct map_symbol *ms,
-				    struct evsel *evsel, u64 addr,
+				    u64 addr,
 				    struct perf_sample *sample)
 {
 	struct symbol *sym = ms->sym;
@@ -324,8 +358,8 @@ static int symbol__inc_addr_samples(struct map_symbol *ms,
 
 	if (sym == NULL)
 		return 0;
-	src = symbol__hists(sym, evsel->evlist->core.nr_entries);
-	return src ? __symbol__inc_addr_samples(ms, src, evsel, addr, sample) : 0;
+	src = symbol__hists(sym, evlist__nr_entries(sample->evsel->evlist));
+	return src ? __symbol__inc_addr_samples(ms, src, addr, sample) : 0;
 }
 
 static int symbol__account_br_cntr(struct annotated_branch *branch,
@@ -335,7 +369,7 @@ static int symbol__account_br_cntr(struct annotated_branch *branch,
 {
 	unsigned int br_cntr_nr = evsel__leader(evsel)->br_cntr_nr;
 	unsigned int base = evsel__leader(evsel)->br_cntr_idx;
-	unsigned int off = offset * evsel->evlist->nr_br_cntr;
+	unsigned int off = offset * evlist__nr_br_cntr(evsel->evlist);
 	u64 *branch_br_cntr = branch->br_cntr;
 	unsigned int i, mask, width;
 
@@ -365,7 +399,7 @@ static int symbol__account_cycles(u64 addr, u64 start, struct symbol *sym,
 
 	if (sym == NULL)
 		return 0;
-	branch = symbol__find_branch_hist(sym, evsel->evlist->nr_br_cntr);
+	branch = symbol__find_branch_hist(sym, evlist__nr_br_cntr(evsel->evlist));
 	if (!branch)
 		return -ENOMEM;
 	if (addr < sym->start || addr >= sym->end)
@@ -507,7 +541,7 @@ static void annotation__count_and_fill(struct annotation *notes, u64 start, u64 
 static int annotation__compute_ipc(struct annotation *notes, size_t size,
 				   struct evsel *evsel)
 {
-	unsigned int br_cntr_nr = evsel->evlist->nr_br_cntr;
+	unsigned int br_cntr_nr = evlist__nr_br_cntr(evsel->evlist);
 	int err = 0;
 	s64 offset;
 
@@ -579,16 +613,14 @@ static int annotation__compute_ipc(struct annotation *notes, size_t size,
 	return 0;
 }
 
-int addr_map_symbol__inc_samples(struct addr_map_symbol *ams, struct perf_sample *sample,
-				 struct evsel *evsel)
+int addr_map_symbol__inc_samples(struct addr_map_symbol *ams, struct perf_sample *sample)
 {
-	return symbol__inc_addr_samples(&ams->ms, evsel, ams->al_addr, sample);
+	return symbol__inc_addr_samples(&ams->ms, ams->al_addr, sample);
 }
 
-int hist_entry__inc_addr_samples(struct hist_entry *he, struct perf_sample *sample,
-				 struct evsel *evsel, u64 ip)
+int hist_entry__inc_addr_samples(struct hist_entry *he, struct perf_sample *sample, u64 ip)
 {
-	return symbol__inc_addr_samples(&he->ms, evsel, ip, sample);
+	return symbol__inc_addr_samples(&he->ms, ip, sample);
 }
 
 
@@ -761,7 +793,7 @@ static int disasm_line__print(struct disasm_line *dl, u64 start, int addr_fmt_wi
 }
 
 static struct annotated_data_type *
-__hist_entry__get_data_type(struct hist_entry *he, struct arch *arch,
+__hist_entry__get_data_type(struct hist_entry *he, const struct arch *arch,
 			    struct debuginfo *dbg, struct disasm_line *dl,
 			    int *type_offset);
 
@@ -774,6 +806,50 @@ static bool needs_type_info(struct annotated_data_type *data_type)
 		return true;
 
 	return (data_type != &stackop_type) && (data_type != &canary_type);
+}
+
+static const char *annotation__weight_mode_str(enum symbol__weight_mode mode,
+						 const struct evsel *evsel)
+{
+	switch (mode) {
+	case WEIGHT_NONE:
+		return "";
+	case WEIGHT_WEIGHT:
+		return "Weight";
+	case WEIGHT_INSNLAT:
+		return "InsnLat";
+	case WEIGHT_WEIGHT3:
+		switch (evsel__e_machine((struct evsel *)evsel, NULL)) {
+		case EM_PPC:
+		case EM_PPC64:
+			return "PCycleLat";
+		case EM_X86_64:
+			return "RetireLat";
+		default:
+			return "Weight3";
+		}
+	default:
+		return "";
+	}
+}
+
+static void annotation__column_title(char *buf, size_t size,
+					     struct annotation *notes,
+					     const struct evsel *evsel)
+{
+	const char *base = symbol_conf.show_total_period ? "Period" :
+			symbol_conf.show_nr_samples ? "Samples" : "Percent";
+	int weight;
+	u8 weight_mask = annotation__weight_mask(notes, evsel);
+
+	scnprintf(buf, size, "%s", base);
+	for_each_weight(weight) {
+		if (weight_mask & BIT(weight))
+			scnprintf(buf + strlen(buf),
+				  size - strlen(buf),
+				  " %s",
+				  annotation__weight_mode_str(weight, evsel));
+	}
 }
 
 static int
@@ -831,6 +907,8 @@ annotation_line__print(struct annotation_line *al, struct annotation_print_data 
 		for (i = 0; i < nr_percent; i++) {
 			struct annotation_data *data = &al->data[i];
 			double percent;
+			int weight;
+			u8 weight_mask = annotation__weight_mask(notes, apd->evsel);
 
 			percent = annotation_data__percent(data, percent_type);
 			color = get_percent_color(percent);
@@ -843,6 +921,14 @@ annotation_line__print(struct annotation_line *al, struct annotation_print_data 
 					      data->he.nr_samples);
 			else
 				color_fprintf(stdout, color, " %7.2f", percent);
+			for_each_weight(weight) {
+				if (weight_mask & BIT(weight))
+					color_fprintf(stdout, color, " %7" PRIu64,
+						      data->he.weight_num[weight] ?
+						      data->he.weight_sum[weight] /
+						      data->he.weight_num[weight]
+						      : 0);
+			}
 		}
 
 		printf(" : ");
@@ -889,7 +975,7 @@ annotation_line__print(struct annotation_line *al, struct annotation_print_data 
 	} else if (max_lines && printed >= max_lines)
 		return 1;
 	else {
-		int width = annotation__pcnt_width(notes);
+		int width = annotation__pcnt_width(notes, apd->evsel);
 
 		if (queue)
 			return -1;
@@ -913,6 +999,9 @@ static void calc_percent(struct annotation *notes,
 	struct sym_hist *sym_hist = annotation__histogram(notes, evsel);
 	unsigned int hits = 0;
 	u64 period = 0;
+	int i;
+	u64 weight_sum[WEIGHT_WEIGHT3 + 1] = { 0 };
+	u64 weight_num[WEIGHT_WEIGHT3 + 1] = { 0 };
 
 	while (offset < end) {
 		struct sym_hist_entry *entry;
@@ -921,6 +1010,10 @@ static void calc_percent(struct annotation *notes,
 		if (entry) {
 			hits   += entry->nr_samples;
 			period += entry->period;
+			for_each_weight(i) {
+				weight_sum[i] += entry->weight_sum[i];
+				weight_num[i] += entry->weight_num[i];
+			}
 		}
 		++offset;
 	}
@@ -928,6 +1021,10 @@ static void calc_percent(struct annotation *notes,
 	if (sym_hist->nr_samples) {
 		data->he.period     = period;
 		data->he.nr_samples = hits;
+		for_each_weight(i) {
+			data->he.weight_sum[i] = weight_sum[i];
+			data->he.weight_num[i] = weight_num[i];
+		}
 		data->percent[PERCENT_HITS_LOCAL] = 100.0 * hits / sym_hist->nr_samples;
 	}
 
@@ -980,48 +1077,63 @@ void symbol__calc_percent(struct symbol *sym, struct evsel *evsel)
 	annotation__calc_percent(notes, evsel, symbol__size(sym));
 }
 
-static int evsel__get_arch(struct evsel *evsel, struct arch **parch)
+
+
+int map_symbol__get_arch(struct map_symbol *ms, const struct arch **parch)
 {
-	struct perf_env *env = evsel__env(evsel);
-	const char *arch_name = perf_env__arch(env);
-	struct arch *arch;
-	int err;
+	const struct arch *arch;
+	struct machine *machine = NULL;
+	struct map *map = ms->map;
+	struct dso *dso = map ? map__dso(map) : NULL;
+	uint32_t e_flags = 0;
+	uint16_t e_machine = EM_NONE;
 
-	if (!arch_name) {
-		*parch = NULL;
-		return errno;
+	const char *cpuid = NULL;
+
+	if (ms->thread) {
+		machine = maps__machine(thread__maps(ms->thread));
+		e_machine = thread__e_machine(ms->thread, machine, &e_flags);
+		if (machine && machine->env)
+			cpuid = machine->env->cpuid;
+	} else if (dso) {
+		struct maps *kmaps = (map && dso__kernel(dso)) ? map__kmaps(map) : NULL;
+		struct machine *kmap_machine = kmaps ? maps__machine(kmaps) : NULL;
+
+		e_machine = dso__e_machine(dso, kmap_machine, &e_flags);
+		if (kmap_machine && kmap_machine->env)
+			cpuid = kmap_machine->env->cpuid;
 	}
 
-	*parch = arch = arch__find(arch_name);
+	if (e_machine == EM_NONE)
+		e_machine = thread__e_machine(NULL, NULL, &e_flags);
+
+	arch = arch__find(e_machine, e_flags, cpuid);
 	if (arch == NULL) {
-		pr_err("%s: unsupported arch %s\n", __func__, arch_name);
-		return ENOTSUP;
+		pr_err("%s: unsupported arch %d\n", __func__, e_machine);
+		/* TODO: Refactor annotate/disassemble subsystem error
+		 * codes to uniformly return negative integers.
+		 */
+		return errno ? errno : ENOTSUP;
 	}
+	if (parch)
+		*parch = arch;
 
-	if (arch->init) {
-		err = arch->init(arch, env ? env->cpuid : NULL);
-		if (err) {
-			pr_err("%s: failed to initialize %s arch priv area\n",
-			       __func__, arch->name);
-			return err;
-		}
-	}
 	return 0;
 }
 
 int symbol__annotate(struct map_symbol *ms, struct evsel *evsel,
-		     struct arch **parch)
+		     const struct arch **parch)
 {
 	struct symbol *sym = ms->sym;
 	struct annotation *notes = symbol__annotation(sym);
 	struct annotate_args args = {
 		.options	= &annotate_opts,
 	};
-	struct arch *arch = NULL;
+	const struct arch *arch = NULL;
 	int err, nr;
 
-	err = evsel__get_arch(evsel, &arch);
-	if (err < 0)
+	err = map_symbol__get_arch(ms, &arch);
+	if (err)
 		return err;
 
 	if (parch)
@@ -1031,7 +1143,7 @@ int symbol__annotate(struct map_symbol *ms, struct evsel *evsel,
 		return 0;
 
 	args.arch = arch;
-	args.ms = *ms;
+	args.ms = ms;
 
 	if (notes->src == NULL) {
 		notes->src = annotated_source__new();
@@ -1235,8 +1347,9 @@ int hist_entry__annotate_printf(struct hist_entry *he, struct evsel *evsel)
 	int printed = 2, queue_len = 0;
 	int more = 0;
 	bool context = opts->context;
-	int width = annotation__pcnt_width(notes);
+	int width = annotation__pcnt_width(notes, evsel);
 	int graph_dotted_len;
+	char title[64];
 	char buf[512];
 
 	filename = strdup(dso__long_name(dso));
@@ -1246,17 +1359,22 @@ int hist_entry__annotate_printf(struct hist_entry *he, struct evsel *evsel)
 	if (opts->full_path)
 		d_filename = filename;
 	else
-		d_filename = basename(filename);
+		d_filename = perf_basename(filename);
 
 	if (evsel__is_group_event(evsel)) {
 		evsel__group_desc(evsel, buf, sizeof(buf));
 		evsel_name = buf;
 	}
 
-	graph_dotted_len = printf(" %-*.*s|	Source code & Disassembly of %s for %s (%" PRIu64 " samples, "
+	if (map_symbol__get_arch(ms, &apd.arch)) {
+		free(filename);
+		return ENOTSUP;
+	}
+
+	annotation__column_title(title, sizeof(title), notes, evsel);
+	graph_dotted_len = printf(" %-*.*s|\tSource code & Disassembly of %s for %s (%" PRIu64 " samples, "
 				  "percent: %s)\n",
-				  width, width, symbol_conf.show_total_period ? "Period" :
-				  symbol_conf.show_nr_samples ? "Samples" : "Percent",
+				  width, width, title,
 				  d_filename, evsel_name, h->nr_samples,
 				  percent_type_str(opts->percent_type));
 
@@ -1268,7 +1386,6 @@ int hist_entry__annotate_printf(struct hist_entry *he, struct evsel *evsel)
 
 	apd.addr_fmt_width = annotated_source__addr_fmt_width(&notes->src->source,
 							      notes->src->start);
-	evsel__get_arch(evsel, &apd.arch);
 	apd.dbg = dso__debuginfo(dso);
 
 	list_for_each_entry(pos, &notes->src->source, node) {
@@ -1373,7 +1490,7 @@ static int symbol__annotate_fprintf2(struct symbol *sym, FILE *fp,
 	struct annotation_line *al;
 
 	if (annotate_opts.code_with_type) {
-		evsel__get_arch(apd->evsel, &apd->arch);
+		map_symbol__get_arch(&apd->he->ms, &apd->arch);
 		apd->dbg = dso__debuginfo(map__dso(apd->he->ms.map));
 	}
 
@@ -1815,7 +1932,7 @@ int annotation_br_cntr_abbr_list(char **str, struct evsel *evsel, bool header)
 	struct evsel *pos;
 	struct strbuf sb;
 
-	if (evsel->evlist->nr_br_cntr <= 0)
+	if (evlist__nr_br_cntr(evsel->evlist) <= 0)
 		return -ENOTSUP;
 
 	strbuf_init(&sb, /*hint=*/ 0);
@@ -2008,7 +2125,8 @@ static int disasm_line__snprint_type_info(struct disasm_line *dl,
 	return printed;
 }
 
-void annotation_line__write(struct annotation_line *al, struct annotation *notes,
+void annotation_line__write(struct annotation_line *al,
+			    struct annotation *notes,
 			    const struct annotation_write_ops *wops,
 			    struct annotation_print_data *apd)
 {
@@ -2016,7 +2134,8 @@ void annotation_line__write(struct annotation_line *al, struct annotation *notes
 	bool change_color = wops->change_color;
 	double percent_max = annotation_line__max_percent(al, annotate_opts.percent_type);
 	int width = wops->width;
-	int pcnt_width = annotation__pcnt_width(notes);
+	int pcnt_width = annotation__pcnt_width(notes, apd->evsel);
+	u8 weight_mask = annotation__weight_mask(notes, apd->evsel);
 	int cycles_width = annotation__cycles_width(notes);
 	bool show_title = false;
 	char bf[256];
@@ -2041,6 +2160,7 @@ void annotation_line__write(struct annotation_line *al, struct annotation *notes
 
 		for (i = 0; i < al->data_nr; i++) {
 			double percent;
+			int weight;
 
 			percent = annotation_data__percent(&al->data[i],
 							   annotate_opts.percent_type);
@@ -2054,6 +2174,15 @@ void annotation_line__write(struct annotation_line *al, struct annotation *notes
 			} else {
 				obj__printf(obj, "%7.2f ", percent);
 			}
+
+			for_each_weight(weight) {
+				if (weight_mask & BIT(weight))
+					obj__printf(obj, "%7" PRIu64 " ",
+						    al->data[i].he.weight_num[weight] ?
+						    al->data[i].he.weight_sum[weight] /
+						    al->data[i].he.weight_num[weight] :
+						    0);
+			}
 		}
 	} else {
 		obj__set_percent_color(obj, 0, current_entry);
@@ -2061,9 +2190,9 @@ void annotation_line__write(struct annotation_line *al, struct annotation *notes
 		if (!show_title)
 			obj__printf(obj, "%-*s", pcnt_width, " ");
 		else {
-			obj__printf(obj, "%-*s", pcnt_width,
-					   symbol_conf.show_total_period ? "Period" :
-					   symbol_conf.show_nr_samples ? "Samples" : "Percent");
+			char buf[64];
+			annotation__column_title(buf, sizeof(buf), notes, apd->evsel);
+			obj__printf(obj, "%-*s", pcnt_width, buf);
 		}
 	}
 	width -= pcnt_width;
@@ -2204,7 +2333,7 @@ print_addr:
 }
 
 int symbol__annotate2(struct map_symbol *ms, struct evsel *evsel,
-		      struct arch **parch)
+		      const struct arch **parch)
 {
 	struct symbol *sym = ms->sym;
 	struct annotation *notes = symbol__annotation(sym);
@@ -2226,7 +2355,7 @@ int symbol__annotate2(struct map_symbol *ms, struct evsel *evsel,
 
 	annotation__init_column_widths(notes, sym);
 	annotation__update_column_widths(notes);
-	sym->annotate2 = 1;
+	symbol__set_annotate2(sym, true);
 
 	return 0;
 }
@@ -2451,67 +2580,29 @@ int annotate_check_args(void)
 	return 0;
 }
 
-/*
- * Get register number and access offset from the given instruction.
- * It assumes AT&T x86 asm format like OFFSET(REG).  Maybe it needs
- * to revisit the format when it handles different architecture.
- * Fills @reg and @offset when return 0.
- */
-static int extract_reg_offset(struct arch *arch, const char *str,
-			      struct annotated_op_loc *op_loc)
+int arch__dwarf_regnum(const struct arch *arch, const char *str)
 {
-	char *p;
-	char *regname;
+	const char *p = str;
+	char *regname, *q;
+	int reg;
 
-	if (arch->objdump.register_char == 0)
-		return -1;
-
-	/*
-	 * It should start from offset, but it's possible to skip 0
-	 * in the asm.  So 0(%rax) should be same as (%rax).
-	 *
-	 * However, it also start with a segment select register like
-	 * %gs:0x18(%rbx).  In that case it should skip the part.
-	 */
-	if (*str == arch->objdump.register_char) {
-		if (arch__is(arch, "x86")) {
-			/* FIXME: Handle other segment registers */
-			if (!strncmp(str, "%gs:", 4))
-				op_loc->segment = INSN_SEG_X86_GS;
-		}
-
-		while (*str && !isdigit(*str) &&
-		       *str != arch->objdump.memory_ref_char)
-			str++;
+	if (arch->objdump.register_char) {
+		p = strchr(str, arch->objdump.register_char);
+		if (p == NULL)
+			return -1;
 	}
-
-	op_loc->offset = strtol(str, &p, 0);
-
-	p = strchr(p, arch->objdump.register_char);
-	if (p == NULL)
-		return -1;
 
 	regname = strdup(p);
 	if (regname == NULL)
 		return -1;
 
-	op_loc->reg1 = get_dwarf_regnum(regname, arch->e_machine, arch->e_flags);
+	q = strpbrk(regname, ",)] ");
+	if (q)
+		*q = '\0';
+
+	reg = get_dwarf_regnum(regname, arch->id.e_machine, arch->id.e_flags);
 	free(regname);
-
-	/* Get the second register */
-	if (op_loc->multi_regs) {
-		p = strchr(p + 1, arch->objdump.register_char);
-		if (p == NULL)
-			return -1;
-
-		regname = strdup(p);
-		if (regname == NULL)
-			return -1;
-
-		op_loc->reg2 = get_dwarf_regnum(regname, arch->e_machine, arch->e_flags);
-		free(regname);
-	}
-	return 0;
+	return reg < 0 ? -1 : reg;
 }
 
 /**
@@ -2538,7 +2629,7 @@ static int extract_reg_offset(struct arch *arch, const char *str,
  *                              # dst_reg1 = rbx, dst_reg2 = rcx, dst_mem = 1
  *                              # dst_multi_regs = 1, dst_offset = 8
  */
-int annotate_get_insn_location(struct arch *arch, struct disasm_line *dl,
+int annotate_get_insn_location(const struct arch *arch, struct disasm_line *dl,
 			       struct annotated_insn_loc *loc)
 {
 	struct ins_operands *ops;
@@ -2569,53 +2660,11 @@ int annotate_get_insn_location(struct arch *arch, struct disasm_line *dl,
 		/* Invalidate the register by default */
 		op_loc->reg1 = -1;
 		op_loc->reg2 = -1;
+		op_loc->mem_ref = mem_ref;
+		op_loc->multi_regs = multi_regs;
 
-		if (insn_str == NULL) {
-			if (!arch__is(arch, "powerpc"))
-				continue;
-		}
-
-		/*
-		 * For powerpc, call get_powerpc_regs function which extracts the
-		 * required fields for op_loc, ie reg1, reg2, offset from the
-		 * raw instruction.
-		 */
-		if (arch__is(arch, "powerpc")) {
-			op_loc->mem_ref = mem_ref;
-			op_loc->multi_regs = multi_regs;
-			get_powerpc_regs(dl->raw.raw_insn, !i, op_loc);
-		} else if (strchr(insn_str, arch->objdump.memory_ref_char)) {
-			op_loc->mem_ref = true;
-			op_loc->multi_regs = multi_regs;
-			extract_reg_offset(arch, insn_str, op_loc);
-		} else {
-			char *s, *p = NULL;
-
-			if (arch__is(arch, "x86")) {
-				/* FIXME: Handle other segment registers */
-				if (!strncmp(insn_str, "%gs:", 4)) {
-					op_loc->segment = INSN_SEG_X86_GS;
-					op_loc->offset = strtol(insn_str + 4,
-								&p, 0);
-					if (p && p != insn_str + 4)
-						op_loc->imm = true;
-					continue;
-				}
-			}
-
-			s = strdup(insn_str);
-			if (s == NULL)
-				return -1;
-
-			if (*s == arch->objdump.register_char)
-				op_loc->reg1 = get_dwarf_regnum(s, arch->e_machine, arch->e_flags);
-			else if (*s == arch->objdump.imm_char) {
-				op_loc->offset = strtol(s + 1, &p, 0);
-				if (p && p != s + 1)
-					op_loc->imm = true;
-			}
-			free(s);
-		}
+		if (arch->extract_op_location)
+			arch->extract_op_location(arch, dl, insn_str, i, op_loc);
 	}
 
 	return 0;
@@ -2673,9 +2722,9 @@ static struct annotated_item_stat *annotate_data_stat(struct list_head *head,
 	return istat;
 }
 
-static bool is_stack_operation(struct arch *arch, struct disasm_line *dl)
+static bool is_stack_operation(const struct arch *arch, struct disasm_line *dl)
 {
-	if (arch__is(arch, "x86")) {
+	if (arch__is_x86(arch)) {
 		if (!strncmp(dl->ins.name, "push", 4) ||
 		    !strncmp(dl->ins.name, "pop", 3) ||
 		    !strncmp(dl->ins.name, "call", 4) ||
@@ -2686,12 +2735,26 @@ static bool is_stack_operation(struct arch *arch, struct disasm_line *dl)
 	return false;
 }
 
-static bool is_stack_canary(struct arch *arch, struct annotated_op_loc *loc)
+static bool is_stack_canary(const struct arch *arch, struct annotated_op_loc *loc)
 {
 	/* On x86_64, %gs:40 is used for stack canary */
-	if (arch__is(arch, "x86")) {
+	if (arch__is_x86(arch)) {
 		if (loc->segment == INSN_SEG_X86_GS && loc->imm &&
 		    loc->offset == 40)
+			return true;
+	}
+
+	return false;
+}
+
+/**
+ * Returns true if the instruction has a memory operand without
+ * performing a load/store
+ */
+static bool is_address_gen_insn(const struct arch *arch, struct disasm_line *dl)
+{
+	if (arch__is_x86(arch)) {
+		if (!strncmp(dl->ins.name, "lea", 3))
 			return true;
 	}
 
@@ -2777,7 +2840,7 @@ void debuginfo_cache__delete(void)
 }
 
 static struct annotated_data_type *
-__hist_entry__get_data_type(struct hist_entry *he, struct arch *arch,
+__hist_entry__get_data_type(struct hist_entry *he, const struct arch *arch,
 			    struct debuginfo *dbg, struct disasm_line *dl,
 			    int *type_offset)
 {
@@ -2806,6 +2869,12 @@ __hist_entry__get_data_type(struct hist_entry *he, struct arch *arch,
 		return &stackop_type;
 	}
 
+	if (is_address_gen_insn(arch, dl)) {
+		istat->bad++;
+		ann_data_stat.no_mem_ops++;
+		return NO_TYPE;
+	}
+
 	for_each_insn_op_loc(&loc, i, op_loc) {
 		struct data_loc_info dloc = {
 			.arch = arch,
@@ -2827,7 +2896,7 @@ __hist_entry__get_data_type(struct hist_entry *he, struct arch *arch,
 		}
 
 		/* This CPU access in kernel - pretend PC-relative addressing */
-		if (dso__kernel(map__dso(ms->map)) && arch__is(arch, "x86") &&
+		if (dso__kernel(map__dso(ms->map)) && arch__is_x86(arch) &&
 		    op_loc->segment == INSN_SEG_X86_GS && op_loc->imm) {
 			dloc.var_addr = op_loc->offset;
 			op_loc->reg1 = DWARF_REG_PC;
@@ -2875,7 +2944,7 @@ struct annotated_data_type *hist_entry__get_data_type(struct hist_entry *he)
 {
 	struct map_symbol *ms = &he->ms;
 	struct evsel *evsel = hists_to_evsel(he->hists);
-	struct arch *arch;
+	const struct arch *arch;
 	struct disasm_line *dl;
 	struct annotated_data_type *mem_type;
 	struct annotated_item_stat *istat;

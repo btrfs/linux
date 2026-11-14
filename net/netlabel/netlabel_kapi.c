@@ -104,7 +104,7 @@ int netlbl_cfg_unlbl_map_add(const char *domain,
 	struct netlbl_domaddr4_map *map4 = NULL;
 	struct netlbl_domaddr6_map *map6 = NULL;
 
-	entry = kzalloc(sizeof(*entry), GFP_ATOMIC);
+	entry = kzalloc_obj(*entry, GFP_ATOMIC);
 	if (entry == NULL)
 		return -ENOMEM;
 	if (domain != NULL) {
@@ -117,7 +117,7 @@ int netlbl_cfg_unlbl_map_add(const char *domain,
 	if (addr == NULL && mask == NULL)
 		entry->def.type = NETLBL_NLTYPE_UNLABELED;
 	else if (addr != NULL && mask != NULL) {
-		addrmap = kzalloc(sizeof(*addrmap), GFP_ATOMIC);
+		addrmap = kzalloc_obj(*addrmap, GFP_ATOMIC);
 		if (addrmap == NULL)
 			goto cfg_unlbl_map_add_failure;
 		INIT_LIST_HEAD(&addrmap->list4);
@@ -127,7 +127,7 @@ int netlbl_cfg_unlbl_map_add(const char *domain,
 		case AF_INET: {
 			const struct in_addr *addr4 = addr;
 			const struct in_addr *mask4 = mask;
-			map4 = kzalloc(sizeof(*map4), GFP_ATOMIC);
+			map4 = kzalloc_obj(*map4, GFP_ATOMIC);
 			if (map4 == NULL)
 				goto cfg_unlbl_map_add_failure;
 			map4->def.type = NETLBL_NLTYPE_UNLABELED;
@@ -144,7 +144,7 @@ int netlbl_cfg_unlbl_map_add(const char *domain,
 		case AF_INET6: {
 			const struct in6_addr *addr6 = addr;
 			const struct in6_addr *mask6 = mask;
-			map6 = kzalloc(sizeof(*map6), GFP_ATOMIC);
+			map6 = kzalloc_obj(*map6, GFP_ATOMIC);
 			if (map6 == NULL)
 				goto cfg_unlbl_map_add_failure;
 			map6->def.type = NETLBL_NLTYPE_UNLABELED;
@@ -336,7 +336,7 @@ int netlbl_cfg_cipsov4_map_add(u32 doi,
 	if (doi_def == NULL)
 		return -ENOENT;
 
-	entry = kzalloc(sizeof(*entry), GFP_ATOMIC);
+	entry = kzalloc_obj(*entry, GFP_ATOMIC);
 	if (entry == NULL)
 		goto out_entry;
 	entry->family = AF_INET;
@@ -350,13 +350,13 @@ int netlbl_cfg_cipsov4_map_add(u32 doi,
 		entry->def.cipso = doi_def;
 		entry->def.type = NETLBL_NLTYPE_CIPSOV4;
 	} else if (addr != NULL && mask != NULL) {
-		addrmap = kzalloc(sizeof(*addrmap), GFP_ATOMIC);
+		addrmap = kzalloc_obj(*addrmap, GFP_ATOMIC);
 		if (addrmap == NULL)
 			goto out_addrmap;
 		INIT_LIST_HEAD(&addrmap->list4);
 		INIT_LIST_HEAD(&addrmap->list6);
 
-		addrinfo = kzalloc(sizeof(*addrinfo), GFP_ATOMIC);
+		addrinfo = kzalloc_obj(*addrinfo, GFP_ATOMIC);
 		if (addrinfo == NULL)
 			goto out_addrinfo;
 		addrinfo->def.cipso = doi_def;
@@ -462,7 +462,7 @@ int netlbl_cfg_calipso_map_add(u32 doi,
 	if (doi_def == NULL)
 		return -ENOENT;
 
-	entry = kzalloc(sizeof(*entry), GFP_ATOMIC);
+	entry = kzalloc_obj(*entry, GFP_ATOMIC);
 	if (entry == NULL)
 		goto out_entry;
 	entry->family = AF_INET6;
@@ -476,13 +476,13 @@ int netlbl_cfg_calipso_map_add(u32 doi,
 		entry->def.calipso = doi_def;
 		entry->def.type = NETLBL_NLTYPE_CALIPSO;
 	} else if (addr != NULL && mask != NULL) {
-		addrmap = kzalloc(sizeof(*addrmap), GFP_ATOMIC);
+		addrmap = kzalloc_obj(*addrmap, GFP_ATOMIC);
 		if (addrmap == NULL)
 			goto out_addrmap;
 		INIT_LIST_HEAD(&addrmap->list4);
 		INIT_LIST_HEAD(&addrmap->list6);
 
-		addrinfo = kzalloc(sizeof(*addrinfo), GFP_ATOMIC);
+		addrinfo = kzalloc_obj(*addrinfo, GFP_ATOMIC);
 		if (addrinfo == NULL)
 			goto out_addrinfo;
 		addrinfo->def.calipso = doi_def;
@@ -1045,18 +1045,18 @@ socket_setattr_return:
  * ensuring that @sk is locked.
  *
  */
-void netlbl_sock_delattr(struct sock *sk)
+int netlbl_sock_delattr(struct sock *sk)
 {
 	switch (sk->sk_family) {
 	case AF_INET:
-		cipso_v4_sock_delattr(sk);
-		break;
+		return cipso_v4_sock_delattr(sk);
 #if IS_ENABLED(CONFIG_IPV6)
 	case AF_INET6:
 		calipso_sock_delattr(sk);
 		break;
 #endif /* IPv6 */
 	}
+	return 0;
 }
 
 /**
@@ -1156,8 +1156,7 @@ int netlbl_conn_setattr(struct sock *sk,
 		case NETLBL_NLTYPE_UNLABELED:
 			/* just delete the protocols we support for right now
 			 * but we could remove other protocols if needed */
-			netlbl_sock_delattr(sk);
-			ret_val = 0;
+			ret_val = netlbl_sock_delattr(sk);
 			break;
 		default:
 			ret_val = -ENOENT;
@@ -1185,8 +1184,7 @@ int netlbl_conn_setattr(struct sock *sk,
 		case NETLBL_NLTYPE_UNLABELED:
 			/* just delete the protocols we support for right now
 			 * but we could remove other protocols if needed */
-			netlbl_sock_delattr(sk);
-			ret_val = 0;
+			ret_val = netlbl_sock_delattr(sk);
 			break;
 		default:
 			ret_val = -ENOENT;
@@ -1234,8 +1232,7 @@ int netlbl_req_setattr(struct request_sock *req,
 						       entry->cipso, secattr);
 			break;
 		case NETLBL_NLTYPE_UNLABELED:
-			netlbl_req_delattr(req);
-			ret_val = 0;
+			ret_val = netlbl_req_delattr(req);
 			break;
 		default:
 			ret_val = -ENOENT;
@@ -1255,8 +1252,7 @@ int netlbl_req_setattr(struct request_sock *req,
 						      entry->calipso, secattr);
 			break;
 		case NETLBL_NLTYPE_UNLABELED:
-			netlbl_req_delattr(req);
-			ret_val = 0;
+			ret_val = netlbl_req_delattr(req);
 			break;
 		default:
 			ret_val = -ENOENT;
@@ -1280,18 +1276,18 @@ req_setattr_return:
 * Remove all the NetLabel labeling from @req.
 *
 */
-void netlbl_req_delattr(struct request_sock *req)
+int netlbl_req_delattr(struct request_sock *req)
 {
 	switch (req->rsk_ops->family) {
 	case AF_INET:
-		cipso_v4_req_delattr(req);
-		break;
+		return cipso_v4_req_delattr(req);
 #if IS_ENABLED(CONFIG_IPV6)
 	case AF_INET6:
 		calipso_req_delattr(req);
 		break;
 #endif /* IPv6 */
 	}
+	return 0;
 }
 
 /**

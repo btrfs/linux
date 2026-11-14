@@ -1172,7 +1172,8 @@ static int das1800_attach(struct comedi_device *dev,
 	if (!devpriv)
 		return -ENOMEM;
 
-	ret = comedi_request_region(dev, it->options[0], DAS1800_SIZE);
+	ret = comedi_check_request_region(dev, it->options[0], DAS1800_SIZE,
+					  0, 0x3ff, 16);
 	if (ret)
 		return ret;
 
@@ -1227,9 +1228,7 @@ static int das1800_attach(struct comedi_device *dev,
 	if (dev->irq & it->options[2])
 		das1800_init_dma(dev, it);
 
-	devpriv->fifo_buf = kmalloc_array(FIFO_SIZE,
-					  sizeof(*devpriv->fifo_buf),
-					  GFP_KERNEL);
+	devpriv->fifo_buf = kmalloc_objs(*devpriv->fifo_buf, FIFO_SIZE);
 	if (!devpriv->fifo_buf)
 		return -ENOMEM;
 

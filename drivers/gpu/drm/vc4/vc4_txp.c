@@ -9,7 +9,6 @@
 
 #include <linux/clk.h>
 #include <linux/component.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 
@@ -21,6 +20,7 @@
 #include <drm/drm_fourcc.h>
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_panel.h>
+#include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_vblank.h>
 #include <drm/drm_writeback.h>
@@ -245,7 +245,7 @@ static void vc4_txp_armed(struct drm_crtc_state *state)
 }
 
 static int vc4_txp_connector_atomic_check(struct drm_connector *conn,
-					  struct drm_atomic_state *state)
+					  struct drm_atomic_commit *state)
 {
 	struct drm_connector_state *conn_state;
 	struct drm_crtc_state *crtc_state;
@@ -284,7 +284,7 @@ static int vc4_txp_connector_atomic_check(struct drm_connector *conn,
 }
 
 static void vc4_txp_connector_atomic_commit(struct drm_connector *conn,
-					struct drm_atomic_state *state)
+					struct drm_atomic_commit *state)
 {
 	struct drm_device *drm = conn->dev;
 	struct drm_connector_state *conn_state = drm_atomic_get_new_connector_state(state,
@@ -378,7 +378,7 @@ static const struct drm_connector_funcs vc4_txp_connector_funcs = {
 	.detect = vc4_txp_connector_detect,
 	.fill_modes = drm_helper_probe_single_connector_modes,
 	.destroy = drm_connector_cleanup,
-	.reset = drm_atomic_helper_connector_reset,
+	.atomic_create_state = drm_atomic_helper_connector_create_state,
 	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
 };
@@ -425,7 +425,7 @@ static void vc4_txp_disable_vblank(struct drm_crtc *crtc) {}
 static const struct drm_crtc_funcs vc4_txp_crtc_funcs = {
 	.set_config		= drm_atomic_helper_set_config,
 	.page_flip		= vc4_page_flip,
-	.reset			= vc4_crtc_reset,
+	.atomic_create_state	= vc4_crtc_create_state,
 	.atomic_duplicate_state	= vc4_crtc_duplicate_state,
 	.atomic_destroy_state	= vc4_crtc_destroy_state,
 	.enable_vblank		= vc4_txp_enable_vblank,
@@ -434,7 +434,7 @@ static const struct drm_crtc_funcs vc4_txp_crtc_funcs = {
 };
 
 static int vc4_txp_atomic_check(struct drm_crtc *crtc,
-				struct drm_atomic_state *state)
+				struct drm_atomic_commit *state)
 {
 	struct drm_crtc_state *crtc_state = drm_atomic_get_new_crtc_state(state,
 									  crtc);
@@ -450,14 +450,14 @@ static int vc4_txp_atomic_check(struct drm_crtc *crtc,
 }
 
 static void vc4_txp_atomic_enable(struct drm_crtc *crtc,
-				  struct drm_atomic_state *state)
+				  struct drm_atomic_commit *state)
 {
 	drm_crtc_vblank_on(crtc);
 	vc4_hvs_atomic_enable(crtc, state);
 }
 
 static void vc4_txp_atomic_disable(struct drm_crtc *crtc,
-				   struct drm_atomic_state *state)
+				   struct drm_atomic_commit *state)
 {
 	struct drm_device *dev = crtc->dev;
 

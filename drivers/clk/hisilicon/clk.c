@@ -30,7 +30,7 @@ struct hisi_clock_data *hisi_clk_alloc(struct platform_device *pdev,
 	struct resource *res;
 	struct clk **clk_table;
 
-	clk_data = devm_kmalloc(&pdev->dev, sizeof(*clk_data), GFP_KERNEL);
+	clk_data = devm_kmalloc_obj(&pdev->dev, *clk_data);
 	if (!clk_data)
 		return NULL;
 
@@ -42,9 +42,7 @@ struct hisi_clock_data *hisi_clk_alloc(struct platform_device *pdev,
 	if (!clk_data->base)
 		return NULL;
 
-	clk_table = devm_kmalloc_array(&pdev->dev, nr_clks,
-				       sizeof(*clk_table),
-				       GFP_KERNEL);
+	clk_table = devm_kmalloc_objs(&pdev->dev, *clk_table, nr_clks);
 	if (!clk_table)
 		return NULL;
 
@@ -68,12 +66,12 @@ struct hisi_clock_data *hisi_clk_init(struct device_node *np,
 		goto err;
 	}
 
-	clk_data = kzalloc(sizeof(*clk_data), GFP_KERNEL);
+	clk_data = kzalloc_obj(*clk_data);
 	if (!clk_data)
-		goto err;
+		goto err_base;
 
 	clk_data->base = base;
-	clk_table = kcalloc(nr_clks, sizeof(*clk_table), GFP_KERNEL);
+	clk_table = kzalloc_objs(*clk_table, nr_clks);
 	if (!clk_table)
 		goto err_data;
 
@@ -83,6 +81,8 @@ struct hisi_clock_data *hisi_clk_init(struct device_node *np,
 	return clk_data;
 err_data:
 	kfree(clk_data);
+err_base:
+	iounmap(base);
 err:
 	return NULL;
 }

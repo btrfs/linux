@@ -77,7 +77,8 @@ static const struct virtsnd_v2a_rate g_v2a_rate_map[] = {
 	[VIRTIO_SND_PCM_RATE_88200] = { SNDRV_PCM_RATE_88200, 88200 },
 	[VIRTIO_SND_PCM_RATE_96000] = { SNDRV_PCM_RATE_96000, 96000 },
 	[VIRTIO_SND_PCM_RATE_176400] = { SNDRV_PCM_RATE_176400, 176400 },
-	[VIRTIO_SND_PCM_RATE_192000] = { SNDRV_PCM_RATE_192000, 192000 }
+	[VIRTIO_SND_PCM_RATE_192000] = { SNDRV_PCM_RATE_192000, 192000 },
+	[VIRTIO_SND_PCM_RATE_384000] = { SNDRV_PCM_RATE_384000, 384000 }
 };
 
 /**
@@ -244,7 +245,7 @@ struct virtio_pcm *virtsnd_pcm_find_or_create(struct virtio_snd *snd, u32 nid)
 	if (!IS_ERR(vpcm))
 		return vpcm;
 
-	vpcm = devm_kzalloc(&vdev->dev, sizeof(*vpcm), GFP_KERNEL);
+	vpcm = devm_kzalloc_obj(&vdev->dev, *vpcm);
 	if (!vpcm)
 		return ERR_PTR(-ENOMEM);
 
@@ -334,8 +335,8 @@ int virtsnd_pcm_parse_cfg(struct virtio_snd *snd)
 	if (!snd->nsubstreams)
 		return 0;
 
-	snd->substreams = devm_kcalloc(&vdev->dev, snd->nsubstreams,
-				       sizeof(*snd->substreams), GFP_KERNEL);
+	snd->substreams = devm_kzalloc_objs(&vdev->dev, *snd->substreams,
+					    snd->nsubstreams);
 	if (!snd->substreams)
 		return -ENOMEM;
 
@@ -354,7 +355,7 @@ int virtsnd_pcm_parse_cfg(struct virtio_snd *snd)
 		spin_lock_init(&vss->lock);
 	}
 
-	info = kcalloc(snd->nsubstreams, sizeof(*info), GFP_KERNEL);
+	info = kzalloc_objs(*info, snd->nsubstreams);
 	if (!info)
 		return -ENOMEM;
 
@@ -448,9 +449,9 @@ int virtsnd_pcm_build_devs(struct virtio_snd *snd)
 				continue;
 
 			stream->substreams =
-				devm_kcalloc(&vdev->dev, stream->nsubstreams,
-					     sizeof(*stream->substreams),
-					     GFP_KERNEL);
+				devm_kzalloc_objs(&vdev->dev,
+						  *stream->substreams,
+						  stream->nsubstreams);
 			if (!stream->substreams)
 				return -ENOMEM;
 

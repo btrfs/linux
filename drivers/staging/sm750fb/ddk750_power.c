@@ -96,20 +96,6 @@ void sm750_enable_2d_engine(unsigned int enable)
 	sm750_set_current_gate(gate);
 }
 
-void sm750_enable_dma(unsigned int enable)
-{
-	u32 gate;
-
-	/* Enable DMA Gate */
-	gate = peek32(CURRENT_GATE);
-	if (enable)
-		gate |= CURRENT_GATE_DMA;
-	else
-		gate &= ~CURRENT_GATE_DMA;
-
-	sm750_set_current_gate(gate);
-}
-
 /*
  * This function enable/disable the GPIO Engine
  */
@@ -123,23 +109,6 @@ void sm750_enable_gpio(unsigned int enable)
 		gate |= CURRENT_GATE_GPIO;
 	else
 		gate &= ~CURRENT_GATE_GPIO;
-
-	sm750_set_current_gate(gate);
-}
-
-/*
- * This function enable/disable the I2C Engine
- */
-void sm750_enable_i2c(unsigned int enable)
-{
-	u32 gate;
-
-	/* Enable I2C Gate */
-	gate = peek32(CURRENT_GATE);
-	if (enable)
-		gate |= CURRENT_GATE_I2C;
-	else
-		gate &= ~CURRENT_GATE_I2C;
 
 	sm750_set_current_gate(gate);
 }

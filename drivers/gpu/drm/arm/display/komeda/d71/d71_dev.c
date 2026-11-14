@@ -355,7 +355,7 @@ static int d71_enum_resources(struct komeda_dev *mdev)
 	u32 i, value, offset;
 	int err;
 
-	d71 = devm_kzalloc(mdev->dev, sizeof(*d71), GFP_KERNEL);
+	d71 = devm_kzalloc_obj(mdev->dev, *d71);
 	if (!d71)
 		return -ENOMEM;
 
@@ -628,6 +628,7 @@ d71_identify(u32 __iomem *reg_base, struct komeda_chip_info *chip)
 	switch (product_id) {
 	case MALIDP_D71_PRODUCT_ID:
 	case MALIDP_D32_PRODUCT_ID:
+	case LINLONDP_D6_PRODUCT_ID:
 		funcs = &d71_chip_funcs;
 		break;
 	default:

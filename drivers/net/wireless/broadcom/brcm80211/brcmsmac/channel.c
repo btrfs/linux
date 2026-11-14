@@ -331,7 +331,7 @@ struct brcms_cm_info *brcms_c_channel_mgr_attach(struct brcms_c_info *wlc)
 	const char *ccode = sprom->alpha2;
 	int ccode_len = sizeof(sprom->alpha2);
 
-	wlc_cm = kzalloc(sizeof(*wlc_cm), GFP_ATOMIC);
+	wlc_cm = kzalloc_obj(*wlc_cm, GFP_ATOMIC);
 	if (wlc_cm == NULL)
 		return NULL;
 	wlc_cm->pub = pub;
@@ -676,6 +676,8 @@ brcms_reg_apply_beaconing_flags(struct wiphy *wiphy,
 				continue;
 
 			if (initiator == NL80211_REGDOM_SET_BY_COUNTRY_IE) {
+				guard(rcu)();
+
 				rule = freq_reg_info(wiphy,
 						     MHZ_TO_KHZ(ch->center_freq));
 				if (IS_ERR(rule))

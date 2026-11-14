@@ -19,9 +19,9 @@
 
 /*
  * All access rights that are denied by default whether they are handled or not
- * by a ruleset/layer.  This must be ORed with all ruleset->access_masks[]
- * entries when we need to get the absolute handled access masks, see
- * landlock_upgrade_handled_access_masks().
+ * by a ruleset/layer.  This must be ORed with the .handled field of all
+ * domain->layers[] entries when we need to get the absolute handled access
+ * masks, see landlock_upgrade_handled_layer_config().
  */
 /* clang-format off */
 #define _LANDLOCK_ACCESS_FS_INITIALLY_DENIED ( \
@@ -34,7 +34,7 @@
 	LANDLOCK_ACCESS_FS_IOCTL_DEV)
 /* clang-format on */
 
-typedef u16 access_mask_t;
+typedef u32 access_mask_t;
 
 /* Makes sure all filesystem access rights can be stored. */
 static_assert(BITS_PER_TYPE(access_mask_t) >= LANDLOCK_NUM_ACCESS_FS);
@@ -42,15 +42,18 @@ static_assert(BITS_PER_TYPE(access_mask_t) >= LANDLOCK_NUM_ACCESS_FS);
 static_assert(BITS_PER_TYPE(access_mask_t) >= LANDLOCK_NUM_ACCESS_NET);
 /* Makes sure all scoped rights can be stored. */
 static_assert(BITS_PER_TYPE(access_mask_t) >= LANDLOCK_NUM_SCOPE);
+/* Makes sure all permissions can be stored. */
+static_assert(BITS_PER_TYPE(access_mask_t) >= LANDLOCK_NUM_PERMISSION);
 /* Makes sure for_each_set_bit() and for_each_clear_bit() calls are OK. */
 static_assert(sizeof(unsigned long) >= sizeof(access_mask_t));
 
-/* Ruleset access masks. */
+/* Access and permission masks (bitfields only). */
 struct access_masks {
 	access_mask_t fs : LANDLOCK_NUM_ACCESS_FS;
 	access_mask_t net : LANDLOCK_NUM_ACCESS_NET;
 	access_mask_t scope : LANDLOCK_NUM_SCOPE;
-};
+	access_mask_t permissions : LANDLOCK_NUM_PERMISSION;
+} __packed __aligned(sizeof(u32));
 
 union access_masks_all {
 	struct access_masks masks;
@@ -61,14 +64,101 @@ union access_masks_all {
 static_assert(sizeof(typeof_member(union access_masks_all, masks)) ==
 	      sizeof(typeof_member(union access_masks_all, all)));
 
-typedef u16 layer_mask_t;
+/**
+ * struct permission_masks - Per-permission member bitmasks
+ */
+struct permission_masks {
+	/**
+	 * @ns_types: Namespace type member mask, indexed in FOR_EACH_NS_TYPE()
+	 * order.
+	 */
+	u64 ns_types : LANDLOCK_NUM_NAMESPACE_TYPE;
+	/**
+	 * @caps: Capability member mask, indexed by CAP_* values.
+	 */
+	u64 caps : LANDLOCK_NUM_CAPABILITY;
+} __packed __aligned(sizeof(u64));
 
-/* Makes sure all layers can be checked. */
-static_assert(BITS_PER_TYPE(layer_mask_t) >= LANDLOCK_MAX_NUM_LAYERS);
+static_assert(sizeof(struct permission_masks) == sizeof(u64));
+/* All permission_masks bitfields must fit in a single u64. */
+static_assert(LANDLOCK_NUM_CAPABILITY + LANDLOCK_NUM_NAMESPACE_TYPE <=
+	      BITS_PER_TYPE(u64));
+
+/**
+ * struct layer_config - Per-layer access configuration
+ *
+ * A ruleset stores one mutable layer and a domain stores a flexible array of
+ * immutable layers.  Unlike filesystem and network access rights, namespace
+ * types and capabilities use flat bitmasks because their keyspaces are small
+ * and bounded.
+ */
+struct layer_config {
+	/**
+	 * @allowed: Members allowed by each handled permission.
+	 */
+	struct permission_masks allowed;
+	/**
+	 * @handled: Bitmask of access rights and permissions handled (i.e.
+	 * restricted) by this layer.
+	 */
+	struct access_masks handled;
+};
+
+#define _LANDLOCK_LAYER_MASK_PADDING                              \
+	(BITS_PER_TYPE(access_mask_t) - LANDLOCK_NUM_ACCESS_MAX - \
+	 IS_ENABLED(CONFIG_SECURITY_LANDLOCK_LOG))
+
+/**
+ * struct layer_mask - The access rights and rule flags for a layer.
+ *
+ * This has a bit for each access rights and rule flags.  During access checks,
+ * it is used to represent the access rights for each layer which still need to
+ * be fulfilled.  When all bits are 0, the access request is considered to be
+ * fulfilled.
+ */
+struct layer_mask {
+	/**
+	 * @access: The unfulfilled access rights for this layer.
+	 */
+	access_mask_t access : LANDLOCK_NUM_ACCESS_MAX;
+#ifdef CONFIG_SECURITY_LANDLOCK_LOG
+	/**
+	 * @quiet: Whether we have encountered a rule with the quiet flag for
+	 * this layer.  Used to control logging.
+	 */
+	access_mask_t quiet : 1;
+#endif /* CONFIG_SECURITY_LANDLOCK_LOG */
+	/**
+	 * @__pad: Padding for the compiler's bitfield initialization.
+	 */
+	access_mask_t __pad : _LANDLOCK_LAYER_MASK_PADDING;
+} __packed __aligned(sizeof(access_mask_t));
 
 /*
- * Tracks domains responsible of a denied access.  This is required to avoid
- * storing in each object the full layer_masks[] required by update_request().
+ * Make sure that we don't increase the size of struct layer_mask when storing
+ * rule flags.
+ */
+static_assert(sizeof(struct layer_mask) == sizeof(access_mask_t));
+
+/**
+ * struct layer_masks - An array of struct layer_mask, one per layer.
+ */
+struct layer_masks {
+	/**
+	 * @layers: The unfulfilled access rights for each layer.
+	 */
+	struct layer_mask layers[LANDLOCK_MAX_NUM_LAYERS];
+};
+
+/*
+ * Tracks domains responsible of a denied access.  This avoids storing in each
+ * object the full matrix of per-layer unfulfilled access rights, which is
+ * required by update_request().
+ *
+ * Each nibble represents the layer index of the newest layer which denied a
+ * certain access right.  For file system access rights, the upper four bits are
+ * the index of the layer which denies LANDLOCK_ACCESS_FS_IOCTL_DEV and the
+ * lower nibble represents LANDLOCK_ACCESS_FS_TRUNCATE.
  */
 typedef u8 deny_masks_t;
 
@@ -84,17 +174,29 @@ static_assert(BITS_PER_TYPE(deny_masks_t) >=
 static_assert(HWEIGHT(LANDLOCK_MAX_NUM_LAYERS) == 1);
 
 /* Upgrades with all initially denied by default access rights. */
-static inline struct access_masks
-landlock_upgrade_handled_access_masks(struct access_masks access_masks)
+static inline struct layer_config
+landlock_upgrade_handled_layer_config(struct layer_config layer_config)
 {
 	/*
 	 * All access rights that are denied by default whether they are
 	 * explicitly handled or not.
 	 */
-	if (access_masks.fs)
-		access_masks.fs |= _LANDLOCK_ACCESS_FS_INITIALLY_DENIED;
+	if (layer_config.handled.fs)
+		layer_config.handled.fs |= _LANDLOCK_ACCESS_FS_INITIALLY_DENIED;
 
-	return access_masks;
+	return layer_config;
 }
+
+/* Checks the subset relation between access masks. */
+static inline bool access_mask_subset(access_mask_t subset,
+				      access_mask_t superset)
+{
+	return (subset | superset) == superset;
+}
+
+/* A bitmask that is large enough to hold set of optional accesses. */
+typedef u8 optional_access_t;
+static_assert(BITS_PER_TYPE(optional_access_t) >=
+	      HWEIGHT(_LANDLOCK_ACCESS_FS_OPTIONAL));
 
 #endif /* _SECURITY_LANDLOCK_ACCESS_H */

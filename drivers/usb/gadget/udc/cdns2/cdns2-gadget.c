@@ -1505,7 +1505,7 @@ struct usb_request *cdns2_gadget_ep_alloc_request(struct usb_ep *ep,
 	struct cdns2_endpoint *pep = ep_to_cdns2_ep(ep);
 	struct cdns2_request *preq;
 
-	preq = kzalloc(sizeof(*preq), gfp_flags);
+	preq = kzalloc_obj(*preq, gfp_flags);
 	if (!preq)
 		return NULL;
 
@@ -2341,7 +2341,7 @@ static int cdns2_gadget_start(struct cdns2_device *pdev)
 
 	/* Allocate memory for setup packet buffer. */
 	buf = dma_alloc_coherent(pdev->dev, 8, &pdev->ep0_preq.request.dma,
-				 GFP_DMA);
+				 GFP_KERNEL);
 	pdev->ep0_preq.request.buf = buf;
 
 	if (!pdev->ep0_preq.request.buf) {
@@ -2415,7 +2415,6 @@ int cdns2_gadget_resume(struct cdns2_device *pdev, bool hibernated)
 
 void cdns2_gadget_remove(struct cdns2_device *pdev)
 {
-	pm_runtime_mark_last_busy(pdev->dev);
 	pm_runtime_put_autosuspend(pdev->dev);
 
 	usb_del_gadget(&pdev->gadget);

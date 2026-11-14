@@ -23,7 +23,7 @@ easier.
 
 Some subsystems and maintainer trees have additional information about
 their workflow and expectations, see
-:ref:`Documentation/process/maintainer-handbooks.rst <maintainer_handbooks_main>`.
+Documentation/process/maintainer-handbooks.rst.
 
 Obtain a current source tree
 ----------------------------
@@ -404,12 +404,11 @@ patches that are being emailed around.
 The sign-off is a simple line at the end of the explanation for the
 patch, which certifies that you wrote it or otherwise have the right to
 pass it on as an open-source patch.  The rules are pretty simple: if you
-can certify the below:
+can certify the below::
 
-Developer's Certificate of Origin 1.1
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        Developer's Certificate of Origin 1.1
 
-By making a contribution to this project, I certify that:
+        By making a contribution to this project, I certify that:
 
         (a) The contribution was created in whole or in part by me and I
             have the right to submit it under the open source license
@@ -457,7 +456,7 @@ When to use Acked-by:, Cc:, and Co-developed-by:
 ------------------------------------------------
 
 The Signed-off-by: tag indicates that the signer was involved in the
-development of the patch, or that he/she was in the patch's delivery path.
+development of the patch, or that they were in the patch's delivery path.
 
 If a person was not directly involved in the preparation or handling of a
 patch but wishes to signify and record their approval of it then they can
@@ -554,12 +553,11 @@ some testing has been performed, provides a means to locate testers for
 future patches, and ensures credit for the testers.
 
 Reviewed-by:, instead, indicates that the patch has been reviewed and found
-acceptable according to the Reviewer's Statement:
+acceptable according to the Reviewer's Statement::
 
-Reviewer's statement of oversight
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+	Reviewer's statement of oversight
 
-By offering my Reviewed-by: tag, I state that:
+	By offering my Reviewed-by: tag, I state that:
 
 	 (a) I have carried out a technical review of this patch to
 	     evaluate its appropriateness and readiness for inclusion into
@@ -581,19 +579,20 @@ By offering my Reviewed-by: tag, I state that:
 
 A Reviewed-by tag is a statement of opinion that the patch is an
 appropriate modification of the kernel without any remaining serious
-technical issues.  Any interested reviewer (who has done the work) can
-offer a Reviewed-by tag for a patch.  This tag serves to give credit to
-reviewers and to inform maintainers of the degree of review which has been
-done on the patch.  Reviewed-by: tags, when supplied by reviewers known to
-understand the subject area and to perform thorough reviews, will normally
-increase the likelihood of your patch getting into the kernel.
+technical issues.  Any interested reviewer (who has done the work and is a
+person with known identity) can offer a Reviewed-by tag for a patch.  This tag
+serves to give credit to reviewers and to inform maintainers of the degree of
+review which has been done on the patch.  Reviewed-by: tags, when supplied by
+reviewers known to understand the subject area and to perform thorough reviews,
+will normally increase the likelihood of your patch getting into the kernel.
 
 Both Tested-by and Reviewed-by tags, once received on mailing list from tester
 or reviewer, should be added by author to the applicable patches when sending
 next versions.  However if the patch has changed substantially in following
 version, these tags might not be applicable anymore and thus should be removed.
-Usually removal of someone's Tested-by or Reviewed-by tags should be mentioned
-in the patch changelog (after the '---' separator).
+Usually removal of someone's Acked-by, Tested-by or Reviewed-by tags should be
+mentioned in the patch changelog with an explanation (after the '---'
+separator).
 
 A Suggested-by: tag indicates that the patch idea is suggested by the person
 named and ensures credit to the person for the idea: if we diligently credit
@@ -804,7 +803,8 @@ not part of the changelog which gets committed to the git tree. It is
 additional information for the reviewers. If it's placed above the
 commit tags, it needs manual interaction to remove it. If it is below
 the separator line, it gets automatically stripped off when applying the
-patch::
+patch.  If available, adding links to previous versions of the patch (e.g.,
+lore.kernel.org archive link) is recommended to help reviewers::
 
   <commit message>
   ...
@@ -812,6 +812,9 @@ patch::
   ---
   V2 -> V3: Removed redundant helper function
   V1 -> V2: Cleaned up coding style and addressed review comments
+
+  v2: https://lore.kernel.org/bar
+  v1: https://lore.kernel.org/foo
 
   path/to/file | 5+++--
   ...

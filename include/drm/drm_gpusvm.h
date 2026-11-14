@@ -6,9 +6,11 @@
 #ifndef __DRM_GPUSVM_H__
 #define __DRM_GPUSVM_H__
 
+#include <linux/dma-mapping.h>
 #include <linux/kref.h>
 #include <linux/interval_tree.h>
 #include <linux/mmu_notifier.h>
+#include <drm/drm_pagemap.h>
 
 struct dev_pagemap_ops;
 struct drm_device;
@@ -17,7 +19,6 @@ struct drm_gpusvm_notifier;
 struct drm_gpusvm_ops;
 struct drm_gpusvm_range;
 struct drm_pagemap;
-struct drm_pagemap_addr;
 
 /**
  * struct drm_gpusvm_ops - Operations structure for GPU SVM
@@ -108,23 +109,20 @@ struct drm_gpusvm_notifier {
 /**
  * struct drm_gpusvm_pages_flags - Structure representing a GPU SVM pages flags
  *
- * @migrate_devmem: Flag indicating whether the pages can be migrated to device memory
  * @unmapped: Flag indicating if the pages has been unmapped
- * @partial_unmap: Flag indicating if the pages has been partially unmapped
  * @has_devmem_pages: Flag indicating if the pages has devmem pages
  * @has_dma_mapping: Flag indicating if the pages has a DMA mapping
+ * @inline_dma_mapping: Flag indicating if the pages have an inline DMA mapping
  * @__flags: Flags for pages in u16 form (used for READ_ONCE)
  */
 struct drm_gpusvm_pages_flags {
 	union {
 		struct {
-			/* All flags below must be set upon creation */
-			u16 migrate_devmem : 1;
 			/* All flags below must be set / cleared under notifier lock */
 			u16 unmapped : 1;
-			u16 partial_unmap : 1;
 			u16 has_devmem_pages : 1;
 			u16 has_dma_mapping : 1;
+			u16 inline_dma_mapping : 1;
 		};
 		u16 __flags;
 	};
@@ -133,22 +131,54 @@ struct drm_gpusvm_pages_flags {
 /**
  * struct drm_gpusvm_pages - Structure representing a GPU SVM mapped pages
  *
- * @dma_addr: Device address array
+ * @drm: The DRM device that owns the dma mappings
+ * @dma_addr: Device address array, valid while @flags.inline_dma_mapping is
+ *            not set
+ * @inline_addr: Device address inline address, valid while
+ *               @flags.inline_dma_mapping is set
  * @dpagemap: The struct drm_pagemap of the device pages we're dma-mapping.
  *            Note this is assuming only one drm_pagemap per range is allowed.
+ * @state: DMA IOVA state for mapping.
+ * @state_offset: DMA IOVA offset for mapping.
  * @notifier_seq: Notifier sequence number of the range's pages
- * @flags: Flags for range
- * @flags.migrate_devmem: Flag indicating whether the range can be migrated to device memory
- * @flags.unmapped: Flag indicating if the range has been unmapped
- * @flags.partial_unmap: Flag indicating if the range has been partially unmapped
- * @flags.has_devmem_pages: Flag indicating if the range has devmem pages
- * @flags.has_dma_mapping: Flag indicating if the range has a DMA mapping
+ * @flags: Flags for the range; see &struct drm_gpusvm_pages_flags
+ *
+ * @dma_addr and @inline_addr share storage, discriminated by
+ * @flags.inline_dma_mapping. Driver should use drm_gpusvm_pages_first_dma()
+ * to access the correct DMA address.
  */
 struct drm_gpusvm_pages {
-	struct drm_pagemap_addr *dma_addr;
+	struct drm_device *drm;
+	union {
+		struct drm_pagemap_addr *dma_addr;
+		struct drm_pagemap_addr inline_addr;
+	};
 	struct drm_pagemap *dpagemap;
+	struct dma_iova_state state;
+	unsigned long state_offset;
 	unsigned long notifier_seq;
 	struct drm_gpusvm_pages_flags flags;
+};
+
+/**
+ * struct drm_gpusvm_range_flags - Range-level GPU SVM flags
+ *
+ * @migrate_devmem: Flag indicating whether the range can be migrated to device memory
+ * @unmapped: Flag indicating if the range has been unmapped
+ * @partial_unmap: Flag indicating if the range has been partially unmapped
+ * @__flags: All flags in u16 form (used for READ_ONCE)
+ */
+struct drm_gpusvm_range_flags {
+	union {
+		struct {
+			/* All flags below must be set upon creation */
+			u16 migrate_devmem	: 1;
+			/* All flags below must be set / cleared under notifier lock */
+			u16 unmapped		: 1;
+			u16 partial_unmap	: 1;
+		};
+		u16 __flags;
+	};
 };
 
 /**
@@ -159,7 +189,7 @@ struct drm_gpusvm_pages {
  * @refcount: Reference count for the range
  * @itree: Interval tree node for the range (inserted in GPU SVM notifier)
  * @entry: List entry to fast interval tree traversal
- * @pages: The pages for this range.
+ * @flags: Flags for range see &struct drm_gpusvm_range_flags
  *
  * This structure represents a GPU SVM range used for tracking memory ranges
  * mapped in a DRM device.
@@ -170,14 +200,13 @@ struct drm_gpusvm_range {
 	struct kref refcount;
 	struct interval_tree_node itree;
 	struct list_head entry;
-	struct drm_gpusvm_pages pages;
+	struct drm_gpusvm_range_flags flags;
 };
 
 /**
  * struct drm_gpusvm - GPU SVM structure
  *
  * @name: Name of the GPU SVM
- * @drm: Pointer to the DRM device structure
  * @mm: Pointer to the mm_struct for the address space
  * @mm_start: Start address of GPU SVM
  * @mm_range: Range of the GPU SVM
@@ -201,7 +230,6 @@ struct drm_gpusvm_range {
  */
 struct drm_gpusvm {
 	const char *name;
-	struct drm_device *drm;
 	struct mm_struct *mm;
 	unsigned long mm_start;
 	unsigned long mm_range;
@@ -235,6 +263,22 @@ struct drm_gpusvm {
  * @read_only: operating on read-only memory
  * @devmem_possible: possible to use device memory
  * @devmem_only: use only device memory
+ * @allow_mixed: Allow mixed mappings in get pages. Mixing between system and
+ *               single dpagemap is supported, mixing between multiple dpagemap
+ *               is unsupported.
+ * @no_dma_map: Only fault the CPU pages for the range; skip the device DMA
+ *              mapping step. Used by drivers that consume the faulted pages
+ *              without needing a DMA mapping. In this mode @drm on the
+ *              drm_gpusvm_pages is not required, no mapping state is recorded
+ *              and drm_gpusvm_pages_valid() therefore never reports these
+ *              pages as valid; the caller revalidates the snapshot itself, see
+ *              drm_gpusvm_get_pages(). @devmem_only is rejected and no page
+ *              type check is performed, so @allow_mixed has no effect.
+ * @devmem_fn: Optional callback invoked under the notifier lock, once per
+ *             contiguous run of pages backed by the same &drm_pagemap_devmem.
+ *             Must not sleep and must be idempotent, as a non-contiguous
+ *             allocation is reported more than once. Fires even with
+ *             @no_dma_map. May be NULL.
  *
  * Context that is DRM GPUSVM is operating in (i.e. user arguments).
  */
@@ -242,14 +286,17 @@ struct drm_gpusvm_ctx {
 	void *device_private_page_owner;
 	unsigned long check_pages_threshold;
 	unsigned long timeslice_ms;
+	void (*devmem_fn)(struct drm_pagemap_devmem *devmem);
 	unsigned int in_notifier :1;
 	unsigned int read_only :1;
 	unsigned int devmem_possible :1;
 	unsigned int devmem_only :1;
+	unsigned int allow_mixed :1;
+	unsigned int no_dma_map :1;
 };
 
 int drm_gpusvm_init(struct drm_gpusvm *gpusvm,
-		    const char *name, struct drm_device *drm,
+		    const char *name,
 		    struct mm_struct *mm,
 		    unsigned long mm_start, unsigned long mm_range,
 		    unsigned long notifier_size,
@@ -283,16 +330,8 @@ drm_gpusvm_range_get(struct drm_gpusvm_range *range);
 
 void drm_gpusvm_range_put(struct drm_gpusvm_range *range);
 
-bool drm_gpusvm_range_pages_valid(struct drm_gpusvm *gpusvm,
-				  struct drm_gpusvm_range *range);
-
-int drm_gpusvm_range_get_pages(struct drm_gpusvm *gpusvm,
-			       struct drm_gpusvm_range *range,
-			       const struct drm_gpusvm_ctx *ctx);
-
-void drm_gpusvm_range_unmap_pages(struct drm_gpusvm *gpusvm,
-				  struct drm_gpusvm_range *range,
-				  const struct drm_gpusvm_ctx *ctx);
+bool drm_gpusvm_pages_valid(struct drm_gpusvm *gpusvm,
+			    struct drm_gpusvm_pages *svm_pages);
 
 bool drm_gpusvm_has_mapping(struct drm_gpusvm *gpusvm, unsigned long start,
 			    unsigned long end);
@@ -306,10 +345,13 @@ drm_gpusvm_range_find(struct drm_gpusvm_notifier *notifier, unsigned long start,
 		      unsigned long end);
 
 void drm_gpusvm_range_set_unmapped(struct drm_gpusvm_range *range,
+				   struct drm_gpusvm_pages *pages,
+				   unsigned int pages_count,
 				   const struct mmu_notifier_range *mmu_range);
 
 int drm_gpusvm_get_pages(struct drm_gpusvm *gpusvm,
 			 struct drm_gpusvm_pages *svm_pages,
+			 unsigned int num_pages,
 			 struct mm_struct *mm,
 			 struct mmu_interval_notifier *notifier,
 			 unsigned long pages_start, unsigned long pages_end,
@@ -323,6 +365,95 @@ void drm_gpusvm_unmap_pages(struct drm_gpusvm *gpusvm,
 void drm_gpusvm_free_pages(struct drm_gpusvm *gpusvm,
 			   struct drm_gpusvm_pages *svm_pages,
 			   unsigned long npages);
+
+/**
+ * drm_gpusvm_init_pages() - Initialize a freshly allocated drm_gpusvm_pages
+ * @svm_pages: Pointer to the drm_gpusvm_pages to initialize.
+ * @drm: The DRM device that will own DMA mappings for this pages object.
+ *
+ * Drivers that embed one or more drm_gpusvm_pages in their own range
+ * structure must call this once on each pages instance after allocation,
+ * before the first drm_gpusvm_get_pages() / unmap / free.
+ */
+static inline void drm_gpusvm_init_pages(struct drm_gpusvm_pages *svm_pages,
+					 struct drm_device *drm)
+{
+	memset(svm_pages, 0, sizeof(*svm_pages));
+	svm_pages->drm = drm;
+	svm_pages->notifier_seq = LONG_MAX;
+}
+
+/**
+ * drm_gpusvm_pages_first_dma() - Resolve the device address array
+ * @svm_pages: Pointer to the drm_gpusvm_pages.
+ * @contiguous: Where to store whether one entry spans the whole range, or NULL
+ *
+ * drm_gpusvm_pages use unions to optimize the storage of DMA addresses,
+ * this function abstracts the access to the first device address. The driver
+ * should use this helper instead of reading dma_addr directly to prevent
+ * array out of bounds access.
+ *
+ * @contiguous comes from the same read of the flags as the array itself, so a
+ * caller cannot see the two disagree and walk past that single entry into the
+ * fields behind it. When it is set the length comes from the range rather than
+ * from the order. The order still states what one PTE may cover: the range
+ * length for a huge page, PAGE_SIZE for an IOVA mapped range of single pages.
+ *
+ * Only get_pages() and the free path switch between the two union members.
+ * Both hold the notifier lock for read, so taking that lock does not stop
+ * them; callers need the driver lock that does, which every reader of the
+ * addresses holds anyway. The notifier never touches the union, so the
+ * pointer returned here stays good and can then be used under the notifier
+ * lock.
+ *
+ * Return: Pointer to the first device address, NULL if none is populated.
+ */
+static inline const struct drm_pagemap_addr *
+drm_gpusvm_pages_first_dma(const struct drm_gpusvm_pages *svm_pages,
+			   bool *contiguous)
+{
+	struct drm_gpusvm_pages_flags flags = {
+		/* READ_ONCE pairs with the WRITE_ONCE of the flag writers */
+		.__flags = READ_ONCE(svm_pages->flags.__flags),
+	};
+
+	if (contiguous)
+		*contiguous = flags.inline_dma_mapping;
+
+	if (flags.inline_dma_mapping)
+		return &svm_pages->inline_addr;
+
+	return READ_ONCE(svm_pages->dma_addr);
+}
+
+/**
+ * enum drm_gpusvm_scan_result - Scan result from the drm_gpusvm_scan_mm() function.
+ * @DRM_GPUSVM_SCAN_UNPOPULATED: At least one page was not present or inaccessible.
+ * @DRM_GPUSVM_SCAN_EQUAL: All pages belong to the struct dev_pagemap indicated as
+ * the @pagemap argument to the drm_gpusvm_scan_mm() function.
+ * @DRM_GPUSVM_SCAN_OTHER: All pages belong to exactly one dev_pagemap, which is
+ * *NOT* the @pagemap argument to the drm_gpusvm_scan_mm(). All pages belong to
+ * the same device private owner.
+ * @DRM_GPUSVM_SCAN_SYSTEM: All pages are present and system pages.
+ * @DRM_GPUSVM_SCAN_MIXED_DEVICE: All pages are device pages and belong to at least
+ * two different struct dev_pagemaps. All pages belong to the same device private
+ * owner.
+ * @DRM_GPUSVM_SCAN_MIXED: Pages are present and are a mix of system pages
+ * and device-private pages. All device-private pages belong to the same device
+ * private owner.
+ */
+enum drm_gpusvm_scan_result {
+	DRM_GPUSVM_SCAN_UNPOPULATED,
+	DRM_GPUSVM_SCAN_EQUAL,
+	DRM_GPUSVM_SCAN_OTHER,
+	DRM_GPUSVM_SCAN_SYSTEM,
+	DRM_GPUSVM_SCAN_MIXED_DEVICE,
+	DRM_GPUSVM_SCAN_MIXED,
+};
+
+enum drm_gpusvm_scan_result drm_gpusvm_scan_mm(struct drm_gpusvm_range *range,
+					       void *dev_private_owner,
+					       const struct dev_pagemap *pagemap);
 
 #ifdef CONFIG_LOCKDEP
 /**

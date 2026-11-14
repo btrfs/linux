@@ -72,7 +72,7 @@ static const int stts751_intervals[] = {
 };
 
 static const struct i2c_device_id stts751_id[] = {
-	{ "stts751" },
+	{ .name = "stts751" },
 	{ }
 };
 
@@ -768,7 +768,7 @@ static int stts751_probe(struct i2c_client *client)
 	bool smbus_nto;
 	int rev_id;
 
-	priv = devm_kzalloc(&client->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&client->dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

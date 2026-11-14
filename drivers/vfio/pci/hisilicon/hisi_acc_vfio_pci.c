@@ -16,6 +16,9 @@
 
 #include "hisi_acc_vfio_pci.h"
 
+VFIO_PCI_CORE_DEFINE_CALLBACKS(hisi_acc_vf, struct hisi_acc_vf_core_device,
+			       core_device)
+
 /* Return 0 on VM acc device ready, -ETIMEDOUT hardware timeout */
 static int qm_wait_dev_not_ready(struct hisi_qm *qm)
 {
@@ -81,13 +84,10 @@ static int qm_get_vft(struct hisi_qm *qm, u32 *base)
 	u32 qp_num;
 	int ret;
 
-	ret = hisi_qm_mb(qm, QM_MB_CMD_SQC_VFT_V2, 0, 0, 1);
+	ret = hisi_qm_mb_read(qm, &sqc_vft, QM_MB_CMD_SQC_VFT_V2, 0);
 	if (ret)
 		return ret;
 
-	sqc_vft = readl(qm->io_base + QM_MB_CMD_DATA_ADDR_L) |
-		  ((u64)readl(qm->io_base + QM_MB_CMD_DATA_ADDR_H) <<
-		  QM_XQC_ADDR_OFFSET);
 	*base = QM_SQC_VFT_BASE_MASK_V2 & (sqc_vft >> QM_SQC_VFT_BASE_SHIFT_V2);
 	qp_num = (QM_SQC_VFT_NUM_MASK_V2 &
 		  (sqc_vft >> QM_SQC_VFT_NUM_SHIFT_V2)) + 1;
@@ -95,39 +95,25 @@ static int qm_get_vft(struct hisi_qm *qm, u32 *base)
 	return qp_num;
 }
 
-static int qm_get_sqc(struct hisi_qm *qm, u64 *addr)
+static void qm_xqc_reg_offsets(struct hisi_qm *qm,
+			       u32 *eqc_addr, u32 *aeqc_addr)
 {
-	int ret;
+	struct hisi_acc_vf_core_device *hisi_acc_vdev =
+		container_of(qm, struct hisi_acc_vf_core_device, vf_qm);
 
-	ret = hisi_qm_mb(qm, QM_MB_CMD_SQC_BT, 0, 0, 1);
-	if (ret)
-		return ret;
-
-	*addr = readl(qm->io_base + QM_MB_CMD_DATA_ADDR_L) |
-		  ((u64)readl(qm->io_base + QM_MB_CMD_DATA_ADDR_H) <<
-		  QM_XQC_ADDR_OFFSET);
-
-	return 0;
-}
-
-static int qm_get_cqc(struct hisi_qm *qm, u64 *addr)
-{
-	int ret;
-
-	ret = hisi_qm_mb(qm, QM_MB_CMD_CQC_BT, 0, 0, 1);
-	if (ret)
-		return ret;
-
-	*addr = readl(qm->io_base + QM_MB_CMD_DATA_ADDR_L) |
-		  ((u64)readl(qm->io_base + QM_MB_CMD_DATA_ADDR_H) <<
-		  QM_XQC_ADDR_OFFSET);
-
-	return 0;
+	if (hisi_acc_vdev->drv_mode == HW_ACC_MIG_VF_CTRL) {
+		*eqc_addr = QM_EQC_VF_DW0;
+		*aeqc_addr = QM_AEQC_VF_DW0;
+	} else {
+		*eqc_addr = QM_EQC_PF_DW0;
+		*aeqc_addr = QM_AEQC_PF_DW0;
+	}
 }
 
 static int qm_get_regs(struct hisi_qm *qm, struct acc_vf_data *vf_data)
 {
 	struct device *dev = &qm->pdev->dev;
+	u32 eqc_addr, aeqc_addr;
 	int ret;
 
 	ret = qm_read_regs(qm, QM_VF_AEQ_INT_MASK, &vf_data->aeq_int_mask, 1);
@@ -167,15 +153,16 @@ static int qm_get_regs(struct hisi_qm *qm, struct acc_vf_data *vf_data)
 		return ret;
 	}
 
+	qm_xqc_reg_offsets(qm, &eqc_addr, &aeqc_addr);
 	/* QM_EQC_DW has 7 regs */
-	ret = qm_read_regs(qm, QM_EQC_DW0, vf_data->qm_eqc_dw, 7);
+	ret = qm_read_regs(qm, eqc_addr, vf_data->qm_eqc_dw, 7);
 	if (ret) {
 		dev_err(dev, "failed to read QM_EQC_DW\n");
 		return ret;
 	}
 
 	/* QM_AEQC_DW has 7 regs */
-	ret = qm_read_regs(qm, QM_AEQC_DW0, vf_data->qm_aeqc_dw, 7);
+	ret = qm_read_regs(qm, aeqc_addr, vf_data->qm_aeqc_dw, 7);
 	if (ret) {
 		dev_err(dev, "failed to read QM_AEQC_DW\n");
 		return ret;
@@ -187,6 +174,7 @@ static int qm_get_regs(struct hisi_qm *qm, struct acc_vf_data *vf_data)
 static int qm_set_regs(struct hisi_qm *qm, struct acc_vf_data *vf_data)
 {
 	struct device *dev = &qm->pdev->dev;
+	u32 eqc_addr, aeqc_addr;
 	int ret;
 
 	/* Check VF state */
@@ -239,15 +227,16 @@ static int qm_set_regs(struct hisi_qm *qm, struct acc_vf_data *vf_data)
 		return ret;
 	}
 
+	qm_xqc_reg_offsets(qm, &eqc_addr, &aeqc_addr);
 	/* QM_EQC_DW has 7 regs */
-	ret = qm_write_regs(qm, QM_EQC_DW0, vf_data->qm_eqc_dw, 7);
+	ret = qm_write_regs(qm, eqc_addr, vf_data->qm_eqc_dw, 7);
 	if (ret) {
 		dev_err(dev, "failed to write QM_EQC_DW\n");
 		return ret;
 	}
 
 	/* QM_AEQC_DW has 7 regs */
-	ret = qm_write_regs(qm, QM_AEQC_DW0, vf_data->qm_aeqc_dw, 7);
+	ret = qm_write_regs(qm, aeqc_addr, vf_data->qm_aeqc_dw, 7);
 	if (ret) {
 		dev_err(dev, "failed to write QM_AEQC_DW\n");
 		return ret;
@@ -407,7 +396,7 @@ static int vf_qm_check_match(struct hisi_acc_vf_core_device *hisi_acc_vdev,
 	ret = qm_get_vft(vf_qm, &vf_qm->qp_base);
 	if (ret <= 0) {
 		dev_err(dev, "failed to get vft qp nums\n");
-		return ret;
+		return ret < 0 ? ret : -EINVAL;
 	}
 
 	if (ret != vf_data->qp_num) {
@@ -556,13 +545,13 @@ static int vf_qm_read_data(struct hisi_qm *vf_qm, struct acc_vf_data *vf_data)
 	vf_data->aeqe_dma |= vf_data->qm_aeqc_dw[QM_XQC_ADDR_LOW];
 
 	/* Through SQC_BT/CQC_BT to get sqc and cqc address */
-	ret = qm_get_sqc(vf_qm, &vf_data->sqc_dma);
+	ret = hisi_qm_mb_read(vf_qm, &vf_data->sqc_dma, QM_MB_CMD_SQC_BT, 0);
 	if (ret) {
 		dev_err(dev, "failed to read SQC addr!\n");
 		return ret;
 	}
 
-	ret = qm_get_cqc(vf_qm, &vf_data->cqc_dma);
+	ret = hisi_qm_mb_read(vf_qm, &vf_data->cqc_dma, QM_MB_CMD_CQC_BT, 0);
 	if (ret) {
 		dev_err(dev, "failed to read CQC addr!\n");
 		return ret;
@@ -602,10 +591,7 @@ static int vf_qm_state_save(struct hisi_acc_vf_core_device *hisi_acc_vdev,
 
 static struct hisi_acc_vf_core_device *hisi_acc_drvdata(struct pci_dev *pdev)
 {
-	struct vfio_pci_core_device *core_device = dev_get_drvdata(&pdev->dev);
-
-	return container_of(core_device, struct hisi_acc_vf_core_device,
-			    core_device);
+	return pci_get_drvdata(pdev);
 }
 
 /* Check the PF's RAS state and Function INT state */
@@ -812,7 +798,7 @@ hisi_acc_vf_pci_resume(struct hisi_acc_vf_core_device *hisi_acc_vdev)
 {
 	struct hisi_acc_vf_migration_file *migf;
 
-	migf = kzalloc(sizeof(*migf), GFP_KERNEL_ACCOUNT);
+	migf = kzalloc_obj(*migf, GFP_KERNEL_ACCOUNT);
 	if (!migf)
 		return ERR_PTR(-ENOMEM);
 
@@ -838,18 +824,12 @@ static long hisi_acc_vf_precopy_ioctl(struct file *filp,
 	struct hisi_acc_vf_core_device *hisi_acc_vdev = migf->hisi_acc_vdev;
 	loff_t *pos = &filp->f_pos;
 	struct vfio_precopy_info info;
-	unsigned long minsz;
 	int ret;
 
-	if (cmd != VFIO_MIG_GET_PRECOPY_INFO)
-		return -ENOTTY;
-
-	minsz = offsetofend(struct vfio_precopy_info, dirty_bytes);
-
-	if (copy_from_user(&info, (void __user *)arg, minsz))
-		return -EFAULT;
-	if (info.argsz < minsz)
-		return -EINVAL;
+	ret = vfio_check_precopy_ioctl(&hisi_acc_vdev->core_device.vdev, cmd,
+				       arg, &info);
+	if (ret)
+		return ret;
 
 	mutex_lock(&hisi_acc_vdev->state_mutex);
 	if (hisi_acc_vdev->mig_state != VFIO_DEVICE_STATE_PRE_COPY) {
@@ -874,7 +854,8 @@ static long hisi_acc_vf_precopy_ioctl(struct file *filp,
 	mutex_unlock(&migf->lock);
 	mutex_unlock(&hisi_acc_vdev->state_mutex);
 
-	return copy_to_user((void __user *)arg, &info, minsz) ? -EFAULT : 0;
+	return copy_to_user((void __user *)arg, &info,
+		offsetofend(struct vfio_precopy_info, dirty_bytes)) ? -EFAULT : 0;
 out:
 	mutex_unlock(&migf->lock);
 	mutex_unlock(&hisi_acc_vdev->state_mutex);
@@ -934,7 +915,7 @@ hisi_acc_open_saving_migf(struct hisi_acc_vf_core_device *hisi_acc_vdev)
 	struct hisi_acc_vf_migration_file *migf;
 	int ret;
 
-	migf = kzalloc(sizeof(*migf), GFP_KERNEL_ACCOUNT);
+	migf = kzalloc_obj(*migf, GFP_KERNEL_ACCOUNT);
 	if (!migf)
 		return ERR_PTR(-ENOMEM);
 
@@ -1169,13 +1150,39 @@ hisi_acc_vfio_pci_get_device_state(struct vfio_device *vdev,
 	return 0;
 }
 
+static void hisi_acc_vf_pci_reset_prepare(struct pci_dev *pdev)
+{
+	struct hisi_acc_vf_core_device *hisi_acc_vdev = hisi_acc_drvdata(pdev);
+	struct hisi_qm *qm = hisi_acc_vdev->pf_qm;
+	u32 delay = 0;
+
+	if (!hisi_acc_vdev->core_device.vdev.mig_ops)
+		return;
+
+	/* All reset requests need to be queued for processing */
+	while (test_and_set_bit(QM_RESETTING, &qm->misc_ctl)) {
+		msleep(1);
+		if (++delay > QM_RESET_WAIT_TIMEOUT) {
+			dev_err(&qm->pdev->dev, "reset prepare failed\n");
+			return;
+		}
+	}
+
+	hisi_acc_vdev->set_reset_flag = true;
+}
+
 static void hisi_acc_vf_pci_aer_reset_done(struct pci_dev *pdev)
 {
 	struct hisi_acc_vf_core_device *hisi_acc_vdev = hisi_acc_drvdata(pdev);
+	struct hisi_qm *qm = hisi_acc_vdev->pf_qm;
 
-	if (hisi_acc_vdev->core_device.vdev.migration_flags !=
-				VFIO_MIGRATION_STOP_COPY)
+	if (!hisi_acc_vdev->core_device.vdev.mig_ops)
 		return;
+
+	if (hisi_acc_vdev->set_reset_flag) {
+		clear_bit(QM_RESETTING, &qm->misc_ctl);
+		hisi_acc_vdev->set_reset_flag = false;
+	}
 
 	mutex_lock(&hisi_acc_vdev->state_mutex);
 	hisi_acc_vf_reset(hisi_acc_vdev);
@@ -1186,34 +1193,45 @@ static int hisi_acc_vf_qm_init(struct hisi_acc_vf_core_device *hisi_acc_vdev)
 {
 	struct vfio_pci_core_device *vdev = &hisi_acc_vdev->core_device;
 	struct hisi_qm *vf_qm = &hisi_acc_vdev->vf_qm;
+	struct hisi_qm *pf_qm = hisi_acc_vdev->pf_qm;
 	struct pci_dev *vf_dev = vdev->pdev;
 
-	/*
-	 * ACC VF dev BAR2 region consists of both functional register space
-	 * and migration control register space. For migration to work, we
-	 * need access to both. Hence, we map the entire BAR2 region here.
-	 * But unnecessarily exposing the migration BAR region to the Guest
-	 * has the potential to prevent/corrupt the Guest migration. Hence,
-	 * we restrict access to the migration control space from
-	 * Guest(Please see mmap/ioctl/read/write override functions).
-	 *
-	 * Please note that it is OK to expose the entire VF BAR if migration
-	 * is not supported or required as this cannot affect the ACC PF
-	 * configurations.
-	 *
-	 * Also the HiSilicon ACC VF devices supported by this driver on
-	 * HiSilicon hardware platforms are integrated end point devices
-	 * and the platform lacks the capability to perform any PCIe P2P
-	 * between these devices.
-	 */
+	if (hisi_acc_vdev->drv_mode == HW_ACC_MIG_PF_CTRL) {
+		/*
+		 * On hardware platforms greater than QM_HW_V3, the migration function
+		 * register is placed in the BAR2 configuration region of the PF,
+		 * and each VF device occupies 8KB of configuration space.
+		 */
+		vf_qm->io_base = pf_qm->io_base + QM_MIG_REGION_OFFSET +
+				 hisi_acc_vdev->vf_id * QM_MIG_REGION_SIZE;
+	} else {
+		/*
+		 * ACC VF dev BAR2 region consists of both functional register space
+		 * and migration control register space. For migration to work, we
+		 * need access to both. Hence, we map the entire BAR2 region here.
+		 * But unnecessarily exposing the migration BAR region to the Guest
+		 * has the potential to prevent/corrupt the Guest migration. Hence,
+		 * we restrict access to the migration control space from
+		 * Guest(Please see mmap/ioctl/read/write override functions).
+		 *
+		 * Please note that it is OK to expose the entire VF BAR if migration
+		 * is not supported or required as this cannot affect the ACC PF
+		 * configurations.
+		 *
+		 * Also the HiSilicon ACC VF devices supported by this driver on
+		 * HiSilicon hardware platforms are integrated end point devices
+		 * and the platform lacks the capability to perform any PCIe P2P
+		 * between these devices.
+		 */
 
-	vf_qm->io_base =
-		ioremap(pci_resource_start(vf_dev, VFIO_PCI_BAR2_REGION_INDEX),
-			pci_resource_len(vf_dev, VFIO_PCI_BAR2_REGION_INDEX));
-	if (!vf_qm->io_base)
-		return -EIO;
-
+		vf_qm->io_base =
+			ioremap(pci_resource_start(vf_dev, VFIO_PCI_BAR2_REGION_INDEX),
+				pci_resource_len(vf_dev, VFIO_PCI_BAR2_REGION_INDEX));
+		if (!vf_qm->io_base)
+			return -EIO;
+	}
 	vf_qm->fun_type = QM_HW_VF;
+	vf_qm->ver = pf_qm->ver;
 	vf_qm->pdev = vf_dev;
 	mutex_init(&vf_qm->mailbox_lock);
 
@@ -1250,6 +1268,28 @@ static struct hisi_qm *hisi_acc_get_pf_qm(struct pci_dev *pdev)
 	return !IS_ERR(pf_qm) ? pf_qm : NULL;
 }
 
+static size_t hisi_acc_get_resource_len(struct vfio_pci_core_device *vdev,
+					unsigned int index)
+{
+	struct hisi_acc_vf_core_device *hisi_acc_vdev =
+			hisi_acc_drvdata(vdev->pdev);
+
+	/*
+	 * On the old HW_ACC_MIG_VF_CTRL mode device, the ACC VF device
+	 * BAR2 region encompasses both functional register space
+	 * and migration control register space.
+	 * only the functional region should be report to Guest.
+	 */
+	if (hisi_acc_vdev->drv_mode == HW_ACC_MIG_VF_CTRL)
+		return (pci_resource_len(vdev->pdev, index) >> 1);
+	/*
+	 * On the new HW device, the migration control register
+	 * has been moved to the PF device BAR2 region.
+	 * The VF device BAR2 is entirely functional register space.
+	 */
+	return pci_resource_len(vdev->pdev, index);
+}
+
 static int hisi_acc_pci_rw_access_check(struct vfio_device *core_vdev,
 					size_t count, loff_t *ppos,
 					size_t *new_count)
@@ -1260,8 +1300,9 @@ static int hisi_acc_pci_rw_access_check(struct vfio_device *core_vdev,
 
 	if (index == VFIO_PCI_BAR2_REGION_INDEX) {
 		loff_t pos = *ppos & VFIO_PCI_OFFSET_MASK;
-		resource_size_t end = pci_resource_len(vdev->pdev, index) / 2;
+		resource_size_t end;
 
+		end = hisi_acc_get_resource_len(vdev, index);
 		/* Check if access is for migration control region */
 		if (pos >= end)
 			return -EINVAL;
@@ -1282,8 +1323,9 @@ static int hisi_acc_vfio_pci_mmap(struct vfio_device *core_vdev,
 	index = vma->vm_pgoff >> (VFIO_PCI_OFFSET_SHIFT - PAGE_SHIFT);
 	if (index == VFIO_PCI_BAR2_REGION_INDEX) {
 		u64 req_len, pgoff, req_start;
-		resource_size_t end = pci_resource_len(vdev->pdev, index) / 2;
+		resource_size_t end;
 
+		end = hisi_acc_get_resource_len(vdev, index);
 		req_len = vma->vm_end - vma->vm_start;
 		pgoff = vma->vm_pgoff &
 			((1U << (VFIO_PCI_OFFSET_SHIFT - PAGE_SHIFT)) - 1);
@@ -1324,43 +1366,23 @@ static ssize_t hisi_acc_vfio_pci_read(struct vfio_device *core_vdev,
 	return vfio_pci_core_read(core_vdev, buf, new_count, ppos);
 }
 
-static long hisi_acc_vfio_pci_ioctl(struct vfio_device *core_vdev, unsigned int cmd,
-				    unsigned long arg)
+static int hisi_acc_vfio_ioctl_get_region(struct vfio_device *core_vdev,
+					  struct vfio_region_info *info,
+					  struct vfio_info_cap *caps)
 {
-	if (cmd == VFIO_DEVICE_GET_REGION_INFO) {
-		struct vfio_pci_core_device *vdev =
-			container_of(core_vdev, struct vfio_pci_core_device, vdev);
-		struct pci_dev *pdev = vdev->pdev;
-		struct vfio_region_info info;
-		unsigned long minsz;
+	struct vfio_pci_core_device *vdev =
+		container_of(core_vdev, struct vfio_pci_core_device, vdev);
 
-		minsz = offsetofend(struct vfio_region_info, offset);
+	if (info->index != VFIO_PCI_BAR2_REGION_INDEX)
+		return vfio_pci_ioctl_get_region_info(core_vdev, info, caps);
 
-		if (copy_from_user(&info, (void __user *)arg, minsz))
-			return -EFAULT;
+	info->offset = VFIO_PCI_INDEX_TO_OFFSET(info->index);
 
-		if (info.argsz < minsz)
-			return -EINVAL;
+	info->size = hisi_acc_get_resource_len(vdev, info->index);
 
-		if (info.index == VFIO_PCI_BAR2_REGION_INDEX) {
-			info.offset = VFIO_PCI_INDEX_TO_OFFSET(info.index);
-
-			/*
-			 * ACC VF dev BAR2 region consists of both functional
-			 * register space and migration control register space.
-			 * Report only the functional region to Guest.
-			 */
-			info.size = pci_resource_len(pdev, info.index) / 2;
-
-			info.flags = VFIO_REGION_INFO_FLAG_READ |
-					VFIO_REGION_INFO_FLAG_WRITE |
-					VFIO_REGION_INFO_FLAG_MMAP;
-
-			return copy_to_user((void __user *)arg, &info, minsz) ?
-					    -EFAULT : 0;
-		}
-	}
-	return vfio_pci_core_ioctl(core_vdev, cmd, arg);
+	info->flags = VFIO_REGION_INFO_FLAG_READ | VFIO_REGION_INFO_FLAG_WRITE |
+		     VFIO_REGION_INFO_FLAG_MMAP;
+	return 0;
 }
 
 static int hisi_acc_vf_debug_check(struct seq_file *seq, struct vfio_device *vdev)
@@ -1391,9 +1413,8 @@ static int hisi_acc_vf_debug_check(struct seq_file *seq, struct vfio_device *vde
 static int hisi_acc_vf_debug_cmd(struct seq_file *seq, void *data)
 {
 	struct device *vf_dev = seq->private;
-	struct vfio_pci_core_device *core_device = dev_get_drvdata(vf_dev);
-	struct vfio_device *vdev = &core_device->vdev;
-	struct hisi_acc_vf_core_device *hisi_acc_vdev = hisi_acc_get_vf_dev(vdev);
+	struct hisi_acc_vf_core_device *hisi_acc_vdev = dev_get_drvdata(vf_dev);
+	struct vfio_device *vdev = &hisi_acc_vdev->core_device.vdev;
 	struct hisi_qm *vf_qm = &hisi_acc_vdev->vf_qm;
 	u64 value;
 	int ret;
@@ -1420,9 +1441,8 @@ static int hisi_acc_vf_debug_cmd(struct seq_file *seq, void *data)
 static int hisi_acc_vf_dev_read(struct seq_file *seq, void *data)
 {
 	struct device *vf_dev = seq->private;
-	struct vfio_pci_core_device *core_device = dev_get_drvdata(vf_dev);
-	struct vfio_device *vdev = &core_device->vdev;
-	struct hisi_acc_vf_core_device *hisi_acc_vdev = hisi_acc_get_vf_dev(vdev);
+	struct hisi_acc_vf_core_device *hisi_acc_vdev = dev_get_drvdata(vf_dev);
+	struct vfio_device *vdev = &hisi_acc_vdev->core_device.vdev;
 	size_t vf_data_sz = offsetofend(struct acc_vf_data, padding);
 	struct acc_vf_data *vf_data;
 	int ret;
@@ -1435,7 +1455,7 @@ static int hisi_acc_vf_dev_read(struct seq_file *seq, void *data)
 	}
 
 	mutex_lock(&hisi_acc_vdev->state_mutex);
-	vf_data = kzalloc(sizeof(*vf_data), GFP_KERNEL);
+	vf_data = kzalloc_obj(*vf_data);
 	if (!vf_data) {
 		ret = -ENOMEM;
 		goto mutex_release;
@@ -1467,9 +1487,7 @@ mutex_release:
 static int hisi_acc_vf_migf_read(struct seq_file *seq, void *data)
 {
 	struct device *vf_dev = seq->private;
-	struct vfio_pci_core_device *core_device = dev_get_drvdata(vf_dev);
-	struct vfio_device *vdev = &core_device->vdev;
-	struct hisi_acc_vf_core_device *hisi_acc_vdev = hisi_acc_get_vf_dev(vdev);
+	struct hisi_acc_vf_core_device *hisi_acc_vdev = dev_get_drvdata(vf_dev);
 	size_t vf_data_sz = offsetofend(struct acc_vf_data, padding);
 	struct hisi_acc_vf_migration_file *debug_migf = hisi_acc_vdev->debug_migf;
 
@@ -1506,6 +1524,7 @@ static int hisi_acc_vfio_pci_open_device(struct vfio_device *core_vdev)
 		}
 		hisi_acc_vdev->mig_state = VFIO_DEVICE_STATE_RUNNING;
 		hisi_acc_vdev->dev_opened = true;
+		hisi_acc_vdev->match_done = 0;
 		mutex_unlock(&hisi_acc_vdev->open_mutex);
 	}
 
@@ -1521,7 +1540,8 @@ static void hisi_acc_vfio_pci_close_device(struct vfio_device *core_vdev)
 	hisi_acc_vf_disable_fds(hisi_acc_vdev);
 	mutex_lock(&hisi_acc_vdev->open_mutex);
 	hisi_acc_vdev->dev_opened = false;
-	iounmap(vf_qm->io_base);
+	if (hisi_acc_vdev->drv_mode == HW_ACC_MIG_VF_CTRL)
+		iounmap(vf_qm->io_base);
 	mutex_unlock(&hisi_acc_vdev->open_mutex);
 	vfio_pci_core_close_device(core_vdev);
 }
@@ -1557,13 +1577,15 @@ static const struct vfio_device_ops hisi_acc_vfio_pci_migrn_ops = {
 	.release = vfio_pci_core_release_dev,
 	.open_device = hisi_acc_vfio_pci_open_device,
 	.close_device = hisi_acc_vfio_pci_close_device,
-	.ioctl = hisi_acc_vfio_pci_ioctl,
+	.ioctl = vfio_pci_core_ioctl,
+	.get_region_info_caps = hisi_acc_vfio_ioctl_get_region,
 	.device_feature = vfio_pci_core_ioctl_feature,
 	.read = hisi_acc_vfio_pci_read,
 	.write = hisi_acc_vfio_pci_write,
 	.mmap = hisi_acc_vfio_pci_mmap,
 	.request = vfio_pci_core_request,
 	.match = vfio_pci_core_match,
+	.match_token_uuid = vfio_pci_core_match_token_uuid,
 	.bind_iommufd = vfio_iommufd_physical_bind,
 	.unbind_iommufd = vfio_iommufd_physical_unbind,
 	.attach_ioas = vfio_iommufd_physical_attach_ioas,
@@ -1577,6 +1599,7 @@ static const struct vfio_device_ops hisi_acc_vfio_pci_ops = {
 	.open_device = hisi_acc_vfio_pci_open_device,
 	.close_device = vfio_pci_core_close_device,
 	.ioctl = vfio_pci_core_ioctl,
+	.get_region_info_caps = vfio_pci_ioctl_get_region_info,
 	.device_feature = vfio_pci_core_ioctl_feature,
 	.read = vfio_pci_core_read,
 	.write = vfio_pci_core_write,
@@ -1611,7 +1634,7 @@ static void hisi_acc_vfio_debug_init(struct hisi_acc_vf_core_device *hisi_acc_vd
 		return;
 	}
 
-	migf = kzalloc(sizeof(*migf), GFP_KERNEL);
+	migf = kzalloc_obj(*migf);
 	if (!migf) {
 		dput(vfio_dev_migration);
 		return;
@@ -1635,21 +1658,34 @@ static void hisi_acc_vf_debugfs_exit(struct hisi_acc_vf_core_device *hisi_acc_vd
 	hisi_acc_vdev->debug_migf = NULL;
 }
 
+static enum hw_drv_mode hisi_acc_vf_get_drv_mode(struct hisi_qm *pf_qm)
+{
+	u32 val;
+
+	val = readl(pf_qm->io_base + QM_MIG_REGION_SEL);
+	if (pf_qm->ver > QM_HW_V3 && (val & QM_MIG_REGION_EN))
+		return HW_ACC_MIG_PF_CTRL;
+
+	return HW_ACC_MIG_VF_CTRL;
+}
+
 static int hisi_acc_vfio_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	struct hisi_acc_vf_core_device *hisi_acc_vdev;
 	const struct vfio_device_ops *ops = &hisi_acc_vfio_pci_ops;
+	enum hw_drv_mode drv_mode = HW_ACC_MIG_VF_CTRL;
+	resource_size_t func_len;
 	struct hisi_qm *pf_qm;
-	int vf_id;
 	int ret;
 
 	pf_qm = hisi_acc_get_pf_qm(pdev);
 	if (pf_qm && pf_qm->ver >= QM_HW_V3) {
-		vf_id = pci_iov_vf_id(pdev);
-		if (vf_id >= 0)
-			ops = &hisi_acc_vfio_pci_migrn_ops;
+		func_len = pci_resource_len(pdev, VFIO_PCI_BAR2_REGION_INDEX) >> 1;
+		drv_mode = hisi_acc_vf_get_drv_mode(pf_qm);
+		if (drv_mode == HW_ACC_MIG_VF_CTRL && func_len < PAGE_SIZE)
+			pci_warn(pdev, "migration not supported on 64KB pages with QM_HW_V3\n");
 		else
-			pci_warn(pdev, "migration support failed, continue with generic interface\n");
+			ops = &hisi_acc_vfio_pci_migrn_ops;
 	}
 
 	hisi_acc_vdev = vfio_alloc_device(hisi_acc_vf_core_device,
@@ -1657,7 +1693,9 @@ static int hisi_acc_vfio_pci_probe(struct pci_dev *pdev, const struct pci_device
 	if (IS_ERR(hisi_acc_vdev))
 		return PTR_ERR(hisi_acc_vdev);
 
-	dev_set_drvdata(&pdev->dev, &hisi_acc_vdev->core_device);
+	hisi_acc_vdev->drv_mode = drv_mode;
+
+	dev_set_drvdata(&pdev->dev, hisi_acc_vdev);
 	ret = vfio_pci_core_register_device(&hisi_acc_vdev->core_device);
 	if (ret)
 		goto out_put_vdev;
@@ -1689,8 +1727,9 @@ static const struct pci_device_id hisi_acc_vfio_pci_table[] = {
 MODULE_DEVICE_TABLE(pci, hisi_acc_vfio_pci_table);
 
 static const struct pci_error_handlers hisi_acc_vf_err_handlers = {
+	.reset_prepare = hisi_acc_vf_pci_reset_prepare,
 	.reset_done = hisi_acc_vf_pci_aer_reset_done,
-	.error_detected = vfio_pci_core_aer_err_detected,
+	.error_detected = hisi_acc_vf_aer_err_detected,
 };
 
 static struct pci_driver hisi_acc_vfio_pci_driver = {
@@ -1698,6 +1737,7 @@ static struct pci_driver hisi_acc_vfio_pci_driver = {
 	.id_table = hisi_acc_vfio_pci_table,
 	.probe = hisi_acc_vfio_pci_probe,
 	.remove = hisi_acc_vfio_pci_remove,
+	.driver = { .pm = pm_ptr(&hisi_acc_vf_pm_ops) },
 	.err_handler = &hisi_acc_vf_err_handlers,
 	.driver_managed_dma = true,
 };

@@ -88,7 +88,7 @@ static int rcar_gen3_phy_pcie_probe(struct platform_device *pdev)
 	if (IS_ERR(base))
 		return PTR_ERR(base);
 
-	phy = devm_kzalloc(dev, sizeof(*phy), GFP_KERNEL);
+	phy = devm_kzalloc_obj(dev, *phy);
 	if (!phy)
 		return -ENOMEM;
 
@@ -128,7 +128,7 @@ error:
 static void rcar_gen3_phy_pcie_remove(struct platform_device *pdev)
 {
 	pm_runtime_disable(&pdev->dev);
-};
+}
 
 static struct platform_driver rcar_gen3_phy_driver = {
 	.driver = {

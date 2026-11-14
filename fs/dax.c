@@ -15,7 +15,6 @@
 #include <linux/memcontrol.h>
 #include <linux/mm.h>
 #include <linux/mutex.h>
-#include <linux/pagevec.h>
 #include <linux/sched.h>
 #include <linux/sched/signal.h>
 #include <linux/uio.h>
@@ -24,7 +23,7 @@
 #include <linux/mmu_notifier.h>
 #include <linux/iomap.h>
 #include <linux/rmap.h>
-#include <asm/pgalloc.h>
+#include <linux/pgalloc.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/fs_dax.h>
@@ -378,6 +377,59 @@ static void dax_folio_make_shared(struct folio *folio)
 	folio->share = 1;
 }
 
+/**
+ * dax_folio_reset_order - Reset a compound DAX folio to order-0 pages
+ * @folio: The folio to reset
+ *
+ * Splits a compound folio back into individual order-0 pages,
+ * clearing compound state and restoring pgmap pointers.
+ *
+ * Returns: the original folio order (0 if already order-0)
+ */
+int dax_folio_reset_order(struct folio *folio)
+{
+	struct dev_pagemap *pgmap = page_pgmap(&folio->page);
+	int order = folio_order(folio);
+
+	/*
+	 * Clear the mapping and the index/share union word. folio->share
+	 * and folio->index occupy the same union in struct folio. For
+	 * non-shared folios (mapping != NULL), the union holds folio->index
+	 * (file page offset); for shared folios (mapping == NULL), it holds
+	 * folio->share (reference count). Either way, we are releasing the
+	 * folio and both fields should be zeroed.
+	 */
+	folio->mapping = NULL;
+	folio->share = 0;
+
+	if (!order) {
+		/*
+		 * Restore pgmap explicitly even for order-0 folios. For the
+		 * dax_folio_put() caller this is a no-op (same value), but
+		 * fsdev_clear_folio_state() may call this on folios that
+		 * were previously compound and need pgmap re-established.
+		 */
+		folio->pgmap = pgmap;
+		return 0;
+	}
+
+	folio_reset_order(folio);
+
+	for (int i = 0; i < (1UL << order); i++) {
+		struct page *page = folio_page(folio, i);
+		struct folio *f = (struct folio *)page;
+
+		ClearPageHead(page);
+		clear_compound_head(page);
+		f->mapping = NULL;
+		f->share = 0;
+		f->pgmap = pgmap;
+	}
+
+	return order;
+}
+EXPORT_SYMBOL_GPL(dax_folio_reset_order);
+
 static inline unsigned long dax_folio_put(struct folio *folio)
 {
 	unsigned long ref;
@@ -391,28 +443,13 @@ static inline unsigned long dax_folio_put(struct folio *folio)
 	if (ref)
 		return ref;
 
-	folio->mapping = NULL;
-	order = folio_order(folio);
-	if (!order)
-		return 0;
-	folio_reset_order(folio);
+	order = dax_folio_reset_order(folio);
 
+	/* Debug check: verify refcounts are zero for all sub-folios */
 	for (i = 0; i < (1UL << order); i++) {
-		struct dev_pagemap *pgmap = page_pgmap(&folio->page);
 		struct page *page = folio_page(folio, i);
-		struct folio *new_folio = (struct folio *)page;
 
-		ClearPageHead(page);
-		clear_compound_head(page);
-
-		new_folio->mapping = NULL;
-		/*
-		 * Reset pgmap which was over-written by
-		 * prep_compound_page().
-		 */
-		new_folio->pgmap = pgmap;
-		new_folio->share = 0;
-		WARN_ON_ONCE(folio_ref_count(new_folio));
+		WARN_ON_ONCE(folio_ref_count((struct folio *)page));
 	}
 
 	return ref;
@@ -432,8 +469,6 @@ static void dax_folio_init(void *entry)
 
 	if (order > 0) {
 		prep_compound_page(&folio->page, order);
-		if (order > 1)
-			INIT_LIST_HEAD(&folio->_deferred_list);
 		WARN_ON_ONCE(folio_ref_count(folio));
 	}
 }
@@ -443,11 +478,12 @@ static void dax_associate_entry(void *entry, struct address_space *mapping,
 				unsigned long address, bool shared)
 {
 	unsigned long size = dax_entry_size(entry), index;
-	struct folio *folio = dax_to_folio(entry);
+	struct folio *folio;
 
 	if (dax_is_zero_entry(entry) || dax_is_empty_entry(entry))
 		return;
 
+	folio = dax_to_folio(entry);
 	index = linear_page_index(vma, address & ~(size - 1));
 	if (shared && (folio->mapping || dax_folio_is_shared(folio))) {
 		if (folio->mapping)
@@ -468,21 +504,23 @@ static void dax_associate_entry(void *entry, struct address_space *mapping,
 static void dax_disassociate_entry(void *entry, struct address_space *mapping,
 				bool trunc)
 {
-	struct folio *folio = dax_to_folio(entry);
+	struct folio *folio;
 
 	if (dax_is_zero_entry(entry) || dax_is_empty_entry(entry))
 		return;
 
+	folio = dax_to_folio(entry);
 	dax_folio_put(folio);
 }
 
 static struct page *dax_busy_page(void *entry)
 {
-	struct folio *folio = dax_to_folio(entry);
+	struct folio *folio;
 
 	if (dax_is_zero_entry(entry) || dax_is_empty_entry(entry))
 		return NULL;
 
+	folio = dax_to_folio(entry);
 	if (folio_ref_count(folio) - folio_mapcount(folio))
 		return &folio->page;
 	else
@@ -735,24 +773,23 @@ fallback:
 
 /**
  * dax_layout_busy_page_range - find first pinned page in @mapping
- * @mapping: address space to scan for a page with ref count > 1
+ * @mapping: address space to scan for a pinned page
  * @start: Starting offset. Page containing 'start' is included.
  * @end: End offset. Page containing 'end' is included. If 'end' is LLONG_MAX,
  *       pages from 'start' till the end of file are included.
  *
- * DAX requires ZONE_DEVICE mapped pages. These pages are never
- * 'onlined' to the page allocator so they are considered idle when
- * page->count == 1. A filesystem uses this interface to determine if
- * any page in the mapping is busy, i.e. for DMA, or other
- * get_user_pages() usages.
+ * DAX requires ZONE_DEVICE mapped pages. A page is considered busy when
+ * folio_ref_count(folio) exceeds folio_mapcount(folio). This helper is
+ * used to determine if any page in the mapping is busy, i.e. for DMA,
+ * or other get_user_pages() usages.
  *
  * It is expected that the filesystem is holding locks to block the
  * establishment of new mappings in this address_space. I.e. it expects
- * to be able to run unmap_mapping_range() and subsequently not race
+ * to be able to run unmap_mapping_pages() and subsequently not race
  * mapping_mapped() becoming true.
  */
-struct page *dax_layout_busy_page_range(struct address_space *mapping,
-					loff_t start, loff_t end)
+static struct page *dax_layout_busy_page_range(struct address_space *mapping,
+					       loff_t start, loff_t end)
 {
 	void *entry;
 	unsigned int scanned = 0;
@@ -804,13 +841,6 @@ struct page *dax_layout_busy_page_range(struct address_space *mapping,
 	xas_unlock_irq(&xas);
 	return page;
 }
-EXPORT_SYMBOL_GPL(dax_layout_busy_page_range);
-
-struct page *dax_layout_busy_page(struct address_space *mapping)
-{
-	return dax_layout_busy_page_range(mapping, 0, LLONG_MAX);
-}
-EXPORT_SYMBOL_GPL(dax_layout_busy_page);
 
 static int __dax_invalidate_entry(struct address_space *mapping,
 				  pgoff_t index, bool trunc)
@@ -1164,7 +1194,7 @@ static int dax_writeback_one(struct xa_state *xas, struct dax_device *dax_dev,
 
 	/* Walk all mappings of a given index of a file and writeprotect them */
 	i_mmap_lock_read(mapping);
-	vma_interval_tree_foreach(vma, &mapping->i_mmap, index, end) {
+	mapping_rmap_tree_foreach(vma, mapping, index, end) {
 		pfn_mkclean_range(pfn, count, index, vma);
 		cond_resched();
 	}
@@ -1360,7 +1390,7 @@ static vm_fault_t dax_load_hole(struct xa_state *xas, struct vm_fault *vmf,
 {
 	struct inode *inode = iter->inode;
 	unsigned long vaddr = vmf->address;
-	unsigned long pfn = my_zero_pfn(vaddr);
+	unsigned long pfn = zero_pfn(vaddr);
 	vm_fault_t ret;
 
 	*entry = dax_insert_entry(xas, vmf, iter, *entry, pfn, DAX_ZERO_PAGE);
@@ -1455,7 +1485,7 @@ out_unlock:
 }
 
 int dax_file_unshare(struct inode *inode, loff_t pos, loff_t len,
-		const struct iomap_ops *ops)
+		iomap_iter_next_fn next)
 {
 	struct iomap_iter iter = {
 		.inode		= inode,
@@ -1469,7 +1499,7 @@ int dax_file_unshare(struct inode *inode, loff_t pos, loff_t len,
 		return 0;
 
 	iter.len = min(len, size - pos);
-	while ((ret = iomap_iter(&iter, ops)) > 0)
+	while ((ret = iomap_iter(&iter, next)) > 0)
 		iter.status = dax_unshare_iter(&iter);
 	return ret;
 }
@@ -1507,7 +1537,7 @@ static int dax_zero_iter(struct iomap_iter *iter, bool *did_zero)
 
 	/* already zeroed?  we're done. */
 	if (srcmap->type == IOMAP_HOLE || srcmap->type == IOMAP_UNWRITTEN)
-		return iomap_iter_advance(iter, &length);
+		return iomap_iter_advance(iter, length);
 
 	/*
 	 * invalidate the pages whose sharing state is to be changed
@@ -1536,10 +1566,10 @@ static int dax_zero_iter(struct iomap_iter *iter, bool *did_zero)
 		if (ret < 0)
 			return ret;
 
-		ret = iomap_iter_advance(iter, &length);
+		ret = iomap_iter_advance(iter, length);
 		if (ret)
 			return ret;
-	} while (length > 0);
+	} while ((length = iomap_length(iter)) > 0);
 
 	if (did_zero)
 		*did_zero = true;
@@ -1547,7 +1577,7 @@ static int dax_zero_iter(struct iomap_iter *iter, bool *did_zero)
 }
 
 int dax_zero_range(struct inode *inode, loff_t pos, loff_t len, bool *did_zero,
-		const struct iomap_ops *ops)
+		iomap_iter_next_fn next)
 {
 	struct iomap_iter iter = {
 		.inode		= inode,
@@ -1557,14 +1587,14 @@ int dax_zero_range(struct inode *inode, loff_t pos, loff_t len, bool *did_zero,
 	};
 	int ret;
 
-	while ((ret = iomap_iter(&iter, ops)) > 0)
+	while ((ret = iomap_iter(&iter, next)) > 0)
 		iter.status = dax_zero_iter(&iter, did_zero);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(dax_zero_range);
 
 int dax_truncate_page(struct inode *inode, loff_t pos, bool *did_zero,
-		const struct iomap_ops *ops)
+		iomap_iter_next_fn next)
 {
 	unsigned int blocksize = i_blocksize(inode);
 	unsigned int off = pos & (blocksize - 1);
@@ -1572,7 +1602,7 @@ int dax_truncate_page(struct inode *inode, loff_t pos, bool *did_zero,
 	/* Block boundary? Nothing to do */
 	if (!off)
 		return 0;
-	return dax_zero_range(inode, pos, blocksize - off, did_zero, ops);
+	return dax_zero_range(inode, pos, blocksize - off, did_zero, next);
 }
 EXPORT_SYMBOL_GPL(dax_truncate_page);
 
@@ -1597,7 +1627,7 @@ static int dax_iomap_iter(struct iomap_iter *iomi, struct iov_iter *iter)
 
 		if (iomap->type == IOMAP_HOLE || iomap->type == IOMAP_UNWRITTEN) {
 			done = iov_iter_zero(min(length, end - pos), iter);
-			return iomap_iter_advance(iomi, &done);
+			return iomap_iter_advance(iomi, done);
 		}
 	}
 
@@ -1681,12 +1711,12 @@ static int dax_iomap_iter(struct iomap_iter *iomi, struct iov_iter *iter)
 			xfer = dax_copy_to_iter(dax_dev, pgoff, kaddr,
 					map_len, iter);
 
-		length = xfer;
-		ret = iomap_iter_advance(iomi, &length);
+		ret = iomap_iter_advance(iomi, xfer);
 		if (!ret && xfer == 0)
 			ret = -EFAULT;
 		if (xfer < map_len)
 			break;
+		length = iomap_length(iomi);
 	}
 	dax_read_unlock(id);
 
@@ -1697,7 +1727,8 @@ static int dax_iomap_iter(struct iomap_iter *iomi, struct iov_iter *iter)
  * dax_iomap_rw - Perform I/O to a DAX file
  * @iocb:	The control block for this I/O
  * @iter:	The addresses to do I/O from or to
- * @ops:	iomap ops passed from the file system
+ * @next:	Callback passed from the file system for advancing to next
+ *		iteration
  *
  * This function performs read and write operations to directly mapped
  * persistent memory.  The callers needs to take care of read/write exclusion
@@ -1705,7 +1736,7 @@ static int dax_iomap_iter(struct iomap_iter *iomi, struct iov_iter *iter)
  */
 ssize_t
 dax_iomap_rw(struct kiocb *iocb, struct iov_iter *iter,
-		const struct iomap_ops *ops)
+		iomap_iter_next_fn next)
 {
 	struct iomap_iter iomi = {
 		.inode		= iocb->ki_filp->f_mapping->host,
@@ -1732,7 +1763,7 @@ dax_iomap_rw(struct kiocb *iocb, struct iov_iter *iter,
 	if (iocb->ki_flags & IOCB_NOWAIT)
 		iomi.flags |= IOMAP_NOWAIT;
 
-	while ((ret = iomap_iter(&iomi, ops)) > 0)
+	while ((ret = iomap_iter(&iomi, next)) > 0)
 		iomi.status = dax_iomap_iter(&iomi, iter);
 
 	done = iomi.pos - iocb->ki_pos;
@@ -1860,7 +1891,7 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 }
 
 static vm_fault_t dax_iomap_pte_fault(struct vm_fault *vmf, unsigned long *pfnp,
-			       int *iomap_errp, const struct iomap_ops *ops)
+			       int *iomap_errp, iomap_iter_next_fn next)
 {
 	struct address_space *mapping = vmf->vma->vm_file->f_mapping;
 	XA_STATE(xas, &mapping->i_pages, vmf->pgoff);
@@ -1905,7 +1936,7 @@ static vm_fault_t dax_iomap_pte_fault(struct vm_fault *vmf, unsigned long *pfnp,
 		goto unlock_entry;
 	}
 
-	while ((error = iomap_iter(&iter, ops)) > 0) {
+	while ((error = iomap_iter(&iter, next)) > 0) {
 		if (WARN_ON_ONCE(iomap_length(&iter) < PAGE_SIZE)) {
 			iter.status = -EIO;	/* fs corruption? */
 			continue;
@@ -1919,10 +1950,8 @@ static vm_fault_t dax_iomap_pte_fault(struct vm_fault *vmf, unsigned long *pfnp,
 			ret |= VM_FAULT_MAJOR;
 		}
 
-		if (!(ret & VM_FAULT_ERROR)) {
-			u64 length = PAGE_SIZE;
-			iter.status = iomap_iter_advance(&iter, &length);
-		}
+		if (!(ret & VM_FAULT_ERROR))
+			iter.status = iomap_iter_advance(&iter, PAGE_SIZE);
 	}
 
 	if (iomap_errp)
@@ -1972,7 +2001,7 @@ static bool dax_fault_check_fallback(struct vm_fault *vmf, struct xa_state *xas,
 }
 
 static vm_fault_t dax_iomap_pmd_fault(struct vm_fault *vmf, unsigned long *pfnp,
-			       const struct iomap_ops *ops)
+			       iomap_iter_next_fn next)
 {
 	struct address_space *mapping = vmf->vma->vm_file->f_mapping;
 	XA_STATE_ORDER(xas, &mapping->i_pages, vmf->pgoff, PMD_ORDER);
@@ -2029,15 +2058,13 @@ static vm_fault_t dax_iomap_pmd_fault(struct vm_fault *vmf, unsigned long *pfnp,
 	}
 
 	iter.pos = (loff_t)xas.xa_index << PAGE_SHIFT;
-	while (iomap_iter(&iter, ops) > 0) {
+	while (iomap_iter(&iter, next) > 0) {
 		if (iomap_length(&iter) < PMD_SIZE)
 			continue; /* actually breaks out of the loop */
 
 		ret = dax_fault_iter(vmf, &iter, pfnp, &xas, &entry, true);
-		if (ret != VM_FAULT_FALLBACK) {
-			u64 length = PMD_SIZE;
-			iter.status = iomap_iter_advance(&iter, &length);
-		}
+		if (ret != VM_FAULT_FALLBACK)
+			iter.status = iomap_iter_advance(&iter, PMD_SIZE);
 	}
 
 unlock_entry:
@@ -2053,7 +2080,7 @@ out:
 }
 #else
 static vm_fault_t dax_iomap_pmd_fault(struct vm_fault *vmf, unsigned long *pfnp,
-			       const struct iomap_ops *ops)
+			       iomap_iter_next_fn next)
 {
 	return VM_FAULT_FALLBACK;
 }
@@ -2065,7 +2092,7 @@ static vm_fault_t dax_iomap_pmd_fault(struct vm_fault *vmf, unsigned long *pfnp,
  * @order: Order of the page to fault in
  * @pfnp: PFN to insert for synchronous faults if fsync is required
  * @iomap_errp: Storage for detailed error code in case of error
- * @ops: Iomap ops passed from the file system
+ * @next: The iomap iteration function for the filesystem
  *
  * When a page fault occurs, filesystems may call this helper in
  * their fault handler for DAX files. dax_iomap_fault() assumes the caller
@@ -2074,12 +2101,12 @@ static vm_fault_t dax_iomap_pmd_fault(struct vm_fault *vmf, unsigned long *pfnp,
  */
 vm_fault_t dax_iomap_fault(struct vm_fault *vmf, unsigned int order,
 			unsigned long *pfnp, int *iomap_errp,
-			const struct iomap_ops *ops)
+			iomap_iter_next_fn next)
 {
 	if (order == 0)
-		return dax_iomap_pte_fault(vmf, pfnp, iomap_errp, ops);
+		return dax_iomap_pte_fault(vmf, pfnp, iomap_errp, next);
 	else if (order == PMD_ORDER)
-		return dax_iomap_pmd_fault(vmf, pfnp, ops);
+		return dax_iomap_pmd_fault(vmf, pfnp, next);
 	else
 		return VM_FAULT_FALLBACK;
 }
@@ -2163,8 +2190,8 @@ static int dax_range_compare_iter(struct iomap_iter *it_src,
 	const struct iomap *smap = &it_src->iomap;
 	const struct iomap *dmap = &it_dest->iomap;
 	loff_t pos1 = it_src->pos, pos2 = it_dest->pos;
-	u64 dest_len;
 	void *saddr, *daddr;
+	size_t size1, size2;
 	int id, ret;
 
 	len = min(len, min(smap->length, dmap->length));
@@ -2180,26 +2207,26 @@ static int dax_range_compare_iter(struct iomap_iter *it_src,
 	}
 
 	id = dax_read_lock();
-	ret = dax_iomap_direct_access(smap, pos1, ALIGN(pos1 + len, PAGE_SIZE),
-				      &saddr, NULL);
+	size1 = ALIGN(len + offset_in_page(pos1), PAGE_SIZE);
+	ret = dax_iomap_direct_access(smap, pos1, size1, &saddr, NULL);
 	if (ret < 0)
 		goto out_unlock;
 
-	ret = dax_iomap_direct_access(dmap, pos2, ALIGN(pos2 + len, PAGE_SIZE),
-				      &daddr, NULL);
+	size2 = ALIGN(len + offset_in_page(pos2), PAGE_SIZE);
+	ret = dax_iomap_direct_access(dmap, pos2, size2, &daddr, NULL);
 	if (ret < 0)
 		goto out_unlock;
 
-	*same = !memcmp(saddr, daddr, len);
+	*same = !memcmp(saddr + offset_in_page(pos1),
+			daddr + offset_in_page(pos2), len);
 	if (!*same)
 		len = 0;
 	dax_read_unlock(id);
 
 advance:
-	dest_len = len;
-	ret = iomap_iter_advance(it_src, &len);
+	ret = iomap_iter_advance(it_src, len);
 	if (!ret)
-		ret = iomap_iter_advance(it_dest, &dest_len);
+		ret = iomap_iter_advance(it_dest, len);
 	return ret;
 
 out_unlock:
@@ -2209,7 +2236,7 @@ out_unlock:
 
 int dax_dedupe_file_range_compare(struct inode *src, loff_t srcoff,
 		struct inode *dst, loff_t dstoff, loff_t len, bool *same,
-		const struct iomap_ops *ops)
+		iomap_iter_next_fn next)
 {
 	struct iomap_iter src_iter = {
 		.inode		= src,
@@ -2225,12 +2252,12 @@ int dax_dedupe_file_range_compare(struct inode *src, loff_t srcoff,
 	};
 	int ret, status;
 
-	while ((ret = iomap_iter(&src_iter, ops)) > 0 &&
-	       (ret = iomap_iter(&dst_iter, ops)) > 0) {
+	while ((ret = iomap_iter(&src_iter, next)) > 0 &&
+	       (ret = iomap_iter(&dst_iter, next)) > 0) {
 		status = dax_range_compare_iter(&src_iter, &dst_iter,
 				min(src_iter.len, dst_iter.len), same);
 		if (status < 0)
-			return ret;
+			return status;
 		src_iter.status = dst_iter.status = status;
 	}
 	return ret;
@@ -2239,9 +2266,10 @@ int dax_dedupe_file_range_compare(struct inode *src, loff_t srcoff,
 int dax_remap_file_range_prep(struct file *file_in, loff_t pos_in,
 			      struct file *file_out, loff_t pos_out,
 			      loff_t *len, unsigned int remap_flags,
-			      const struct iomap_ops *ops)
+			      iomap_iter_next_fn next)
 {
 	return __generic_remap_file_range_prep(file_in, pos_in, file_out,
-					       pos_out, len, remap_flags, ops);
+					       pos_out, len, remap_flags,
+					       next);
 }
 EXPORT_SYMBOL_GPL(dax_remap_file_range_prep);

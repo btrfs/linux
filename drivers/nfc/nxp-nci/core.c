@@ -25,6 +25,7 @@
 			       NFC_PROTO_FELICA_MASK | \
 			       NFC_PROTO_ISO14443_MASK | \
 			       NFC_PROTO_ISO14443_B_MASK | \
+			       NFC_PROTO_ISO15693_MASK | \
 			       NFC_PROTO_NFC_DEP_MASK)
 
 #define NXP_NCI_RF_PLL_UNLOCKED_NTF nci_opcode_pack(NCI_GID_RF_MGMT, 0x21)
@@ -139,7 +140,7 @@ int nxp_nci_probe(void *phy_id, struct device *pdev,
 	struct nxp_nci_info *info;
 	int r;
 
-	info = devm_kzalloc(pdev, sizeof(struct nxp_nci_info), GFP_KERNEL);
+	info = devm_kzalloc_obj(pdev, struct nxp_nci_info);
 	if (!info)
 		return -ENOMEM;
 

@@ -50,7 +50,7 @@
 #define RX8010_ALARM_AE		BIT(7)
 
 static const struct i2c_device_id rx8010_id[] = {
-	{ "rx8010" },
+	{ .name = "rx8010" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rx8010_id);
@@ -73,11 +73,10 @@ static irqreturn_t rx8010_irq_1_handler(int irq, void *dev_id)
 	struct rx8010_data *rx8010 = i2c_get_clientdata(client);
 	int flagreg, err;
 
-	rtc_lock(rx8010->rtc);
+	guard(rtc_ops)(rx8010->rtc);
 
 	err = regmap_read(rx8010->regs, RX8010_FLAG, &flagreg);
 	if (err) {
-		rtc_unlock(rx8010->rtc);
 		return IRQ_NONE;
 	}
 
@@ -100,7 +99,6 @@ static irqreturn_t rx8010_irq_1_handler(int irq, void *dev_id)
 	}
 
 	err = regmap_write(rx8010->regs, RX8010_FLAG, flagreg);
-	rtc_unlock(rx8010->rtc);
 	return err ? IRQ_NONE : IRQ_HANDLED;
 }
 
@@ -375,7 +373,7 @@ static int rx8010_probe(struct i2c_client *client)
 	struct rx8010_data *rx8010;
 	int err = 0;
 
-	rx8010 = devm_kzalloc(dev, sizeof(*rx8010), GFP_KERNEL);
+	rx8010 = devm_kzalloc_obj(dev, *rx8010);
 	if (!rx8010)
 		return -ENOMEM;
 
@@ -412,7 +410,6 @@ static int rx8010_probe(struct i2c_client *client)
 	}
 
 	rx8010->rtc->ops = &rx8010_rtc_ops;
-	rx8010->rtc->max_user_freq = 1;
 	rx8010->rtc->range_min = RTC_TIMESTAMP_BEGIN_2000;
 	rx8010->rtc->range_max = RTC_TIMESTAMP_END_2099;
 

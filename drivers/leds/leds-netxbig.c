@@ -360,9 +360,12 @@ static int netxbig_gpio_ext_get(struct device *dev,
 		return ret;
 	}
 	num_addr = ret;
-	addr = devm_kcalloc(dev, num_addr, sizeof(*addr), GFP_KERNEL);
+	addr = devm_kzalloc_objs(dev, *addr, num_addr);
 	if (!addr)
 		return -ENOMEM;
+
+	gpio_ext->addr = addr;
+	gpio_ext->num_addr = 0;
 
 	/*
 	 * We cannot use devm_ managed resources with these GPIO descriptors
@@ -375,45 +378,58 @@ static int netxbig_gpio_ext_get(struct device *dev,
 		gpiod = gpiod_get_index(gpio_ext_dev, "addr", i,
 					GPIOD_OUT_LOW);
 		if (IS_ERR(gpiod))
-			return PTR_ERR(gpiod);
+			goto err_set_code;
 		gpiod_set_consumer_name(gpiod, "GPIO extension addr");
 		addr[i] = gpiod;
+		gpio_ext->num_addr++;
 	}
-	gpio_ext->addr = addr;
-	gpio_ext->num_addr = num_addr;
 
 	ret = gpiod_count(gpio_ext_dev, "data");
 	if (ret < 0) {
 		dev_err(dev,
 			"Failed to count GPIOs in DT property data-gpios\n");
-		return ret;
+		goto err_free_addr;
 	}
 	num_data = ret;
-	data = devm_kcalloc(dev, num_data, sizeof(*data), GFP_KERNEL);
-	if (!data)
-		return -ENOMEM;
+	data = devm_kzalloc_objs(dev, *data, num_data);
+	if (!data) {
+		ret = -ENOMEM;
+		goto err_free_addr;
+	}
+
+	gpio_ext->data = data;
+	gpio_ext->num_data = 0;
 
 	for (i = 0; i < num_data; i++) {
 		gpiod = gpiod_get_index(gpio_ext_dev, "data", i,
 					GPIOD_OUT_LOW);
 		if (IS_ERR(gpiod))
-			return PTR_ERR(gpiod);
+			goto err_free_data;
 		gpiod_set_consumer_name(gpiod, "GPIO extension data");
 		data[i] = gpiod;
+		gpio_ext->num_data++;
 	}
-	gpio_ext->data = data;
-	gpio_ext->num_data = num_data;
 
 	gpiod = gpiod_get(gpio_ext_dev, "enable", GPIOD_OUT_LOW);
 	if (IS_ERR(gpiod)) {
 		dev_err(dev,
 			"Failed to get GPIO from DT property enable-gpio\n");
-		return PTR_ERR(gpiod);
+		goto err_free_data;
 	}
 	gpiod_set_consumer_name(gpiod, "GPIO extension enable");
 	gpio_ext->enable = gpiod;
 
 	return devm_add_action_or_reset(dev, netxbig_gpio_ext_remove, gpio_ext);
+
+err_free_data:
+	for (i = 0; i < gpio_ext->num_data; i++)
+		gpiod_put(gpio_ext->data[i]);
+err_set_code:
+	ret = PTR_ERR(gpiod);
+err_free_addr:
+	for (i = 0; i < gpio_ext->num_addr; i++)
+		gpiod_put(gpio_ext->addr[i]);
+	return ret;
 }
 
 static int netxbig_leds_get_of_pdata(struct device *dev,
@@ -445,7 +461,7 @@ static int netxbig_leds_get_of_pdata(struct device *dev,
 	}
 	gpio_ext_dev = &gpio_ext_pdev->dev;
 
-	gpio_ext = devm_kzalloc(dev, sizeof(*gpio_ext), GFP_KERNEL);
+	gpio_ext = devm_kzalloc_obj(dev, *gpio_ext);
 	if (!gpio_ext) {
 		of_node_put(gpio_ext_np);
 		ret = -ENOMEM;
@@ -466,8 +482,7 @@ static int netxbig_leds_get_of_pdata(struct device *dev,
 		}
 
 		num_timers = ret / 3;
-		timers = devm_kcalloc(dev, num_timers, sizeof(*timers),
-				      GFP_KERNEL);
+		timers = devm_kzalloc_objs(dev, *timers, num_timers);
 		if (!timers) {
 			ret = -ENOMEM;
 			goto put_device;
@@ -500,7 +515,7 @@ static int netxbig_leds_get_of_pdata(struct device *dev,
 		goto put_device;
 	}
 
-	leds = devm_kcalloc(dev, num_leds, sizeof(*leds), GFP_KERNEL);
+	leds = devm_kzalloc_objs(dev, *leds, num_leds);
 	if (!leds) {
 		ret = -ENOMEM;
 		goto put_device;
@@ -528,9 +543,7 @@ static int netxbig_leds_get_of_pdata(struct device *dev,
 			goto put_device;
 
 		mode_val =
-			devm_kcalloc(dev,
-				     NETXBIG_LED_MODE_NUM, sizeof(*mode_val),
-				     GFP_KERNEL);
+			devm_kzalloc_objs(dev, *mode_val, NETXBIG_LED_MODE_NUM);
 		if (!mode_val) {
 			ret = -ENOMEM;
 			goto put_device;
@@ -601,16 +614,14 @@ static int netxbig_led_probe(struct platform_device *pdev)
 	int i;
 	int ret;
 
-	pdata = devm_kzalloc(&pdev->dev, sizeof(*pdata), GFP_KERNEL);
+	pdata = devm_kzalloc_obj(&pdev->dev, *pdata);
 	if (!pdata)
 		return -ENOMEM;
 	ret = netxbig_leds_get_of_pdata(&pdev->dev, pdata);
 	if (ret)
 		return ret;
 
-	leds_data = devm_kcalloc(&pdev->dev,
-				 pdata->num_leds, sizeof(*leds_data),
-				 GFP_KERNEL);
+	leds_data = devm_kzalloc_objs(&pdev->dev, *leds_data, pdata->num_leds);
 	if (!leds_data)
 		return -ENOMEM;
 

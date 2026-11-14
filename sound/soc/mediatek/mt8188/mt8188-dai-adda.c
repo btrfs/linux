@@ -123,10 +123,7 @@ static void mtk_adda_ul_mictype(struct mtk_base_afe *afe, bool dmic)
 	       UL_MODE_3P25M_CH2_CTL);
 
 	/* turn on dmic, ch1, ch2 */
-	if (dmic)
-		regmap_set_bits(afe->regmap, reg, val);
-	else
-		regmap_clear_bits(afe->regmap, reg, val);
+	regmap_assign_bits(afe->regmap, reg, val, dmic);
 }
 
 static int mtk_adda_ul_event(struct snd_soc_dapm_widget *w,
@@ -310,7 +307,7 @@ static const struct snd_soc_dapm_route mtk_dai_adda_routes[] = {
 static int mt8188_adda_dmic_get(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
 	struct mt8188_afe_private *afe_priv = afe->platform_priv;
 	struct mtkaif_param *param = &afe_priv->mtkaif_params;
@@ -322,7 +319,7 @@ static int mt8188_adda_dmic_get(struct snd_kcontrol *kcontrol,
 static int mt8188_adda_dmic_set(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
 	struct mt8188_afe_private *afe_priv = afe->platform_priv;
 	struct mtkaif_param *param = &afe_priv->mtkaif_params;
@@ -476,9 +473,7 @@ static int init_adda_priv_data(struct mtk_base_afe *afe)
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(adda_dai_list); i++) {
-		adda_priv = devm_kzalloc(afe->dev,
-					 sizeof(struct mtk_dai_adda_priv),
-					 GFP_KERNEL);
+		adda_priv = devm_kzalloc_obj(afe->dev, struct mtk_dai_adda_priv);
 		if (!adda_priv)
 			return -ENOMEM;
 
@@ -492,7 +487,7 @@ int mt8188_dai_adda_register(struct mtk_base_afe *afe)
 {
 	struct mtk_base_afe_dai *dai;
 
-	dai = devm_kzalloc(afe->dev, sizeof(*dai), GFP_KERNEL);
+	dai = devm_kzalloc_obj(afe->dev, *dai);
 	if (!dai)
 		return -ENOMEM;
 

@@ -92,7 +92,7 @@ static struct auxiliary_device __init *ep93xx_adev_alloc(struct device *parent,
 	struct auxiliary_device *adev;
 	int ret;
 
-	rdev = kzalloc(sizeof(*rdev), GFP_KERNEL);
+	rdev = kzalloc_obj(*rdev);
 	if (!rdev)
 		return ERR_PTR(-ENOMEM);
 
@@ -189,7 +189,7 @@ static int __init ep93xx_syscon_probe(struct platform_device *pdev)
 	if (IS_ERR(base))
 		return PTR_ERR(base);
 
-	attrs = devm_kzalloc(dev, sizeof(*attrs), GFP_KERNEL);
+	attrs = devm_kzalloc_obj(dev, *attrs);
 	if (!attrs)
 		return -ENOMEM;
 
@@ -203,7 +203,7 @@ static int __init ep93xx_syscon_probe(struct platform_device *pdev)
 	if (IS_ERR(soc_dev))
 		return PTR_ERR(soc_dev);
 
-	map_info = devm_kzalloc(dev, sizeof(*map_info), GFP_KERNEL);
+	map_info = devm_kzalloc_obj(dev, *map_info);
 	if (!map_info)
 		return -ENOMEM;
 

@@ -102,15 +102,12 @@ static ssize_t show_values(struct device *dev, struct device_attribute *attr,
 	struct hidma_mgmt_dev *mdev = dev_get_drvdata(dev);
 	unsigned int i;
 
-	buf[0] = 0;
-
 	for (i = 0; i < ARRAY_SIZE(hidma_mgmt_files); i++) {
-		if (strcmp(attr->attr.name, hidma_mgmt_files[i].name) == 0) {
-			sprintf(buf, "%d\n", hidma_mgmt_files[i].get(mdev));
-			break;
-		}
+		if (strcmp(attr->attr.name, hidma_mgmt_files[i].name) == 0)
+			return sysfs_emit(buf, "%d\n",
+					hidma_mgmt_files[i].get(mdev));
 	}
-	return strlen(buf);
+	return 0;
 }
 
 static ssize_t set_values(struct device *dev, struct device_attribute *attr,
@@ -143,15 +140,15 @@ static ssize_t show_values_channel(struct kobject *kobj,
 	struct hidma_chan_attr *chattr;
 	struct hidma_mgmt_dev *mdev;
 
-	buf[0] = 0;
 	chattr = container_of(attr, struct hidma_chan_attr, attr);
 	mdev = chattr->mdev;
-	if (strcmp(attr->attr.name, "priority") == 0)
-		sprintf(buf, "%d\n", mdev->priority[chattr->index]);
-	else if (strcmp(attr->attr.name, "weight") == 0)
-		sprintf(buf, "%d\n", mdev->weight[chattr->index]);
 
-	return strlen(buf);
+	if (strcmp(attr->attr.name, "priority") == 0)
+		return sysfs_emit(buf, "%d\n", mdev->priority[chattr->index]);
+	else if (strcmp(attr->attr.name, "weight") == 0)
+		return sysfs_emit(buf, "%d\n", mdev->weight[chattr->index]);
+
+	return 0;
 }
 
 static ssize_t set_values_channel(struct kobject *kobj,
@@ -187,8 +184,7 @@ static int create_sysfs_entry(struct hidma_mgmt_dev *dev, char *name, int mode)
 	struct device_attribute *attrs;
 	char *name_copy;
 
-	attrs = devm_kmalloc(&dev->pdev->dev,
-			     sizeof(struct device_attribute), GFP_KERNEL);
+	attrs = devm_kmalloc_obj(&dev->pdev->dev, struct device_attribute);
 	if (!attrs)
 		return -ENOMEM;
 
@@ -212,7 +208,7 @@ static int create_sysfs_entry_channel(struct hidma_mgmt_dev *mdev, char *name,
 	struct hidma_chan_attr *chattr;
 	char *name_copy;
 
-	chattr = devm_kmalloc(&mdev->pdev->dev, sizeof(*chattr), GFP_KERNEL);
+	chattr = devm_kmalloc_obj(&mdev->pdev->dev, *chattr);
 	if (!chattr)
 		return -ENOMEM;
 

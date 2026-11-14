@@ -12,6 +12,7 @@
 #include <asm/pgalloc.h>
 #include <asm/sections.h>
 #include <asm/mmu_context.h>
+#include <asm/tlbflush.h>
 #include <as-layout.h>
 #include <os.h>
 #include <skas.h>
@@ -23,17 +24,63 @@ static_assert(sizeof(struct stub_data) == STUB_DATA_PAGES * UM_KERN_PAGE_SIZE);
 static spinlock_t mm_list_lock;
 static struct list_head mm_list;
 
+struct mutex *__get_turnstile(struct mm_id *mm_id)
+{
+	struct mm_context *ctx = container_of(mm_id, struct mm_context, id);
+
+	return &ctx->turnstile;
+}
+
+void enter_turnstile(struct mm_id *mm_id)
+{
+	mutex_lock(__get_turnstile(mm_id));
+}
+
+void exit_turnstile(struct mm_id *mm_id)
+{
+	mutex_unlock(__get_turnstile(mm_id));
+}
+
+unsigned long current_stub_stack(void)
+{
+	if (current->mm == NULL)
+		return 0;
+
+	return current->mm->context.id.stack;
+}
+
+struct mm_id *current_mm_id(void)
+{
+	if (current->mm == NULL)
+		return NULL;
+
+	return &current->mm->context.id;
+}
+
+void current_mm_sync(void)
+{
+	if (current->mm == NULL)
+		return;
+
+	um_tlb_sync(current->mm);
+}
+
 int init_new_context(struct task_struct *task, struct mm_struct *mm)
 {
 	struct mm_id *new_id = &mm->context.id;
 	unsigned long stack = 0;
 	int ret = -ENOMEM;
 
+	mutex_init(&mm->context.turnstile);
+	spin_lock_init(&mm->context.sync_tlb_lock);
+
 	stack = __get_free_pages(GFP_KERNEL | __GFP_ZERO, ilog2(STUB_DATA_PAGES));
 	if (stack == 0)
 		goto out;
 
 	new_id->stack = stack;
+	new_id->syscall_data_len = 0;
+	new_id->syscall_fd_num = 0;
 
 	scoped_guard(spinlock_irqsave, &mm_list_lock) {
 		/* Insert into list, used for lookups when the child dies */
@@ -73,6 +120,9 @@ void destroy_context(struct mm_struct *mm)
 		return;
 	}
 
+	scoped_guard(spinlock_irqsave, &mm_list_lock)
+		list_del(&mm->context.list);
+
 	if (mmu->id.pid > 0) {
 		os_kill_ptraced_process(mmu->id.pid, 1);
 		mmu->id.pid = -1;
@@ -82,10 +132,6 @@ void destroy_context(struct mm_struct *mm)
 		os_close_file(mmu->id.sock);
 
 	free_pages(mmu->id.stack, ilog2(STUB_DATA_PAGES));
-
-	guard(spinlock_irqsave)(&mm_list_lock);
-
-	list_del(&mm->context.list);
 }
 
 static irqreturn_t mm_sigchld_irq(int irq, void* dev)
@@ -110,12 +156,11 @@ static irqreturn_t mm_sigchld_irq(int irq, void* dev)
 				/* Marks the MM as dead */
 				mm_context->id.pid = -1;
 
-				/*
-				 * NOTE: If SMP is implemented, a futex_wake
-				 * needs to be added here.
-				 */
 				stub_data = (void *)mm_context->id.stack;
 				stub_data->futex = FUTEX_IN_KERN;
+#if IS_ENABLED(CONFIG_SMP)
+				os_futex_wake(&stub_data->futex);
+#endif
 
 				/*
 				 * NOTE: Currently executing syscalls by

@@ -313,8 +313,7 @@ static int lm3639_probe(struct i2c_client *client)
 		return -ENODATA;
 	}
 
-	pchip = devm_kzalloc(&client->dev,
-			     sizeof(struct lm3639_chip_data), GFP_KERNEL);
+	pchip = devm_kzalloc_obj(&client->dev, struct lm3639_chip_data);
 	if (!pchip)
 		return -ENOMEM;
 
@@ -403,8 +402,8 @@ static void lm3639_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id lm3639_id[] = {
-	{ LM3639_NAME },
-	{}
+	{ .name = LM3639_NAME },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, lm3639_id);

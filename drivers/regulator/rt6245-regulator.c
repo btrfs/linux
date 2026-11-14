@@ -49,8 +49,11 @@ static int rt6245_enable(struct regulator_dev *rdev)
 
 	regcache_cache_only(regmap, false);
 	ret = regcache_sync(regmap);
-	if (ret)
+	if (ret) {
+		regcache_cache_only(regmap, true);
+		gpiod_direction_output(priv->enable_gpio, 0);
 		return ret;
+	}
 
 	priv->enable_state = true;
 	return 0;
@@ -193,7 +196,7 @@ static int rt6245_probe(struct i2c_client *i2c)
 	struct regulator_dev *rdev;
 	int ret;
 
-	priv = devm_kzalloc(&i2c->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&i2c->dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

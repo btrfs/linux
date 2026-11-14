@@ -10,7 +10,6 @@
 #include <linux/iio/iio.h>
 #include <linux/iio/triggered_buffer.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/regulator/consumer.h>
@@ -77,6 +76,7 @@ static const struct iio_backend_ops sd_backend_ops = {
 static const struct iio_backend_info sd_backend_info = {
 	.name = "sd-modulator",
 	.ops = &sd_backend_ops,
+	.caps = IIO_BACKEND_CAP_ENABLE,
 };
 
 static int iio_sd_mod_register(struct platform_device *pdev)
@@ -111,7 +111,7 @@ static int iio_sd_mod_probe(struct platform_device *pdev)
 	if (!device_property_present(dev, "#io-backend-cells"))
 		return iio_sd_mod_register(pdev);
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

@@ -8,11 +8,14 @@
 #include <linux/bitfield.h>
 #include <linux/bits.h>
 #include <linux/clk-provider.h>
+#include <linux/debugfs.h>
 #include <linux/err.h>
 #include <linux/export.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/math64.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/jiffies.h>
 
 #include "clk.h"
@@ -20,6 +23,8 @@
 #define GNRL_CTL	0x0
 #define DIV_CTL0	0x4
 #define DIV_CTL1	0x8
+#define SSCG_CTRL	0xc
+
 #define LOCK_STATUS	BIT(31)
 #define LOCK_SEL_MASK	BIT(29)
 #define CLKE_MASK	BIT(11)
@@ -31,6 +36,13 @@
 #define KDIV_MASK	GENMASK(15, 0)
 #define KDIV_MIN	SHRT_MIN
 #define KDIV_MAX	SHRT_MAX
+#define SSCG_ENABLE	BIT(31)
+#define MFREQ_CTL_MASK	GENMASK(19, 12)
+#define MRAT_CTL_MASK	GENMASK(9, 4)
+#define SEL_PF_DOWN_SPREAD	0
+#define SEL_PF_UP_SPREAD	1
+#define SEL_PF_CENTER_SPREAD	2
+#define SEL_PF_MASK	GENMASK(1, 0)
 
 #define LOCK_TIMEOUT_US		10000
 
@@ -40,6 +52,9 @@ struct clk_pll14xx {
 	enum imx_pll14xx_type		type;
 	const struct imx_pll14xx_rate_table *rate_table;
 	int rate_count;
+	s16 delta_k;
+	spinlock_t lock;
+	struct clk_spread_spectrum ss_conf;
 };
 
 #define to_clk_pll14xx(_hw) container_of(_hw, struct clk_pll14xx, hw)
@@ -134,6 +149,7 @@ static void imx_pll14xx_calc_settings(struct clk_pll14xx *pll, unsigned long rat
 	u32 pll_div_ctl0, pll_div_ctl1;
 	int mdiv, pdiv, sdiv, kdiv;
 	long fout, rate_min, rate_max, dist, best = LONG_MAX;
+	unsigned long flags;
 	const struct imx_pll14xx_rate_table *tt;
 
 	/*
@@ -151,7 +167,7 @@ static void imx_pll14xx_calc_settings(struct clk_pll14xx *pll, unsigned long rat
 	/* First try if we can get the desired rate from one of the static entries */
 	tt = imx_get_pll_settings(pll, rate);
 	if (tt) {
-		pr_debug("%s: in=%ld, want=%ld, Using PLL setting from table\n",
+		pr_debug("%s: in=%lu, want=%lu, Using PLL setting from table\n",
 			 clk_hw_get_name(&pll->hw), prate, rate);
 		t->rate = tt->rate;
 		t->mdiv = tt->mdiv;
@@ -161,11 +177,16 @@ static void imx_pll14xx_calc_settings(struct clk_pll14xx *pll, unsigned long rat
 		return;
 	}
 
+	spin_lock_irqsave(&pll->lock, flags);
+
 	pll_div_ctl0 = readl_relaxed(pll->base + DIV_CTL0);
+	pll_div_ctl1 = readl_relaxed(pll->base + DIV_CTL1);
+
+	spin_unlock_irqrestore(&pll->lock, flags);
+
 	mdiv = FIELD_GET(MDIV_MASK, pll_div_ctl0);
 	pdiv = FIELD_GET(PDIV_MASK, pll_div_ctl0);
 	sdiv = FIELD_GET(SDIV_MASK, pll_div_ctl0);
-	pll_div_ctl1 = readl_relaxed(pll->base + DIV_CTL1);
 
 	/* Then see if we can get the desired rate by only adjusting kdiv (glitch free) */
 	rate_min = pll14xx_calc_rate(pll, mdiv, pdiv, sdiv, KDIV_MIN, prate);
@@ -173,7 +194,7 @@ static void imx_pll14xx_calc_settings(struct clk_pll14xx *pll, unsigned long rat
 
 	if (rate >= rate_min && rate <= rate_max) {
 		kdiv = pll1443x_calc_kdiv(mdiv, pdiv, sdiv, rate, prate);
-		pr_debug("%s: in=%ld, want=%ld Only adjust kdiv %ld -> %d\n",
+		pr_debug("%s: in=%lu, want=%lu Only adjust kdiv %ld -> %d\n",
 			 clk_hw_get_name(&pll->hw), prate, rate,
 			 FIELD_GET(KDIV_MASK, pll_div_ctl1), kdiv);
 		fout = pll14xx_calc_rate(pll, mdiv, pdiv, sdiv, kdiv, prate);
@@ -211,7 +232,7 @@ static void imx_pll14xx_calc_settings(struct clk_pll14xx *pll, unsigned long rat
 		}
 	}
 found:
-	pr_debug("%s: in=%ld, want=%ld got=%d (pdiv=%d sdiv=%d mdiv=%d kdiv=%d)\n",
+	pr_debug("%s: in=%lu, want=%lu got=%u (pdiv=%d sdiv=%d mdiv=%d kdiv=%d)\n",
 		 clk_hw_get_name(&pll->hw), prate, rate, t->rate, t->pdiv, t->sdiv,
 		 t->mdiv, t->kdiv);
 }
@@ -356,15 +377,74 @@ static int clk_pll1416x_set_rate(struct clk_hw *hw, unsigned long drate,
 	return 0;
 }
 
+static void __clk_pll1443x_set_spread_spectrum(struct clk_hw *hw,
+					       unsigned long parent_rate,
+					       unsigned int pdiv,
+					       unsigned int mdiv)
+{
+	struct clk_pll14xx *pll = to_clk_pll14xx(hw);
+	struct clk_spread_spectrum *conf = &pll->ss_conf;
+	u32 sscg_ctrl, mfr, mrr, sel_pf;
+
+	sscg_ctrl = readl_relaxed(pll->base + SSCG_CTRL);
+	sscg_ctrl &= ~(SSCG_ENABLE | MFREQ_CTL_MASK | MRAT_CTL_MASK | SEL_PF_MASK);
+
+	switch (conf->method) {
+	case CLK_SPREAD_CENTER:
+		sel_pf = SEL_PF_CENTER_SPREAD;
+		break;
+	case CLK_SPREAD_UP:
+		sel_pf = SEL_PF_UP_SPREAD;
+		break;
+	case CLK_SPREAD_DOWN:
+		sel_pf = SEL_PF_DOWN_SPREAD;
+		break;
+	default:
+		/* No spread: disable modulation and clear any stale state */
+		goto out;
+	}
+
+	if (!conf->modfreq_hz || !parent_rate || !pdiv)
+		goto out;
+
+	mfr = div64_u64(parent_rate, (u64)conf->modfreq_hz * pdiv * BIT(5));
+	if (!mfr || mfr > FIELD_MAX(MFREQ_CTL_MASK)) {
+		pr_warn_ratelimited("%s: SSC disabled, modulation frequency (%u Hz) out of range\n",
+				    clk_hw_get_name(hw), conf->modfreq_hz);
+		goto out;
+	}
+
+	/*
+	 * No overflow: the core limits spread_bp to 10000 and mdiv is a 10-bit
+	 * field, so the product is at most 10000 * 1023 * 64 < 2^32.
+	 */
+	mrr = (conf->spread_bp * mdiv * BIT(6)) / (10000 * mfr);
+	if (!mrr || mrr > FIELD_MAX(MRAT_CTL_MASK)) {
+		pr_warn_ratelimited("%s: SSC disabled, spread (%u permyriad) out of range\n",
+				    clk_hw_get_name(hw), conf->spread_bp);
+		goto out;
+	}
+
+	sscg_ctrl |= SSCG_ENABLE | FIELD_PREP(MFREQ_CTL_MASK, mfr) |
+		FIELD_PREP(MRAT_CTL_MASK, mrr) |
+		FIELD_PREP(SEL_PF_MASK, sel_pf);
+
+out:
+	writel_relaxed(sscg_ctrl, pll->base + SSCG_CTRL);
+}
+
 static int clk_pll1443x_set_rate(struct clk_hw *hw, unsigned long drate,
 				 unsigned long prate)
 {
 	struct clk_pll14xx *pll = to_clk_pll14xx(hw);
 	struct imx_pll14xx_rate_table rate;
+	unsigned long flags;
 	u32 gnrl_ctl, div_ctl0;
 	int ret;
 
 	imx_pll14xx_calc_settings(pll, drate, prate, &rate);
+
+	spin_lock_irqsave(&pll->lock, flags);
 
 	div_ctl0 = readl_relaxed(pll->base + DIV_CTL0);
 
@@ -376,6 +456,11 @@ static int clk_pll1443x_set_rate(struct clk_hw *hw, unsigned long drate,
 
 		writel_relaxed(FIELD_PREP(KDIV_MASK, rate.kdiv),
 			       pll->base + DIV_CTL1);
+
+		__clk_pll1443x_set_spread_spectrum(hw, prate, rate.pdiv,
+						   rate.mdiv);
+
+		spin_unlock_irqrestore(&pll->lock, flags);
 
 		return 0;
 	}
@@ -395,6 +480,10 @@ static int clk_pll1443x_set_rate(struct clk_hw *hw, unsigned long drate,
 	writel_relaxed(div_ctl0, pll->base + DIV_CTL0);
 
 	writel_relaxed(FIELD_PREP(KDIV_MASK, rate.kdiv), pll->base + DIV_CTL1);
+
+	__clk_pll1443x_set_spread_spectrum(hw, prate, rate.pdiv, rate.mdiv);
+
+	spin_unlock_irqrestore(&pll->lock, flags);
 
 	/*
 	 * According to SPEC, t3 - t2 need to be greater than
@@ -416,6 +505,36 @@ static int clk_pll1443x_set_rate(struct clk_hw *hw, unsigned long drate,
 	/* Bypass */
 	gnrl_ctl &= ~BYPASS_MASK;
 	writel_relaxed(gnrl_ctl, pll->base + GNRL_CTL);
+
+	return 0;
+}
+
+static int clk_pll1443x_set_spread_spectrum(struct clk_hw *hw,
+					    const struct clk_spread_spectrum *ss_conf)
+{
+	struct clk_pll14xx *pll = to_clk_pll14xx(hw);
+	struct clk_hw *parent = clk_hw_get_parent(hw);
+	unsigned long parent_rate = parent ? clk_hw_get_rate(parent) : 0;
+	unsigned long flags;
+	u32 div_ctl0;
+
+	spin_lock_irqsave(&pll->lock, flags);
+
+	pll->ss_conf = *ss_conf;
+
+	/*
+	 * Apply the configuration to the hardware right away, using the
+	 * current PLL dividers: the clock framework does not call set_rate()
+	 * if the requested rate is unchanged, so relying on it would leave
+	 * the SSC settings unapplied when the PLL is already at the target
+	 * rate (e.g. configured by the bootloader).
+	 */
+	div_ctl0 = readl_relaxed(pll->base + DIV_CTL0);
+	__clk_pll1443x_set_spread_spectrum(hw, parent_rate,
+					   FIELD_GET(PDIV_MASK, div_ctl0),
+					   FIELD_GET(MDIV_MASK, div_ctl0));
+
+	spin_unlock_irqrestore(&pll->lock, flags);
 
 	return 0;
 }
@@ -492,21 +611,24 @@ static const struct clk_ops clk_pll1443x_ops = {
 	.recalc_rate	= clk_pll14xx_recalc_rate,
 	.determine_rate = clk_pll1443x_determine_rate,
 	.set_rate	= clk_pll1443x_set_rate,
+	.set_spread_spectrum = clk_pll1443x_set_spread_spectrum,
 };
 
 struct clk_hw *imx_dev_clk_hw_pll14xx(struct device *dev, const char *name,
 				const char *parent_name, void __iomem *base,
 				const struct imx_pll14xx_clk *pll_clk)
 {
+	struct clk_init_data init = {};
 	struct clk_pll14xx *pll;
 	struct clk_hw *hw;
-	struct clk_init_data init;
 	int ret;
 	u32 val;
 
-	pll = kzalloc(sizeof(*pll), GFP_KERNEL);
+	pll = kzalloc_obj(*pll);
 	if (!pll)
 		return ERR_PTR(-ENOMEM);
+
+	spin_lock_init(&pll->lock);
 
 	init.name = name;
 	init.flags = pll_clk->flags;
@@ -551,3 +673,101 @@ struct clk_hw *imx_dev_clk_hw_pll14xx(struct device *dev, const char *name,
 	return hw;
 }
 EXPORT_SYMBOL_GPL(imx_dev_clk_hw_pll14xx);
+
+/*
+ * Debugfs interface for Audio PLL runtime monitoring and control
+ *
+ * This interface allows dynamic adjustment of the Audio PLL
+ * K-divider for precise frequency tuning, particularly useful
+ * for audio applications.
+ *
+ * examples for the usage of the two interfaces:
+ *   1): Get the current PLL setting of dividers
+ *     cat /sys/kernel/debug/audio_pll_monitor/audio_pll1/pll_parameter
+ *
+ *   2): Adjust the K-divider by a small delta_k
+ *     echo 1 > /sys/kernel/debug/audio_pll_monitor/audio_pll1/delta_k;
+ */
+#ifdef CONFIG_DEBUG_FS
+static int pll_delta_k_get(void *data, u64 *val)
+{
+	struct clk_pll14xx *pll = to_clk_pll14xx(data);
+	*val = pll->delta_k;
+	return 0;
+}
+
+static int pll_delta_k_set(void *data, u64 val)
+{
+	struct clk_pll14xx *pll = to_clk_pll14xx(data);
+	unsigned long flags;
+	u32 div_ctl1;
+	s16 kdiv, delta_k;
+
+	delta_k = (s16)clamp_t(s64, val, KDIV_MIN, KDIV_MAX);
+
+	spin_lock_irqsave(&pll->lock, flags);
+
+	pll->delta_k = delta_k;
+
+	div_ctl1 = readl_relaxed(pll->base + DIV_CTL1);
+	kdiv = (s16)FIELD_GET(KDIV_MASK, div_ctl1);
+	kdiv = (s16)clamp_t(s32, (s32)kdiv + delta_k, KDIV_MIN, KDIV_MAX);
+	writel_relaxed(FIELD_PREP(KDIV_MASK, kdiv), pll->base + DIV_CTL1);
+
+	spin_unlock_irqrestore(&pll->lock, flags);
+
+	return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE_SIGNED(delta_k_fops, pll_delta_k_get, pll_delta_k_set, "%lld\n");
+
+static int pll_setting_show(struct seq_file *s, void *data)
+{
+	struct clk_pll14xx *pll = to_clk_pll14xx(s->private);
+	unsigned long flags;
+	u32 div_ctl0, div_ctl1;
+	u32 mdiv, pdiv, sdiv, kdiv;
+
+	spin_lock_irqsave(&pll->lock, flags);
+
+	div_ctl0 = readl_relaxed(pll->base + DIV_CTL0);
+	div_ctl1 = readl_relaxed(pll->base + DIV_CTL1);
+
+	spin_unlock_irqrestore(&pll->lock, flags);
+
+	mdiv = FIELD_GET(MDIV_MASK, div_ctl0);
+	pdiv = FIELD_GET(PDIV_MASK, div_ctl0);
+	sdiv = FIELD_GET(SDIV_MASK, div_ctl0);
+	kdiv = FIELD_GET(KDIV_MASK, div_ctl1);
+
+	seq_printf(s, "Mdiv: 0x%x; Pdiv: 0x%x; Sdiv: 0x%x; Kdiv: 0x%x\n",
+		   mdiv, pdiv, sdiv, kdiv);
+
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(pll_setting);
+
+void imx_audio_pll_debug_init(struct clk_hw *hws[], unsigned int num_plls)
+{
+	struct dentry *rootdir, *audio_pll_dir;
+	const char *pll_name;
+	int i;
+
+	rootdir = debugfs_create_dir("audio_pll_monitor", NULL);
+
+	for (i = 0; i < num_plls; i++) {
+		if (!IS_ERR_OR_NULL(hws[i])) {
+			pll_name = clk_hw_get_name(hws[i]);
+			audio_pll_dir = debugfs_create_dir(pll_name, rootdir);
+			debugfs_create_file_unsafe("delta_k", 0600, audio_pll_dir,
+						   hws[i], &delta_k_fops);
+			debugfs_create_file("pll_parameter", 0444, audio_pll_dir,
+					    hws[i], &pll_setting_fops);
+		}
+	}
+}
+#else /* !CONFIG_DEBUG_FS */
+void imx_audio_pll_debug_init(struct clk_hw *hws[], unsigned int num_plls)
+{
+}
+#endif /* CONFIG_DEBUG_FS */
+EXPORT_SYMBOL_GPL(imx_audio_pll_debug_init);

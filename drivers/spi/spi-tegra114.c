@@ -859,6 +859,13 @@ static u32 tegra_spi_setup_transfer_one(struct spi_device *spi,
 		command1 |= SPI_BIT_LENGTH(bits_per_word - 1);
 	}
 
+	/*
+	 * Re-assert the CS GPIO for every transfer: transfer_end() drops it
+	 * on cs_change, and the assert above only covers is_first_of_msg.
+	 */
+	if (spi_get_csgpiod(spi, 0))
+		gpiod_set_value(spi_get_csgpiod(spi, 0), 1);
+
 	return command1;
 }
 
@@ -920,7 +927,7 @@ static struct tegra_spi_client_data
 		return NULL;
 	}
 
-	cdata = kzalloc(sizeof(*cdata), GFP_KERNEL);
+	cdata = kzalloc_obj(*cdata);
 	if (!cdata)
 		return NULL;
 
@@ -978,11 +985,14 @@ static int tegra_spi_setup(struct spi_device *spi)
 	if (spi_get_csgpiod(spi, 0))
 		gpiod_set_value(spi_get_csgpiod(spi, 0), 0);
 
+	/* Update default register to include CS polarity and SPI mode */
 	val = tspi->def_command1_reg;
 	if (spi->mode & SPI_CS_HIGH)
 		val &= ~SPI_CS_POL_INACTIVE(spi_get_chipselect(spi, 0));
 	else
 		val |= SPI_CS_POL_INACTIVE(spi_get_chipselect(spi, 0));
+	val &= ~SPI_CONTROL_MODE_MASK;
+	val |= SPI_MODE_SEL(spi->mode & 0x3);
 	tspi->def_command1_reg = val;
 	tegra_spi_writel(tspi, tspi->def_command1_reg, SPI_COMMAND1);
 	spin_unlock_irqrestore(&tspi->lock, flags);
@@ -1298,8 +1308,11 @@ static int tegra_spi_probe(struct platform_device *pdev)
 	struct resource		*r;
 	int ret, spi_irq;
 	int bus_num;
+	u32 conflicting_cs;
+	u32 enabled_child_cs_polarity = 0, disabled_child_cs_low = 0, disabled_child_cs_high = 0;
+	u32 enabled_cs_mask = 0;
 
-	host = spi_alloc_host(&pdev->dev, sizeof(*tspi));
+	host = devm_spi_alloc_host(&pdev->dev, sizeof(*tspi));
 	if (!host) {
 		dev_err(&pdev->dev, "host allocation failed\n");
 		return -ENOMEM;
@@ -1333,36 +1346,31 @@ static int tegra_spi_probe(struct platform_device *pdev)
 	tspi->soc_data = of_device_get_match_data(&pdev->dev);
 	if (!tspi->soc_data) {
 		dev_err(&pdev->dev, "unsupported tegra\n");
-		ret = -ENODEV;
-		goto exit_free_host;
+		return -ENODEV;
 	}
 
 	tspi->base = devm_platform_get_and_ioremap_resource(pdev, 0, &r);
-	if (IS_ERR(tspi->base)) {
-		ret = PTR_ERR(tspi->base);
-		goto exit_free_host;
-	}
+	if (IS_ERR(tspi->base))
+		return PTR_ERR(tspi->base);
+
 	tspi->phys = r->start;
 
 	spi_irq = platform_get_irq(pdev, 0);
-	if (spi_irq < 0) {
-		ret = spi_irq;
-		goto exit_free_host;
-	}
+	if (spi_irq < 0)
+		return spi_irq;
+
 	tspi->irq = spi_irq;
 
 	tspi->clk = devm_clk_get(&pdev->dev, "spi");
 	if (IS_ERR(tspi->clk)) {
 		dev_err(&pdev->dev, "can not get clock\n");
-		ret = PTR_ERR(tspi->clk);
-		goto exit_free_host;
+		return PTR_ERR(tspi->clk);
 	}
 
 	tspi->rst = devm_reset_control_get_exclusive(&pdev->dev, "spi");
 	if (IS_ERR(tspi->rst)) {
 		dev_err(&pdev->dev, "can not get reset\n");
-		ret = PTR_ERR(tspi->rst);
-		goto exit_free_host;
+		return PTR_ERR(tspi->rst);
 	}
 
 	tspi->max_buf_size = SPI_FIFO_DEPTH << 2;
@@ -1370,7 +1378,7 @@ static int tegra_spi_probe(struct platform_device *pdev)
 
 	ret = tegra_spi_init_dma_param(tspi, true);
 	if (ret < 0)
-		goto exit_free_host;
+		return ret;
 	ret = tegra_spi_init_dma_param(tspi, false);
 	if (ret < 0)
 		goto exit_rx_dma_free;
@@ -1397,6 +1405,52 @@ static int tegra_spi_probe(struct platform_device *pdev)
 	udelay(2);
 	reset_control_deassert(tspi->rst);
 	tspi->def_command1_reg  = SPI_M_S;
+
+	/*
+	 * SPI_COMMAND1 is written before any child is registered, so a chip
+	 * select with CS_POL_INACTIVE clear stays asserted until
+	 * tegra_spi_setup() runs for that device. Program the level the
+	 * device tree asks for up front instead.
+	 *
+	 * Disabled children are included deliberately. The core never
+	 * registers them, so this is the only chance to park their chip
+	 * select at the level their hardware needs. An enabled child on the
+	 * same CS takes priority.
+	 */
+	for_each_child_of_node_scoped(pdev->dev.of_node, np) {
+		u32 cs;
+		u32 polarity_bitmask;
+		u32 cs_polarity = 0;
+
+		if (of_property_read_u32(np, "reg", &cs))
+			continue;
+
+		if (cs >= MAX_CHIP_SELECT)
+			continue;
+
+		polarity_bitmask = SPI_CS_POL_INACTIVE(cs);
+		if (!of_property_read_bool(np, "spi-cs-high"))
+			cs_polarity = polarity_bitmask;
+
+		if (of_device_is_available(np)) {
+			enabled_cs_mask |= polarity_bitmask;
+			enabled_child_cs_polarity |= cs_polarity;
+		} else {
+			if (cs_polarity)
+				disabled_child_cs_low |= polarity_bitmask;
+			else
+				disabled_child_cs_high |= polarity_bitmask;
+		}
+	}
+	conflicting_cs = disabled_child_cs_low & disabled_child_cs_high & ~enabled_cs_mask;
+	for (u32 cs = 0; cs < MAX_CHIP_SELECT; cs++) {
+		if (SPI_CS_POL_INACTIVE(cs) & conflicting_cs)
+			dev_warn(&pdev->dev,
+				 "Conflicting CS polarity on disabled nodes at cs %u\n", cs);
+	}
+
+	tspi->def_command1_reg |= enabled_child_cs_polarity |
+		(disabled_child_cs_low & ~enabled_cs_mask);
 	tegra_spi_writel(tspi, tspi->def_command1_reg, SPI_COMMAND1);
 	tspi->spi_cs_timing1 = tegra_spi_readl(tspi, SPI_CS_TIMING1);
 	tspi->spi_cs_timing2 = tegra_spi_readl(tspi, SPI_CS_TIMING2);
@@ -1412,8 +1466,7 @@ static int tegra_spi_probe(struct platform_device *pdev)
 		goto exit_pm_disable;
 	}
 
-	host->dev.of_node = pdev->dev.of_node;
-	ret = devm_spi_register_controller(&pdev->dev, host);
+	ret = spi_register_controller(host);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "can not register to host err %d\n", ret);
 		goto exit_free_irq;
@@ -1429,8 +1482,7 @@ exit_pm_disable:
 	tegra_spi_deinit_dma_param(tspi, false);
 exit_rx_dma_free:
 	tegra_spi_deinit_dma_param(tspi, true);
-exit_free_host:
-	spi_controller_put(host);
+
 	return ret;
 }
 
@@ -1438,6 +1490,8 @@ static void tegra_spi_remove(struct platform_device *pdev)
 {
 	struct spi_controller *host = platform_get_drvdata(pdev);
 	struct tegra_spi_data	*tspi = spi_controller_get_devdata(host);
+
+	spi_unregister_controller(host);
 
 	free_irq(tspi->irq, tspi);
 
@@ -1452,7 +1506,6 @@ static void tegra_spi_remove(struct platform_device *pdev)
 		tegra_spi_runtime_suspend(&pdev->dev);
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int tegra_spi_suspend(struct device *dev)
 {
 	struct spi_controller *host = dev_get_drvdata(dev);
@@ -1478,7 +1531,6 @@ static int tegra_spi_resume(struct device *dev)
 
 	return spi_controller_resume(host);
 }
-#endif
 
 static int tegra_spi_runtime_suspend(struct device *dev)
 {
@@ -1507,14 +1559,14 @@ static int tegra_spi_runtime_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops tegra_spi_pm_ops = {
-	SET_RUNTIME_PM_OPS(tegra_spi_runtime_suspend,
-		tegra_spi_runtime_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(tegra_spi_suspend, tegra_spi_resume)
+	RUNTIME_PM_OPS(tegra_spi_runtime_suspend,
+		       tegra_spi_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(tegra_spi_suspend, tegra_spi_resume)
 };
 static struct platform_driver tegra_spi_driver = {
 	.driver = {
 		.name		= "spi-tegra114",
-		.pm		= &tegra_spi_pm_ops,
+		.pm		= pm_ptr(&tegra_spi_pm_ops),
 		.of_match_table	= tegra_spi_of_match,
 	},
 	.probe =	tegra_spi_probe,

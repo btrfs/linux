@@ -43,7 +43,7 @@ struct cros_ec_device *cros_ec_device_alloc(struct device *dev)
 {
 	struct cros_ec_device *ec_dev;
 
-	ec_dev = devm_kzalloc(dev, sizeof(*ec_dev), GFP_KERNEL);
+	ec_dev = devm_kzalloc_obj(dev, *ec_dev);
 	if (!ec_dev)
 		return NULL;
 
@@ -249,11 +249,8 @@ int cros_ec_register(struct cros_ec_device *ec_dev)
 						cros_ec_irq_thread,
 						IRQF_TRIGGER_LOW | IRQF_ONESHOT,
 						"chromeos-ec", ec_dev);
-		if (err) {
-			dev_err(dev, "Failed to request IRQ %d: %d\n",
-				ec_dev->irq, err);
+		if (err)
 			goto exit;
-		}
 	}
 
 	/* Register a platform device for the main EC instance */

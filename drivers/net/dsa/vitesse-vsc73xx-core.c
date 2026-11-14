@@ -1664,7 +1664,7 @@ static int vsc73xx_port_vlan_add(struct dsa_switch *ds, int port,
 	vsc73xx_vlan = vsc73xx_bridge_vlan_find(vsc, vlan->vid);
 
 	if (!vsc73xx_vlan) {
-		vsc73xx_vlan = kzalloc(sizeof(*vsc73xx_vlan), GFP_KERNEL);
+		vsc73xx_vlan = kzalloc_obj(*vsc73xx_vlan);
 		if (!vsc73xx_vlan)
 			return -ENOMEM;
 
@@ -2372,7 +2372,7 @@ int vsc73xx_probe(struct vsc73xx *vsc)
 		 vsc->addr[0], vsc->addr[1], vsc->addr[2],
 		 vsc->addr[3], vsc->addr[4], vsc->addr[5]);
 
-	vsc->ds = devm_kzalloc(dev, sizeof(*vsc->ds), GFP_KERNEL);
+	vsc->ds = devm_kzalloc_obj(dev, *vsc->ds);
 	if (!vsc->ds)
 		return -ENOMEM;
 

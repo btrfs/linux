@@ -98,6 +98,27 @@ inline int ksmbd_max_protocol(void)
 	return SMB311_PROT;
 }
 
+static const struct {
+	int version;
+	const char *string;
+} version_strings[] = {
+	{SMB2_PROT, SMB20_VERSION_STRING},
+	{SMB21_PROT, SMB21_VERSION_STRING},
+	{SMB30_PROT, SMB30_VERSION_STRING},
+	{SMB302_PROT, SMB302_VERSION_STRING},
+	{SMB311_PROT, SMB311_VERSION_STRING},
+};
+
+const char *ksmbd_get_protocol_string(int version)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(version_strings); i++) {
+		if (version_strings[i].version == version)
+			return version_strings[i].string;
+	}
+	return "";
+}
 int ksmbd_lookup_protocol_idx(char *str)
 {
 	int offt = ARRAY_SIZE(smb1_protos) - 1;
@@ -140,10 +161,25 @@ int ksmbd_verify_smb_message(struct ksmbd_work *work)
 	if (smb2_hdr->ProtocolId == SMB2_PROTO_NUMBER)
 		return ksmbd_smb2_check_message(work);
 
-	hdr = work->request_buf;
+	hdr = smb_get_msg(work->request_buf);
 	if (*(__le32 *)hdr->Protocol == SMB1_PROTO_NUMBER &&
 	    hdr->Command == SMB_COM_NEGOTIATE) {
-		work->conn->outstanding_credits++;
+		struct ksmbd_conn *conn = work->conn;
+
+		conn->outstanding_credits++;
+		/*
+		 * A legacy SMB1 multi-protocol negotiate occupies sequence
+		 * number 0 but does not pass through
+		 * ksmbd_smb2_check_message(). Consume it here so that, after
+		 * the connection is upgraded to SMB2, the command sequence
+		 * window can advance instead of staying pinned at 0.
+		 */
+		spin_lock(&conn->credits_lock);
+		if (conn->seq_low == 0) {
+			__clear_bit(0, conn->seq_bitmap);
+			conn->seq_low = 1;
+		}
+		spin_unlock(&conn->credits_lock);
 		return 0;
 	}
 
@@ -163,12 +199,7 @@ bool ksmbd_smb_request(struct ksmbd_conn *conn)
 	if (conn->request_buf[0] != 0)
 		return false;
 
-	proto = (__le32 *)smb2_get_msg(conn->request_buf);
-	if (*proto == SMB2_COMPRESSION_TRANSFORM_ID) {
-		pr_err_ratelimited("smb2 compression not support yet");
-		return false;
-	}
-
+	proto = (__le32 *)smb_get_msg(conn->request_buf);
 	if (*proto != SMB1_PROTO_NUMBER &&
 	    *proto != SMB2_PROTO_NUMBER &&
 	    *proto != SMB2_TRANSFORM_PROTO_NUM)
@@ -259,14 +290,14 @@ int ksmbd_lookup_dialect_by_id(__le16 *cli_dialects, __le16 dialects_count)
 static int ksmbd_negotiate_smb_dialect(void *buf)
 {
 	int smb_buf_length = get_rfc1002_len(buf);
-	__le32 proto = ((struct smb2_hdr *)smb2_get_msg(buf))->ProtocolId;
+	__le32 proto = ((struct smb2_hdr *)smb_get_msg(buf))->ProtocolId;
 
 	if (proto == SMB2_PROTO_NUMBER) {
 		struct smb2_negotiate_req *req;
 		int smb2_neg_size =
 			offsetof(struct smb2_negotiate_req, Dialects);
 
-		req = (struct smb2_negotiate_req *)smb2_get_msg(buf);
+		req = (struct smb2_negotiate_req *)smb_get_msg(buf);
 		if (smb2_neg_size > smb_buf_length)
 			goto err_out;
 
@@ -278,15 +309,14 @@ static int ksmbd_negotiate_smb_dialect(void *buf)
 						  req->DialectCount);
 	}
 
-	proto = *(__le32 *)((struct smb_hdr *)buf)->Protocol;
 	if (proto == SMB1_PROTO_NUMBER) {
 		struct smb_negotiate_req *req;
 
-		req = (struct smb_negotiate_req *)buf;
+		req = (struct smb_negotiate_req *)smb_get_msg(buf);
 		if (le16_to_cpu(req->ByteCount) < 2)
 			goto err_out;
 
-		if (offsetof(struct smb_negotiate_req, DialectsArray) - 4 +
+		if (offsetof(struct smb_negotiate_req, DialectsArray) +
 			le16_to_cpu(req->ByteCount) > smb_buf_length) {
 			goto err_out;
 		}
@@ -320,8 +350,8 @@ static u16 get_smb1_cmd_val(struct ksmbd_work *work)
  */
 static int init_smb1_rsp_hdr(struct ksmbd_work *work)
 {
-	struct smb_hdr *rsp_hdr = (struct smb_hdr *)work->response_buf;
-	struct smb_hdr *rcv_hdr = (struct smb_hdr *)work->request_buf;
+	struct smb_hdr *rsp_hdr = (struct smb_hdr *)smb_get_msg(work->response_buf);
+	struct smb_hdr *rcv_hdr = (struct smb_hdr *)smb_get_msg(work->request_buf);
 
 	rsp_hdr->Command = SMB_COM_NEGOTIATE;
 	*(__le32 *)rsp_hdr->Protocol = SMB1_PROTO_NUMBER;
@@ -412,9 +442,10 @@ static int init_smb1_server(struct ksmbd_conn *conn)
 
 int ksmbd_init_smb_server(struct ksmbd_conn *conn)
 {
+	struct smb_hdr *rcv_hdr = (struct smb_hdr *)smb_get_msg(conn->request_buf);
 	__le32 proto;
 
-	proto = *(__le32 *)((struct smb_hdr *)conn->request_buf)->Protocol;
+	proto = *(__le32 *)rcv_hdr->Protocol;
 	if (conn->need_neg == false) {
 		if (proto == SMB1_PROTO_NUMBER)
 			return -EINVAL;
@@ -436,7 +467,7 @@ int ksmbd_populate_dot_dotdot_entries(struct ksmbd_work *work, int info_level,
 {
 	int i, rc = 0;
 	struct ksmbd_conn *conn = work->conn;
-	struct mnt_idmap *idmap = file_mnt_idmap(dir->filp);
+	const struct mnt_idmap *idmap = file_mnt_idmap(dir->filp);
 
 	for (i = 0; i < 2; i++) {
 		struct kstat kstat;
@@ -447,16 +478,17 @@ int ksmbd_populate_dot_dotdot_entries(struct ksmbd_work *work, int info_level,
 			if (i == 0) {
 				d_info->name = ".";
 				d_info->name_len = 1;
-				dentry = dir->filp->f_path.dentry;
+				dentry = dget(dir->filp->f_path.dentry);
 			} else {
 				d_info->name = "..";
 				d_info->name_len = 2;
-				dentry = dir->filp->f_path.dentry->d_parent;
+				dentry = dget_parent(dir->filp->f_path.dentry);
 			}
 
 			if (!match_pattern(d_info->name, d_info->name_len,
 					   search_pattern)) {
 				dir->dot_dotdot[i] = 1;
+				dput(dentry);
 				continue;
 			}
 
@@ -465,6 +497,7 @@ int ksmbd_populate_dot_dotdot_entries(struct ksmbd_work *work, int info_level,
 							 idmap,
 							 dentry,
 							 &ksmbd_kstat);
+			dput(dentry);
 			if (rc)
 				break;
 
@@ -492,8 +525,6 @@ int ksmbd_populate_dot_dotdot_entries(struct ksmbd_work *work, int info_level,
  * @shortname:	destination short filename
  *
  * Return:	shortname length or 0 when source long name is '.' or '..'
- * TODO: Though this function conforms the restriction of 8.3 Filename spec,
- * but the result is different with Windows 7's one. need to check.
  */
 int ksmbd_extract_shortname(struct ksmbd_conn *conn, const char *longname,
 			    char *shortname)
@@ -557,7 +588,7 @@ int ksmbd_extract_shortname(struct ksmbd_conn *conn, const char *longname,
 	if (dot_present)
 		memcpy(out + baselen + 4, extension, 4);
 	else
-		out[baselen + 4] = '\0';
+		out[baselen + 3] = '\0';
 	smbConvertToUTF16((__le16 *)shortname, out, PATH_MAX,
 			  conn->local_nls, 0);
 	len = strlen(out) * 2;
@@ -572,12 +603,12 @@ static int __smb2_negotiate(struct ksmbd_conn *conn)
 
 static int smb_handle_negotiate(struct ksmbd_work *work)
 {
-	struct smb_negotiate_rsp *neg_rsp = work->response_buf;
+	struct smb_negotiate_rsp *neg_rsp = smb_get_msg(work->response_buf);
 
 	ksmbd_debug(SMB, "Unsupported SMB1 protocol\n");
 
-	if (ksmbd_iov_pin_rsp(work, (void *)neg_rsp + 4,
-			      sizeof(struct smb_negotiate_rsp) - 4))
+	if (ksmbd_iov_pin_rsp(work, (void *)neg_rsp,
+			      sizeof(struct smb_negotiate_rsp)))
 		return -ENOMEM;
 
 	neg_rsp->hdr.Status.CifsError = STATUS_SUCCESS;
@@ -592,23 +623,46 @@ int ksmbd_smb_negotiate_common(struct ksmbd_work *work, unsigned int command)
 	struct ksmbd_conn *conn = work->conn;
 	int ret;
 
-	conn->dialect =
-		ksmbd_negotiate_smb_dialect(work->request_buf);
-	ksmbd_debug(SMB, "conn->dialect 0x%x\n", conn->dialect);
-
 	if (command == SMB2_NEGOTIATE_HE) {
+		/*
+		 * An SMB2 NEGOTIATE is valid for a new connection, or after an
+		 * SMB1 multi-protocol negotiate has selected SMB2. Do not allow
+		 * a second SMB2 NEGOTIATE to replace connection-wide state
+		 * while a session setup is pending. KSMBD_SESS_NEED_RECONNECT
+		 * is a transient session state and does not restart transport
+		 * negotiation.
+		 */
+		ksmbd_conn_lock(conn);
+		if (!ksmbd_conn_new(conn) &&
+		    !ksmbd_conn_need_negotiate(conn)) {
+			work->send_no_response = 1;
+			ksmbd_conn_set_exiting(conn);
+			ksmbd_conn_unlock(conn);
+			return 0;
+		}
+
+		conn->dialect =
+			ksmbd_negotiate_smb_dialect(work->request_buf);
+		ksmbd_debug(SMB, "conn->dialect 0x%x\n", conn->dialect);
 		ret = smb2_handle_negotiate(work);
+		ksmbd_conn_unlock(conn);
 		return ret;
 	}
 
 	if (command == SMB_COM_NEGOTIATE) {
+		ksmbd_conn_lock(conn);
+		conn->dialect =
+			ksmbd_negotiate_smb_dialect(work->request_buf);
+		ksmbd_debug(SMB, "conn->dialect 0x%x\n", conn->dialect);
 		if (__smb2_negotiate(conn)) {
 			init_smb3_11_server(conn);
-			init_smb2_neg_rsp(work);
+			ret = init_smb2_neg_rsp(work);
 			ksmbd_debug(SMB, "Upgrade to SMB2 negotiation\n");
-			return 0;
+		} else {
+			ret = smb_handle_negotiate(work);
 		}
-		return smb_handle_negotiate(work);
+		ksmbd_conn_unlock(conn);
+		return ret;
 	}
 
 	pr_err("Unknown SMB negotiation command: %u\n", command);

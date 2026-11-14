@@ -411,7 +411,7 @@ static int kxtj9_probe(struct i2c_client *client)
 		return -EINVAL;
 	}
 
-	tj9 = devm_kzalloc(&client->dev, sizeof(*tj9), GFP_KERNEL);
+	tj9 = devm_kzalloc_obj(&client->dev, *tj9);
 	if (!tj9) {
 		dev_err(&client->dev,
 			"failed to allocate memory for module data\n");
@@ -525,7 +525,7 @@ static int kxtj9_resume(struct device *dev)
 static DEFINE_SIMPLE_DEV_PM_OPS(kxtj9_pm_ops, kxtj9_suspend, kxtj9_resume);
 
 static const struct i2c_device_id kxtj9_id[] = {
-	{ NAME },
+	{ .name = NAME },
 	{ }
 };
 

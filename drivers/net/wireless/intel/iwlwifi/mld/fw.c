@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright (C) 2024-2025 Intel Corporation
+ * Copyright (C) 2024-2026 Intel Corporation
  */
 
 #include "mld.h"
+#include "tx.h"
 
 #include "fw/api/alive.h"
 #include "fw/api/scan.h"
@@ -45,6 +46,9 @@ static int iwl_mld_send_rss_cfg_cmd(struct iwl_mld *mld)
 	};
 
 	lockdep_assert_wiphy(mld->wiphy);
+
+	if (mld->trans->info.num_rxqs == 1)
+		return 0;
 
 	/* Do not direct RSS traffic to Q 0 which is our fallback queue */
 	for (int i = 0; i < ARRAY_SIZE(cmd.indirection_table); i++)
@@ -124,9 +128,8 @@ static bool iwl_alive_fn(struct iwl_notif_wait_data *notif_wait,
 	u16 status;
 
 	switch (version) {
-	case 6:
 	case 7:
-		expected_sz = sizeof(struct iwl_alive_ntf_v6);
+		expected_sz = sizeof(struct iwl_alive_ntf_v7);
 		break;
 	case 8:
 		expected_sz = sizeof(struct iwl_alive_ntf);
@@ -168,11 +171,7 @@ static bool iwl_alive_fn(struct iwl_notif_wait_data *notif_wait,
 	umac_error_table = le32_to_cpu(umac->dbg_ptrs.error_info_addr) &
 		~FW_ADDR_CACHE_CONTROL;
 
-	if (umac_error_table >= trans->mac_cfg->base->min_umac_error_event_table)
-		iwl_fw_umac_set_alive_err_table(trans, umac_error_table);
-	else
-		IWL_ERR(mld, "Not valid error log pointer 0x%08X\n",
-			umac_error_table);
+	iwl_fw_umac_set_alive_err_table(trans, umac_error_table);
 
 	alive_data->valid = status == IWL_ALIVE_STATUS_OK;
 
@@ -188,9 +187,8 @@ static bool iwl_alive_fn(struct iwl_notif_wait_data *notif_wait,
 		     le32_to_cpu(umac->umac_major),
 		     le32_to_cpu(umac->umac_minor));
 
-	if (version >= 7)
-		IWL_DEBUG_FW(mld, "FW alive flags 0x%x\n",
-			     le16_to_cpu(palive->flags));
+	IWL_DEBUG_FW(mld, "FW alive flags 0x%x\n",
+		     le16_to_cpu(palive->flags));
 
 	if (version >= 8)
 		IWL_DEBUG_FW(mld, "platform_id 0x%llx\n",
@@ -212,11 +210,11 @@ static void iwl_mld_print_alive_notif_timeout(struct iwl_mld *mld)
 
 	IWL_ERR(mld,
 		"SecBoot CPU1 Status: 0x%x, CPU2 Status: 0x%x\n",
-		iwl_read_umac_prph(trans, UMAG_SB_CPU_1_STATUS),
-		iwl_read_umac_prph(trans,
-				   UMAG_SB_CPU_2_STATUS));
+		iwl_trans_read_umac_prph(trans, UMAG_SB_CPU_1_STATUS),
+		iwl_trans_read_umac_prph(trans,
+					 UMAG_SB_CPU_2_STATUS));
 #define IWL_FW_PRINT_REG_INFO(reg_name) \
-	IWL_ERR(mld, #reg_name ": 0x%x\n", iwl_read_umac_prph(trans, reg_name))
+	IWL_ERR(mld, #reg_name ": 0x%x\n", iwl_trans_read_umac_prph(trans, reg_name))
 
 	IWL_FW_PRINT_REG_INFO(WFPM_LMAC1_PD_NOTIFICATION);
 
@@ -361,6 +359,8 @@ void iwl_mld_stop_fw(struct iwl_mld *mld)
 {
 	lockdep_assert_wiphy(mld->wiphy);
 
+	iwl_mld_tx_gp2_stop(mld);
+
 	iwl_abort_notification_waits(&mld->notif_wait);
 
 	iwl_fw_dbg_stop_sync(&mld->fwrt);
@@ -402,8 +402,10 @@ void iwl_mld_send_recovery_cmd(struct iwl_mld *mld, u32 flags)
 
 	if (flags & ERROR_RECOVERY_UPDATE_DB) {
 		/* no buf was allocated upon NIC error */
-		if (!mld->error_recovery_buf)
+		if (!mld->error_recovery_buf) {
+			IWL_ERR(mld, "Recovering without recovery buffer. Expect bugs\n");
 			return;
+		}
 
 		cmd.data[1] = mld->error_recovery_buf;
 		cmd.len[1] =  error_log_size;
@@ -519,7 +521,7 @@ static int iwl_mld_config_fw(struct iwl_mld *mld)
 		return ret;
 
 	iwl_mld_init_tas(mld);
-	iwl_mld_init_uats(mld);
+	iwl_mld_init_ap_type_tables(mld);
 
 	return 0;
 }
@@ -545,6 +547,8 @@ int iwl_mld_start_fw(struct iwl_mld *mld)
 	ret = iwl_mld_init_mcc(mld);
 	if (ret)
 		goto error;
+
+	iwl_mld_tx_gp2_start(mld);
 
 	return 0;
 

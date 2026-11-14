@@ -44,8 +44,8 @@ enum {
 };
 
 static const struct reg_default stih407_sas_reg_defaults[] = {
-	{ STIH407_AUDIO_DAC_CTRL, 0x000000000 },
 	{ STIH407_AUDIO_GLUE_CTRL, 0x00000040 },
+	{ STIH407_AUDIO_DAC_CTRL, 0x000000000 },
 };
 
 struct sti_dac_audio {
@@ -406,8 +406,7 @@ static int sti_sas_driver_probe(struct platform_device *pdev)
 	const struct of_device_id *of_id;
 
 	/* Allocate device structure */
-	drvdata = devm_kzalloc(&pdev->dev, sizeof(struct sti_sas_data),
-			       GFP_KERNEL);
+	drvdata = devm_kzalloc_obj(&pdev->dev, struct sti_sas_data);
 	if (!drvdata)
 		return -ENOMEM;
 

@@ -5,7 +5,6 @@
  * Copyright (c) 2012-2016 Mentor Graphics Inc.
  */
 #include <linux/delay.h>
-#include <linux/fs.h>
 #include <linux/module.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/platform_device.h>
@@ -722,8 +721,8 @@ static int capture_start_streaming(struct vb2_queue *vq, unsigned int count)
 		goto return_bufs;
 	}
 
-	ret = imx_media_pipeline_set_stream(priv->md, &priv->src_sd->entity,
-					    true);
+	ret = imx_media_pipeline_set_stream(priv->md, &priv->vdev,
+					    &priv->src_sd->entity, true);
 	if (ret) {
 		dev_err(priv->dev, "pipeline start failed with %d\n", ret);
 		goto return_bufs;
@@ -749,8 +748,8 @@ static void capture_stop_streaming(struct vb2_queue *vq)
 	unsigned long flags;
 	int ret;
 
-	ret = imx_media_pipeline_set_stream(priv->md, &priv->src_sd->entity,
-					    false);
+	ret = imx_media_pipeline_set_stream(priv->md, &priv->vdev,
+					    &priv->src_sd->entity, false);
 	if (ret)
 		dev_warn(priv->dev, "pipeline stop failed with %d\n", ret);
 
@@ -968,7 +967,7 @@ imx_media_capture_device_init(struct device *dev, struct v4l2_subdev *src_sd,
 	struct vb2_queue *vq;
 	int ret;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return ERR_PTR(-ENOMEM);
 

@@ -87,7 +87,7 @@ static int snd_hwdep_open(struct inode *inode, struct file * file)
 
 	if (!try_module_get(hw->card->module)) {
 		snd_card_unref(hw->card);
-		return -EFAULT;
+		return -ENODEV;
 	}
 
 	init_waitqueue_entry(&wait, current);
@@ -212,6 +212,7 @@ static int snd_hwdep_dsp_load(struct snd_hwdep *hw,
 		return -ENXIO;
 	if (info->index >= 32)
 		return -EINVAL;
+	guard(mutex)(&hw->dsp_mutex);
 	/* check whether the dsp was already loaded */
 	if (hw->dsp_loaded & (1u << info->index))
 		return -EBUSY;
@@ -323,18 +324,17 @@ static int snd_hwdep_control_ioctl(struct snd_card *card,
 
  */
 
-static const struct file_operations snd_hwdep_f_ops =
-{
-	.owner = 	THIS_MODULE,
-	.llseek =	snd_hwdep_llseek,
-	.read = 	snd_hwdep_read,
-	.write =	snd_hwdep_write,
-	.open =		snd_hwdep_open,
-	.release =	snd_hwdep_release,
-	.poll =		snd_hwdep_poll,
-	.unlocked_ioctl =	snd_hwdep_ioctl,
-	.compat_ioctl =	snd_hwdep_ioctl_compat,
-	.mmap =		snd_hwdep_mmap,
+static const struct file_operations snd_hwdep_f_ops = {
+	.owner		=	THIS_MODULE,
+	.llseek		=	snd_hwdep_llseek,
+	.read		=	snd_hwdep_read,
+	.write		=	snd_hwdep_write,
+	.open		=	snd_hwdep_open,
+	.release	=	snd_hwdep_release,
+	.poll		=	snd_hwdep_poll,
+	.unlocked_ioctl	=	snd_hwdep_ioctl,
+	.compat_ioctl	=	snd_hwdep_ioctl_compat,
+	.mmap		=	snd_hwdep_mmap,
 };
 
 static void snd_hwdep_free(struct snd_hwdep *hwdep)
@@ -375,12 +375,13 @@ int snd_hwdep_new(struct snd_card *card, char *id, int device,
 		return -ENXIO;
 	if (rhwdep)
 		*rhwdep = NULL;
-	hwdep = kzalloc(sizeof(*hwdep), GFP_KERNEL);
+	hwdep = kzalloc_obj(*hwdep);
 	if (!hwdep)
 		return -ENOMEM;
 
 	init_waitqueue_head(&hwdep->open_wait);
 	mutex_init(&hwdep->open_mutex);
+	mutex_init(&hwdep->dsp_mutex);
 	hwdep->card = card;
 	hwdep->device = device;
 	if (id)

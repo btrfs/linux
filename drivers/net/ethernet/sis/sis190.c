@@ -331,9 +331,9 @@ static const struct {
 };
 
 static const struct pci_device_id sis190_pci_tbl[] = {
-	{ PCI_DEVICE(PCI_VENDOR_ID_SI, 0x0190), 0, 0, 0 },
-	{ PCI_DEVICE(PCI_VENDOR_ID_SI, 0x0191), 0, 0, 1 },
-	{ 0, },
+	{ PCI_VDEVICE(SI, 0x0190), .driver_data = 0 },
+	{ PCI_VDEVICE(SI, 0x0191), .driver_data = 1 },
+	{ },
 };
 
 MODULE_DEVICE_TABLE(pci, sis190_pci_tbl);
@@ -1407,7 +1407,7 @@ static int sis190_mii_probe(struct net_device *dev)
 		if (status == 0xffff || status == 0x0000)
 			continue;
 
-		phy = kmalloc(sizeof(*phy), GFP_KERNEL);
+		phy = kmalloc_obj(*phy);
 		if (!phy) {
 			sis190_free_phy(&tp->first_phy);
 			rc = -ENOMEM;

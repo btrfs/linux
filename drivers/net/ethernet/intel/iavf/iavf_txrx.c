@@ -1774,7 +1774,7 @@ static int iavf_tso(struct iavf_tx_buffer *first, u8 *hdr_len,
 					 SKB_GSO_UDP_TUNNEL_CSUM)) {
 		if (!(skb_shinfo(skb)->gso_type & SKB_GSO_PARTIAL) &&
 		    (skb_shinfo(skb)->gso_type & SKB_GSO_UDP_TUNNEL_CSUM)) {
-			l4.udp->len = 0;
+			udp_set_len_short(l4.udp, 0);
 
 			/* determine offset of outer transport header */
 			l4_offset = l4.hdr - skb->data;
@@ -2396,12 +2396,8 @@ netdev_tx_t iavf_xmit_frame(struct sk_buff *skb, struct net_device *netdev)
 	/* hardware can't handle really short frames, hardware padding works
 	 * beyond this point
 	 */
-	if (unlikely(skb->len < IAVF_MIN_TX_LEN)) {
-		if (skb_pad(skb, IAVF_MIN_TX_LEN - skb->len))
-			return NETDEV_TX_OK;
-		skb->len = IAVF_MIN_TX_LEN;
-		skb_set_tail_pointer(skb, IAVF_MIN_TX_LEN);
-	}
+	if (skb_put_padto(skb, IAVF_MIN_TX_LEN))
+		return NETDEV_TX_OK;
 
 	return iavf_xmit_frame_ring(skb, tx_ring);
 }

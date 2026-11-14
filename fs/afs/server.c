@@ -117,7 +117,7 @@ static struct afs_server *afs_alloc_server(struct afs_cell *cell, const uuid_t *
 
 	_enter("");
 
-	server = kzalloc(sizeof(struct afs_server), GFP_KERNEL);
+	server = kzalloc_obj(struct afs_server);
 	if (!server)
 		return NULL;
 
@@ -242,7 +242,6 @@ struct afs_server *afs_lookup_server(struct afs_cell *cell, struct key *key,
 out:
 	afs_put_addrlist(alist, afs_alist_trace_put_server_create);
 	if (candidate) {
-		kfree(rcu_access_pointer(server->endpoint_state));
 		kfree(candidate);
 		afs_dec_servers_outstanding(cell->net);
 	}

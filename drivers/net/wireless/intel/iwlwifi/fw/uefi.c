@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright(c) 2021-2025 Intel Corporation
+ * Copyright(c) 2021-2026 Intel Corporation
  */
 
 #include "iwl-drv.h"
 #include "pnvm.h"
 #include "iwl-prph.h"
-#include "iwl-io.h"
+#include "iwl-trans.h"
 
 #include "fw/uefi.h"
 #include "fw/api/alive.h"
@@ -20,6 +20,10 @@
 					 0x8d, 0x03, 0x77, 0x2e,	\
 					 0xcc, 0x3d, 0xa5, 0x31)
 
+#define IWL_EFI_GLUI_GUID	EFI_GUID(0x6c5bed75, 0x0ee8, 0x4d45,	\
+					 0x98, 0x0b, 0x4d, 0x81,	\
+					 0x31, 0xba, 0x84, 0xb5)
+
 struct iwl_uefi_pnvm_mem_desc {
 	__le32 addr;
 	__le32 size;
@@ -27,9 +31,10 @@ struct iwl_uefi_pnvm_mem_desc {
 } __packed;
 
 static void *iwl_uefi_get_variable(efi_char16_t *name, efi_guid_t *guid,
-				   unsigned long *data_size)
+				   u32 *attributes, unsigned long *data_size)
 {
 	efi_status_t status;
+	u32 attr = 0;
 	void *data;
 
 	if (!data_size)
@@ -48,13 +53,26 @@ static void *iwl_uefi_get_variable(efi_char16_t *name, efi_guid_t *guid,
 	if (!data)
 		return ERR_PTR(-ENOMEM);
 
-	status = efi.get_variable(name, guid, NULL, data_size, data);
+	status = efi.get_variable(name, guid, &attr, data_size, data);
 	if (status != EFI_SUCCESS) {
 		kfree(data);
 		return ERR_PTR(-ENOENT);
 	}
 
+	if (attributes)
+		*attributes = attr;
+
 	return data;
+}
+
+static efi_status_t iwl_uefi_set_variable(efi_char16_t *name, efi_guid_t *guid,
+					  u32 attributes, void *data,
+					  unsigned long data_size)
+{
+	if (!efi_rt_services_supported(EFI_RT_SUPPORTED_SET_VARIABLE))
+		return EFI_UNSUPPORTED;
+
+	return efi.set_variable(name, guid, attributes, data_size, data);
 }
 
 void *iwl_uefi_get_pnvm(struct iwl_trans *trans, size_t *len)
@@ -65,7 +83,7 @@ void *iwl_uefi_get_pnvm(struct iwl_trans *trans, size_t *len)
 	*len = 0;
 
 	data = iwl_uefi_get_variable(IWL_UEFI_OEM_PNVM_NAME, &IWL_EFI_WIFI_GUID,
-				     &package_size);
+				     NULL, &package_size);
 	if (IS_ERR(data)) {
 		IWL_DEBUG_FW(trans,
 			     "PNVM UEFI variable not found 0x%lx (len %lu)\n",
@@ -80,17 +98,18 @@ void *iwl_uefi_get_pnvm(struct iwl_trans *trans, size_t *len)
 }
 
 static void *
-iwl_uefi_get_verified_variable_guid(struct iwl_trans *trans,
-				    efi_guid_t *guid,
-				    efi_char16_t *uefi_var_name,
-				    char *var_name,
-				    unsigned int expected_size,
-				    unsigned long *size)
+iwl_uefi_get_variable_guid(struct iwl_trans *trans,
+			   efi_guid_t *guid,
+			   efi_char16_t *uefi_var_name,
+			   char *var_name,
+			   unsigned int expected_size,
+			   unsigned long *size,
+			   u32 *attributes)
 {
 	void *var;
 	unsigned long var_size;
 
-	var = iwl_uefi_get_variable(uefi_var_name, guid, &var_size);
+	var = iwl_uefi_get_variable(uefi_var_name, guid, attributes, &var_size);
 
 	if (IS_ERR(var)) {
 		IWL_DEBUG_RADIO(trans,
@@ -116,13 +135,72 @@ iwl_uefi_get_verified_variable_guid(struct iwl_trans *trans,
 }
 
 static void *
-iwl_uefi_get_verified_variable(struct iwl_trans *trans,
+iwl_uefi_get_verified_variable_guid(struct iwl_fw_runtime *fwrt,
+				    efi_guid_t *guid,
+				    efi_char16_t *uefi_var_name,
+				    char *var_name,
+				    unsigned int expected_size,
+				    unsigned long *size)
+{
+	unsigned long var_size;
+	u32 attributes = 0;
+	void *var;
+
+	if (fwrt->uefi_tables_lock_status == UEFI_CNV_GUID_UNLOCKED)
+		return ERR_PTR(-EINVAL);
+
+	/* In x86 either GLUI or GLAI should exist */
+	if ((IS_ENABLED(CONFIG_X86) || IS_ENABLED(CONFIG_X86_64) ||
+	     IS_ENABLED(CONFIG_X86_32)) &&
+	    fwrt->uefi_tables_lock_status == UEFI_CNV_GUID_UNKNOWN)
+		return ERR_PTR(-EINVAL);
+
+	var = iwl_uefi_get_variable_guid(fwrt->trans,
+					 guid,
+					 uefi_var_name, var_name,
+					 expected_size, &var_size,
+					 &attributes);
+	if (IS_ERR(var))
+		return var;
+
+	if (fwrt->uefi_tables_lock_status != UEFI_CNV_GUID_UNKNOWN)
+		goto out;
+
+	/*
+	 * The lock status is unknown, so probe it: rewrite the variable
+	 * with the data just read and trust it only if the firmware
+	 * refuses the write. Treat a zero attributes value as untrusted,
+	 * since a SetVariable() with no attributes would delete it.
+	 */
+	if (attributes) {
+		efi_status_t status;
+
+		status = iwl_uefi_set_variable(uefi_var_name, guid, attributes,
+					       var, var_size);
+		if (status == EFI_WRITE_PROTECTED ||
+		    status == EFI_SECURITY_VIOLATION ||
+		    status == EFI_ACCESS_DENIED)
+			goto out;
+	}
+
+	/* unprobeable (e.g. EFI_UNSUPPORTED) or writable: not trusted */
+	kfree(var);
+	return ERR_PTR(-EINVAL);
+
+out:
+	if (size)
+		*size = var_size;
+	return var;
+}
+
+static void *
+iwl_uefi_get_verified_wifi_var(struct iwl_fw_runtime *fwrt,
 			       efi_char16_t *uefi_var_name,
 			       char *var_name,
 			       unsigned int expected_size,
 			       unsigned long *size)
 {
-	return iwl_uefi_get_verified_variable_guid(trans, &IWL_EFI_WIFI_GUID,
+	return iwl_uefi_get_verified_variable_guid(fwrt, &IWL_EFI_WIFI_GUID,
 						   uefi_var_name, var_name,
 						   expected_size, size);
 }
@@ -173,15 +251,24 @@ static int iwl_uefi_reduce_power_section(struct iwl_trans *trans,
 	memset(pnvm_data, 0, sizeof(*pnvm_data));
 
 	while (len >= sizeof(*tlv)) {
-		u32 tlv_len, tlv_type;
+		u32 tlv_len, tlv_type, tlv_len_aligned;
 
 		len -= sizeof(*tlv);
 		tlv = (const void *)data;
 
 		tlv_len = le32_to_cpu(tlv->length);
 		tlv_type = le32_to_cpu(tlv->type);
+		tlv_len_aligned = ALIGN(tlv_len, 4);
 
-		if (len < tlv_len) {
+		/* Make sure ALIGN() did not overflow for a malformed TLV length. */
+		if (tlv_len_aligned < tlv_len) {
+			IWL_ERR(trans,
+				"TLV len overflows on alignment: %u\n",
+				tlv_len);
+			return -EINVAL;
+		}
+
+		if (len < tlv_len_aligned) {
 			IWL_ERR(trans, "invalid TLV len: %zd/%u\n",
 				len, tlv_len);
 			return -EINVAL;
@@ -200,13 +287,13 @@ static int iwl_uefi_reduce_power_section(struct iwl_trans *trans,
 				     "New REDUCE_POWER section started, stop parsing.\n");
 			goto done;
 		default:
-			IWL_DEBUG_FW(trans, "Found TLV 0x%0x, len %d\n",
+			IWL_DEBUG_FW(trans, "Found TLV 0x%0x, len %u\n",
 				     tlv_type, tlv_len);
 			break;
 		}
 
-		len -= ALIGN(tlv_len, 4);
-		data += ALIGN(tlv_len, 4);
+		len -= tlv_len_aligned;
+		data += tlv_len_aligned;
 	}
 
 done:
@@ -227,15 +314,24 @@ int iwl_uefi_reduce_power_parse(struct iwl_trans *trans,
 	IWL_DEBUG_FW(trans, "Parsing REDUCE_POWER data\n");
 
 	while (len >= sizeof(*tlv)) {
-		u32 tlv_len, tlv_type;
+		u32 tlv_len, tlv_type, tlv_len_aligned;
 
 		len -= sizeof(*tlv);
 		tlv = (const void *)data;
 
 		tlv_len = le32_to_cpu(tlv->length);
 		tlv_type = le32_to_cpu(tlv->type);
+		tlv_len_aligned = ALIGN(tlv_len, 4);
 
-		if (len < tlv_len) {
+		/* Make sure ALIGN() did not overflow for a malformed TLV length. */
+		if (tlv_len_aligned < tlv_len) {
+			IWL_ERR(trans,
+				"TLV len overflows on alignment: %u\n",
+				tlv_len);
+			return -EINVAL;
+		}
+
+		if (len < tlv_len_aligned) {
 			IWL_ERR(trans, "invalid TLV len: %zd/%u\n",
 				len, tlv_len);
 			return -EINVAL;
@@ -245,16 +341,23 @@ int iwl_uefi_reduce_power_parse(struct iwl_trans *trans,
 			const struct iwl_sku_id *tlv_sku_id =
 				(const void *)(data + sizeof(*tlv));
 
+			if (tlv_len < sizeof(*tlv_sku_id)) {
+				IWL_ERR(trans, "invalid PNVM SKU TLV len: %u\n",
+					tlv_len);
+				return -EINVAL;
+			}
+
 			IWL_DEBUG_FW(trans,
-				     "Got IWL_UCODE_TLV_PNVM_SKU len %d\n",
+				     "Got IWL_UCODE_TLV_PNVM_SKU len %u\n",
 				     tlv_len);
+
 			IWL_DEBUG_FW(trans, "sku_id 0x%0x 0x%0x 0x%0x\n",
 				     le32_to_cpu(tlv_sku_id->data[0]),
 				     le32_to_cpu(tlv_sku_id->data[1]),
 				     le32_to_cpu(tlv_sku_id->data[2]));
 
-			data += sizeof(*tlv) + ALIGN(tlv_len, 4);
-			len -= ALIGN(tlv_len, 4);
+			data += sizeof(*tlv) + tlv_len_aligned;
+			len -= tlv_len_aligned;
 
 			if (sku_id[0] == tlv_sku_id->data[0] &&
 			    sku_id[1] == tlv_sku_id->data[1] &&
@@ -268,8 +371,8 @@ int iwl_uefi_reduce_power_parse(struct iwl_trans *trans,
 				IWL_DEBUG_FW(trans, "SKU ID didn't match!\n");
 			}
 		} else {
-			data += sizeof(*tlv) + ALIGN(tlv_len, 4);
-			len -= ALIGN(tlv_len, 4);
+			data += sizeof(*tlv) + tlv_len_aligned;
+			len -= tlv_len_aligned;
 		}
 	}
 
@@ -282,11 +385,12 @@ u8 *iwl_uefi_get_reduced_power(struct iwl_trans *trans, size_t *len)
 	unsigned long package_size;
 	u8 *data;
 
-	package = iwl_uefi_get_verified_variable(trans,
-						 IWL_UEFI_REDUCED_POWER_NAME,
-						 "Reduced Power",
-						 sizeof(*package),
-						 &package_size);
+	package =
+		iwl_uefi_get_variable_guid(trans, &IWL_EFI_WIFI_GUID,
+					   IWL_UEFI_REDUCED_POWER_NAME,
+					   "Reduced Power",
+					   sizeof(*package),
+					   &package_size, NULL);
 	if (IS_ERR(package))
 		return ERR_CAST(package);
 
@@ -328,9 +432,9 @@ void iwl_uefi_get_step_table(struct iwl_trans *trans)
 	if (trans->mac_cfg->device_family < IWL_DEVICE_FAMILY_AX210)
 		return;
 
-	data = iwl_uefi_get_verified_variable_guid(trans, &IWL_EFI_WIFI_BT_GUID,
-						   IWL_UEFI_STEP_NAME,
-						   "STEP", sizeof(*data), NULL);
+	data = iwl_uefi_get_variable_guid(trans, &IWL_EFI_WIFI_BT_GUID,
+					  IWL_UEFI_STEP_NAME, "STEP",
+					  sizeof(*data), NULL, NULL);
 	if (IS_ERR(data))
 		return;
 
@@ -383,8 +487,9 @@ void iwl_uefi_get_sgom_table(struct iwl_trans *trans,
 	if (!fwrt->geo_enabled)
 		return;
 
-	data = iwl_uefi_get_verified_variable(trans, IWL_UEFI_SGOM_NAME,
-					      "SGOM", sizeof(*data), NULL);
+	data = iwl_uefi_get_variable_guid(trans, &IWL_EFI_WIFI_GUID,
+					  IWL_UEFI_SGOM_NAME, "SGOM",
+					  sizeof(*data), NULL, NULL);
 	if (IS_ERR(data))
 		return;
 
@@ -402,10 +507,11 @@ static int iwl_uefi_uats_parse(struct uefi_cnv_wlan_uats_data *uats_data,
 	if (uats_data->revision != 1)
 		return -EINVAL;
 
-	memcpy(fwrt->uats_table.offset_map, uats_data->offset_map,
-	       sizeof(fwrt->uats_table.offset_map));
+	memcpy(fwrt->ap_type_cmd.mcc_to_ap_type_map,
+	       uats_data->mcc_to_ap_type_map,
+	       sizeof(fwrt->ap_type_cmd.mcc_to_ap_type_map));
 
-	fwrt->uats_valid = true;
+	fwrt->ap_type_cmd_valid = true;
 
 	return 0;
 }
@@ -416,8 +522,9 @@ void iwl_uefi_get_uats_table(struct iwl_trans *trans,
 	struct uefi_cnv_wlan_uats_data *data;
 	int ret;
 
-	data = iwl_uefi_get_verified_variable(trans, IWL_UEFI_UATS_NAME,
-					      "UATS", sizeof(*data), NULL);
+	data = iwl_uefi_get_variable_guid(trans, &IWL_EFI_WIFI_GUID,
+					  IWL_UEFI_UATS_NAME, "UATS",
+					  sizeof(*data), NULL, NULL);
 	if (IS_ERR(data))
 		return;
 
@@ -428,37 +535,110 @@ void iwl_uefi_get_uats_table(struct iwl_trans *trans,
 }
 IWL_EXPORT_SYMBOL(iwl_uefi_get_uats_table);
 
-static void iwl_uefi_set_sar_profile(struct iwl_fw_runtime *fwrt,
-				     struct uefi_sar_profile *uefi_sar_prof,
-				     u8 prof_index, bool enabled)
+void iwl_uefi_get_uneb_table(struct iwl_trans *trans,
+			     struct iwl_fw_runtime *fwrt)
 {
-	memcpy(&fwrt->sar_profiles[prof_index].chains, uefi_sar_prof,
-	       sizeof(struct uefi_sar_profile));
+	struct uefi_cnv_wlan_uneb_data *data;
 
-	fwrt->sar_profiles[prof_index].enabled = enabled & IWL_SAR_ENABLE_MSK;
+	data = iwl_uefi_get_variable_guid(trans, &IWL_EFI_WIFI_GUID,
+					  IWL_UEFI_UNEB_NAME, "UNEB",
+					  sizeof(*data), NULL, NULL);
+	if (IS_ERR(data))
+		return;
+
+	if (data->revision != 1) {
+		IWL_DEBUG_RADIO(fwrt,
+				"Cannot read UNEB table. rev is invalid\n");
+		goto out;
+	}
+
+	BUILD_BUG_ON(sizeof(data->mcc_to_ap_type_map) !=
+		     sizeof(fwrt->ap_type_cmd.mcc_to_ap_type_unii9_map));
+
+	memcpy(fwrt->ap_type_cmd.mcc_to_ap_type_unii9_map,
+	       data->mcc_to_ap_type_map,
+	       sizeof(fwrt->ap_type_cmd.mcc_to_ap_type_unii9_map));
+
+	fwrt->ap_type_cmd_valid = true;
+
+out:
+	kfree(data);
+}
+IWL_EXPORT_SYMBOL(iwl_uefi_get_uneb_table);
+
+static void iwl_uefi_set_sar_profile(struct iwl_sar_profile *profiles,
+				     const u8 *vals, u8 prof_index,
+				     u8 num_subbands, u32 mode)
+{
+	struct iwl_sar_profile *sar_prof = &profiles[prof_index];
+
+	/*
+	 * Make sure fwrt has enough room to hold the data
+	 * coming from the UEFI table
+	 */
+	if (WARN_ON(ARRAY_SIZE(sar_prof->chains) *
+		    ARRAY_SIZE(sar_prof->chains[0].subbands)  <
+		    UEFI_SAR_MAX_CHAINS_PER_PROFILE * num_subbands))
+		return;
+
+	BUILD_BUG_ON(ARRAY_SIZE(sar_prof->chains) !=
+		     UEFI_SAR_MAX_CHAINS_PER_PROFILE);
+
+	for (int chain = 0;
+	     chain < UEFI_SAR_MAX_CHAINS_PER_PROFILE;
+	     chain++) {
+		for (int subband = 0; subband < num_subbands; subband++)
+			sar_prof->chains[chain].subbands[subband] =
+				vals[chain * num_subbands + subband];
+	}
+
+	sar_prof->enabled = mode & IWL_SAR_ENABLE_MSK;
 }
 
 int iwl_uefi_get_wrds_table(struct iwl_fw_runtime *fwrt)
 {
 	struct uefi_cnv_var_wrds *data;
+	unsigned long size;
+	unsigned long expected_size;
+	int num_subbands;
 	int ret = 0;
 
-	data = iwl_uefi_get_verified_variable(fwrt->trans, IWL_UEFI_WRDS_NAME,
-					      "WRDS", sizeof(*data), NULL);
+	data = iwl_uefi_get_verified_wifi_var(fwrt,
+					      IWL_UEFI_WRDS_NAME, "WRDS",
+					      UEFI_SAR_WRDS_TABLE_SIZE_REV2,
+					      &size);
+
 	if (IS_ERR(data))
 		return -EINVAL;
 
-	if (data->revision != IWL_UEFI_WRDS_REVISION) {
-		ret = -EINVAL;
-		IWL_DEBUG_RADIO(fwrt, "Unsupported UEFI WRDS revision:%d\n",
+	switch (data->revision) {
+	case 2:
+		expected_size = UEFI_SAR_WRDS_TABLE_SIZE_REV2;
+		num_subbands = UEFI_SAR_SUB_BANDS_NUM_REV2;
+		break;
+	case 3:
+		expected_size = UEFI_SAR_WRDS_TABLE_SIZE_REV3;
+		num_subbands = UEFI_SAR_SUB_BANDS_NUM_REV3;
+		break;
+	default:
+		IWL_DEBUG_RADIO(fwrt,
+				"Unsupported UEFI WRDS revision:%d\n",
 				data->revision);
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (size != expected_size) {
+		ret = -EINVAL;
 		goto out;
 	}
 
 	/* The profile from WRDS is officially profile 1, but goes
 	 * into sar_profiles[0] (because we don't have a profile 0).
 	 */
-	iwl_uefi_set_sar_profile(fwrt, &data->sar_profile, 0, data->mode);
+	iwl_uefi_set_sar_profile(fwrt->sar_profiles, data->vals, 0,
+				 num_subbands, data->mode);
+	fwrt->wrds_table_revision = data->revision;
 out:
 	kfree(data);
 	return ret;
@@ -467,21 +647,40 @@ out:
 int iwl_uefi_get_ewrd_table(struct iwl_fw_runtime *fwrt)
 {
 	struct uefi_cnv_var_ewrd *data;
+	unsigned long expected_size;
 	int i, ret = 0;
+	unsigned long size;
+	int num_subbands;
+	int profile_size;
 
-	data = iwl_uefi_get_verified_variable(fwrt->trans, IWL_UEFI_EWRD_NAME,
-					      "EWRD", sizeof(*data), NULL);
+	data = iwl_uefi_get_verified_wifi_var(fwrt,
+					      IWL_UEFI_EWRD_NAME, "EWRD",
+					      UEFI_SAR_EWRD_TABLE_SIZE_REV2,
+					      &size);
 	if (IS_ERR(data))
 		return -EINVAL;
 
-	if (data->revision != IWL_UEFI_EWRD_REVISION) {
-		ret = -EINVAL;
-		IWL_DEBUG_RADIO(fwrt, "Unsupported UEFI EWRD revision:%d\n",
+	switch (data->revision) {
+	case 2:
+		expected_size = UEFI_SAR_EWRD_TABLE_SIZE_REV2;
+		num_subbands = UEFI_SAR_SUB_BANDS_NUM_REV2;
+		profile_size = UEFI_SAR_PROFILE_SIZE_REV2;
+		break;
+	case 3:
+		expected_size = UEFI_SAR_EWRD_TABLE_SIZE_REV3;
+		num_subbands = UEFI_SAR_SUB_BANDS_NUM_REV3;
+		profile_size = UEFI_SAR_PROFILE_SIZE_REV3;
+		break;
+	default:
+		IWL_DEBUG_RADIO(fwrt,
+				"Unsupported UEFI EWRD revision:%d\n",
 				data->revision);
+		ret = -EINVAL;
 		goto out;
 	}
 
-	if (data->num_profiles >= BIOS_SAR_MAX_PROFILE_NUM) {
+	if (size != expected_size ||
+	    data->num_profiles >= BIOS_SAR_MAX_PROFILE_NUM) {
 		ret = -EINVAL;
 		goto out;
 	}
@@ -491,28 +690,169 @@ int iwl_uefi_get_ewrd_table(struct iwl_fw_runtime *fwrt)
 		 * save them in sar_profiles[1-3] (because we don't
 		 * have profile 0).  So in the array we start from 1.
 		 */
-		iwl_uefi_set_sar_profile(fwrt, &data->sar_profiles[i], i + 1,
-					 data->mode);
+		iwl_uefi_set_sar_profile(fwrt->sar_profiles,
+					 &data->vals[i * profile_size],
+					 i + 1, num_subbands, data->mode);
+
+	fwrt->ewrd_table_revision = data->revision;
 
 out:
 	kfree(data);
 	return ret;
 }
 
+int iwl_uefi_get_wsss_table(struct iwl_fw_runtime *fwrt)
+{
+	struct uefi_cnv_var_wrds *data __free(kfree) = NULL;
+	unsigned long expected_size;
+	unsigned long size;
+	int num_subbands;
+
+	if (fwrt->wrds_table_revision == IWL_BIOS_REVISION_UNSET) {
+		IWL_DEBUG_RADIO(fwrt,
+				"Skipping standalone SAR: WRDS table was not read\n");
+		return -EINVAL;
+	}
+
+	data = iwl_uefi_get_verified_wifi_var(fwrt,
+					      IWL_UEFI_WSSS_NAME,
+					      "WSSS",
+					      UEFI_SAR_WRDS_TABLE_SIZE_REV2,
+					      &size);
+	if (IS_ERR(data))
+		return PTR_ERR(data);
+
+	switch (data->revision) {
+	case 2:
+		expected_size = UEFI_SAR_WRDS_TABLE_SIZE_REV2;
+		num_subbands = UEFI_SAR_SUB_BANDS_NUM_REV2;
+		break;
+	case 3:
+		expected_size = UEFI_SAR_WRDS_TABLE_SIZE_REV3;
+		num_subbands = UEFI_SAR_SUB_BANDS_NUM_REV3;
+		break;
+	default:
+		IWL_DEBUG_RADIO(fwrt,
+				"Unsupported UEFI WSSS revision:%d\n",
+				data->revision);
+		return -EINVAL;
+	}
+
+	if (size != expected_size)
+		return -EINVAL;
+
+	if (fwrt->wrds_table_revision != data->revision) {
+		IWL_DEBUG_RADIO(fwrt,
+				"Skipping standalone SAR: WRDS/WSSS revision mismatch (WRDS rev %d, WSSS rev %d)\n",
+				fwrt->wrds_table_revision,
+				data->revision);
+		return -EINVAL;
+	}
+
+	IWL_DEBUG_RADIO(fwrt, "Reading WSSS (WRDS Standalone) tbl_rev=%d\n",
+			data->revision);
+	iwl_uefi_set_sar_profile(fwrt->sar_standalone_profiles,
+				 data->vals, 0,
+				 num_subbands,
+				 data->mode);
+	return 0;
+}
+
+int iwl_uefi_get_ewss_table(struct iwl_fw_runtime *fwrt)
+{
+	struct uefi_cnv_var_ewrd *data __free(kfree) = NULL;
+	unsigned long expected_size;
+	unsigned long size;
+	int num_subbands;
+	int profile_size;
+	int i;
+
+	if (fwrt->ewrd_table_revision == IWL_BIOS_REVISION_UNSET) {
+		IWL_DEBUG_RADIO(fwrt,
+				"Skipping standalone SAR: EWRD table was not read\n");
+		return -EINVAL;
+	}
+
+	data = iwl_uefi_get_verified_wifi_var(fwrt,
+					      IWL_UEFI_EWSS_NAME,
+					      "EWSS",
+					      UEFI_SAR_EWRD_TABLE_SIZE_REV2,
+					      &size);
+	if (IS_ERR(data))
+		return PTR_ERR(data);
+
+	switch (data->revision) {
+	case 3:
+		expected_size = UEFI_SAR_EWRD_TABLE_SIZE_REV3;
+		num_subbands = UEFI_SAR_SUB_BANDS_NUM_REV3;
+		profile_size = UEFI_SAR_PROFILE_SIZE_REV3;
+		break;
+	case 2:
+		expected_size = UEFI_SAR_EWRD_TABLE_SIZE_REV2;
+		num_subbands = UEFI_SAR_SUB_BANDS_NUM_REV2;
+		profile_size = UEFI_SAR_PROFILE_SIZE_REV2;
+		break;
+	default:
+		IWL_DEBUG_RADIO(fwrt,
+				"Unsupported UEFI EWSS revision:%d\n",
+				data->revision);
+		return -EINVAL;
+	}
+
+	if (size != expected_size ||
+	    data->num_profiles >= BIOS_SAR_MAX_PROFILE_NUM)
+		return -EINVAL;
+
+	if (fwrt->ewrd_table_revision != data->revision) {
+		IWL_DEBUG_RADIO(fwrt,
+				"Skipping standalone SAR: EWRD/EWSS revision mismatch (EWRD rev %d, EWSS rev %d)\n",
+				fwrt->ewrd_table_revision,
+				data->revision);
+		return -EINVAL;
+	}
+
+	for (i = 0; i < data->num_profiles; i++)
+		iwl_uefi_set_sar_profile(fwrt->sar_standalone_profiles,
+					 &data->vals[i * profile_size],
+					 i + 1, num_subbands,
+					 data->mode);
+
+	return 0;
+}
+
 int iwl_uefi_get_wgds_table(struct iwl_fw_runtime *fwrt)
 {
 	struct uefi_cnv_var_wgds *data;
-	int i, ret = 0;
+	unsigned long expected_size;
+	unsigned long size;
+	int profile_size;
+	int n_subbands;
+	int ret = 0;
 
-	data = iwl_uefi_get_verified_variable(fwrt->trans, IWL_UEFI_WGDS_NAME,
-					      "WGDS", sizeof(*data), NULL);
+	data = iwl_uefi_get_verified_wifi_var(fwrt,
+					      IWL_UEFI_WGDS_NAME, "WGDS",
+					      UEFI_WGDS_TABLE_SIZE_REV3, &size);
 	if (IS_ERR(data))
 		return -EINVAL;
 
-	if (data->revision != IWL_UEFI_WGDS_REVISION) {
+	switch (data->revision) {
+	case 3:
+		expected_size = UEFI_WGDS_TABLE_SIZE_REV3;
+		n_subbands = UEFI_GEO_NUM_BANDS_REV3;
+		break;
+	case 4:
+		expected_size = UEFI_WGDS_TABLE_SIZE_REV4;
+		n_subbands = UEFI_GEO_NUM_BANDS_REV4;
+		break;
+	default:
 		ret = -EINVAL;
 		IWL_DEBUG_RADIO(fwrt, "Unsupported UEFI WGDS revision:%d\n",
 				data->revision);
+		goto out;
+	}
+
+	if (size != expected_size) {
+		ret = -EINVAL;
 		goto out;
 	}
 
@@ -524,10 +864,31 @@ int iwl_uefi_get_wgds_table(struct iwl_fw_runtime *fwrt)
 		goto out;
 	}
 
+	if (WARN_ON(BIOS_GEO_MAX_PROFILE_NUM >
+		    ARRAY_SIZE(fwrt->geo_profiles) ||
+		    n_subbands > ARRAY_SIZE(fwrt->geo_profiles[0].bands) ||
+		    BIOS_GEO_NUM_CHAINS >
+		    ARRAY_SIZE(fwrt->geo_profiles[0].bands[0].chains))) {
+		ret = -EINVAL;
+		goto out;
+	}
+
 	fwrt->geo_rev = data->revision;
-	for (i = 0; i < data->num_profiles; i++)
-		memcpy(&fwrt->geo_profiles[i], &data->geo_profiles[i],
-		       sizeof(struct iwl_geo_profile));
+	fwrt->geo_bios_source = BIOS_SOURCE_UEFI;
+	profile_size = 3 * n_subbands;
+	for (int prof = 0; prof < data->num_profiles; prof++) {
+		const u8 *val = &data->vals[profile_size * prof];
+		struct iwl_geo_profile *geo_prof = &fwrt->geo_profiles[prof];
+
+		for (int subband = 0; subband < n_subbands; subband++) {
+			geo_prof->bands[subband].max = *val++;
+
+			for (int chain = 0;
+			     chain < BIOS_GEO_NUM_CHAINS;
+			     chain++)
+				geo_prof->bands[subband].chains[chain] = *val++;
+		}
+	}
 
 	fwrt->geo_num_profiles = data->num_profiles;
 	fwrt->geo_enabled = true;
@@ -539,18 +900,52 @@ out:
 int iwl_uefi_get_ppag_table(struct iwl_fw_runtime *fwrt)
 {
 	struct uefi_cnv_var_ppag *data;
+	int n_subbands;
+	u32 valid_rev;
 	int ret = 0;
 
-	data = iwl_uefi_get_verified_variable(fwrt->trans, IWL_UEFI_PPAG_NAME,
-					      "PPAG", sizeof(*data), NULL);
-	if (IS_ERR(data))
-		return -EINVAL;
+	data = iwl_uefi_get_verified_wifi_var(fwrt,
+					      IWL_UEFI_PPAG_NAME, "PPAG",
+					      UEFI_PPAG_DATA_SIZE_V5, NULL);
+	if (!IS_ERR(data)) {
+		n_subbands = UEFI_PPAG_SUB_BANDS_NUM_REV5;
+		valid_rev = BIT(5);
 
-	if (data->revision < IWL_UEFI_MIN_PPAG_REV ||
-	    data->revision > IWL_UEFI_MAX_PPAG_REV) {
+		goto parse_table;
+	}
+
+	data = iwl_uefi_get_verified_wifi_var(fwrt,
+					      IWL_UEFI_PPAG_NAME,
+					      "PPAG",
+					      UEFI_PPAG_DATA_SIZE_V4,
+					      NULL);
+	if (!IS_ERR(data)) {
+		n_subbands = UEFI_PPAG_SUB_BANDS_NUM_REV4;
+		/* revisions 1-4 have all the same size */
+		valid_rev = BIT(1) | BIT(2) | BIT(3) | BIT(4);
+
+		goto parse_table;
+	}
+
+	return -EINVAL;
+
+parse_table:
+	if (data->revision >= 32 || !(BIT(data->revision) & valid_rev)) {
 		ret = -EINVAL;
-		IWL_DEBUG_RADIO(fwrt, "Unsupported UEFI PPAG revision:%d\n",
+		IWL_DEBUG_RADIO(fwrt,
+				"Unsupported UEFI PPAG revision:%d\n",
 				data->revision);
+		goto out;
+	}
+
+	/*
+	 * Make sure fwrt has enough room to hold
+	 * data coming from the UEFI table
+	 */
+	if (WARN_ON(ARRAY_SIZE(fwrt->ppag_chains) *
+		    ARRAY_SIZE(fwrt->ppag_chains[0].subbands)  <
+		    UEFI_PPAG_NUM_CHAINS * n_subbands)) {
+		ret = -EINVAL;
 		goto out;
 	}
 
@@ -558,9 +953,13 @@ int iwl_uefi_get_ppag_table(struct iwl_fw_runtime *fwrt)
 	fwrt->ppag_flags = iwl_bios_get_ppag_flags(data->ppag_modes,
 						   fwrt->ppag_bios_rev);
 
-	BUILD_BUG_ON(sizeof(fwrt->ppag_chains) != sizeof(data->ppag_chains));
-	memcpy(&fwrt->ppag_chains, &data->ppag_chains,
-	       sizeof(data->ppag_chains));
+	for (int chain = 0; chain < UEFI_PPAG_NUM_CHAINS; chain++) {
+		for (int subband = 0; subband < n_subbands; subband++)
+			fwrt->ppag_chains[chain].subbands[subband] =
+				data->vals[chain * n_subbands + subband];
+	}
+
+	iwl_bios_print_ppag(fwrt, n_subbands);
 	fwrt->ppag_bios_source = BIOS_SOURCE_UEFI;
 out:
 	kfree(data);
@@ -573,8 +972,9 @@ int iwl_uefi_get_tas_table(struct iwl_fw_runtime *fwrt,
 	struct uefi_cnv_var_wtas *uefi_tas;
 	int ret, enabled;
 
-	uefi_tas = iwl_uefi_get_verified_variable(fwrt->trans, IWL_UEFI_WTAS_NAME,
-						  "WTAS", sizeof(*uefi_tas), NULL);
+	uefi_tas = iwl_uefi_get_verified_wifi_var(fwrt,
+						  IWL_UEFI_WTAS_NAME, "WTAS",
+						  sizeof(*uefi_tas), NULL);
 	if (IS_ERR(uefi_tas))
 		return -EINVAL;
 
@@ -626,7 +1026,7 @@ int iwl_uefi_get_pwr_limit(struct iwl_fw_runtime *fwrt,
 	struct uefi_cnv_var_splc *data;
 	int ret = 0;
 
-	data = iwl_uefi_get_verified_variable(fwrt->trans, IWL_UEFI_SPLC_NAME,
+	data = iwl_uefi_get_verified_wifi_var(fwrt, IWL_UEFI_SPLC_NAME,
 					      "SPLC", sizeof(*data), NULL);
 	if (IS_ERR(data))
 		return -EINVAL;
@@ -648,8 +1048,9 @@ int iwl_uefi_get_mcc(struct iwl_fw_runtime *fwrt, char *mcc)
 	struct uefi_cnv_var_wrdd *data;
 	int ret = 0;
 
-	data = iwl_uefi_get_verified_variable(fwrt->trans, IWL_UEFI_WRDD_NAME,
-					      "WRDD", sizeof(*data), NULL);
+	data = iwl_uefi_get_verified_wifi_var(fwrt,
+					      IWL_UEFI_WRDD_NAME, "WRDD",
+					      sizeof(*data), NULL);
 	if (IS_ERR(data))
 		return -EINVAL;
 
@@ -679,7 +1080,7 @@ int iwl_uefi_get_eckv(struct iwl_fw_runtime *fwrt, u32 *extl_clk)
 	struct uefi_cnv_var_eckv *data;
 	int ret = 0;
 
-	data = iwl_uefi_get_verified_variable_guid(fwrt->trans,
+	data = iwl_uefi_get_verified_variable_guid(fwrt,
 						   &IWL_EFI_WIFI_BT_GUID,
 						   IWL_UEFI_ECKV_NAME,
 						   "ECKV", sizeof(*data), NULL);
@@ -703,8 +1104,9 @@ int iwl_uefi_get_wbem(struct iwl_fw_runtime *fwrt, u32 *value)
 	struct uefi_cnv_wlan_wbem_data *data;
 	int ret = 0;
 
-	data = iwl_uefi_get_verified_variable(fwrt->trans, IWL_UEFI_WBEM_NAME,
-					      "WBEM", sizeof(*data), NULL);
+	data = iwl_uefi_get_verified_wifi_var(fwrt,
+					      IWL_UEFI_WBEM_NAME, "WBEM",
+					      sizeof(*data), NULL);
 	if (IS_ERR(data))
 		return -EINVAL;
 
@@ -715,25 +1117,22 @@ int iwl_uefi_get_wbem(struct iwl_fw_runtime *fwrt, u32 *value)
 		goto out;
 	}
 	*value = data->wbem_320mhz_per_mcc & IWL_UEFI_WBEM_REV0_MASK;
+	fwrt->wbem_source = BIOS_SOURCE_UEFI;
+	fwrt->wbem_revision = data->revision;
 	IWL_DEBUG_RADIO(fwrt, "Loaded WBEM config from UEFI\n");
 out:
 	kfree(data);
 	return ret;
 }
 
-int iwl_uefi_get_dsm(struct iwl_fw_runtime *fwrt, enum iwl_dsm_funcs func,
-		     u32 *value)
+static int iwl_uefi_load_dsm_values(struct iwl_fw_runtime *fwrt)
 {
 	struct uefi_cnv_var_general_cfg *data;
 	int ret = -EINVAL;
 
-	BUILD_BUG_ON(ARRAY_SIZE(data->functions) < DSM_FUNC_NUM_FUNCS);
+	BUILD_BUG_ON(ARRAY_SIZE(data->functions) < ARRAY_SIZE(fwrt->dsm_values));
 
-	/* Not supported function index */
-	if (func >= DSM_FUNC_NUM_FUNCS || func == 5)
-		return -EOPNOTSUPP;
-
-	data = iwl_uefi_get_verified_variable(fwrt->trans, IWL_UEFI_DSM_NAME,
+	data = iwl_uefi_get_verified_wifi_var(fwrt, IWL_UEFI_DSM_NAME,
 					      "DSM", sizeof(*data), NULL);
 	if (IS_ERR(data))
 		return -EINVAL;
@@ -743,50 +1142,98 @@ int iwl_uefi_get_dsm(struct iwl_fw_runtime *fwrt, enum iwl_dsm_funcs func,
 				data->revision);
 		goto out;
 	}
-
-	if (!(data->functions[DSM_FUNC_QUERY] & BIT(func))) {
-		IWL_DEBUG_RADIO(fwrt, "DSM func %d not in 0x%x\n",
-				func, data->functions[DSM_FUNC_QUERY]);
+	if (!data->functions[DSM_FUNC_QUERY]) {
+		IWL_DEBUG_RADIO(fwrt,
+				"UEFI DSM query bitmap is empty, revision:%d\n",
+				data->revision);
 		goto out;
 	}
+	fwrt->dsm_revision = data->revision;
+	fwrt->dsm_source = BIOS_SOURCE_UEFI;
 
-	*value = data->functions[func];
+	fwrt->dsm_funcs_valid = data->functions[DSM_FUNC_QUERY];
 
-	IWL_DEBUG_RADIO(fwrt,
-			"UEFI: DSM func=%d: value=%d\n", func, *value);
+	/*
+	 * Make sure we don't load the DSM values twice. Set this only after we
+	 * validated the DSM table so that if the table in UEFI is not valid,
+	 * we will fallback to ACPI.
+	 */
+	fwrt->dsm_funcs_valid |= BIT(DSM_FUNC_QUERY);
 
+	for (int func = 0; func < ARRAY_SIZE(fwrt->dsm_values); func++) {
+		if (!(fwrt->dsm_funcs_valid & BIT(func))) {
+			IWL_DEBUG_RADIO(fwrt, "DSM func %d not in 0x%x\n",
+					func, fwrt->dsm_funcs_valid);
+			continue;
+		}
+
+		fwrt->dsm_values[func] = data->functions[func];
+
+		IWL_DEBUG_RADIO(fwrt,
+				"UEFI: DSM func=%d: value=%d\n", func,
+				fwrt->dsm_values[func]);
+	}
 	ret = 0;
+
 out:
 	kfree(data);
 	return ret;
 }
 
+int iwl_uefi_get_dsm(struct iwl_fw_runtime *fwrt, enum iwl_dsm_funcs func,
+		     u32 *value)
+{
+	/* Not supported function index */
+	if (func >= DSM_FUNC_NUM_FUNCS || func == 5)
+		return -EOPNOTSUPP;
+
+	if (!fwrt->dsm_funcs_valid) {
+		int ret = iwl_uefi_load_dsm_values(fwrt);
+
+		if (ret)
+			return ret;
+	}
+
+	if (!(fwrt->dsm_funcs_valid & BIT(func))) {
+		IWL_DEBUG_RADIO(fwrt, "DSM func %d not in 0x%x\n",
+				func, fwrt->dsm_funcs_valid);
+		return -EINVAL;
+	}
+
+	*value = fwrt->dsm_values[func];
+
+	IWL_DEBUG_RADIO(fwrt,
+			"UEFI: DSM func=%d: value=%d\n", func, *value);
+
+	return 0;
+}
+
 int iwl_uefi_get_puncturing(struct iwl_fw_runtime *fwrt)
 {
 	struct uefi_cnv_var_puncturing_data *data;
-	/* default value is not enabled if there is any issue in reading
-	 * uefi variable or revision is not supported
-	 */
-	int puncturing = 0;
+	int ret = 0;
 
-	data = iwl_uefi_get_verified_variable(fwrt->trans,
-					      IWL_UEFI_PUNCTURING_NAME,
-					      "UefiCnvWlanPuncturing",
-					      sizeof(*data), NULL);
+	data = iwl_uefi_get_variable_guid(fwrt->trans, &IWL_EFI_WIFI_GUID,
+					  IWL_UEFI_PUNCTURING_NAME,
+					  "UefiCnvWlanPuncturing",
+					  sizeof(*data), NULL, NULL);
 	if (IS_ERR(data))
-		return puncturing;
+		return -EINVAL;
 
 	if (data->revision != IWL_UEFI_PUNCTURING_REVISION) {
 		IWL_DEBUG_RADIO(fwrt, "Unsupported UEFI PUNCTURING rev:%d\n",
 				data->revision);
+		ret = -EINVAL;
 	} else {
-		puncturing = data->puncturing & IWL_UEFI_PUNCTURING_REV0_MASK;
+		fwrt->puncturing_source = BIOS_SOURCE_UEFI;
+		fwrt->puncturing_revision = data->revision;
+		fwrt->bios_puncturing = data->puncturing;
 		IWL_DEBUG_RADIO(fwrt, "Loaded puncturing bits from UEFI: %d\n",
-				puncturing);
+				fwrt->bios_puncturing);
 	}
 
 	kfree(data);
-	return puncturing;
+	return ret;
 }
 IWL_EXPORT_SYMBOL(iwl_uefi_get_puncturing);
 
@@ -795,7 +1242,7 @@ int iwl_uefi_get_dsbr(struct iwl_fw_runtime *fwrt, u32 *value)
 	struct uefi_cnv_wlan_dsbr_data *data;
 	int ret = 0;
 
-	data = iwl_uefi_get_verified_variable_guid(fwrt->trans,
+	data = iwl_uefi_get_verified_variable_guid(fwrt,
 						   &IWL_EFI_WIFI_BT_GUID,
 						   IWL_UEFI_DSBR_NAME, "DSBR",
 						   sizeof(*data), NULL);
@@ -821,8 +1268,9 @@ int iwl_uefi_get_phy_filters(struct iwl_fw_runtime *fwrt)
 	struct uefi_cnv_wpfc_data *data __free(kfree);
 	struct iwl_phy_specific_cfg *filters = &fwrt->phy_filters;
 
-	data = iwl_uefi_get_verified_variable(fwrt->trans, IWL_UEFI_WPFC_NAME,
-					      "WPFC", sizeof(*data), NULL);
+	data = iwl_uefi_get_verified_wifi_var(fwrt,
+					      IWL_UEFI_WPFC_NAME, "WPFC",
+					      sizeof(*data), NULL);
 	if (IS_ERR(data))
 		return -EINVAL;
 
@@ -842,4 +1290,34 @@ int iwl_uefi_get_phy_filters(struct iwl_fw_runtime *fwrt)
 
 	IWL_DEBUG_RADIO(fwrt, "Loaded WPFC config from UEFI\n");
 	return 0;
+}
+
+void iwl_uefi_get_guid_lock_status(struct iwl_fw_runtime *fwrt)
+{
+	struct uefi_cnv_var_glui *data __free(kfree) =
+		iwl_uefi_get_variable_guid(fwrt->trans,
+					   &IWL_EFI_GLUI_GUID,
+					   IWL_UEFI_GLUI_NAME, "GLUI",
+					   sizeof(*data), NULL, NULL);
+
+	if (IS_ERR(data))
+		return;
+
+	if (data->revision != IWL_UEFI_GLUI_REVISION) {
+		IWL_DEBUG_RADIO(fwrt, "Unsupported UEFI GLUI revision:%d\n",
+				data->revision);
+		return;
+	}
+
+	/* UEFI_CNV_GUID_TEST_MODE is the max value the BIOS can report */
+	if (data->guid_lock_status > UEFI_CNV_GUID_TEST_MODE) {
+		IWL_DEBUG_RADIO(fwrt, "Invalid UEFI GUID lock status:%d\n",
+				data->guid_lock_status);
+		return;
+	}
+
+	fwrt->uefi_tables_lock_status = data->guid_lock_status;
+
+	IWL_DEBUG_RADIO(fwrt, "Loaded UEFI WIFI GUID lock status: %d\n",
+			fwrt->uefi_tables_lock_status);
 }

@@ -392,6 +392,9 @@ static void mtdoops_notify_remove(struct mtd_info *mtd)
 	cxt->mtd = NULL;
 	flush_work(&cxt->work_erase);
 	flush_work(&cxt->work_write);
+	vfree(cxt->oops_page_used);
+	cxt->oops_page_used = NULL;
+	cxt->oops_pages = 0;
 }
 
 
@@ -403,8 +406,7 @@ static struct mtd_notifier mtdoops_notifier = {
 static int __init mtdoops_init(void)
 {
 	struct mtdoops_context *cxt = &oops_cxt;
-	int mtd_index;
-	char *endp;
+	unsigned int mtd_index;
 
 	if (strlen(mtddev) == 0) {
 		pr_err("mtd device (mtddev=name/number) must be supplied\n");
@@ -421,9 +423,9 @@ static int __init mtdoops_init(void)
 
 	/* Setup the MTD device to use */
 	cxt->mtd_index = -1;
-	mtd_index = simple_strtoul(mtddev, &endp, 0);
-	if (*endp == '\0')
+	if (kstrtouint(mtddev, 0, &mtd_index) == 0) {
 		cxt->mtd_index = mtd_index;
+	}
 
 	cxt->oops_buf = vmalloc(record_size);
 	if (!cxt->oops_buf)

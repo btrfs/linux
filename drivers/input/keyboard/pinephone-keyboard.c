@@ -10,7 +10,6 @@
 #include <linux/input/matrix_keypad.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/of.h>
 #include <linux/regulator/consumer.h>
 #include <linux/types.h>
@@ -366,7 +365,7 @@ static int ppkb_probe(struct i2c_client *client)
 	if (error)
 		return error;
 
-	ppkb = devm_kzalloc(dev, sizeof(*ppkb), GFP_KERNEL);
+	ppkb = devm_kzalloc_obj(dev, *ppkb);
 	if (!ppkb)
 		return -ENOMEM;
 

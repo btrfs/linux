@@ -20,7 +20,7 @@
 #include <linux/lwq.h>
 #include <linux/wait.h>
 #include <linux/mm.h>
-#include <linux/pagevec.h>
+#include <linux/folio_batch.h>
 #include <linux/kthread.h>
 
 /*
@@ -35,8 +35,10 @@
  */
 struct svc_pool {
 	unsigned int		sp_id;		/* pool id; also node id on NUMA */
+	unsigned int		sp_nrthreads;	/* # of threads currently running in pool */
+	unsigned int		sp_nrthrmin;	/* Min number of threads to run per pool */
+	unsigned int		sp_nrthrmax;	/* Max requested number of threads in pool */
 	struct lwq		sp_xprts;	/* pending transports */
-	unsigned int		sp_nrthreads;	/* # of threads in pool */
 	struct list_head	sp_all_threads;	/* all server threads */
 	struct llist_head	sp_idle_threads; /* idle server threads */
 
@@ -53,6 +55,7 @@ enum {
 	SP_TASK_PENDING,	/* still work to do even if no xprt is queued */
 	SP_NEED_VICTIM,		/* One thread needs to agree to exit */
 	SP_VICTIM_REMAINS,	/* One thread needs to actually exit */
+	SP_TASK_STARTING,	/* Task has started but not added to idle yet */
 };
 
 
@@ -71,10 +74,11 @@ struct svc_serv {
 	struct svc_stat *	sv_stats;	/* RPC statistics */
 	spinlock_t		sv_lock;
 	unsigned int		sv_nprogs;	/* Number of sv_programs */
-	unsigned int		sv_nrthreads;	/* # of server threads */
+	unsigned int		sv_nrthreads;	/* # of running server threads */
 	unsigned int		sv_max_payload;	/* datagram payload size */
 	unsigned int		sv_max_mesg;	/* max_payload + 1 page for overheads */
 	unsigned int		sv_xdrsize;	/* XDR buffer size */
+	atomic_t		sv_rpcb_failures; /* unanswered rpcbind calls */
 	struct list_head	sv_permsocks;	/* all permanent sockets */
 	struct list_head	sv_tempsocks;	/* all temporary sockets */
 	int			sv_tmpcnt;	/* count of temporary "valid" sockets */
@@ -82,8 +86,9 @@ struct svc_serv {
 
 	char *			sv_name;	/* service name */
 
-	unsigned int		sv_nrpools;	/* number of thread pools */
 	bool			sv_is_pooled;	/* is this a pooled service? */
+	/* Caller registers with rpcbind itself. Set before svc_bind(). */
+	bool			sv_no_rpcbind;
 	struct svc_pool *	sv_pools;	/* array of thread pools */
 	int			(*sv_threadfn)(void *data);
 
@@ -131,25 +136,37 @@ enum {
 extern u32 svc_max_payload(const struct svc_rqst *rqstp);
 
 /*
- * RPC Requests and replies are stored in one or more pages.
- * We maintain an array of pages for each server thread.
- * Requests are copied into these pages as they arrive.  Remaining
- * pages are available to write the reply into.
+ * RPC Call and Reply messages each have their own page array.
+ * rq_pages holds the incoming Call message; rq_respages holds
+ * the outgoing Reply message. Both arrays are sized to
+ * svc_serv_maxpages() entries and are allocated dynamically.
  *
- * Pages are sent using ->sendmsg with MSG_SPLICE_PAGES so each server thread
- * needs to allocate more to replace those used in sending.  To help keep track
- * of these pages we have a receive list where all pages initialy live, and a
- * send list where pages are moved to when there are to be part of a reply.
+ * Pages are sent using ->sendmsg with MSG_SPLICE_PAGES so each
+ * server thread needs to allocate more to replace those used in
+ * sending.
  *
- * We use xdr_buf for holding responses as it fits well with NFS
- * read responses (that have a header, and some data pages, and possibly
- * a tail) and means we can share some client side routines.
+ * rq_pages request page contract:
  *
- * The xdr_buf.head kvec always points to the first page in the rq_*pages
- * list.  The xdr_buf.pages pointer points to the second page on that
- * list.  xdr_buf.tail points to the end of the first page.
- * This assumes that the non-page part of an rpc reply will fit
- * in a page - NFSd ensures this.  lockd also has no trouble.
+ * Transport receive paths that move request data pages out of
+ * rq_pages -- TCP multi-fragment reassembly (svc_tcp_save_pages)
+ * and RDMA Read I/O (svc_rdma_clear_rqst_pages) -- NULL those
+ * entries to prevent svc_rqst_release_pages() from freeing pages
+ * still in transport use, and set rq_pages_nfree to the count.
+ * svc_alloc_arg() refills only that many rq_pages entries.
+ *
+ * For rq_respages, svc_rqst_release_pages() NULLs entries in
+ * [rq_respages, rq_next_page) after each RPC. svc_alloc_arg()
+ * refills only that range.
+ *
+ * xdr_buf holds responses; the structure fits NFS read responses
+ * (header, data pages, optional tail) and enables sharing of
+ * client-side routines.
+ *
+ * The xdr_buf.head kvec always points to the first page in the
+ * rq_*pages list. The xdr_buf.pages pointer points to the second
+ * page on that list. xdr_buf.tail points to the end of the first
+ * page. This assumes that the non-page part of an rpc reply will
+ * fit in a page - NFSd ensures this. lockd also has no trouble.
  */
 
 /**
@@ -159,10 +176,10 @@ extern u32 svc_max_payload(const struct svc_rqst *rqstp);
  * Returns a count of pages or vectors that can hold the maximum
  * size RPC message for @serv.
  *
- * Each request/reply pair can have at most one "payload", plus two
- * pages, one for the request, and one for the reply.
- * nfsd_splice_actor() might need an extra page when a READ payload
- * is not page-aligned.
+ * Each page array can hold at most one payload plus two
+ * overhead pages (one for the RPC header, one for tail data).
+ * nfsd_splice_actor() might need an extra page when a READ
+ * payload is not page-aligned.
  */
 static inline unsigned long svc_serv_maxpages(const struct svc_serv *serv)
 {
@@ -172,6 +189,9 @@ static inline unsigned long svc_serv_maxpages(const struct svc_serv *serv)
 /*
  * The context of a single thread, including the request currently being
  * processed.
+ *
+ * RPC programs are free to use rq_private to stash thread-local information.
+ * The sunrpc layer will not access it.
  */
 struct svc_rqst {
 	struct list_head	rq_all;		/* all threads list */
@@ -198,11 +218,12 @@ struct svc_rqst {
 	struct xdr_stream	rq_res_stream;
 	struct folio		*rq_scratch_folio;
 	struct xdr_buf		rq_res;
-	unsigned long		rq_maxpages;	/* num of entries in rq_pages */
-	struct page *		*rq_pages;
-	struct page *		*rq_respages;	/* points into rq_pages */
+	unsigned long		rq_maxpages;	/* entries per page array */
+	unsigned long		rq_pages_nfree;	/* rq_pages entries NULLed by transport */
+	struct page *		*rq_pages;	/* Call buffer pages */
+	struct page *		*rq_respages;	/* Reply buffer pages */
 	struct page *		*rq_next_page; /* next reply page to use */
-	struct page *		*rq_page_end;  /* one past the last page */
+	struct page *		*rq_page_end;  /* one past the last reply page */
 
 	struct folio_batch	rq_fbatch;
 	struct bio_vec		*rq_bvec;
@@ -212,7 +233,6 @@ struct svc_rqst {
 	u32			rq_vers;	/* program version */
 	u32			rq_proc;	/* procedure number */
 	u32			rq_prot;	/* IP protocol */
-	int			rq_cachetype;	/* catering to nfsd */
 	unsigned long		rq_flags;	/* flags field */
 	ktime_t			rq_qtime;	/* enqueue time */
 
@@ -248,7 +268,7 @@ struct svc_rqst {
 	unsigned long		bc_to_initval;
 	unsigned int		bc_to_retries;
 	unsigned int		rq_status_counter; /* RPC processing counter */
-	void			**rq_lease_breaker; /* The v4 client breaking a lease */
+	void			*rq_private;	/* For use by the service thread */
 };
 
 /* bits for rq_flags */
@@ -390,7 +410,6 @@ struct svc_version {
 	u32			vs_vers;	/* version number */
 	u32			vs_nproc;	/* number of procedures */
 	const struct svc_procedure *vs_proc;	/* per-procedure info */
-	unsigned long __percpu	*vs_count;	/* call counts */
 	u32			vs_xdrsize;	/* xdrsize needed for this version */
 
 	/* Don't register with rpcbind */
@@ -435,28 +454,36 @@ int sunrpc_set_pool_mode(const char *val);
 int sunrpc_get_pool_mode(char *val, size_t size);
 void svc_rpcb_cleanup(struct svc_serv *serv, struct net *net);
 int svc_bind(struct svc_serv *serv, struct net *net);
+unsigned int svc_rpcb_failure_count(struct svc_serv *serv);
 struct svc_serv *svc_create(struct svc_program *, unsigned int,
 			    int (*threadfn)(void *data));
 bool		   svc_rqst_replace_page(struct svc_rqst *rqstp,
 					 struct page *page);
 void		   svc_rqst_release_pages(struct svc_rqst *rqstp);
+int		   svc_new_thread(struct svc_serv *serv, struct svc_pool *pool);
 void		   svc_exit_thread(struct svc_rqst *);
 struct svc_serv *  svc_create_pooled(struct svc_program *prog,
 				     unsigned int nprog,
 				     struct svc_stat *stats,
 				     unsigned int bufsize,
 				     int (*threadfn)(void *data));
-int		   svc_set_num_threads(struct svc_serv *, struct svc_pool *, int);
+int		   svc_set_pool_threads(struct svc_serv *serv, struct svc_pool *pool,
+					unsigned int min_threads, unsigned int max_threads);
+int		   svc_set_num_threads(struct svc_serv *serv, unsigned int min_threads,
+				       unsigned int nrservs);
+unsigned int	   svc_serv_maxthreads(const struct svc_serv *serv);
 int		   svc_pool_stats_open(struct svc_info *si, struct file *file);
 void		   svc_process(struct svc_rqst *rqstp);
 void		   svc_process_bc(struct rpc_rqst *req, struct svc_rqst *rqstp);
-int		   svc_register(const struct svc_serv *, struct net *, const int,
-				const unsigned short, const unsigned short);
+int		   svc_register(struct svc_serv *serv, struct net *net,
+				const int family, const unsigned short proto,
+				const unsigned short port);
 
 void		   svc_wake_up(struct svc_serv *);
 void		   svc_reserve(struct svc_rqst *rqstp, int space);
 void		   svc_pool_wake_idle_thread(struct svc_pool *pool);
 struct svc_pool   *svc_pool_for_cpu(struct svc_serv *serv);
+unsigned int	   svc_serv_nrpools(const struct svc_serv *serv);
 char *		   svc_print_addr(struct svc_rqst *, char *, size_t);
 const char *	   svc_proc_name(const struct svc_rqst *rqstp);
 int		   svc_encode_result_payload(struct svc_rqst *rqstp,
@@ -476,6 +503,21 @@ int		   svc_generic_rpcbind_set(struct net *net,
 
 #define	RPC_MAX_ADDRBUFLEN	(63U)
 
+/**
+ * svc_rqst_page_release - release a page associated with an RPC transaction
+ * @rqstp: RPC transaction context
+ * @page: page to release
+ *
+ * Released pages are batched and freed together, reducing
+ * allocator pressure under heavy RPC workloads.
+ */
+static inline void svc_rqst_page_release(struct svc_rqst *rqstp,
+					 struct page *page)
+{
+	if (!folio_batch_add(&rqstp->rq_fbatch, page_folio(page)))
+		__folio_batch_release(&rqstp->rq_fbatch);
+}
+
 /*
  * When we want to reduce the size of the reserved space in the response
  * buffer, we need to take into account the size of any checksum data that
@@ -492,6 +534,8 @@ static inline void svc_reserve_auth(struct svc_rqst *rqstp, int space)
  * svcxdr_init_decode - Prepare an xdr_stream for Call decoding
  * @rqstp: controlling server RPC transaction context
  *
+ * The stream records @rqstp, so a codec running on it reaches the
+ * transaction with svcxdr_rqst().
  */
 static inline void svcxdr_init_decode(struct svc_rqst *rqstp)
 {
@@ -504,12 +548,15 @@ static inline void svcxdr_init_decode(struct svc_rqst *rqstp)
 
 	xdr_init_decode(xdr, buf, argv->iov_base, NULL);
 	xdr_set_scratch_folio(xdr, rqstp->rq_scratch_folio);
+	xdr->xdrgen_ctx = rqstp;
 }
 
 /**
  * svcxdr_init_encode - Prepare an xdr_stream for svc Reply encoding
  * @rqstp: controlling server RPC transaction context
  *
+ * The stream records @rqstp, so a codec running on it reaches the
+ * transaction with svcxdr_rqst().
  */
 static inline void svcxdr_init_encode(struct svc_rqst *rqstp)
 {
@@ -527,6 +574,19 @@ static inline void svcxdr_init_encode(struct svc_rqst *rqstp)
 	xdr->page_ptr = buf->pages - 1;
 	buf->buflen = PAGE_SIZE * (rqstp->rq_page_end - buf->pages);
 	xdr->rqst = NULL;
+	xdr->xdrgen_ctx = rqstp;
+}
+
+/**
+ * svcxdr_rqst - Retrieve the transaction bound to an xdr_stream
+ * @xdr: stream to query
+ *
+ * Return: the controlling svc_rqst when @xdr was initialized by
+ * svcxdr_init_decode() or svcxdr_init_encode(), otherwise NULL.
+ */
+static inline struct svc_rqst *svcxdr_rqst(struct xdr_stream *xdr)
+{
+	return xdr->xdrgen_ctx;
 }
 
 /**
@@ -548,6 +608,74 @@ static inline void svcxdr_encode_opaque_pages(struct svc_rqst *rqstp,
 {
 	xdr_write_pages(xdr, pages, base, len);
 	xdr->page_ptr = rqstp->rq_next_page - 1;
+}
+
+/**
+ * svcxdr_encode_opaque_payload - Encode a page-resident opaque data item
+ * @xdr: xdr_stream to be updated
+ * @len: number of octets of content in the data item
+ *
+ * Context: Process context. @xdr must have been initialized by
+ *	    svcxdr_init_encode() and still be positioned in the reply
+ *	    head.
+ *
+ * Return:
+ *   %true: Success
+ *   %false: The reply head cannot hold the length prefix and XDR
+ *   padding, or the transport could not accommodate the result payload
+ */
+static inline bool svcxdr_encode_opaque_payload(struct xdr_stream *xdr, u32 len)
+{
+	struct svc_rqst *rqstp = svcxdr_rqst(xdr);
+	struct xdr_buf *buf = xdr->buf;
+
+	/*
+	 * The length prefix and any pad word must land in the reply
+	 * head. A prefix that spills into the first Reply page lands
+	 * on the payload itself, and xdr_write_pages() BUGs when the
+	 * pad word does not fit.
+	 */
+	if ((xdr->end - xdr->p) * XDR_UNIT < XDR_UNIT + xdr_pad_size(len))
+		return false;
+	if (xdr_stream_encode_u32(xdr, len) < 0)
+		return false;
+	svcxdr_encode_opaque_pages(rqstp, xdr, buf->pages, buf->page_base, len);
+	if (svc_encode_result_payload(rqstp, buf->head->iov_len, len) < 0)
+		return false;
+	return true;
+}
+
+/**
+ * svcxdr_decode_opaque_payload - Decode a page-resident opaque data item
+ * @xdr: xdr_stream to be decoded
+ * @payload: on success, describes the octets of the data item's content
+ * @maxlen: largest data item length the caller will accept, or zero for
+ *	    no limit
+ *
+ * A bulk payload such as the content of an NFS WRITE request resides in
+ * the pages of the Receive buffer. Rather than copy it, set @payload to
+ * describe the item's content in place.
+ *
+ * Context: Process context. @xdr must have been initialized by
+ *	    svcxdr_init_decode().
+ *
+ * Return:
+ *   %true: @payload describes the item in place and @xdr has advanced
+ *	    past it
+ *   %false: a bounds error occurred, or the length prefix exceeds
+ *	     @maxlen; @payload is undefined
+ */
+static inline bool svcxdr_decode_opaque_payload(struct xdr_stream *xdr,
+						struct xdr_buf *payload,
+						u32 maxlen)
+{
+	u32 len;
+
+	if (xdr_stream_decode_u32(xdr, &len) < 0)
+		return false;
+	if (maxlen && len > maxlen)
+		return false;
+	return xdr_stream_subsegment(xdr, payload, len);
 }
 
 /**

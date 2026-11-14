@@ -242,11 +242,11 @@ struct rme96 {
 };
 
 static const struct pci_device_id snd_rme96_ids[] = {
-	{ PCI_VDEVICE(XILINX, PCI_DEVICE_ID_RME_DIGI96), 0, },
-	{ PCI_VDEVICE(XILINX, PCI_DEVICE_ID_RME_DIGI96_8), 0, },
-	{ PCI_VDEVICE(XILINX, PCI_DEVICE_ID_RME_DIGI96_8_PRO), 0, },
-	{ PCI_VDEVICE(XILINX, PCI_DEVICE_ID_RME_DIGI96_8_PAD_OR_PST), 0, },
-	{ 0, }
+	{ PCI_VDEVICE(XILINX, PCI_DEVICE_ID_RME_DIGI96) },
+	{ PCI_VDEVICE(XILINX, PCI_DEVICE_ID_RME_DIGI96_8) },
+	{ PCI_VDEVICE(XILINX, PCI_DEVICE_ID_RME_DIGI96_8_PRO) },
+	{ PCI_VDEVICE(XILINX, PCI_DEVICE_ID_RME_DIGI96_8_PAD_OR_PST) },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, snd_rme96_ids);
@@ -2356,12 +2356,12 @@ static void snd_rme96_card_free(struct snd_card *card)
 }
 
 static int
-__snd_rme96_probe(struct pci_dev *pci,
-		  const struct pci_device_id *pci_id)
+snd_rme96_probe(struct pci_dev *pci,
+		const struct pci_device_id *pci_id)
 {
 	static int dev;
 	struct rme96 *rme96;
-	struct snd_card *card;
+	struct snd_card *card __free(snd_card_free) = NULL;
 	int err;
 	u8 val;
 
@@ -2420,14 +2420,9 @@ __snd_rme96_probe(struct pci_dev *pci,
 		return err;
 
 	pci_set_drvdata(pci, card);
+	card = NULL; /* probe succeeded, don't release as error */
 	dev++;
 	return 0;
-}
-
-static int snd_rme96_probe(struct pci_dev *pci,
-			   const struct pci_device_id *pci_id)
-{
-	return snd_card_free_on_error(&pci->dev, __snd_rme96_probe(pci, pci_id));
 }
 
 static struct pci_driver rme96_driver = {

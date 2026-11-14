@@ -10,8 +10,8 @@
  * Quirk: Python headers cannot be in arbitrary places, so keep this testcase at
  * the top:
  */
-#define main main_test_libpython
-# include "test-libpython.c"
+#define main main_test_python_module
+# include "test-python-module.c"
 #undef main
 
 #define main main_test_hello
@@ -90,6 +90,10 @@
 # include "test-pthread-barrier.c"
 #undef main
 
+#define main main_test_pthread_mutex_robust
+# include "test-pthread-mutex-robust.c"
+#undef main
+
 #define main main_test_scandirat
 # include "test-scandirat.c"
 #undef main
@@ -100,22 +104,18 @@
 
 # if 0
 /*
- * Disable libbabeltrace check for test-all, because the requested
+ * Disable babeltrace2-ctf-writer check for test-all, because the requested
  * library version is not released yet in most distributions. Will
  * reenable later.
  */
 
-#define main main_test_libbabeltrace
-# include "test-libbabeltrace.c"
+#define main main_test_babeltrace2_ctf_writer
+# include "test-babeltrace2-ctf-writer.c"
 #undef main
 #endif
 
 #define main main_test_lzma
 # include "test-lzma.c"
-#undef main
-
-#define main main_test_get_cpuid
-# include "test-get_cpuid.c"
 #undef main
 
 #define main main_test_bpf
@@ -146,9 +146,13 @@
 # include "test-libtraceevent.c"
 #undef main
 
+#define main main_test_libopenssl
+# include "test-libopenssl.c"
+#undef main
+
 int main(int argc, char *argv[])
 {
-	main_test_libpython();
+	main_test_python_module();
 	main_test_hello();
 	main_test_libelf();
 	main_test_gettid();
@@ -167,8 +171,8 @@ int main(int argc, char *argv[])
 	main_test_zlib();
 	main_test_pthread_attr_setaffinity_np();
 	main_test_pthread_barrier();
+	main_test_pthread_mutex_robust();
 	main_test_lzma();
-	main_test_get_cpuid();
 	main_test_bpf();
 	main_test_scandirat();
 	main_test_sched_getcpu();
@@ -178,6 +182,7 @@ int main(int argc, char *argv[])
 	main_test_reallocarray();
 	main_test_libzstd();
 	main_test_libtraceevent();
+	main_test_libopenssl();
 
 	return 0;
 }

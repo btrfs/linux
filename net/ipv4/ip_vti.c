@@ -526,7 +526,7 @@ static int __net_init vti_init_net(struct net *net)
 static void __net_exit vti_exit_rtnl(struct net *net,
 				     struct list_head *dev_to_kill)
 {
-	ip_tunnel_delete_net(net, vti_net_id, &vti_link_ops, dev_to_kill);
+	ip_tunnel_delete_net(net, vti_net_id, dev_to_kill);
 }
 
 static struct pernet_operations vti_net_ops = {
@@ -595,6 +595,9 @@ static int vti_changelink(struct net_device *dev, struct nlattr *tb[],
 	struct ip_tunnel *t = netdev_priv(dev);
 	struct ip_tunnel_parm_kern p;
 	__u32 fwmark = t->fwmark;
+
+	if (!rtnl_dev_link_net_capable(dev, t->net))
+		return -EPERM;
 
 	vti_netlink_parms(data, &p, &fwmark);
 	return ip_tunnel_changelink(dev, tb, &p, fwmark);

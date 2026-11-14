@@ -25,7 +25,8 @@
  */
 #define MCLK1_RATE 24000000U
 #define MCLK2_RATE 32768U
-#define DEFAULT_FLL1_RATE 11289600U
+/* Matches the codec's default AIF1 configuration: 48kHz, 256fs */
+#define DEFAULT_FLL1_RATE 12288000U
 
 struct midas_priv {
 	struct gpio_desc *gpio_fm_sel;
@@ -34,6 +35,7 @@ struct midas_priv {
 	struct gpio_desc *gpio_headset_key;
 	struct iio_channel *adc_headset_detect;
 	unsigned int fll1_rate;
+	unsigned int aif1clk_rate;
 
 	struct snd_soc_jack headset_jack;
 };
@@ -73,7 +75,7 @@ static struct snd_soc_jack_zone headset_key_zones[] = {
 static int headset_jack_check(void *data)
 {
 	struct snd_soc_component *codec = data;
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(codec);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(codec);
 	struct midas_priv *priv = snd_soc_card_get_drvdata(codec->card);
 	int adc, ret;
 	int jack_type = 0;
@@ -171,11 +173,12 @@ static int midas_start_fll1(struct snd_soc_pcm_runtime *rtd, unsigned int rate)
 	if (!rate)
 		rate = priv->fll1_rate;
 	/*
-	 * If no new rate is requested, set FLL1 to a sane default for jack
-	 * detection.
+	 * If no new rate is requested, set FLL1 to the rate the codec's AIF1
+	 * is currently configured for, as its digital paths can be powered
+	 * up without an active stream.
 	 */
 	if (!rate)
-		rate = DEFAULT_FLL1_RATE;
+		rate = priv->aif1clk_rate ?: DEFAULT_FLL1_RATE;
 
 	if (rate != priv->fll1_rate && priv->fll1_rate) {
 		/* while reconfiguring, switch to MCLK2 for SYSCLK */
@@ -241,6 +244,7 @@ static int midas_aif1_hw_params(struct snd_pcm_substream *substream,
 				struct snd_pcm_hw_params *params)
 {
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct midas_priv *priv = snd_soc_card_get_drvdata(rtd->card);
 	unsigned int pll_out;
 
 	/* AIF1CLK should be at least 3MHz for "optimal performance" */
@@ -248,6 +252,8 @@ static int midas_aif1_hw_params(struct snd_pcm_substream *substream,
 		pll_out = params_rate(params) * 512;
 	else
 		pll_out = params_rate(params) * 256;
+
+	priv->aif1clk_rate = pll_out;
 
 	return midas_start_fll1(rtd, pll_out);
 }
@@ -285,7 +291,7 @@ static int midas_ext_spkmode(struct snd_soc_dapm_widget *w,
 static int midas_fm_set(struct snd_soc_dapm_widget *w,
 			struct snd_kcontrol *kcontrol, int event)
 {
-	struct snd_soc_card *card = w->dapm->card;
+	struct snd_soc_card *card = snd_soc_dapm_to_card(w->dapm);
 	struct midas_priv *priv = snd_soc_card_get_drvdata(card);
 
 	if (!priv->gpio_fm_sel)
@@ -306,7 +312,7 @@ static int midas_fm_set(struct snd_soc_dapm_widget *w,
 static int midas_line_set(struct snd_soc_dapm_widget *w,
 			  struct snd_kcontrol *kcontrol, int event)
 {
-	struct snd_soc_card *card = w->dapm->card;
+	struct snd_soc_card *card = snd_soc_dapm_to_card(w->dapm);
 	struct midas_priv *priv = snd_soc_card_get_drvdata(card);
 
 	if (!priv->gpio_lineout_sel)
@@ -376,7 +382,7 @@ static int midas_set_bias_level(struct snd_soc_card *card,
 						  &card->dai_link[0]);
 	struct snd_soc_dai *aif1_dai = snd_soc_rtd_to_codec(rtd, 0);
 
-	if (dapm->dev != aif1_dai->dev)
+	if (snd_soc_dapm_to_dev(dapm) != aif1_dai->dev)
 		return 0;
 
 	switch (level) {
@@ -582,7 +588,7 @@ static int midas_probe(struct platform_device *pdev)
 	struct midas_priv *priv;
 	int ret, i;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -773,3 +779,4 @@ module_platform_driver(midas_driver);
 MODULE_AUTHOR("Simon Shields <simon@lineageos.org>");
 MODULE_DESCRIPTION("ASoC support for Midas");
 MODULE_LICENSE("GPL v2");
+MODULE_IMPORT_NS("IIO_CONSUMER");

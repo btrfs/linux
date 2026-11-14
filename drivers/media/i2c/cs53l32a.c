@@ -145,7 +145,7 @@ static int cs53l32a_probe(struct i2c_client *client)
 	v4l_info(client, "chip found @ 0x%x (%s)\n",
 			client->addr << 1, client->adapter->name);
 
-	state = devm_kzalloc(&client->dev, sizeof(*state), GFP_KERNEL);
+	state = devm_kzalloc_obj(&client->dev, *state);
 	if (state == NULL)
 		return -ENOMEM;
 	sd = &state->sd;
@@ -200,7 +200,7 @@ static void cs53l32a_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id cs53l32a_id[] = {
-	{ "cs53l32a" },
+	{ .name = "cs53l32a" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, cs53l32a_id);

@@ -105,7 +105,7 @@ int mcs_add_intr_wq_entry(struct mcs *mcs, struct mcs_intr_event *event)
 	if (!(pfvf->intr_mask && event->intr_mask))
 		return 0;
 
-	qentry = kmalloc(sizeof(*qentry), GFP_ATOMIC);
+	qentry = kmalloc_obj(*qentry, GFP_ATOMIC);
 	if (!qentry)
 		return -ENOMEM;
 
@@ -856,7 +856,7 @@ int rvu_mbox_handler_mcs_ctrl_pkt_rule_write(struct rvu *rvu,
 static void rvu_mcs_set_lmac_bmap(struct rvu *rvu)
 {
 	struct mcs *mcs = mcs_get_pdata(0);
-	unsigned long lmac_bmap;
+	unsigned long lmac_bmap = 0;
 	int cgx, lmac, port;
 
 	for (port = 0; port < mcs->hw->lmac_cnt; port++) {
@@ -899,13 +899,13 @@ int rvu_mcs_init(struct rvu *rvu)
 		mcs->rvu = rvu;
 
 		/* Allocated memory for PFVF data */
-		mcs->pf = devm_kcalloc(mcs->dev, hw->total_pfs,
-				       sizeof(struct mcs_pfvf), GFP_KERNEL);
+		mcs->pf = devm_kzalloc_objs(mcs->dev, struct mcs_pfvf,
+					    hw->total_pfs);
 		if (!mcs->pf)
 			return -ENOMEM;
 
-		mcs->vf = devm_kcalloc(mcs->dev, hw->total_vfs,
-				       sizeof(struct mcs_pfvf), GFP_KERNEL);
+		mcs->vf = devm_kzalloc_objs(mcs->dev, struct mcs_pfvf,
+					    hw->total_vfs);
 		if (!mcs->vf)
 			return -ENOMEM;
 	}

@@ -30,7 +30,7 @@
 
 #define MAX_CCPS 32
 
-/* Limit CCP use to a specifed number of queues per device */
+/* Limit CCP use to a specified number of queues per device */
 static unsigned int nqueues;
 module_param(nqueues, uint, 0444);
 MODULE_PARM_DESC(nqueues, "Number of queues per CCP (minimum 1; default: all available)");
@@ -477,7 +477,7 @@ struct ccp_device *ccp_alloc_struct(struct sp_device *sp)
 	struct device *dev = sp->dev;
 	struct ccp_device *ccp;
 
-	ccp = devm_kzalloc(dev, sizeof(*ccp), GFP_KERNEL);
+	ccp = devm_kzalloc_obj(dev, *ccp);
 	if (!ccp)
 		return NULL;
 	ccp->dev = dev;
@@ -507,7 +507,7 @@ int ccp_trng_read(struct hwrng *rng, void *data, size_t max, bool wait)
 {
 	struct ccp_device *ccp = container_of(rng, struct ccp_device, hwrng);
 	u32 trng_value;
-	int len = min_t(int, sizeof(trng_value), max);
+	int len = min(sizeof(trng_value), max);
 
 	/* Locking is provided by the caller so we can update device
 	 * hwrng-related fields safely

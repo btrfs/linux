@@ -302,7 +302,7 @@ static int sis_ts_probe(struct i2c_client *client)
 	struct input_dev *input;
 	int error;
 
-	ts = devm_kzalloc(&client->dev, sizeof(*ts), GFP_KERNEL);
+	ts = devm_kzalloc_obj(&client->dev, *ts);
 	if (!ts)
 		return -ENOMEM;
 
@@ -374,8 +374,8 @@ MODULE_DEVICE_TABLE(of, sis_ts_dt_ids);
 #endif
 
 static const struct i2c_device_id sis_ts_id[] = {
-	{ SIS_I2C_NAME },
-	{ "9200-ts" },
+	{ .name = SIS_I2C_NAME },
+	{ .name = "9200-ts" },
 	{ /* sentinel */  }
 };
 MODULE_DEVICE_TABLE(i2c, sis_ts_id);

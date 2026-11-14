@@ -7,7 +7,6 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/types.h>
 #include <linux/err.h>
 #include <linux/device.h>
@@ -639,7 +638,7 @@ static int olpc_battery_probe(struct platform_device *pdev)
 	uint8_t ecver;
 	int ret;
 
-	data = devm_kzalloc(&pdev->dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(&pdev->dev, *data);
 	if (!data)
 		return -ENOMEM;
 	platform_set_drvdata(pdev, data);
