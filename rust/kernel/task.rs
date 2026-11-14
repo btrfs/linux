@@ -6,16 +6,15 @@
 
 use crate::{
     bindings,
-    ffi::{c_int, c_long, c_uint},
     mm::MmWithUser,
     pid_namespace::PidNamespace,
+    prelude::*,
     sync::aref::ARef,
     types::{NotThreadSafe, Opaque},
 };
 use core::{
-    cmp::{Eq, PartialEq},
     ops::Deref,
-    ptr,
+    ptr, //
 };
 
 /// A sentinel value used for infinite timeouts.
@@ -204,18 +203,6 @@ impl Task {
         self.0.get()
     }
 
-    /// Returns the group leader of the given task.
-    pub fn group_leader(&self) -> &Task {
-        // SAFETY: The group leader of a task never changes after initialization, so reading this
-        // field is not a data race.
-        let ptr = unsafe { *ptr::addr_of!((*self.as_ptr()).group_leader) };
-
-        // SAFETY: The lifetime of the returned task reference is tied to the lifetime of `self`,
-        // and given that a task has a reference to its group leader, we know it must be valid for
-        // the lifetime of the returned task reference.
-        unsafe { &*ptr.cast() }
-    }
-
     /// Returns the PID of the given task.
     pub fn pid(&self) -> Pid {
         // SAFETY: The pid of a task never changes after initialization, so reading this field is
@@ -223,18 +210,18 @@ impl Task {
         unsafe { *ptr::addr_of!((*self.as_ptr()).pid) }
     }
 
-    /// Returns the UID of the given task.
+    /// Returns the TGID (Thread Group ID / Process ID) of the given task.
+    pub fn tgid(&self) -> Pid {
+        // SAFETY: The tgid of a task never changes after initialization, so reading this field is
+        // not a data race.
+        unsafe { *ptr::addr_of!((*self.as_ptr()).tgid) }
+    }
+
+    /// Returns the objective real UID of the given task.
     #[inline]
     pub fn uid(&self) -> Kuid {
         // SAFETY: It's always safe to call `task_uid` on a valid task.
         Kuid::from_raw(unsafe { bindings::task_uid(self.as_ptr()) })
-    }
-
-    /// Returns the effective UID of the given task.
-    #[inline]
-    pub fn euid(&self) -> Kuid {
-        // SAFETY: It's always safe to call `task_euid` on a valid task.
-        Kuid::from_raw(unsafe { bindings::task_euid(self.as_ptr()) })
     }
 
     /// Determines whether the given task has pending signals.
@@ -345,6 +332,18 @@ impl CurrentTask {
         // `release_task()` call.
         Some(unsafe { PidNamespace::from_ptr(active_ns) })
     }
+
+    /// Returns the group leader of the current task.
+    pub fn group_leader(&self) -> &Task {
+        // SAFETY: The group leader of a task never changes while the task is running, and `self`
+        // is the current task, which is guaranteed running.
+        let ptr = unsafe { (*self.as_ptr()).group_leader };
+
+        // SAFETY: `current->group_leader` stays valid for at least the duration in which `current`
+        // is running, and the signature of this function ensures that the returned `&Task` can
+        // only be used while `current` is still valid, thus still running.
+        unsafe { &*ptr.cast() }
+    }
 }
 
 // SAFETY: The type invariants guarantee that `Task` is always refcounted.
@@ -362,8 +361,17 @@ unsafe impl crate::sync::aref::AlwaysRefCounted for Task {
     }
 }
 
+impl PartialEq for Task {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        ptr::eq(self.as_ptr(), other.as_ptr())
+    }
+}
+
+impl Eq for Task {}
+
 impl Kuid {
-    /// Get the current euid.
+    /// Get the current subjective effective UID.
     #[inline]
     pub fn current_euid() -> Kuid {
         // SAFETY: Just an FFI call.
@@ -419,7 +427,7 @@ pub fn might_sleep() {
         let file = kernel::file_from_location(loc);
 
         // SAFETY: `file.as_ptr()` is valid for reading and guaranteed to be nul-terminated.
-        unsafe { crate::bindings::__might_sleep(file.as_ptr().cast(), loc.line() as i32) }
+        unsafe { crate::bindings::__might_sleep(file.as_char_ptr(), loc.line() as i32) }
     }
 
     // SAFETY: Always safe to call.

@@ -423,8 +423,7 @@ static int msm8x16_wcd_get_iir_band_audio_mixer(
 					struct snd_ctl_elem_value *ucontrol)
 {
 
-	struct snd_soc_component *component =
-			snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct wcd_iir_filter_ctl *ctl =
 			(struct wcd_iir_filter_ctl *)kcontrol->private_value;
 	struct soc_bytes_ext *params = &ctl->bytes_ext;
@@ -469,8 +468,7 @@ static int msm8x16_wcd_put_iir_band_audio_mixer(
 					struct snd_kcontrol *kcontrol,
 					struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-			snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct wcd_iir_filter_ctl *ctl =
 			(struct wcd_iir_filter_ctl *)kcontrol->private_value;
 	struct soc_bytes_ext *params = &ctl->bytes_ext;
@@ -1173,7 +1171,7 @@ static int msm8916_wcd_digital_probe(struct platform_device *pdev)
 	struct regmap *digital_map;
 	int ret;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

@@ -502,8 +502,7 @@ static const struct snd_kcontrol_new rt715_sdca_snd_controls[] = {
 static int rt715_sdca_mux_get(struct snd_kcontrol *kcontrol,
 			struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-		snd_soc_dapm_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_soc_dapm_kcontrol_to_component(kcontrol);
 	struct rt715_sdca_priv *rt715 = snd_soc_component_get_drvdata(component);
 	unsigned int val, mask_sft;
 
@@ -538,10 +537,8 @@ static int rt715_sdca_mux_get(struct snd_kcontrol *kcontrol,
 static int rt715_sdca_mux_put(struct snd_kcontrol *kcontrol,
 			struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-		snd_soc_dapm_kcontrol_component(kcontrol);
-	struct snd_soc_dapm_context *dapm =
-				snd_soc_dapm_kcontrol_dapm(kcontrol);
+	struct snd_soc_component *component = snd_soc_dapm_kcontrol_to_component(kcontrol);
+	struct snd_soc_dapm_context *dapm = snd_soc_dapm_kcontrol_to_dapm(kcontrol);
 	struct rt715_sdca_priv *rt715 = snd_soc_component_get_drvdata(component);
 	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
 	unsigned int *item = ucontrol->value.enumerated.item;
@@ -964,7 +961,7 @@ int rt715_sdca_init(struct device *dev, struct regmap *mbq_regmap,
 	struct rt715_sdca_priv *rt715;
 	int ret;
 
-	rt715 = devm_kzalloc(dev, sizeof(*rt715), GFP_KERNEL);
+	rt715 = devm_kzalloc_obj(dev, *rt715);
 	if (!rt715)
 		return -ENOMEM;
 

@@ -465,7 +465,7 @@ static struct max14577_charger_platform_data *max14577_charger_dt_init(
 		return ERR_PTR(-EINVAL);
 	}
 
-	pdata = devm_kzalloc(&pdev->dev, sizeof(*pdata), GFP_KERNEL);
+	pdata = devm_kzalloc_obj(&pdev->dev, *pdata);
 	if (!pdata)
 		return ERR_PTR(-ENOMEM);
 
@@ -563,7 +563,7 @@ static int max14577_charger_probe(struct platform_device *pdev)
 	struct max14577 *max14577 = dev_get_drvdata(pdev->dev.parent);
 	int ret;
 
-	chg = devm_kzalloc(&pdev->dev, sizeof(*chg), GFP_KERNEL);
+	chg = devm_kzalloc_obj(&pdev->dev, *chg);
 	if (!chg)
 		return -ENOMEM;
 
@@ -613,18 +613,16 @@ static void max14577_charger_remove(struct platform_device *pdev)
 }
 
 static const struct platform_device_id max14577_charger_id[] = {
-	{ "max14577-charger", MAXIM_DEVICE_TYPE_MAX14577, },
-	{ "max77836-charger", MAXIM_DEVICE_TYPE_MAX77836, },
+	{ .name = "max14577-charger" },
+	{ .name = "max77836-charger" },
 	{ }
 };
 MODULE_DEVICE_TABLE(platform, max14577_charger_id);
 
 static const struct of_device_id of_max14577_charger_dt_match[] = {
-	{ .compatible = "maxim,max14577-charger",
-	  .data = (void *)MAXIM_DEVICE_TYPE_MAX14577, },
-	{ .compatible = "maxim,max77836-charger",
-	  .data = (void *)MAXIM_DEVICE_TYPE_MAX77836, },
-	{ },
+	{ .compatible = "maxim,max14577-charger" },
+	{ .compatible = "maxim,max77836-charger" },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, of_max14577_charger_dt_match);
 

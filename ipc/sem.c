@@ -514,7 +514,7 @@ static struct sem_array *sem_alloc(size_t nsems)
 	if (nsems > (INT_MAX - sizeof(*sma)) / sizeof(sma->sems[0]))
 		return NULL;
 
-	sma = kvzalloc(struct_size(sma, sems, nsems), GFP_KERNEL_ACCOUNT);
+	sma = kvzalloc_flex(*sma, sems, nsems, GFP_KERNEL_ACCOUNT);
 	if (unlikely(!sma))
 		return NULL;
 
@@ -1447,8 +1447,7 @@ static int semctl_main(struct ipc_namespace *ns, int semid, int semnum,
 			}
 			sem_unlock(sma, -1);
 			rcu_read_unlock();
-			sem_io = kvmalloc_array(nsems, sizeof(ushort),
-						GFP_KERNEL);
+			sem_io = kvmalloc_objs(ushort, nsems);
 			if (sem_io == NULL) {
 				ipc_rcu_putref(&sma->sem_perm, sem_rcu_free);
 				return -ENOMEM;
@@ -1482,8 +1481,7 @@ static int semctl_main(struct ipc_namespace *ns, int semid, int semnum,
 		rcu_read_unlock();
 
 		if (nsems > SEMMSL_FAST) {
-			sem_io = kvmalloc_array(nsems, sizeof(ushort),
-						GFP_KERNEL);
+			sem_io = kvmalloc_objs(ushort, nsems);
 			if (sem_io == NULL) {
 				ipc_rcu_putref(&sma->sem_perm, sem_rcu_free);
 				return -ENOMEM;
@@ -1853,7 +1851,7 @@ static inline int get_undo_list(struct sem_undo_list **undo_listp)
 
 	undo_list = current->sysvsem.undo_list;
 	if (!undo_list) {
-		undo_list = kzalloc(sizeof(*undo_list), GFP_KERNEL_ACCOUNT);
+		undo_list = kzalloc_obj(*undo_list, GFP_KERNEL_ACCOUNT);
 		if (undo_list == NULL)
 			return -ENOMEM;
 		spin_lock_init(&undo_list->lock);
@@ -1938,7 +1936,7 @@ static struct sem_undo *find_alloc_undo(struct ipc_namespace *ns, int semid)
 	rcu_read_unlock();
 
 	/* step 2: allocate new undo structure */
-	new = kvzalloc(struct_size(new, semadj, nsems), GFP_KERNEL_ACCOUNT);
+	new = kvzalloc_flex(*new, semadj, nsems, GFP_KERNEL_ACCOUNT);
 	if (!new) {
 		ipc_rcu_putref(&sma->sem_perm, sem_rcu_free);
 		return ERR_PTR(-ENOMEM);
@@ -1981,7 +1979,7 @@ out:
 }
 
 long __do_semtimedop(int semid, struct sembuf *sops,
-		unsigned nsops, const struct timespec64 *timeout,
+		unsigned int nsops, const struct timespec64 *timeout,
 		struct ipc_namespace *ns)
 {
 	int error = -EINVAL;
@@ -2220,7 +2218,7 @@ out:
 }
 
 static long do_semtimedop(int semid, struct sembuf __user *tsops,
-		unsigned nsops, const struct timespec64 *timeout)
+		unsigned int nsops, const struct timespec64 *timeout)
 {
 	struct sembuf fast_sops[SEMOPM_FAST];
 	struct sembuf *sops = fast_sops;
@@ -2234,7 +2232,7 @@ static long do_semtimedop(int semid, struct sembuf __user *tsops,
 		return -EINVAL;
 
 	if (nsops > SEMOPM_FAST) {
-		sops = kvmalloc_array(nsops, sizeof(*sops), GFP_KERNEL);
+		sops = kvmalloc_objs(*sops, nsops);
 		if (sops == NULL)
 			return -ENOMEM;
 	}
@@ -2294,7 +2292,7 @@ SYSCALL_DEFINE4(semtimedop_time32, int, semid, struct sembuf __user *, tsems,
 #endif
 
 SYSCALL_DEFINE3(semop, int, semid, struct sembuf __user *, tsops,
-		unsigned, nsops)
+		unsigned int, nsops)
 {
 	return do_semtimedop(semid, tsops, nsops, NULL);
 }

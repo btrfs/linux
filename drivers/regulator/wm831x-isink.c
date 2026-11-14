@@ -62,11 +62,7 @@ static int wm831x_isink_disable(struct regulator_dev *rdev)
 	if (ret < 0)
 		return ret;
 
-	ret = wm831x_set_bits(wm831x, isink->reg, WM831X_CS1_ENA, 0);
-	if (ret < 0)
-		return ret;
-
-	return ret;
+	return wm831x_set_bits(wm831x, isink->reg, WM831X_CS1_ENA, 0);
 
 }
 
@@ -122,8 +118,7 @@ static int wm831x_isink_probe(struct platform_device *pdev)
 	if (pdata == NULL || pdata->isink[id] == NULL)
 		return -ENODEV;
 
-	isink = devm_kzalloc(&pdev->dev, sizeof(struct wm831x_isink),
-			     GFP_KERNEL);
+	isink = devm_kzalloc_obj(&pdev->dev, struct wm831x_isink);
 	if (!isink)
 		return -ENOMEM;
 

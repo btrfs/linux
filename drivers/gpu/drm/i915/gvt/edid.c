@@ -33,10 +33,12 @@
  */
 
 #include <drm/display/drm_dp.h>
+#include <drm/drm_print.h>
 
 #include "display/intel_dp_aux_regs.h"
 #include "display/intel_gmbus.h"
 #include "display/intel_gmbus_regs.h"
+
 #include "gvt.h"
 #include "i915_drv.h"
 #include "i915_reg.h"
@@ -88,13 +90,13 @@ static inline int cnp_get_port_from_gmbus0(u32 gmbus0)
 	int port_select = gmbus0 & _GMBUS_PIN_SEL_MASK;
 	int port = -EINVAL;
 
-	if (port_select == GMBUS_PIN_1_BXT)
+	if (port_select == GMBUS_PIN_1)
 		port = PORT_B;
-	else if (port_select == GMBUS_PIN_2_BXT)
+	else if (port_select == GMBUS_PIN_2)
 		port = PORT_C;
-	else if (port_select == GMBUS_PIN_3_BXT)
+	else if (port_select == GMBUS_PIN_3)
 		port = PORT_D;
-	else if (port_select == GMBUS_PIN_4_CNP)
+	else if (port_select == GMBUS_PIN_4)
 		port = PORT_E;
 	return port;
 }
@@ -104,11 +106,11 @@ static inline int bxt_get_port_from_gmbus0(u32 gmbus0)
 	int port_select = gmbus0 & _GMBUS_PIN_SEL_MASK;
 	int port = -EINVAL;
 
-	if (port_select == GMBUS_PIN_1_BXT)
+	if (port_select == GMBUS_PIN_1)
 		port = PORT_B;
-	else if (port_select == GMBUS_PIN_2_BXT)
+	else if (port_select == GMBUS_PIN_2)
 		port = PORT_C;
-	else if (port_select == GMBUS_PIN_3_BXT)
+	else if (port_select == GMBUS_PIN_3)
 		port = PORT_D;
 	return port;
 }
@@ -533,16 +535,7 @@ void intel_gvt_i2c_handle_aux_ch_write(struct intel_vgpu *vgpu,
 					i2c_edid->edid_available = true;
 			}
 		}
-	} else if ((op & 0x1) == DP_AUX_I2C_WRITE) {
-		/* TODO
-		 * We only support EDID reading from I2C_over_AUX. And
-		 * we do not expect the index mode to be used. Right now
-		 * the WRITE operation is ignored. It is good enough to
-		 * support the gfx driver to do EDID access.
-		 */
-	} else {
-		if (drm_WARN_ON(&i915->drm, (op & 0x1) != DP_AUX_I2C_READ))
-			return;
+	} else if ((op & 0x1) == DP_AUX_I2C_READ) {
 		if (drm_WARN_ON(&i915->drm, msg_length != 4))
 			return;
 		if (i2c_edid->edid_available && i2c_edid->target_selected) {
@@ -551,6 +544,13 @@ void intel_gvt_i2c_handle_aux_ch_write(struct intel_vgpu *vgpu,
 			aux_data_for_write = (val << 16);
 		} else
 			aux_data_for_write = (0xff << 16);
+	} else {
+		/* TODO
+		 * We only support EDID reading from I2C_over_AUX. And
+		 * we do not expect the index mode to be used. Right now
+		 * the WRITE operation is ignored. It is good enough to
+		 * support the gfx driver to do EDID access.
+		 */
 	}
 	/* write the return value in AUX_CH_DATA reg which includes:
 	 * ACK of I2C_WRITE

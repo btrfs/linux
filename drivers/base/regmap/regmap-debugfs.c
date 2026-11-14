@@ -12,6 +12,7 @@
 #include <linux/uaccess.h>
 #include <linux/device.h>
 #include <linux/list.h>
+#include <linux/idr.h>
 
 #include "internal.h"
 
@@ -20,7 +21,7 @@ struct regmap_debugfs_node {
 	struct list_head link;
 };
 
-static unsigned int dummy_index;
+static DEFINE_IDA(dummy_ida);
 static struct dentry *regmap_debugfs_root;
 static LIST_HEAD(regmap_debugfs_early_list);
 static DEFINE_MUTEX(regmap_debugfs_early_lock);
@@ -37,10 +38,9 @@ static ssize_t regmap_name_read_file(struct file *file,
 {
 	struct regmap *map = file->private_data;
 	const char *name = "nodev";
+	char *buf __free(kfree) = kmalloc(PAGE_SIZE, GFP_KERNEL);
 	int ret;
-	char *buf;
 
-	buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
 
@@ -48,14 +48,10 @@ static ssize_t regmap_name_read_file(struct file *file,
 		name = map->dev->driver->name;
 
 	ret = snprintf(buf, PAGE_SIZE, "%s\n", name);
-	if (ret >= PAGE_SIZE) {
-		kfree(buf);
+	if (ret >= PAGE_SIZE)
 		return ret;
-	}
 
-	ret = simple_read_from_buffer(user_buf, count, ppos, buf, ret);
-	kfree(buf);
-	return ret;
+	return simple_read_from_buffer(user_buf, count, ppos, buf, ret);
 }
 
 static const struct file_operations regmap_name_fops = {
@@ -111,7 +107,7 @@ static unsigned int regmap_debugfs_get_dump_start(struct regmap *map,
 	 * If we don't have a cache build one so we don't have to do a
 	 * linear scan each time.
 	 */
-	mutex_lock(&map->cache_lock);
+	guard(mutex)(&map->cache_lock);
 	i = base;
 	if (list_empty(&map->debugfs_off_cache)) {
 		for (; i <= map->max_register; i += map->reg_stride) {
@@ -130,10 +126,9 @@ static unsigned int regmap_debugfs_get_dump_start(struct regmap *map,
 
 			/* No cache entry?  Start a new one */
 			if (!c) {
-				c = kzalloc(sizeof(*c), GFP_KERNEL);
+				c = kzalloc_obj(*c);
 				if (!c) {
 					regmap_debugfs_free_dump_cache(map);
-					mutex_unlock(&map->cache_lock);
 					return base;
 				}
 				c->min = p;
@@ -166,14 +161,12 @@ static unsigned int regmap_debugfs_get_dump_start(struct regmap *map,
 			fpos_offset = from - c->min;
 			reg_offset = fpos_offset / map->debugfs_tot_len;
 			*pos = c->min + (reg_offset * map->debugfs_tot_len);
-			mutex_unlock(&map->cache_lock);
 			return c->base_reg + (reg_offset * map->reg_stride);
 		}
 
 		*pos = c->max;
 		ret = c->max_reg;
 	}
-	mutex_unlock(&map->cache_lock);
 
 	return ret;
 }
@@ -195,10 +188,10 @@ static int regmap_next_readable_reg(struct regmap *map, int reg)
 	struct regmap_debugfs_off_cache *c;
 	int ret = -EINVAL;
 
-	if (regmap_printable(map, reg + map->reg_stride)) {
-		ret = reg + map->reg_stride;
-	} else {
-		mutex_lock(&map->cache_lock);
+	if (regmap_printable(map, reg + map->reg_stride))
+		return reg + map->reg_stride;
+
+	scoped_guard(mutex, &map->cache_lock) {
 		list_for_each_entry(c, &map->debugfs_off_cache, list) {
 			if (reg > c->max_reg)
 				continue;
@@ -207,8 +200,8 @@ static int regmap_next_readable_reg(struct regmap *map, int reg)
 				break;
 			}
 		}
-		mutex_unlock(&map->cache_lock);
 	}
+
 	return ret;
 }
 
@@ -365,8 +358,6 @@ static ssize_t regmap_reg_ranges_read_file(struct file *file,
 	struct regmap_debugfs_off_cache *c;
 	loff_t p = 0;
 	size_t buf_pos = 0;
-	char *buf;
-	char *entry;
 	int ret;
 	unsigned int entry_len;
 
@@ -376,15 +367,13 @@ static ssize_t regmap_reg_ranges_read_file(struct file *file,
 	if (count > (PAGE_SIZE << MAX_PAGE_ORDER))
 		count = PAGE_SIZE << MAX_PAGE_ORDER;
 
-	buf = kmalloc(count, GFP_KERNEL);
+	char *buf __free(kfree) = kmalloc(count, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
 
-	entry = kmalloc(PAGE_SIZE, GFP_KERNEL);
-	if (!entry) {
-		kfree(buf);
+	char *entry __free(kfree) = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	if (!entry)
 		return -ENOMEM;
-	}
 
 	/* While we are at it, build the register dump cache
 	 * now so the read() operation on the `registers' file
@@ -397,31 +386,27 @@ static ssize_t regmap_reg_ranges_read_file(struct file *file,
 	/* Reset file pointer as the fixed-format of the `registers'
 	 * file is not compatible with the `range' file */
 	p = 0;
-	mutex_lock(&map->cache_lock);
-	list_for_each_entry(c, &map->debugfs_off_cache, list) {
-		entry_len = snprintf(entry, PAGE_SIZE, "%x-%x\n",
-				     c->base_reg, c->max_reg);
-		if (p >= *ppos) {
-			if (buf_pos + entry_len > count)
-				break;
-			memcpy(buf + buf_pos, entry, entry_len);
-			buf_pos += entry_len;
+	scoped_guard(mutex, &map->cache_lock) {
+		list_for_each_entry(c, &map->debugfs_off_cache, list) {
+			entry_len = snprintf(entry, PAGE_SIZE, "%x-%x\n",
+					     c->base_reg, c->max_reg);
+			if (p >= *ppos) {
+				if (buf_pos + entry_len > count)
+					break;
+				memcpy(buf + buf_pos, entry, entry_len);
+				buf_pos += entry_len;
+			}
+			p += entry_len;
 		}
-		p += entry_len;
 	}
-	mutex_unlock(&map->cache_lock);
 
-	kfree(entry);
 	ret = buf_pos;
 
-	if (copy_to_user(user_buf, buf, buf_pos)) {
-		ret = -EFAULT;
-		goto out_buf;
-	}
+	if (copy_to_user(user_buf, buf, buf_pos))
+		return -EFAULT;
 
 	*ppos += buf_pos;
-out_buf:
-	kfree(buf);
+
 	return ret;
 }
 
@@ -470,18 +455,16 @@ static ssize_t regmap_cache_only_write_file(struct file *file,
 	if (err)
 		return count;
 
-	map->lock(map->lock_arg);
-
-	if (new_val && !map->cache_only) {
-		dev_warn(map->dev, "debugfs cache_only=Y forced\n");
-		add_taint(TAINT_USER, LOCKDEP_STILL_OK);
-	} else if (!new_val && map->cache_only) {
-		dev_warn(map->dev, "debugfs cache_only=N forced: syncing cache\n");
-		require_sync = true;
+	scoped_guard(regmap, map) {
+		if (new_val && !map->cache_only) {
+			dev_warn(map->dev, "debugfs cache_only=Y forced\n");
+			add_taint(TAINT_USER, LOCKDEP_STILL_OK);
+		} else if (!new_val && map->cache_only) {
+			dev_warn(map->dev, "debugfs cache_only=N forced: syncing cache\n");
+			require_sync = true;
+		}
+		map->cache_only = new_val;
 	}
-	map->cache_only = new_val;
-
-	map->unlock(map->lock_arg);
 
 	if (require_sync) {
 		err = regcache_sync(map);
@@ -512,7 +495,7 @@ static ssize_t regmap_cache_bypass_write_file(struct file *file,
 	if (err)
 		return count;
 
-	map->lock(map->lock_arg);
+	guard(regmap)(map);
 
 	if (new_val && !map->cache_bypass) {
 		dev_warn(map->dev, "debugfs cache_bypass=Y forced\n");
@@ -521,8 +504,6 @@ static ssize_t regmap_cache_bypass_write_file(struct file *file,
 		dev_warn(map->dev, "debugfs cache_bypass=N forced\n");
 	}
 	map->cache_bypass = new_val;
-
-	map->unlock(map->lock_arg);
 
 	return count;
 }
@@ -539,6 +520,7 @@ void regmap_debugfs_init(struct regmap *map)
 	struct regmap_range_node *range_node;
 	const char *devname = "dummy";
 	const char *name = map->name;
+	int id;
 
 	/*
 	 * Userspace can initiate reads from the hardware over debugfs.
@@ -555,18 +537,18 @@ void regmap_debugfs_init(struct regmap *map)
 	/* If we don't have the debugfs root yet, postpone init */
 	if (!regmap_debugfs_root) {
 		struct regmap_debugfs_node *node;
-		node = kzalloc(sizeof(*node), GFP_KERNEL);
+		node = kzalloc_obj(*node);
 		if (!node)
 			return;
 		node->map = map;
-		mutex_lock(&regmap_debugfs_early_lock);
-		list_add(&node->link, &regmap_debugfs_early_list);
-		mutex_unlock(&regmap_debugfs_early_lock);
+		scoped_guard(mutex, &regmap_debugfs_early_lock)
+			list_add(&node->link, &regmap_debugfs_early_list);
 		return;
 	}
 
 	INIT_LIST_HEAD(&map->debugfs_off_cache);
 	mutex_init(&map->cache_lock);
+	map->debugfs_dummy_id = -1;
 
 	if (map->dev)
 		devname = dev_name(map->dev);
@@ -585,12 +567,16 @@ void regmap_debugfs_init(struct regmap *map)
 
 	if (!strcmp(name, "dummy")) {
 		kfree(map->debugfs_name);
-		map->debugfs_name = kasprintf(GFP_KERNEL, "dummy%d",
-						dummy_index);
-		if (!map->debugfs_name)
+		id = ida_alloc(&dummy_ida, GFP_KERNEL);
+		if (id < 0)
 			return;
+		map->debugfs_name = kasprintf(GFP_KERNEL, "dummy%d", id);
+		if (!map->debugfs_name) {
+			ida_free(&dummy_ida, id);
+			return;
+		}
+		map->debugfs_dummy_id = id;
 		name = map->debugfs_name;
-		dummy_index++;
 	}
 
 	map->debugfs = debugfs_create_dir(name, regmap_debugfs_root);
@@ -655,25 +641,30 @@ void regmap_debugfs_init(struct regmap *map)
 
 void regmap_debugfs_exit(struct regmap *map)
 {
+	struct regmap_debugfs_node *node, *tmp;
+
 	if (map->debugfs) {
 		debugfs_remove_recursive(map->debugfs);
-		mutex_lock(&map->cache_lock);
-		regmap_debugfs_free_dump_cache(map);
-		mutex_unlock(&map->cache_lock);
+		map->debugfs = NULL;
+		scoped_guard(mutex, &map->cache_lock)
+			regmap_debugfs_free_dump_cache(map);
+		if (map->debugfs_dummy_id >= 0) {
+			ida_free(&dummy_ida, map->debugfs_dummy_id);
+			map->debugfs_dummy_id = -1;
+		}
 		kfree(map->debugfs_name);
 		map->debugfs_name = NULL;
-	} else {
-		struct regmap_debugfs_node *node, *tmp;
 
-		mutex_lock(&regmap_debugfs_early_lock);
-		list_for_each_entry_safe(node, tmp, &regmap_debugfs_early_list,
-					 link) {
+		return;
+	}
+
+	scoped_guard(mutex, &regmap_debugfs_early_lock) {
+		list_for_each_entry_safe(node, tmp, &regmap_debugfs_early_list, link) {
 			if (node->map == map) {
 				list_del(&node->link);
 				kfree(node);
 			}
 		}
-		mutex_unlock(&regmap_debugfs_early_lock);
 	}
 }
 
@@ -683,11 +674,10 @@ void regmap_debugfs_initcall(void)
 
 	regmap_debugfs_root = debugfs_create_dir("regmap", NULL);
 
-	mutex_lock(&regmap_debugfs_early_lock);
+	guard(mutex)(&regmap_debugfs_early_lock);
 	list_for_each_entry_safe(node, tmp, &regmap_debugfs_early_list, link) {
 		regmap_debugfs_init(node->map);
 		list_del(&node->link);
 		kfree(node);
 	}
-	mutex_unlock(&regmap_debugfs_early_lock);
 }

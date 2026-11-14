@@ -242,6 +242,10 @@ static int gamecube_rtc_read_offset_from_sram(struct priv *d)
 	}
 
 	hw_srnprot = ioremap(res.start, resource_size(&res));
+	if (!hw_srnprot) {
+		pr_err("failed to ioremap hw_srnprot\n");
+		return -ENOMEM;
+	}
 	old = ioread32be(hw_srnprot);
 
 	/* TODO: figure out why we use this magic constant.  I obtained it by
@@ -319,7 +323,7 @@ static int gamecube_rtc_probe(struct platform_device *pdev)
 	struct priv *d;
 	int ret;
 
-	d = devm_kzalloc(dev, sizeof(struct priv), GFP_KERNEL);
+	d = devm_kzalloc_obj(dev, struct priv);
 	if (!d)
 		return -ENOMEM;
 
@@ -351,9 +355,7 @@ static int gamecube_rtc_probe(struct platform_device *pdev)
 	rtc->range_max = U32_MAX;
 	rtc->ops = &gamecube_rtc_ops;
 
-	devm_rtc_register_device(rtc);
-
-	return 0;
+	return devm_rtc_register_device(rtc);
 }
 
 static const struct of_device_id gamecube_rtc_of_match[] = {

@@ -351,7 +351,7 @@ static int tda7432_probe(struct i2c_client *client)
 	v4l_info(client, "chip found @ 0x%02x (%s)\n",
 			client->addr << 1, client->adapter->name);
 
-	t = devm_kzalloc(&client->dev, sizeof(*t), GFP_KERNEL);
+	t = devm_kzalloc_obj(&client->dev, *t);
 	if (!t)
 		return -ENOMEM;
 	sd = &t->sd;
@@ -400,7 +400,7 @@ static void tda7432_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id tda7432_id[] = {
-	{ "tda7432" },
+	{ .name = "tda7432" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tda7432_id);

@@ -12,7 +12,7 @@
 #include <unistd.h>
 #include <asm-generic/unistd.h>
 #include "vm_util.h"
-#include "../kselftest.h"
+#include "kselftest.h"
 
 #define MB(x) (x << 20)
 #define MAX_SIZE_MB 1024
@@ -157,7 +157,7 @@ retry:
 		 * Retry until we succeed or reach MAX_SIZE_MB.
 		 */
 		if (errno == ESRCH) {
-			retry = (size <= MAX_SIZE_MB);
+			retry = (size < MAX_SIZE_MB);
 		} else {
 			waitpid(pid, NULL, 0);
 			ksft_exit_fail_msg("process_mrelease: %s\n", strerror(errno));

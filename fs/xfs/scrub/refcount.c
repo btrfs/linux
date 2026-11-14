@@ -3,7 +3,7 @@
  * Copyright (C) 2017-2023 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -20,6 +20,7 @@
 #include "scrub/btree.h"
 #include "scrub/trace.h"
 #include "scrub/repair.h"
+#include "scrub/refcount.h"
 
 /*
  * Set us up to scrub reference count btrees.
@@ -80,24 +81,6 @@ xchk_setup_ag_refcountbt(
  * If the refcount is correct, all the check conditions in the algorithm
  * should always hold true.  If not, the refcount is incorrect.
  */
-struct xchk_refcnt_frag {
-	struct list_head	list;
-	struct xfs_rmap_irec	rm;
-};
-
-struct xchk_refcnt_check {
-	struct xfs_scrub	*sc;
-	struct list_head	fragments;
-
-	/* refcount extent we're examining */
-	xfs_agblock_t		bno;
-	xfs_extlen_t		len;
-	xfs_nlink_t		refcount;
-
-	/* number of owners seen */
-	xfs_nlink_t		seen;
-};
-
 /*
  * Decide if the given rmap is large enough that we can redeem it
  * towards refcount verification now, or if it's a fragment, in
@@ -105,7 +88,7 @@ struct xchk_refcnt_check {
  * discover that we've collected exactly the correct number of
  * fragments as the refcountbt says we should have.
  */
-STATIC int
+int
 xchk_refcountbt_rmap_check(
 	struct xfs_btree_cur		*cur,
 	const struct xfs_rmap_irec	*rec,
@@ -129,6 +112,18 @@ xchk_refcountbt_rmap_check(
 		return 0;
 	}
 
+	/*
+	 * The refcount btree should only have records for written file data
+	 * blocks or for COW staging blocks.
+	 */
+	if ((XFS_RMAP_NON_INODE_OWNER(rec->rm_owner) &&
+	     rec->rm_owner != XFS_RMAP_OWN_COW) ||
+	    (rec->rm_flags & (XFS_RMAP_ATTR_FORK | XFS_RMAP_BMBT_BLOCK |
+			      XFS_RMAP_UNWRITTEN))) {
+		xchk_btree_xref_set_corrupt(refchk->sc, cur, 0);
+		return 0;
+	}
+
 	if (rec->rm_startblock <= refchk->bno && rm_last >= rc_last) {
 		/*
 		 * The rmap overlaps the refcount record, so we can confirm
@@ -142,8 +137,7 @@ xchk_refcountbt_rmap_check(
 		 * is healthy each rmap_irec we see will be in agbno order
 		 * so we don't need insertion sort here.
 		 */
-		frag = kmalloc(sizeof(struct xchk_refcnt_frag),
-				XCHK_GFP_FLAGS);
+		frag = kmalloc_obj(struct xchk_refcnt_frag, XCHK_GFP_FLAGS);
 		if (!frag)
 			return -ENOMEM;
 		memcpy(&frag->rm, rec, sizeof(frag->rm));
@@ -160,7 +154,7 @@ xchk_refcountbt_rmap_check(
  * number of extents that totally covered the refcountbt extent),
  * we have a refcountbt error.
  */
-STATIC void
+void
 xchk_refcountbt_process_rmap_fragments(
 	struct xchk_refcnt_check	*refchk)
 {
@@ -174,8 +168,11 @@ xchk_refcountbt_process_rmap_fragments(
 	xfs_nlink_t			target_nr;
 
 	target_nr = refchk->refcount - refchk->seen;
-	if (target_nr == 0)
+	if (target_nr == 0) {
+		if (!list_empty(&refchk->fragments))
+			refchk->seen = 0;
 		return;
+	}
 
 	/*
 	 * There are (refchk->rc.rc_refcount - refchk->nr refcount)
@@ -291,7 +288,7 @@ xchk_refcountbt_xref_rmap(
 		.bno			= irec->rc_startblock,
 		.len			= irec->rc_blockcount,
 		.refcount		= irec->rc_refcount,
-		.seen = 0,
+		.seen			= 0,
 	};
 	struct xfs_rmap_irec		low;
 	struct xfs_rmap_irec		high;
@@ -356,7 +353,7 @@ struct xchk_refcbt_records {
 	enum xfs_refc_domain	prev_domain;
 };
 
-STATIC int
+int
 xchk_refcountbt_rmap_check_gap(
 	struct xfs_btree_cur		*cur,
 	const struct xfs_rmap_irec	*rec,
@@ -411,7 +408,7 @@ xchk_refcount_mergeable(
 	const struct xfs_refcount_irec	*r1 = &rrc->prev_rec;
 
 	/* Ignore if prev_rec is not yet initialized. */
-	if (r1->rc_blockcount > 0)
+	if (r1->rc_blockcount == 0)
 		return false;
 
 	if (r1->rc_domain != r2->rc_domain)
@@ -582,8 +579,12 @@ xchk_xref_is_cow_staging(
 	if (rc.rc_domain != XFS_REFC_DOMAIN_COW)
 		xchk_btree_xref_set_corrupt(sc, sc->sa.refc_cur, 0);
 
+	/* Can't start after bno */
+	if (rc.rc_startblock > agbno)
+		xchk_btree_xref_set_corrupt(sc, sc->sa.refc_cur, 0);
+
 	/* Must be at least as long as what was passed in */
-	if (rc.rc_blockcount < len)
+	if (rc.rc_startblock + rc.rc_blockcount < agbno + len)
 		xchk_btree_xref_set_corrupt(sc, sc->sa.refc_cur, 0);
 }
 

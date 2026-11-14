@@ -6,7 +6,6 @@
 
 #include <linux/delay.h>
 #include <linux/io.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
@@ -250,7 +249,7 @@ static int mmp3_usb_phy_probe(struct platform_device *pdev)
 	struct mmp3_usb_phy *mmp3_usb_phy;
 	struct phy_provider *provider;
 
-	mmp3_usb_phy = devm_kzalloc(dev, sizeof(*mmp3_usb_phy), GFP_KERNEL);
+	mmp3_usb_phy = devm_kzalloc_obj(dev, *mmp3_usb_phy);
 	if (!mmp3_usb_phy)
 		return -ENOMEM;
 

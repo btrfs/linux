@@ -102,11 +102,11 @@ static void *cv1800_dmamux_route_allocate(struct of_phandle_args *dma_spec,
 	struct llist_node *node;
 	unsigned long flags;
 	unsigned int chid, devid, cpuid;
-	int ret;
+	int ret = -EINVAL;
 
 	if (dma_spec->args_count != DMAMUX_NCELLS) {
 		dev_err(&pdev->dev, "invalid number of dma mux args\n");
-		return ERR_PTR(-EINVAL);
+		goto err_put_pdev;
 	}
 
 	devid = dma_spec->args[0];
@@ -115,18 +115,18 @@ static void *cv1800_dmamux_route_allocate(struct of_phandle_args *dma_spec,
 
 	if (devid > MAX_DMA_MAPPING_ID) {
 		dev_err(&pdev->dev, "invalid device id: %u\n", devid);
-		return ERR_PTR(-EINVAL);
+		goto err_put_pdev;
 	}
 
 	if (cpuid > MAX_DMA_CPU_ID) {
 		dev_err(&pdev->dev, "invalid cpu id: %u\n", cpuid);
-		return ERR_PTR(-EINVAL);
+		goto err_put_pdev;
 	}
 
 	dma_spec->np = of_parse_phandle(ofdma->of_node, "dma-masters", 0);
 	if (!dma_spec->np) {
 		dev_err(&pdev->dev, "can't get dma master\n");
-		return ERR_PTR(-EINVAL);
+		goto err_put_pdev;
 	}
 
 	spin_lock_irqsave(&dmamux->lock, flags);
@@ -136,8 +136,6 @@ static void *cv1800_dmamux_route_allocate(struct of_phandle_args *dma_spec,
 			if (map->peripheral == devid && map->cpu == cpuid)
 				goto found;
 		}
-
-		ret = -EINVAL;
 		goto failed;
 	} else {
 		node = llist_del_first(&dmamux->free_maps);
@@ -171,12 +169,17 @@ found:
 	dev_dbg(&pdev->dev, "register channel %u for req %u (cpu %u)\n",
 		chid, devid, cpuid);
 
+	put_device(&pdev->dev);
+
 	return map;
 
 failed:
 	spin_unlock_irqrestore(&dmamux->lock, flags);
 	of_node_put(dma_spec->np);
 	dev_err(&pdev->dev, "errno %d\n", ret);
+err_put_pdev:
+	put_device(&pdev->dev);
+
 	return ERR_PTR(ret);
 }
 
@@ -197,7 +200,7 @@ static int cv1800_dmamux_probe(struct platform_device *pdev)
 	if (IS_ERR(regmap))
 		return PTR_ERR(regmap);
 
-	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, *data);
 	if (!data)
 		return -ENOMEM;
 
@@ -206,7 +209,7 @@ static int cv1800_dmamux_probe(struct platform_device *pdev)
 	init_llist_head(&data->reserve_maps);
 
 	for (i = 0; i <= MAX_DMA_CH_ID; i++) {
-		tmp = devm_kmalloc(dev, sizeof(*tmp), GFP_KERNEL);
+		tmp = devm_kmalloc_obj(dev, *tmp);
 		if (!tmp) {
 			/* It is OK for not allocating all channel */
 			dev_warn(dev, "can not allocate channel %u\n", i);

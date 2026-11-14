@@ -860,7 +860,7 @@ static int gl520_probe(struct i2c_client *client)
 	struct device *hwmon_dev;
 	struct gl520_data *data;
 
-	data = devm_kzalloc(dev, sizeof(struct gl520_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct gl520_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -885,7 +885,7 @@ static int gl520_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id gl520_id[] = {
-	{ "gl520sm" },
+	{ .name = "gl520sm" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, gl520_id);

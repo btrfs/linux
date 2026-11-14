@@ -1868,7 +1868,7 @@ static void mv643xx_eth_program_multicast_filter(struct net_device *dev)
 		goto promiscuous;
 
 	/* Allocate both mc_spec and mc_other tables */
-	mc_spec = kcalloc(128, sizeof(u32), GFP_ATOMIC);
+	mc_spec = kzalloc_objs(u32, 128, GFP_ATOMIC);
 	if (!mc_spec)
 		goto promiscuous;
 	mc_other = &mc_spec[64];
@@ -1967,8 +1967,7 @@ static int rxq_init(struct mv643xx_eth_private *mp, int index)
 	memset(rxq->rx_desc_area, 0, size);
 
 	rxq->rx_desc_area_size = size;
-	rxq->rx_skb = kcalloc(rxq->rx_ring_size, sizeof(*rxq->rx_skb),
-				    GFP_KERNEL);
+	rxq->rx_skb = kzalloc_objs(*rxq->rx_skb, rxq->rx_ring_size);
 	if (rxq->rx_skb == NULL)
 		goto out_free;
 
@@ -2781,7 +2780,7 @@ static int mv643xx_eth_shared_of_add_port(struct platform_device *pdev,
 		goto put_err;
 	}
 	ppdev->dev.coherent_dma_mask = DMA_BIT_MASK(32);
-	ppdev->dev.of_node = pnp;
+	platform_device_set_of_node(ppdev, pnp);
 
 	ret = platform_device_add_resources(ppdev, &res, 1);
 	if (ret)
@@ -2816,7 +2815,7 @@ static int mv643xx_eth_shared_of_probe(struct platform_device *pdev)
 	if (!np)
 		return 0;
 
-	pd = devm_kzalloc(&pdev->dev, sizeof(*pd), GFP_KERNEL);
+	pd = devm_kzalloc_obj(&pdev->dev, *pd);
 	if (!pd)
 		return -ENOMEM;
 	pdev->dev.platform_data = pd;
@@ -2856,7 +2855,7 @@ static int mv643xx_eth_shared_probe(struct platform_device *pdev)
 		pr_notice("MV-643xx 10/100/1000 ethernet driver version %s\n",
 			  mv643xx_eth_driver_version);
 
-	msp = devm_kzalloc(&pdev->dev, sizeof(*msp), GFP_KERNEL);
+	msp = devm_kzalloc_obj(&pdev->dev, *msp);
 	if (msp == NULL)
 		return -ENOMEM;
 	platform_set_drvdata(pdev, msp);
@@ -3172,6 +3171,8 @@ static int mv643xx_eth_probe(struct platform_device *pdev)
 	netif_set_real_num_tx_queues(dev, mp->txq_count);
 	netif_set_real_num_rx_queues(dev, mp->rxq_count);
 
+	dev->netdev_ops = &mv643xx_eth_netdev_ops;
+
 	err = 0;
 	if (pd->phy_node) {
 		phydev = of_phy_connect(mp->dev, pd->phy_node,
@@ -3221,8 +3222,6 @@ static int mv643xx_eth_probe(struct platform_device *pdev)
 		goto out;
 	}
 	dev->irq = irq;
-
-	dev->netdev_ops = &mv643xx_eth_netdev_ops;
 
 	dev->watchdog_timeo = 2 * HZ;
 	dev->base_addr = 0;

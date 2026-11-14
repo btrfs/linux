@@ -9,6 +9,7 @@
  *
  * Copyright (C) 2001-2003 Andreas Gruenbacher, <agruen@suse.de>
  */
+#include <linux/fs_struct.h>
 #include <linux/f2fs_fs.h>
 #include "f2fs.h"
 #include "xattr.h"
@@ -46,6 +47,7 @@ static inline int f2fs_acl_count(size_t size)
 static struct posix_acl *f2fs_acl_from_disk(const char *value, size_t size)
 {
 	int i, count;
+	int err = -EINVAL;
 	struct posix_acl *acl;
 	struct f2fs_acl_header *hdr = (struct f2fs_acl_header *)value;
 	struct f2fs_acl_entry *entry = (struct f2fs_acl_entry *)(hdr + 1);
@@ -69,8 +71,11 @@ static struct posix_acl *f2fs_acl_from_disk(const char *value, size_t size)
 
 	for (i = 0; i < count; i++) {
 
-		if ((char *)entry > end)
+		if (unlikely((char *)entry +
+				sizeof(struct f2fs_acl_entry_short) > end)) {
+			err = -EFSCORRUPTED;
 			goto fail;
+		}
 
 		acl->a_entries[i].e_tag  = le16_to_cpu(entry->e_tag);
 		acl->a_entries[i].e_perm = le16_to_cpu(entry->e_perm);
@@ -85,6 +90,11 @@ static struct posix_acl *f2fs_acl_from_disk(const char *value, size_t size)
 			break;
 
 		case ACL_USER:
+			if (unlikely((char *)entry +
+					sizeof(struct f2fs_acl_entry) > end)) {
+				err = -EFSCORRUPTED;
+				goto fail;
+			}
 			acl->a_entries[i].e_uid =
 				make_kuid(&init_user_ns,
 						le32_to_cpu(entry->e_id));
@@ -92,6 +102,11 @@ static struct posix_acl *f2fs_acl_from_disk(const char *value, size_t size)
 					sizeof(struct f2fs_acl_entry));
 			break;
 		case ACL_GROUP:
+			if (unlikely((char *)entry +
+					sizeof(struct f2fs_acl_entry) > end)) {
+				err = -EFSCORRUPTED;
+				goto fail;
+			}
 			acl->a_entries[i].e_gid =
 				make_kgid(&init_user_ns,
 						le32_to_cpu(entry->e_id));
@@ -107,7 +122,7 @@ static struct posix_acl *f2fs_acl_from_disk(const char *value, size_t size)
 	return acl;
 fail:
 	posix_acl_release(acl);
-	return ERR_PTR(-EINVAL);
+	return ERR_PTR(err);
 }
 
 static void *f2fs_acl_to_disk(struct f2fs_sb_info *sbi,
@@ -166,7 +181,7 @@ fail:
 }
 
 static struct posix_acl *__f2fs_get_acl(struct inode *inode, int type,
-						struct folio *dfolio)
+						struct f2fs_cached_block *entry)
 {
 	int name_index = F2FS_XATTR_INDEX_POSIX_ACL_DEFAULT;
 	void *value = NULL;
@@ -176,13 +191,13 @@ static struct posix_acl *__f2fs_get_acl(struct inode *inode, int type,
 	if (type == ACL_TYPE_ACCESS)
 		name_index = F2FS_XATTR_INDEX_POSIX_ACL_ACCESS;
 
-	retval = f2fs_getxattr(inode, name_index, "", NULL, 0, dfolio);
+	retval = f2fs_getxattr(inode, name_index, "", NULL, 0, entry);
 	if (retval > 0) {
 		value = f2fs_kmalloc(F2FS_I_SB(inode), retval, GFP_F2FS_ZERO);
 		if (!value)
 			return ERR_PTR(-ENOMEM);
 		retval = f2fs_getxattr(inode, name_index, "", value,
-							retval, dfolio);
+							retval, entry);
 	}
 
 	if (retval > 0)
@@ -204,7 +219,7 @@ struct posix_acl *f2fs_get_acl(struct inode *inode, int type, bool rcu)
 	return __f2fs_get_acl(inode, type, NULL);
 }
 
-static int f2fs_acl_update_mode(struct mnt_idmap *idmap,
+static int f2fs_acl_update_mode(const struct mnt_idmap *idmap,
 				struct inode *inode, umode_t *mode_p,
 				struct posix_acl **acl)
 {
@@ -225,9 +240,9 @@ static int f2fs_acl_update_mode(struct mnt_idmap *idmap,
 	return 0;
 }
 
-static int __f2fs_set_acl(struct mnt_idmap *idmap,
+static int __f2fs_set_acl(const struct mnt_idmap *idmap,
 			struct inode *inode, int type,
-			struct posix_acl *acl, struct folio *ifolio)
+			struct posix_acl *acl, struct f2fs_cached_block *ientry)
 {
 	int name_index;
 	void *value = NULL;
@@ -238,7 +253,7 @@ static int __f2fs_set_acl(struct mnt_idmap *idmap,
 	switch (type) {
 	case ACL_TYPE_ACCESS:
 		name_index = F2FS_XATTR_INDEX_POSIX_ACL_ACCESS;
-		if (acl && !ifolio) {
+		if (acl && !ientry) {
 			error = f2fs_acl_update_mode(idmap, inode, &mode, &acl);
 			if (error)
 				return error;
@@ -264,7 +279,7 @@ static int __f2fs_set_acl(struct mnt_idmap *idmap,
 		}
 	}
 
-	error = f2fs_setxattr(inode, name_index, "", value, size, ifolio, 0);
+	error = f2fs_setxattr(inode, name_index, "", value, size, ientry, 0);
 
 	kfree(value);
 	if (!error)
@@ -274,7 +289,7 @@ static int __f2fs_set_acl(struct mnt_idmap *idmap,
 	return error;
 }
 
-int f2fs_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
+int f2fs_set_acl(const struct mnt_idmap *idmap, struct dentry *dentry,
 		 struct posix_acl *acl, int type)
 {
 	struct inode *inode = d_inode(dentry);
@@ -359,7 +374,7 @@ static int f2fs_acl_create_masq(struct posix_acl *acl, umode_t *mode_p)
 
 static int f2fs_acl_create(struct inode *dir, umode_t *mode,
 		struct posix_acl **default_acl, struct posix_acl **acl,
-		struct folio *dfolio)
+		struct f2fs_cached_block *entry)
 {
 	struct posix_acl *p;
 	struct posix_acl *clone;
@@ -371,7 +386,7 @@ static int f2fs_acl_create(struct inode *dir, umode_t *mode,
 	if (S_ISLNK(*mode) || !IS_POSIXACL(dir))
 		return 0;
 
-	p = __f2fs_get_acl(dir, ACL_TYPE_DEFAULT, dfolio);
+	p = __f2fs_get_acl(dir, ACL_TYPE_DEFAULT, entry);
 	if (!p || p == ERR_PTR(-EOPNOTSUPP)) {
 		*mode &= ~current_umask();
 		return 0;
@@ -408,13 +423,13 @@ release_acl:
 	return ret;
 }
 
-int f2fs_init_acl(struct inode *inode, struct inode *dir, struct folio *ifolio,
-							struct folio *dfolio)
+int f2fs_init_acl(struct inode *inode, struct inode *dir, struct f2fs_cached_block *ientry,
+							struct f2fs_cached_block *dentry)
 {
 	struct posix_acl *default_acl = NULL, *acl = NULL;
 	int error;
 
-	error = f2fs_acl_create(dir, &inode->i_mode, &default_acl, &acl, dfolio);
+	error = f2fs_acl_create(dir, &inode->i_mode, &default_acl, &acl, dentry);
 	if (error)
 		return error;
 
@@ -422,7 +437,7 @@ int f2fs_init_acl(struct inode *inode, struct inode *dir, struct folio *ifolio,
 
 	if (default_acl) {
 		error = __f2fs_set_acl(NULL, inode, ACL_TYPE_DEFAULT,
-				default_acl, ifolio);
+				default_acl, ientry);
 		posix_acl_release(default_acl);
 	} else {
 		inode->i_default_acl = NULL;
@@ -430,7 +445,7 @@ int f2fs_init_acl(struct inode *inode, struct inode *dir, struct folio *ifolio,
 	if (acl) {
 		if (!error)
 			error = __f2fs_set_acl(NULL, inode, ACL_TYPE_ACCESS,
-					acl, ifolio);
+					acl, ientry);
 		posix_acl_release(acl);
 	} else {
 		inode->i_acl = NULL;

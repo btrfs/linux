@@ -1448,7 +1448,7 @@ class DevProps:
 
 # Class: DeviceNode
 # Description:
-#	 A container used to create a device hierachy, with a single root node
+#	 A container used to create a device hierarchy, with a single root node
 #	 and a tree of child nodes. Used by Data.deviceTopology()
 class DeviceNode:
 	def __init__(self, nodename, nodedepth):
@@ -3155,7 +3155,7 @@ class TestProps:
 			dev = f[0]
 			props[dev] = DevProps()
 			props[dev].altname = f[1]
-			if int(f[2]):
+			if len(f) > 2 and f[2] and int(f[2]):
 				props[dev].isasync = True
 			else:
 				props[dev].isasync = False

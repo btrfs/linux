@@ -1494,7 +1494,7 @@ int kvm_vm_ioctl_resize_hpt_prepare(struct kvm *kvm,
 
 	/* start new resize */
 
-	resize = kzalloc(sizeof(*resize), GFP_KERNEL);
+	resize = kzalloc_obj(*resize);
 	if (!resize) {
 		ret = -ENOMEM;
 		goto out;
@@ -1749,8 +1749,8 @@ static ssize_t kvm_htab_read(struct file *file, char __user *buf,
 		       record_hpte(flags, hptp, hpte, revp, 1, first_pass)) {
 			/* valid entry, write it out */
 			++hdr.n_valid;
-			if (__put_user(hpte[0], lbuf) ||
-			    __put_user(hpte[1], lbuf + 1))
+			if (put_user(hpte[0], lbuf) ||
+			    put_user(hpte[1], lbuf + 1))
 				return -EFAULT;
 			nb += HPTE_SIZE;
 			lbuf += 2;
@@ -1853,8 +1853,8 @@ static ssize_t kvm_htab_write(struct file *file, const char __user *buf,
 			__be64 hpte_r;
 
 			err = -EFAULT;
-			if (__get_user(hpte_v, lbuf) ||
-			    __get_user(hpte_r, lbuf + 1))
+			if (get_user(hpte_v, lbuf) ||
+			    get_user(hpte_r, lbuf + 1))
 				goto out;
 			v = be64_to_cpu(hpte_v);
 			r = be64_to_cpu(hpte_r);
@@ -1943,7 +1943,7 @@ int kvm_vm_ioctl_get_htab_fd(struct kvm *kvm, struct kvm_get_htab_fd *ghf)
 	/* reject flags we don't recognize */
 	if (ghf->flags & ~(KVM_GET_HTAB_BOLTED_ONLY | KVM_GET_HTAB_WRITE))
 		return -EINVAL;
-	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	ctx = kzalloc_obj(*ctx);
 	if (!ctx)
 		return -ENOMEM;
 	kvm_get_kvm(kvm);
@@ -1985,7 +1985,7 @@ static int debugfs_htab_open(struct inode *inode, struct file *file)
 	struct kvm *kvm = inode->i_private;
 	struct debugfs_htab_state *p;
 
-	p = kzalloc(sizeof(*p), GFP_KERNEL);
+	p = kzalloc_obj(*p);
 	if (!p)
 		return -ENOMEM;
 

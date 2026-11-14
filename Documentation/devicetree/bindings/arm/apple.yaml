@@ -82,6 +82,10 @@ description: |
   - iPhone 8 Plus
   - iPhone X
 
+  Devices based on the "A18 Pro" SoC:
+
+  - MacBook Neo (A18 Pro, 2026)
+
   Devices based on the "M1" SoC:
 
   - Mac mini (M1, 2020)
@@ -95,6 +99,22 @@ description: |
   - MacBook Air (15-inch, M2, 2023)
   - MacBook Pro (13-inch, M2, 2022)
   - Mac mini (M2, 2023)
+
+  Devices based on the "M3" SoC:
+
+  - MacBook Air (13-inch, M3, 2024)
+  - MacBook Air (15-inch, M3, 2024)
+  - MacBook Pro (14-inch, M3, 2023)
+  - iMac (24-inch, M3, 2023)
+
+  Devices based on the "M4" SoC:
+
+  - MacBook Pro (14-inch, M4, 2024)
+  - iMac (24-inch, 2x USB-C, M4, 2024)
+  - iMac (24-inch, 4x USB-C, M4, 2024)
+  - MacBook Air (13-inch, M4, 2025)
+  - MacBook Air (15-inch, M4, 2025)
+  - Mac mini (M4, 2024)
 
   Devices based on the "M1 Pro", "M1 Max" and "M1 Ultra" SoCs:
 
@@ -115,6 +135,14 @@ description: |
   - Mac Studio (M2 Max, 2023)
   - Mac Studio (M2 Ultra, 2023)
   - Mac Pro (M2 Ultra, 2023)
+
+  Devices based on the "M3 Pro", "M3 Max" and "M3 Ultra" SoCs:
+
+  - MacBook Pro (14-inch, M3 Pro, 2023)
+  - MacBook Pro (14-inch, M3 Max, 2023)
+  - MacBook Pro (16-inch, M3 Pro, 2023)
+  - MacBook Pro (16-inch, M3 Max, 2023)
+  - Mac Studio (M3 Ultra, 2025)
 
   The compatible property should follow this format:
 
@@ -276,6 +304,13 @@ properties:
           - const: apple,t8015
           - const: apple,arm-platform
 
+      - description: Apple A18 Pro SoC based platforms
+        items:
+          - enum:
+              - apple,j700  # MacBook Neo (A18 Pro, 2026)
+          - const: apple,t8140
+          - const: apple,arm-platform
+
       - description: Apple M1 SoC based platforms
         items:
           - enum:
@@ -295,6 +330,29 @@ properties:
               - apple,j473 # Mac mini (M2, 2023)
               - apple,j493 # MacBook Pro (13-inch, M2, 2022)
           - const: apple,t8112
+          - const: apple,arm-platform
+
+      - description: Apple M3 SoC based platforms
+        items:
+          - enum:
+              - apple,j433 # iMac (24-inch, 2x USB-C, M3, 2023)
+              - apple,j434 # iMac (24-inch, 4x USB-C, M3, 2023)
+              - apple,j504 # MacBook Pro (14-inch, M3, 2023)
+              - apple,j613 # MacBook Air (13-inch, M3, 2024)
+              - apple,j615 # MacBook Air (15-inch, M3, 2024)
+          - const: apple,t8122
+          - const: apple,arm-platform
+
+      - description: Apple M4 SoC based platforms
+        items:
+          - enum:
+              - apple,j604  # MacBook Pro (14-inch, M4, 2024)
+              - apple,j623  # iMac (24-inch, 2x USB-C, M4, 2024)
+              - apple,j624  # iMac (24-inch, 4x USB-C, M4, 2024)
+              - apple,j713  # MacBook Air (13-inch, M4, 2025)
+              - apple,j715  # MacBook Air (15-inch, M4, 2025)
+              - apple,j773g # Mac mini (M4, 2024)
+          - const: apple,t8132
           - const: apple,arm-platform
 
       - description: Apple M1 Pro SoC based platforms
@@ -345,6 +403,35 @@ properties:
               - apple,j180d # Mac Pro (M2 Ultra, 2023)
               - apple,j475d # Mac Studio (M2 Ultra, 2023)
           - const: apple,t6022
+          - const: apple,arm-platform
+
+      - description: Apple M3 Pro SoC based platforms
+        items:
+          - enum:
+              - apple,j514s  # MacBook Pro (14-inch, M3 Pro, 2023)
+              - apple,j516s  # MacBook Pro (16-inch, M3 Pro, 2023)
+          - const: apple,t6030
+          - const: apple,arm-platform
+
+      - description: Apple M3 Max SoC based platforms
+        oneOf:
+          - items:
+              - enum:
+                  - apple,j514c  # MacBook Pro (14-inch, M3 Max, 16 cores, 2023)
+                  - apple,j516c  # MacBook Pro (16-inch, M3 Max, 16 cores, 2023)
+              - const: apple,t6031
+              - const: apple,arm-platform
+          - items:
+              - enum:
+                  - apple,j514m  # MacBook Pro (14-inch, M3 Max, 14 cores, 2023)
+                  - apple,j516m  # MacBook Pro (16-inch, M3 Max, 14 cores, 2023)
+              - const: apple,t6034
+              - const: apple,arm-platform
+
+      - description: Apple M3 Ultra SoC based platforms
+        items:
+          - const: apple,j575d  # Mac Studio (M3 Ultra, 2025)
+          - const: apple,t6032
           - const: apple,arm-platform
 
 additionalProperties: true

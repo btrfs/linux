@@ -3216,7 +3216,7 @@ static int bttv_probe(struct pci_dev *dev, const struct pci_device_id *pci_id)
 	if (bttv_num == BTTV_MAX)
 		return -ENOMEM;
 	pr_info("Bt8xx card found (%d)\n", bttv_num);
-	bttvs[bttv_num] = btv = kzalloc(sizeof(*btv), GFP_KERNEL);
+	bttvs[bttv_num] = btv = kzalloc_obj(*btv);
 	if (btv == NULL) {
 		pr_err("out of memory\n");
 		return -ENOMEM;
@@ -3504,7 +3504,7 @@ static void bttv_remove(struct pci_dev *pci_dev)
 	return;
 }
 
-static int __maybe_unused bttv_suspend(struct device *dev)
+static int bttv_suspend(struct device *dev)
 {
 	struct v4l2_device *v4l2_dev = dev_get_drvdata(dev);
 	struct bttv *btv = to_bttv(v4l2_dev);
@@ -3535,7 +3535,7 @@ static int __maybe_unused bttv_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused bttv_resume(struct device *dev)
+static int bttv_resume(struct device *dev)
 {
 	struct v4l2_device *v4l2_dev = dev_get_drvdata(dev);
 	struct bttv *btv = to_bttv(v4l2_dev);
@@ -3563,17 +3563,17 @@ static int __maybe_unused bttv_resume(struct device *dev)
 }
 
 static const struct pci_device_id bttv_pci_tbl[] = {
-	{PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT848), 0},
-	{PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT849), 0},
-	{PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT878), 0},
-	{PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT879), 0},
-	{PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_FUSION879), 0},
-	{0,}
+	{ PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT848) },
+	{ PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT849) },
+	{ PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT878) },
+	{ PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT879) },
+	{ PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_FUSION879) },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, bttv_pci_tbl);
 
-static SIMPLE_DEV_PM_OPS(bttv_pm_ops,
+static DEFINE_SIMPLE_DEV_PM_OPS(bttv_pm_ops,
 			 bttv_suspend,
 			 bttv_resume);
 
@@ -3582,7 +3582,7 @@ static struct pci_driver bttv_pci_driver = {
 	.id_table  = bttv_pci_tbl,
 	.probe     = bttv_probe,
 	.remove    = bttv_remove,
-	.driver.pm = &bttv_pm_ops,
+	.driver.pm = pm_sleep_ptr(&bttv_pm_ops),
 };
 
 static int __init bttv_init_module(void)

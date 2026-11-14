@@ -242,7 +242,7 @@ static int ad7418_probe(struct i2c_client *client)
 					I2C_FUNC_SMBUS_WORD_DATA))
 		return -EOPNOTSUPP;
 
-	data = devm_kzalloc(dev, sizeof(struct ad7418_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct ad7418_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -281,9 +281,9 @@ static int ad7418_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ad7418_id[] = {
-	{ "ad7416", ad7416 },
-	{ "ad7417", ad7417 },
-	{ "ad7418", ad7418 },
+	{ .name = "ad7416", .driver_data = ad7416 },
+	{ .name = "ad7417", .driver_data = ad7417 },
+	{ .name = "ad7418", .driver_data = ad7418 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ad7418_id);

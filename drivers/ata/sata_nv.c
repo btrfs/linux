@@ -344,21 +344,49 @@ enum nv_host_type
 };
 
 static const struct pci_device_id nv_pci_tbl[] = {
-	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE2S_SATA), NFORCE2 },
-	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE3S_SATA), NFORCE3 },
-	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE3S_SATA2), NFORCE3 },
-	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_CK804_SATA), CK804 },
-	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_CK804_SATA2), CK804 },
-	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP04_SATA), CK804 },
-	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP04_SATA2), CK804 },
-	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP51_SATA), MCP5x },
-	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP51_SATA2), MCP5x },
-	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP55_SATA), MCP5x },
-	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP55_SATA2), MCP5x },
-	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP61_SATA), GENERIC },
-	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP61_SATA2), GENERIC },
-	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP61_SATA3), GENERIC },
-
+	{
+		PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE2S_SATA),
+		.driver_data = NFORCE2,
+	}, {
+		PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE3S_SATA),
+		.driver_data = NFORCE3,
+	}, {
+		PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE3S_SATA2),
+		.driver_data = NFORCE3,
+	}, {
+		PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_CK804_SATA),
+		.driver_data = CK804,
+	}, {
+		PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_CK804_SATA2),
+		.driver_data = CK804,
+	}, {
+		PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP04_SATA),
+		.driver_data = CK804,
+	}, {
+		PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP04_SATA2),
+		.driver_data = CK804,
+	}, {
+		PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP51_SATA),
+		.driver_data = MCP5x,
+	}, {
+		PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP51_SATA2),
+		.driver_data = MCP5x,
+	}, {
+		PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP55_SATA),
+		.driver_data = MCP5x,
+	}, {
+		PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP55_SATA2),
+		.driver_data = MCP5x,
+	}, {
+		PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP61_SATA),
+		.driver_data = GENERIC,
+	}, {
+		PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP61_SATA2),
+		.driver_data = GENERIC,
+	}, {
+		PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP61_SATA3),
+		.driver_data = GENERIC,
+	},
 	{ } /* terminate list */
 };
 
@@ -1117,7 +1145,7 @@ static int nv_adma_port_start(struct ata_port *ap)
 	if (rc)
 		return rc;
 
-	pp = devm_kzalloc(dev, sizeof(*pp), GFP_KERNEL);
+	pp = devm_kzalloc_obj(dev, *pp);
 	if (!pp)
 		return -ENOMEM;
 
@@ -1626,6 +1654,7 @@ static void nv_mcp55_thaw(struct ata_port *ap)
 }
 
 static void nv_adma_error_handler(struct ata_port *ap)
+	__must_hold(&ap->host->eh_mutex)
 {
 	struct nv_adma_port_priv *pp = ap->private_data;
 	if (!(pp->flags & NV_ADMA_PORT_REGISTER_MODE)) {
@@ -1795,6 +1824,7 @@ static void nv_swncq_ncq_stop(struct ata_port *ap)
 }
 
 static void nv_swncq_error_handler(struct ata_port *ap)
+	__must_hold(&ap->host->eh_mutex)
 {
 	struct ata_eh_context *ehc = &ap->link.eh_context;
 
@@ -1930,7 +1960,7 @@ static int nv_swncq_port_start(struct ata_port *ap)
 	if (rc)
 		return rc;
 
-	pp = devm_kzalloc(dev, sizeof(*pp), GFP_KERNEL);
+	pp = devm_kzalloc_obj(dev, *pp);
 	if (!pp)
 		return -ENOMEM;
 
@@ -2346,7 +2376,7 @@ static int nv_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (rc)
 		return rc;
 
-	hpriv = devm_kzalloc(&pdev->dev, sizeof(*hpriv), GFP_KERNEL);
+	hpriv = devm_kzalloc_obj(&pdev->dev, *hpriv);
 	if (!hpriv)
 		return -ENOMEM;
 	hpriv->type = type;

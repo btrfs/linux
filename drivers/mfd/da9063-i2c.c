@@ -372,7 +372,7 @@ static int da9063_i2c_probe(struct i2c_client *i2c)
 	struct da9063 *da9063;
 	int ret;
 
-	da9063 = devm_kzalloc(&i2c->dev, sizeof(struct da9063), GFP_KERNEL);
+	da9063 = devm_kzalloc_obj(&i2c->dev, struct da9063);
 	if (da9063 == NULL)
 		return -ENOMEM;
 
@@ -468,6 +468,9 @@ static int da9063_i2c_probe(struct i2c_client *i2c)
 			return ret;
 		}
 	}
+
+	/* Reserve our unused second address so userspace won't interfere */
+	devm_i2c_new_dummy_device(&i2c->dev, i2c->adapter, i2c->addr + 1);
 
 	return da9063_device_init(da9063, i2c->irq);
 }

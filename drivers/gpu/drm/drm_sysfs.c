@@ -349,7 +349,7 @@ int drm_sysfs_connector_add(struct drm_connector *connector)
 	if (connector->kdev)
 		return 0;
 
-	kdev = kzalloc(sizeof(*kdev), GFP_KERNEL);
+	kdev = kzalloc_obj(*kdev);
 	if (!kdev)
 		return -ENOMEM;
 
@@ -554,7 +554,7 @@ struct device *drm_sysfs_minor_alloc(struct drm_minor *minor)
 	struct device *kdev;
 	int r;
 
-	kdev = kzalloc(sizeof(*kdev), GFP_KERNEL);
+	kdev = kzalloc_obj(*kdev);
 	if (!kdev)
 		return ERR_PTR(-ENOMEM);
 
@@ -589,35 +589,3 @@ err_free:
 	put_device(kdev);
 	return ERR_PTR(r);
 }
-
-/**
- * drm_class_device_register - register new device with the DRM sysfs class
- * @dev: device to register
- *
- * Registers a new &struct device within the DRM sysfs class. Essentially only
- * used by ttm to have a place for its global settings. Drivers should never use
- * this.
- */
-int drm_class_device_register(struct device *dev)
-{
-	if (!drm_class || IS_ERR(drm_class))
-		return -ENOENT;
-
-	dev->class = drm_class;
-	return device_register(dev);
-}
-EXPORT_SYMBOL_GPL(drm_class_device_register);
-
-/**
- * drm_class_device_unregister - unregister device with the DRM sysfs class
- * @dev: device to unregister
- *
- * Unregisters a &struct device from the DRM sysfs class. Essentially only used
- * by ttm to have a place for its global settings. Drivers should never use
- * this.
- */
-void drm_class_device_unregister(struct device *dev)
-{
-	return device_unregister(dev);
-}
-EXPORT_SYMBOL_GPL(drm_class_device_unregister);

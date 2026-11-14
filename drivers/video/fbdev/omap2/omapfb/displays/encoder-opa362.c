@@ -13,7 +13,6 @@
 
 #include <linux/gpio/consumer.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 
@@ -192,7 +191,7 @@ static int opa362_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	ddata = devm_kzalloc(&pdev->dev, sizeof(*ddata), GFP_KERNEL);
+	ddata = devm_kzalloc_obj(&pdev->dev, *ddata);
 	if (!ddata)
 		return -ENOMEM;
 

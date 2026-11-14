@@ -611,8 +611,8 @@ static int tmp51x_init(struct tmp51x_data *data)
 }
 
 static const struct i2c_device_id tmp51x_id[] = {
-	{ "tmp512", TMP512_MAX_CHANNELS },
-	{ "tmp513", TMP513_MAX_CHANNELS },
+	{ .name = "tmp512", .driver_data = TMP512_MAX_CHANNELS },
+	{ .name = "tmp513", .driver_data = TMP513_MAX_CHANNELS },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tmp51x_id);
@@ -716,7 +716,7 @@ static int tmp51x_probe(struct i2c_client *client)
 	struct device *hwmon_dev;
 	int ret;
 
-	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, *data);
 	if (!data)
 		return -ENOMEM;
 

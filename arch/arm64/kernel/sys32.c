@@ -59,12 +59,7 @@ COMPAT_SYSCALL_DEFINE6(aarch32_mmap2, unsigned long, addr, unsigned long, len,
 	return ksys_mmap_pgoff(addr, len, prot, flags, fd, off_4k);
 }
 
-#ifdef CONFIG_CPU_BIG_ENDIAN
-#define arg_u32p(name)	u32, name##_hi, u32, name##_lo
-#else
 #define arg_u32p(name)	u32, name##_lo, u32, name##_hi
-#endif
-
 #define arg_u64(name)	(((u64)name##_hi << 32) | name##_lo)
 
 COMPAT_SYSCALL_DEFINE6(aarch32_pread64, unsigned int, fd, char __user *, buf,
@@ -89,7 +84,7 @@ COMPAT_SYSCALL_DEFINE4(aarch32_truncate64, const char __user *, pathname,
 COMPAT_SYSCALL_DEFINE4(aarch32_ftruncate64, unsigned int, fd, u32, __pad,
 		       arg_u32p(length))
 {
-	return ksys_ftruncate(fd, arg_u64(length));
+	return ksys_ftruncate(fd, arg_u64(length), FTRUNCATE_LFS);
 }
 
 COMPAT_SYSCALL_DEFINE5(aarch32_readahead, int, fd, u32, __pad,

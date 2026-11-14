@@ -95,7 +95,7 @@
 #define MIN_MAPPED_VRAM	(1024*768*1)
 
 #define CHIP_DEF(id, family, flags)					\
-	{ PCI_VENDOR_ID_ATI, id, PCI_ANY_ID, PCI_ANY_ID, 0, 0, (flags) | (CHIP_FAMILY_##family) }
+	{ PCI_DEVICE(PCI_VENDOR_ID_ATI, id), .driver_data = (flags) | (CHIP_FAMILY_##family) }
 
 static const struct pci_device_id radeonfb_pci_table[] = {
         /* Radeon Xpress 200m */
@@ -779,7 +779,7 @@ static void radeon_get_pllinfo(struct radeonfb_info *rinfo)
 #endif /* CONFIG_PPC || CONFIG_SPARC */
 
 	/*
-	 * Check out if we have an X86 which gave us some PLL informations
+	 * Check out if we have an X86 which gave us some PLL information
 	 * and if yes, retrieve them
 	 */
 	if (!force_measure_pll && rinfo->bios_seg) {
@@ -1653,7 +1653,7 @@ static int radeonfb_set_par(struct fb_info *info)
 	int depth = var_to_depth(mode);
 	int use_rmx = 0;
 
-	newmode = kmalloc(sizeof(struct radeon_regs), GFP_KERNEL);
+	newmode = kmalloc_obj(struct radeon_regs);
 	if (!newmode)
 		return -ENOMEM;
 
@@ -2407,7 +2407,7 @@ static int radeonfb_pci_register(struct pci_dev *pdev,
 	if (rinfo->bios_seg == NULL && rinfo->is_mobility)
 		radeon_map_ROM(rinfo, pdev);
 
-	/* Get informations about the board's PLL */
+	/* Get information about the board's PLL */
 	radeon_get_pllinfo(rinfo);
 
 #ifdef CONFIG_FB_RADEON_I2C
@@ -2476,6 +2476,7 @@ static int radeonfb_pci_register(struct pci_dev *pdev,
 	return 0;
 err_unmap_fb:
 	iounmap(rinfo->fb_base);
+	fb_destroy_modelist(&info->modelist);
 err_unmap_rom:
 	kfree(rinfo->mon1_EDID);
 	kfree(rinfo->mon2_EDID);

@@ -10,6 +10,7 @@
 #include <linux/clk-provider.h>
 #include <linux/module.h>
 #include <linux/of_address.h>
+#include <linux/pm_runtime.h>
 #include <sound/soc.h>
 
 #include "fsl_utils.h"
@@ -152,6 +153,9 @@ void fsl_asoc_reparent_pll_clocks(struct device *dev, struct clk *clk,
 }
 EXPORT_SYMBOL(fsl_asoc_reparent_pll_clocks);
 
+/* Fractional audio PLLs may sit a few Hz off nominal */
+#define FSL_RATE_CONSTR_TOL_HZ	100
+
 /**
  * fsl_asoc_constrain_rates - constrain rates according to clocks
  *
@@ -171,6 +175,7 @@ void fsl_asoc_constrain_rates(struct snd_pcm_hw_constraint_list *target_constr,
 {
 	int i, j, k = 0;
 	u64 clk_rate[3];
+	u32 rate, rem;
 
 	*target_constr = *original_constr;
 	if (pll8k_clk || pll11k_clk || ext_clk) {
@@ -180,10 +185,25 @@ void fsl_asoc_constrain_rates(struct snd_pcm_hw_constraint_list *target_constr,
 			clk_rate[0] = clk_get_rate(pll8k_clk);
 			clk_rate[1] = clk_get_rate(pll11k_clk);
 			clk_rate[2] = clk_get_rate(ext_clk);
+			rate = original_constr->list[i];
 			for (j = 0; j < 3; j++) {
-				if (clk_rate[j] != 0 &&
-				    do_div(clk_rate[j], original_constr->list[i]) == 0) {
-					target_rates[k++] = original_constr->list[i];
+				if (clk_rate[j] == 0)
+					continue;
+				rem = do_div(clk_rate[j], rate);
+				/*
+				 * The audio PLLs are fractional and cannot
+				 * always reproduce their nominal rate: after
+				 * any clk_set_rate() they may sit a few Hz
+				 * off (observed on i.MX8M Plus: audio_pll1
+				 * reads 393215997 after restoring 393216000),
+				 * which must not disqualify the entire rate
+				 * family. Accept near-integer ratios; the
+				 * other family misses by tens of kHz, so a
+				 * small tolerance cannot mix families.
+				 */
+				if (rem <= FSL_RATE_CONSTR_TOL_HZ ||
+				    rem >= rate - FSL_RATE_CONSTR_TOL_HZ) {
+					target_rates[k++] = rate;
 					target_constr->count++;
 					break;
 				}
@@ -196,6 +216,136 @@ void fsl_asoc_constrain_rates(struct snd_pcm_hw_constraint_list *target_constr,
 	}
 }
 EXPORT_SYMBOL(fsl_asoc_constrain_rates);
+
+/*
+ * Below functions are used by mixer interface to avoid accessing registers
+ * which are volatile at pm runtime suspend state (cache_only is enabled).
+ */
+int fsl_asoc_get_xr_sx(struct snd_kcontrol *kcontrol,
+		       struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	int ret = 0;
+
+	ret = pm_runtime_resume_and_get(component->dev);
+	if (ret)
+		return ret;
+
+	ret = snd_soc_get_xr_sx(kcontrol, ucontrol);
+
+	pm_runtime_put_autosuspend(component->dev);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(fsl_asoc_get_xr_sx);
+
+int fsl_asoc_put_xr_sx(struct snd_kcontrol *kcontrol,
+		       struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	int ret = 0;
+
+	ret = pm_runtime_resume_and_get(component->dev);
+	if (ret)
+		return ret;
+
+	ret = snd_soc_put_xr_sx(kcontrol, ucontrol);
+	/*
+	 * As this function only used by the SNDRV_CTL_ELEM_ACCESS_VOLATILE
+	 * case. return 0 to avoid control event notification.
+	 */
+	if (ret > 0)
+		ret = 0;
+
+	pm_runtime_put_autosuspend(component->dev);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(fsl_asoc_put_xr_sx);
+
+int fsl_asoc_get_enum_double(struct snd_kcontrol *kcontrol,
+			     struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	int ret = 0;
+
+	ret = pm_runtime_resume_and_get(component->dev);
+	if (ret)
+		return ret;
+
+	ret = snd_soc_get_enum_double(kcontrol, ucontrol);
+
+	pm_runtime_put_autosuspend(component->dev);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(fsl_asoc_get_enum_double);
+
+int fsl_asoc_put_enum_double(struct snd_kcontrol *kcontrol,
+			     struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	int ret = 0;
+
+	ret = pm_runtime_resume_and_get(component->dev);
+	if (ret)
+		return ret;
+
+	ret = snd_soc_put_enum_double(kcontrol, ucontrol);
+	/*
+	 * As this function only used by the SNDRV_CTL_ELEM_ACCESS_VOLATILE
+	 * case. return 0 to avoid control event notification.
+	 */
+	if (ret > 0)
+		ret = 0;
+
+	pm_runtime_put_autosuspend(component->dev);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(fsl_asoc_put_enum_double);
+
+int fsl_asoc_get_volsw(struct snd_kcontrol *kcontrol,
+		       struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	int ret = 0;
+
+	ret = pm_runtime_resume_and_get(component->dev);
+	if (ret)
+		return ret;
+
+	ret = snd_soc_get_volsw(kcontrol, ucontrol);
+
+	pm_runtime_put_autosuspend(component->dev);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(fsl_asoc_get_volsw);
+
+int fsl_asoc_put_volsw(struct snd_kcontrol *kcontrol,
+		       struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	int ret = 0;
+
+	ret = pm_runtime_resume_and_get(component->dev);
+	if (ret)
+		return ret;
+
+	ret = snd_soc_put_volsw(kcontrol, ucontrol);
+	/*
+	 * As this function only used by the SNDRV_CTL_ELEM_ACCESS_VOLATILE
+	 * case. return 0 to avoid control event notification.
+	 */
+	if (ret > 0)
+		ret = 0;
+
+	pm_runtime_put_autosuspend(component->dev);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(fsl_asoc_put_volsw);
 
 MODULE_AUTHOR("Timur Tabi <timur@freescale.com>");
 MODULE_DESCRIPTION("Freescale ASoC utility code");

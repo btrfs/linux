@@ -911,10 +911,7 @@ static bool sysrq_handle_keypress(struct sysrq_state *sysrq,
 		 * keyboard state so we can release keys that have been
 		 * pressed before entering SysRq mode.
 		 */
-		if (value)
-			set_bit(code, sysrq->key_down);
-		else
-			clear_bit(code, sysrq->key_down);
+		assign_bit(code, sysrq->key_down, value);
 
 		if (was_active)
 			schedule_work(&sysrq->reinject_work);
@@ -971,7 +968,7 @@ static int sysrq_connect(struct input_handler *handler,
 	struct sysrq_state *sysrq;
 	int error;
 
-	sysrq = kzalloc(sizeof(struct sysrq_state), GFP_KERNEL);
+	sysrq = kzalloc_obj(struct sysrq_state);
 	if (!sysrq)
 		return -ENOMEM;
 

@@ -9,7 +9,6 @@
 #include <linux/hwmon.h>
 #include <linux/init.h>
 #include <linux/io.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 
@@ -107,7 +106,7 @@ static int s5_temp_probe(struct platform_device *pdev)
 	struct device *hwmon_dev;
 	struct s5_hwmon *hwmon;
 
-	hwmon = devm_kzalloc(&pdev->dev, sizeof(*hwmon), GFP_KERNEL);
+	hwmon = devm_kzalloc_obj(&pdev->dev, *hwmon);
 	if (!hwmon)
 		return -ENOMEM;
 

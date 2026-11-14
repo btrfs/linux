@@ -118,14 +118,25 @@
 		reg = <0x6 0x00000000 0x1 0x00000000>;
 	};
 
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		tfa@40000000 {
+			reg = <0x0 0x40000000 0x0 0x8000000>;
+			no-map;
+		};
+	};
+
 	/* Page 27 / DSI to Display */
-	mini-dp-con {
+	dp-con {
 		compatible = "dp-connector";
 		label = "CN6";
 		type = "full-size";
 
 		port {
-			mini_dp_con_in: endpoint {
+			dp_con_in: endpoint {
 				remote-endpoint = <&sn65dsi86_out>;
 			};
 		};
@@ -278,6 +289,11 @@
 };
 
 /* Page 27 / DSI to Display */
+&dsc {
+	status = "okay";
+};
+
+/* Page 27 / DSI to Display */
 &dsi1 {
 	status = "okay";
 
@@ -407,7 +423,7 @@
 					port@1 {
 						reg = <1>;
 						sn65dsi86_out: endpoint {
-							remote-endpoint = <&mini_dp_con_in>;
+							remote-endpoint = <&dp_con_in>;
 						};
 					};
 				};
@@ -487,6 +503,7 @@
 	#size-cells = <0>;
 	pinctrl-0 = <&i2c3_pins>;
 	pinctrl-names = "default";
+	status = "okay";
 };
 
 /* Page 31 / IO_CN */
@@ -495,6 +512,7 @@
 	#size-cells = <0>;
 	pinctrl-0 = <&i2c4_pins>;
 	pinctrl-names = "default";
+	status = "okay";
 };
 
 /* Page 18 / POWER_CORE and Page 19 / POWER_PMIC */
@@ -534,6 +552,10 @@
 			remote-endpoint = <&da7212_endpoint>;
 		};
 	};
+};
+
+&otp {
+	bootph-all;
 };
 
 /* Page 26 / 2230 Key M M.2 */
@@ -620,6 +642,7 @@
 	hscif0_pins: hscif0 {
 		groups = "hscif0_data", "hscif0_ctrl";
 		function = "hscif0";
+		bootph-all;
 	};
 
 	/* Page 23 / DEBUG */
@@ -682,6 +705,12 @@
 		function = "intc_ex";
 	};
 
+	/* Page 30 / Audio_Codec */
+	msiof1_pins: msiof1 {
+		groups = "msiof1_clk", "msiof1_sync", "msiof1_txd", "msiof1_rxd";
+		function = "msiof1";
+	};
+
 	/* Page 31 / FAN */
 	pwm0_pins: pwm0 {
 		groups = "pwm0";
@@ -731,12 +760,6 @@
 		groups = "mmc_data4", "mmc_ctrl";
 		function = "mmc";
 		power-source = <1800>;
-	};
-
-	/* Page 30 / Audio_Codec */
-	msiof1_pins: sound {
-		groups = "msiof1_clk", "msiof1_sync", "msiof1_txd", "msiof1_rxd";
-		function = "msiof1";
 	};
 
 	/* Page 30 / Audio_Codec */

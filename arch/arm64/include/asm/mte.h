@@ -8,7 +8,7 @@
 #include <asm/compiler.h>
 #include <asm/mte-def.h>
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <linux/bitfield.h>
 #include <linux/kasan-enabled.h>
@@ -23,9 +23,7 @@ unsigned long mte_copy_tags_from_user(void *to, const void __user *from,
 				      unsigned long n);
 unsigned long mte_copy_tags_to_user(void __user *to, void *from,
 				    unsigned long n);
-int mte_save_tags(struct page *page);
 void mte_save_page_tags(const void *page_addr, void *tag_storage);
-void mte_restore_tags(swp_entry_t entry, struct page *page);
 void mte_restore_page_tags(void *page_addr, const void *tag_storage);
 void mte_invalidate_tags(int type, pgoff_t offset);
 void mte_invalidate_tags_area(int type);
@@ -252,12 +250,18 @@ static inline void mte_check_tfsr_entry(void)
 	if (!kasan_hw_tags_enabled())
 		return;
 
+	if (!system_uses_mte_async_or_asymm_mode())
+		return;
+
 	mte_check_tfsr_el1();
 }
 
 static inline void mte_check_tfsr_exit(void)
 {
 	if (!kasan_hw_tags_enabled())
+		return;
+
+	if (!system_uses_mte_async_or_asymm_mode())
 		return;
 
 	/*
@@ -282,5 +286,5 @@ static inline void mte_check_tfsr_exit(void)
 }
 #endif /* CONFIG_KASAN_HW_TAGS */
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 #endif /* __ASM_MTE_H  */

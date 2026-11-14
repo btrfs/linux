@@ -539,9 +539,8 @@ static int gaudi_set_fixed_properties(struct hl_device *hdev)
 	int i;
 
 	prop->max_queues = GAUDI_QUEUE_ID_SIZE;
-	prop->hw_queues_props = kcalloc(prop->max_queues,
-			sizeof(struct hw_queue_properties),
-			GFP_KERNEL);
+	prop->hw_queues_props = kzalloc_objs(struct hw_queue_properties,
+					     prop->max_queues);
 
 	if (!prop->hw_queues_props)
 		return -ENOMEM;
@@ -1853,7 +1852,7 @@ static int gaudi_sw_init(struct hl_device *hdev)
 	int rc;
 
 	/* Allocate device structure */
-	gaudi = kzalloc(sizeof(*gaudi), GFP_KERNEL);
+	gaudi = kzalloc_obj(*gaudi);
 	if (!gaudi)
 		return -ENOMEM;
 
@@ -4906,7 +4905,7 @@ static int gaudi_pin_memory_before_cs(struct hl_device *hdev,
 			parser->job_userptr_list, &userptr))
 		goto already_pinned;
 
-	userptr = kzalloc(sizeof(*userptr), GFP_KERNEL);
+	userptr = kzalloc_obj(*userptr);
 	if (!userptr)
 		return -ENOMEM;
 
@@ -8843,7 +8842,7 @@ static int gaudi_add_sync_to_engine_map_entry(
 	reg_value -= lower_32_bits(CFG_BASE);
 
 	/* create a new hash entry */
-	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	entry = kzalloc_obj(*entry);
 	if (!entry)
 		return -ENOMEM;
 	entry->engine_type = engine_type;
@@ -8990,14 +8989,12 @@ static int gaudi_print_fences_single_engine(
 	int rc = -ENOMEM, i;
 	u32 *statuses, *fences;
 
-	statuses = kcalloc(sds->props[SP_ENGINE_NUM_OF_QUEUES],
-			sizeof(*statuses), GFP_KERNEL);
+	statuses = kzalloc_objs(*statuses, sds->props[SP_ENGINE_NUM_OF_QUEUES]);
 	if (!statuses)
 		goto out;
 
-	fences = kcalloc(sds->props[SP_ENGINE_NUM_OF_FENCES] *
-				sds->props[SP_ENGINE_NUM_OF_QUEUES],
-			 sizeof(*fences), GFP_KERNEL);
+	fences = kzalloc_objs(*fences,
+			      sds->props[SP_ENGINE_NUM_OF_FENCES] * sds->props[SP_ENGINE_NUM_OF_QUEUES]);
 	if (!fences)
 		goto free_status;
 

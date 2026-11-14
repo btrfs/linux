@@ -257,7 +257,7 @@ static int adc_joystick_probe(struct platform_device *pdev)
 	if (error)
 		return error;
 
-	joy = devm_kzalloc(dev, struct_size(joy, axes, num_chans), GFP_KERNEL);
+	joy = devm_kzalloc_flex(dev, *joy, axes, num_chans);
 	if (!joy)
 		return -ENOMEM;
 
@@ -329,3 +329,4 @@ module_platform_driver(adc_joystick_driver);
 MODULE_DESCRIPTION("Input driver for joysticks connected over ADC");
 MODULE_AUTHOR("Artur Rojek <contact@artur-rojek.eu>");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("IIO_CONSUMER");

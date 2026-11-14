@@ -67,6 +67,15 @@ config IPMI_SI
 	  Currently, only KCS and SMIC are supported.  If
 	  you are using IPMI, you should probably say "y" here.
 
+config IPMI_SI_ASYNC_INIT
+	bool 'Asynchronous initialization of IPMI System Interface'
+	depends on IPMI_SI
+	default n
+	help
+	  Offloads individual SMI inits. It speeds up the boot time.
+	  It also introduces a very small risk that something else might fail
+	  if it depends on synchronous IPMI init.
+
 config IPMI_SSIF
 	tristate 'IPMI SMBus handler (SSIF)'
 	depends on I2C
@@ -186,6 +195,16 @@ config SSIF_IPMI_BMC
 
 	  The driver implements the BMC side of the SMBus system
 	  interface (SSIF).
+
+config SSIF_IPMI_BMC_KUNIT_TEST
+	bool "KUnit tests for SSIF IPMI BMC driver" if !KUNIT_ALL_TESTS
+	depends on KUNIT=y
+	depends on SSIF_IPMI_BMC
+	default KUNIT_ALL_TESTS
+	help
+	  This option builds unit tests that exercise the SSIF BMC state
+	  machine, including request handling, response transmission,
+	  and error paths such as aborted or truncated transfers.
 
 config IPMB_DEVICE_INTERFACE
 	tristate 'IPMB Interface handler'

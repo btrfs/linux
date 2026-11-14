@@ -519,7 +519,7 @@ static int tc654_probe(struct i2c_client *client)
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_BYTE_DATA))
 		return -ENODEV;
 
-	data = devm_kzalloc(dev, sizeof(struct tc654_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct tc654_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -541,8 +541,9 @@ static int tc654_probe(struct i2c_client *client)
 	if (IS_ENABLED(CONFIG_THERMAL)) {
 		struct thermal_cooling_device *cdev;
 
-		cdev = devm_thermal_of_cooling_device_register(dev, dev->of_node, client->name,
-							       hwmon_dev, &tc654_fan_cool_ops);
+		cdev = devm_thermal_of_child_cooling_device_register(dev, dev->of_node,
+								     client->name, hwmon_dev,
+								     &tc654_fan_cool_ops);
 		return PTR_ERR_OR_ZERO(cdev);
 	}
 
@@ -550,9 +551,9 @@ static int tc654_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id tc654_id[] = {
-	{"tc654"},
-	{"tc655"},
-	{}
+	{ .name = "tc654" },
+	{ .name = "tc655" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, tc654_id);

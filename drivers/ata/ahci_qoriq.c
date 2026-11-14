@@ -14,6 +14,7 @@
 #include <linux/device.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
 #include <linux/libata.h>
 #include "ahci.h"
 
@@ -80,7 +81,7 @@ static const struct of_device_id ahci_qoriq_of_match[] = {
 MODULE_DEVICE_TABLE(of, ahci_qoriq_of_match);
 
 static const struct acpi_device_id ahci_qoriq_acpi_match[] = {
-	{"NXP0004", .driver_data = (kernel_ulong_t)AHCI_LX2160A},
+	{ .id = "NXP0004", .driver_data = (kernel_ulong_t)AHCI_LX2160A },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, ahci_qoriq_acpi_match);
@@ -273,7 +274,7 @@ static int ahci_qoriq_probe(struct platform_device *pdev)
 	if (!(of_id || acpi_id))
 		return -ENODEV;
 
-	qoriq_priv = devm_kzalloc(dev, sizeof(*qoriq_priv), GFP_KERNEL);
+	qoriq_priv = devm_kzalloc_obj(dev, *qoriq_priv);
 	if (!qoriq_priv)
 		return -ENOMEM;
 

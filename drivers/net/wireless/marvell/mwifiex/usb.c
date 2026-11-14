@@ -392,7 +392,7 @@ static int mwifiex_usb_probe(struct usb_interface *intf,
 	struct usb_card_rec *card;
 	u16 id_vendor, id_product, bcd_device;
 
-	card = devm_kzalloc(&intf->dev, sizeof(*card), GFP_KERNEL);
+	card = devm_kzalloc_obj(&intf->dev, *card);
 	if (!card)
 		return -ENOMEM;
 
@@ -519,8 +519,6 @@ static int mwifiex_usb_probe(struct usb_interface *intf,
 		usb_reset_device(udev);
 		return ret;
 	}
-
-	usb_get_dev(udev);
 
 	return 0;
 }
@@ -666,8 +664,6 @@ static void mwifiex_usb_disconnect(struct usb_interface *intf)
 	mwifiex_dbg(adapter, FATAL,
 		    "%s: removing card\n", __func__);
 	mwifiex_remove_card(adapter);
-
-	usb_put_dev(interface_to_usbdev(intf));
 }
 
 static void mwifiex_usb_coredump(struct device *dev)

@@ -503,7 +503,7 @@ static int mpc_dma_alloc_chan_resources(struct dma_chan *chan)
 
 	/* Alloc descriptors for this channel */
 	for (i = 0; i < MPC_DMA_DESCRIPTORS; i++) {
-		mdesc = kzalloc(sizeof(struct mpc_dma_desc), GFP_KERNEL);
+		mdesc = kzalloc_obj(struct mpc_dma_desc);
 		if (!mdesc) {
 			dev_notice(mdma->dma.dev,
 				"Memory allocation error. Allocated only %u descriptors\n", i);
@@ -907,7 +907,7 @@ static int mpc_dma_probe(struct platform_device *op)
 	int retval, i;
 	u8 chancnt;
 
-	mdma = devm_kzalloc(dev, sizeof(struct mpc_dma), GFP_KERNEL);
+	mdma = devm_kzalloc_obj(dev, struct mpc_dma);
 	if (!mdma) {
 		retval = -ENOMEM;
 		goto err;

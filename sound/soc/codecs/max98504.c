@@ -314,7 +314,7 @@ static int max98504_i2c_probe(struct i2c_client *client)
 	struct max98504_priv *max98504;
 	int i, ret;
 
-	max98504 = devm_kzalloc(dev, sizeof(*max98504), GFP_KERNEL);
+	max98504 = devm_kzalloc_obj(dev, *max98504);
 	if (!max98504)
 		return -ENOMEM;
 
@@ -363,7 +363,7 @@ MODULE_DEVICE_TABLE(of, max98504_of_match);
 #endif
 
 static const struct i2c_device_id max98504_i2c_id[] = {
-	{ "max98504" },
+	{ .name = "max98504" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max98504_i2c_id);

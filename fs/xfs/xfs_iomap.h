@@ -15,7 +15,8 @@ struct xfs_zone_alloc_ctx;
 int xfs_iomap_write_direct(struct xfs_inode *ip, xfs_fileoff_t offset_fsb,
 		xfs_fileoff_t count_fsb, unsigned int flags,
 		struct xfs_bmbt_irec *imap, u64 *sequence);
-int xfs_iomap_write_unwritten(struct xfs_inode *, xfs_off_t, xfs_off_t, bool);
+int xfs_iomap_write_unwritten(struct xfs_inode *ip, xfs_off_t offset,
+		xfs_off_t count, bool update_isize, uint32_t bmapi_flags);
 xfs_fileoff_t xfs_iomap_eof_align_last_fsb(struct xfs_inode *ip,
 		xfs_fileoff_t end_fsb);
 
@@ -28,6 +29,22 @@ int xfs_zero_range(struct xfs_inode *ip, loff_t pos, loff_t len,
 		struct xfs_zone_alloc_ctx *ac, bool *did_zero);
 int xfs_truncate_page(struct xfs_inode *ip, loff_t pos,
 		struct xfs_zone_alloc_ctx *ac, bool *did_zero);
+
+static inline void
+xfs_iomap_set_anon_write(
+	struct xfs_inode		*ip,
+	struct iomap			*iomap,
+	loff_t				offset,
+	loff_t				length)
+{
+	iomap->type = IOMAP_MAPPED;
+	iomap->bdev = ip->i_mount->m_rtdev_targp->bt_bdev;
+	iomap->offset = offset;
+	iomap->length = length;
+	iomap->flags = IOMAP_F_ANON_WRITE | IOMAP_F_DIRTY;
+	if (bdev_has_integrity_csum(iomap->bdev))
+		iomap->flags |= IOMAP_F_INTEGRITY;
+}
 
 static inline xfs_filblks_t
 xfs_aligned_fsb_count(
@@ -49,14 +66,18 @@ xfs_aligned_fsb_count(
 	return count_fsb;
 }
 
-extern const struct iomap_ops xfs_buffered_write_iomap_ops;
-extern const struct iomap_ops xfs_direct_write_iomap_ops;
-extern const struct iomap_ops xfs_zoned_direct_write_iomap_ops;
-extern const struct iomap_ops xfs_read_iomap_ops;
-extern const struct iomap_ops xfs_seek_iomap_ops;
-extern const struct iomap_ops xfs_xattr_iomap_ops;
-extern const struct iomap_ops xfs_dax_write_iomap_ops;
-extern const struct iomap_ops xfs_atomic_write_cow_iomap_ops;
+int xfs_read_iomap_begin(struct inode *inode, loff_t offset,
+		loff_t length, unsigned flags, struct iomap *iomap,
+		struct iomap *srcmap);
+
+DECLARE_IOMAP_ITER_NEXT(xfs_buffered_write_iomap_next);
+DECLARE_IOMAP_ITER_NEXT(xfs_direct_write_iomap_next);
+DECLARE_IOMAP_ITER_NEXT(xfs_zoned_direct_write_iomap_next);
+DECLARE_IOMAP_ITER_NEXT(xfs_read_iomap_next);
+DECLARE_IOMAP_ITER_NEXT(xfs_seek_iomap_next);
+DECLARE_IOMAP_ITER_NEXT(xfs_xattr_iomap_next);
+DECLARE_IOMAP_ITER_NEXT(xfs_dax_write_iomap_next);
+DECLARE_IOMAP_ITER_NEXT(xfs_atomic_write_cow_iomap_next);
 extern const struct iomap_write_ops xfs_iomap_write_ops;
 
 #endif /* __XFS_IOMAP_H__*/

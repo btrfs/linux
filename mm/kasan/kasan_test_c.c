@@ -511,7 +511,7 @@ static void kmalloc_oob_16(struct kunit *test)
 	ptr1 = RELOC_HIDE(kmalloc(sizeof(*ptr1) - 3, GFP_KERNEL), 0);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr1);
 
-	ptr2 = kmalloc(sizeof(*ptr2), GFP_KERNEL);
+	ptr2 = kmalloc_obj(*ptr2);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr2);
 
 	OPTIMIZER_HIDE_VAR(ptr1);
@@ -529,10 +529,10 @@ static void kmalloc_uaf_16(struct kunit *test)
 
 	KASAN_TEST_NEEDS_CHECKED_MEMINTRINSICS(test);
 
-	ptr1 = kmalloc(sizeof(*ptr1), GFP_KERNEL);
+	ptr1 = kmalloc_obj(*ptr1);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr1);
 
-	ptr2 = kmalloc(sizeof(*ptr2), GFP_KERNEL);
+	ptr2 = kmalloc_obj(*ptr2);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr2);
 	kfree(ptr2);
 
@@ -859,7 +859,7 @@ static void kasan_atomics(struct kunit *test)
 	 */
 	a1 = kzalloc(48, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, a1);
-	a2 = kzalloc(sizeof(atomic_long_t), GFP_KERNEL);
+	a2 = kzalloc_obj(atomic_long_t);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, a2);
 
 	/* Use atomics to access the redzone. */
@@ -873,6 +873,16 @@ static void kmalloc_double_kzfree(struct kunit *test)
 {
 	char *ptr;
 	size_t size = 16;
+
+	/*
+	 * With the tag-based KASAN modes, if the memory happens to be
+	 * reallocated between the two frees and the new allocation tag happens
+	 * to match the old one, the second free will cause a memory corruption.
+	 * Resolving https://bugzilla.kernel.org/show_bug.cgi?id=212177 would
+	 * help to deal with this. With Generic KASAN, it's effectively
+	 * impossible for the memory to get reallocated due to the quarantine.
+	 */
+	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_KASAN_GENERIC);
 
 	ptr = kmalloc(size, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
@@ -954,7 +964,7 @@ static void rcu_uaf(struct kunit *test)
 {
 	struct kasan_rcu_info *ptr;
 
-	ptr = kmalloc(sizeof(struct kasan_rcu_info), GFP_KERNEL);
+	ptr = kmalloc_obj(struct kasan_rcu_info);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, ptr);
 
 	global_rcu_ptr = rcu_dereference_protected(
@@ -978,7 +988,7 @@ static void workqueue_uaf(struct kunit *test)
 	workqueue = create_workqueue("kasan_workqueue_test");
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, workqueue);
 
-	work = kmalloc(sizeof(struct work_struct), GFP_KERNEL);
+	work = kmalloc_obj(struct work_struct);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, work);
 
 	INIT_WORK(work, workqueue_uaf_work);
@@ -1215,14 +1225,13 @@ static void kmem_cache_bulk(struct kunit *test)
 	struct kmem_cache *cache;
 	size_t size = 200;
 	char *p[10];
-	bool ret;
 	int i;
 
 	cache = kmem_cache_create("test_cache", size, 0, 0, NULL);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, cache);
 
-	ret = kmem_cache_alloc_bulk(cache, GFP_KERNEL, ARRAY_SIZE(p), (void **)&p);
-	if (!ret) {
+	if (!kmem_cache_alloc_bulk(cache, GFP_KERNEL, ARRAY_SIZE(p),
+			(void **)&p)) {
 		kunit_err(test, "Allocation failed: %s\n", __func__);
 		kmem_cache_destroy(cache);
 		return;
@@ -1840,22 +1849,8 @@ static void vmalloc_helpers_tags(struct kunit *test)
 	vfree(ptr);
 }
 
-static void vmalloc_oob(struct kunit *test)
+static void vmalloc_oob_helper(struct kunit *test, char *v_ptr, size_t size)
 {
-	char *v_ptr, *p_ptr;
-	struct page *page;
-	size_t size = PAGE_SIZE / 2 - KASAN_GRANULE_SIZE - 5;
-
-	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_KASAN_VMALLOC);
-
-	if (!kasan_vmalloc_enabled())
-		kunit_skip(test, "Test requires kasan.vmalloc=on");
-
-	v_ptr = vmalloc(size);
-	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, v_ptr);
-
-	OPTIMIZER_HIDE_VAR(v_ptr);
-
 	/*
 	 * We have to be careful not to hit the guard page in vmalloc tests.
 	 * The MMU will catch that and crash us.
@@ -1873,7 +1868,41 @@ static void vmalloc_oob(struct kunit *test)
 		KUNIT_EXPECT_KASAN_FAIL(test, ((volatile char *)v_ptr)[size]);
 
 	/* An aligned access into the first out-of-bounds granule. */
-	KUNIT_EXPECT_KASAN_FAIL_READ(test, ((volatile char *)v_ptr)[size + 5]);
+	size = round_up(size, KASAN_GRANULE_SIZE);
+	KUNIT_EXPECT_KASAN_FAIL_READ(test, ((volatile char *)v_ptr)[size]);
+}
+
+static void vmalloc_oob(struct kunit *test)
+{
+	char *v_ptr, *p_ptr;
+	struct page *page;
+	size_t size = PAGE_SIZE / 2 - KASAN_GRANULE_SIZE - 5;
+
+	KASAN_TEST_NEEDS_CONFIG_ON(test, CONFIG_KASAN_VMALLOC);
+
+	if (!kasan_vmalloc_enabled())
+		kunit_skip(test, "Test requires kasan.vmalloc=on");
+
+	v_ptr = vmalloc(size);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, v_ptr);
+
+	OPTIMIZER_HIDE_VAR(v_ptr);
+
+	vmalloc_oob_helper(test, v_ptr, size);
+
+	size -= KASAN_GRANULE_SIZE + 1;
+	v_ptr = vrealloc(v_ptr, size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, v_ptr);
+
+	OPTIMIZER_HIDE_VAR(v_ptr);
+
+	vmalloc_oob_helper(test, v_ptr, size);
+
+	size += 2 * KASAN_GRANULE_SIZE + 2;
+	v_ptr = vrealloc(v_ptr, size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, v_ptr);
+
+	vmalloc_oob_helper(test, v_ptr, size);
 
 	/* Check that in-bounds accesses to the physical page are valid. */
 	page = vmalloc_to_page(v_ptr);

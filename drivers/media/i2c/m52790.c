@@ -141,7 +141,7 @@ static int m52790_probe(struct i2c_client *client)
 	v4l_info(client, "chip found @ 0x%x (%s)\n",
 			client->addr << 1, client->adapter->name);
 
-	state = devm_kzalloc(&client->dev, sizeof(*state), GFP_KERNEL);
+	state = devm_kzalloc_obj(&client->dev, *state);
 	if (state == NULL)
 		return -ENOMEM;
 
@@ -163,7 +163,7 @@ static void m52790_remove(struct i2c_client *client)
 /* ----------------------------------------------------------------------- */
 
 static const struct i2c_device_id m52790_id[] = {
-	{ "m52790" },
+	{ .name = "m52790" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, m52790_id);

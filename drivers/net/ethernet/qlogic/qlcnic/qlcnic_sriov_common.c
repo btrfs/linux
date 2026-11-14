@@ -149,15 +149,14 @@ int qlcnic_sriov_init(struct qlcnic_adapter *adapter, int num_vfs)
 	if (!qlcnic_sriov_enable_check(adapter))
 		return -EIO;
 
-	sriov  = kzalloc(sizeof(struct qlcnic_sriov), GFP_KERNEL);
+	sriov  = kzalloc_obj(struct qlcnic_sriov);
 	if (!sriov)
 		return -ENOMEM;
 
 	adapter->ahw->sriov = sriov;
 	sriov->num_vfs = num_vfs;
 	bc = &sriov->bc;
-	sriov->vf_info = kcalloc(num_vfs, sizeof(struct qlcnic_vf_info),
-				 GFP_KERNEL);
+	sriov->vf_info = kzalloc_objs(struct qlcnic_vf_info, num_vfs);
 	if (!sriov->vf_info) {
 		err = -ENOMEM;
 		goto qlcnic_free_sriov;
@@ -201,7 +200,7 @@ int qlcnic_sriov_init(struct qlcnic_adapter *adapter, int num_vfs)
 		INIT_WORK(&vf->trans_work, qlcnic_sriov_process_bc_cmd);
 
 		if (qlcnic_sriov_pf_check(adapter)) {
-			vp = kzalloc(sizeof(struct qlcnic_vport), GFP_KERNEL);
+			vp = kzalloc_obj(struct qlcnic_vport);
 			if (!vp) {
 				err = -ENOMEM;
 				goto qlcnic_destroy_async_wq;
@@ -453,7 +452,7 @@ static int qlcnic_sriov_set_guest_vlan_mode(struct qlcnic_adapter *adapter,
 		return 0;
 
 	num_vlans = sriov->num_allowed_vlans;
-	sriov->allowed_vlans = kcalloc(num_vlans, sizeof(u16), GFP_KERNEL);
+	sriov->allowed_vlans = kzalloc_objs(u16, num_vlans);
 	if (!sriov->allowed_vlans) {
 		qlcnic_sriov_free_vlans(adapter);
 		return -ENOMEM;
@@ -699,7 +698,7 @@ int qlcnic_sriov_func_to_index(struct qlcnic_adapter *adapter, u8 pci_func)
 
 static inline int qlcnic_sriov_alloc_bc_trans(struct qlcnic_bc_trans **trans)
 {
-	*trans = kzalloc(sizeof(struct qlcnic_bc_trans), GFP_ATOMIC);
+	*trans = kzalloc_obj(struct qlcnic_bc_trans, GFP_ATOMIC);
 	if (!*trans)
 		return -ENOMEM;
 
@@ -710,7 +709,7 @@ static inline int qlcnic_sriov_alloc_bc_trans(struct qlcnic_bc_trans **trans)
 static inline int qlcnic_sriov_alloc_bc_msg(struct qlcnic_bc_hdr **hdr,
 					    u32 size)
 {
-	*hdr = kcalloc(size, sizeof(struct qlcnic_bc_hdr), GFP_ATOMIC);
+	*hdr = kzalloc_objs(struct qlcnic_bc_hdr, size, GFP_ATOMIC);
 	if (!*hdr)
 		return -ENOMEM;
 
@@ -730,12 +729,12 @@ static int qlcnic_sriov_alloc_bc_mbx_args(struct qlcnic_cmd_args *mbx, u32 type)
 			mbx->op_type = QLC_BC_CMD;
 			mbx->req.num = mbx_tbl[i].in_args;
 			mbx->rsp.num = mbx_tbl[i].out_args;
-			mbx->req.arg = kcalloc(mbx->req.num, sizeof(u32),
-					       GFP_ATOMIC);
+			mbx->req.arg = kzalloc_objs(u32, mbx->req.num,
+						    GFP_ATOMIC);
 			if (!mbx->req.arg)
 				return -ENOMEM;
-			mbx->rsp.arg = kcalloc(mbx->rsp.num, sizeof(u32),
-					       GFP_ATOMIC);
+			mbx->rsp.arg = kzalloc_objs(u32, mbx->rsp.num,
+						    GFP_ATOMIC);
 			if (!mbx->rsp.arg) {
 				kfree(mbx->req.arg);
 				mbx->req.arg = NULL;
@@ -1489,10 +1488,8 @@ static int qlcnic_sriov_channel_cfg_cmd(struct qlcnic_adapter *adapter, u8 cmd_o
 		goto out;
 	}
 
-	if (cmd_op == QLCNIC_BC_CMD_CHANNEL_INIT)
-		set_bit(QLC_BC_VF_STATE, &vf->state);
-	else
-		clear_bit(QLC_BC_VF_STATE, &vf->state);
+	assign_bit(QLC_BC_VF_STATE, &vf->state,
+		   cmd_op == QLCNIC_BC_CMD_CHANNEL_INIT);
 
 out:
 	qlcnic_free_mbx_args(&cmd);
@@ -1634,7 +1631,7 @@ qlcnic_sriov_alloc_async_cmd(struct qlcnic_back_channel *bc,
 {
 	struct qlcnic_async_cmd *entry = NULL;
 
-	entry = kzalloc(sizeof(*entry), GFP_ATOMIC);
+	entry = kzalloc_obj(*entry, GFP_ATOMIC);
 	if (!entry)
 		return NULL;
 
@@ -2170,8 +2167,8 @@ int qlcnic_sriov_alloc_vlans(struct qlcnic_adapter *adapter)
 
 	for (i = 0; i < sriov->num_vfs; i++) {
 		vf = &sriov->vf_info[i];
-		vf->sriov_vlans = kcalloc(sriov->num_allowed_vlans,
-					  sizeof(*vf->sriov_vlans), GFP_KERNEL);
+		vf->sriov_vlans = kzalloc_objs(*vf->sriov_vlans,
+					       sriov->num_allowed_vlans);
 		if (!vf->sriov_vlans) {
 			qlcnic_sriov_free_vlans(adapter);
 			return -ENOMEM;

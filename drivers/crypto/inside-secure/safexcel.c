@@ -1172,10 +1172,8 @@ static int safexcel_request_ring_irq(void *pdev, int irqid,
 	ret = devm_request_threaded_irq(dev, irq, handler,
 					threaded_handler, IRQF_ONESHOT,
 					dev_name(dev), ring_irq_priv);
-	if (ret) {
-		dev_err(dev, "unable to request IRQ %d\n", irq);
+	if (ret)
 		return ret;
-	}
 
 	/* Set affinity */
 	cpu = cpumask_local_spread(ring_id, NUMA_NO_NODE);
@@ -1204,12 +1202,13 @@ static struct safexcel_alg_template *safexcel_algs[] = {
 	&safexcel_alg_hmac_sha256,
 	&safexcel_alg_hmac_sha384,
 	&safexcel_alg_hmac_sha512,
+	&safexcel_alg_authenc_hmac_md5_cbc_aes,
 	&safexcel_alg_authenc_hmac_sha1_cbc_aes,
 	&safexcel_alg_authenc_hmac_sha224_cbc_aes,
 	&safexcel_alg_authenc_hmac_sha256_cbc_aes,
 	&safexcel_alg_authenc_hmac_sha384_cbc_aes,
 	&safexcel_alg_authenc_hmac_sha512_cbc_aes,
-	&safexcel_alg_authenc_hmac_sha1_cbc_des3_ede,
+	&safexcel_alg_authenc_hmac_md5_ctr_aes,
 	&safexcel_alg_authenc_hmac_sha1_ctr_aes,
 	&safexcel_alg_authenc_hmac_sha224_ctr_aes,
 	&safexcel_alg_authenc_hmac_sha256_ctr_aes,
@@ -1241,11 +1240,14 @@ static struct safexcel_alg_template *safexcel_algs[] = {
 	&safexcel_alg_hmac_sha3_256,
 	&safexcel_alg_hmac_sha3_384,
 	&safexcel_alg_hmac_sha3_512,
-	&safexcel_alg_authenc_hmac_sha1_cbc_des,
+	&safexcel_alg_authenc_hmac_md5_cbc_des3_ede,
+	&safexcel_alg_authenc_hmac_sha1_cbc_des3_ede,
 	&safexcel_alg_authenc_hmac_sha256_cbc_des3_ede,
 	&safexcel_alg_authenc_hmac_sha224_cbc_des3_ede,
 	&safexcel_alg_authenc_hmac_sha512_cbc_des3_ede,
 	&safexcel_alg_authenc_hmac_sha384_cbc_des3_ede,
+	&safexcel_alg_authenc_hmac_md5_cbc_des,
+	&safexcel_alg_authenc_hmac_sha1_cbc_des,
 	&safexcel_alg_authenc_hmac_sha256_cbc_des,
 	&safexcel_alg_authenc_hmac_sha224_cbc_des,
 	&safexcel_alg_authenc_hmac_sha512_cbc_des,
@@ -1471,7 +1473,7 @@ static int safexcel_probe_generic(void *pdev,
 	peid = version & 255;
 
 	/* Detect EIP206 processing pipe */
-	version = readl(EIP197_PE(priv) + + EIP197_PE_VERSION(0));
+	version = readl(EIP197_PE(priv) + EIP197_PE_VERSION(0));
 	if (EIP197_REG_LO16(version) != EIP206_VERSION_LE) {
 		dev_err(priv->dev, "EIP%d: EIP206 not detected\n", peid);
 		return -ENODEV;
@@ -1607,9 +1609,7 @@ static int safexcel_probe_generic(void *pdev,
 	}
 
 	/* Register the ring IRQ handlers and configure the rings */
-	priv->ring = devm_kcalloc(dev, priv->config.rings,
-				  sizeof(*priv->ring),
-				  GFP_KERNEL);
+	priv->ring = devm_kzalloc_objs(dev, *priv->ring, priv->config.rings);
 	if (!priv->ring)
 		return -ENOMEM;
 
@@ -1626,16 +1626,15 @@ static int safexcel_probe_generic(void *pdev,
 			goto err_cleanup_rings;
 		}
 
-		priv->ring[i].rdr_req = devm_kcalloc(dev,
-			EIP197_DEFAULT_RING_SIZE,
-			sizeof(*priv->ring[i].rdr_req),
-			GFP_KERNEL);
+		priv->ring[i].rdr_req = devm_kzalloc_objs(dev,
+							  *priv->ring[i].rdr_req,
+							  EIP197_DEFAULT_RING_SIZE);
 		if (!priv->ring[i].rdr_req) {
 			ret = -ENOMEM;
 			goto err_cleanup_rings;
 		}
 
-		ring_irq = devm_kzalloc(dev, sizeof(*ring_irq), GFP_KERNEL);
+		ring_irq = devm_kzalloc_obj(dev, *ring_irq);
 		if (!ring_irq) {
 			ret = -ENOMEM;
 			goto err_cleanup_rings;
@@ -1735,7 +1734,7 @@ static int safexcel_probe(struct platform_device *pdev)
 	struct safexcel_crypto_priv *priv;
 	int ret;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -1889,7 +1888,7 @@ static int safexcel_pci_probe(struct pci_dev *pdev,
 		ent->vendor, ent->device, ent->subvendor,
 		ent->subdevice, ent->driver_data);
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

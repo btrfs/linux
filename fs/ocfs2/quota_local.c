@@ -171,6 +171,10 @@ static int ocfs2_local_check_quota_file(struct super_block *sb, int type)
 	struct ocfs2_disk_dqheader *dqhead;
 	int status, ret = 0;
 
+	/* OCFS2 quota format is supported only for OCFS2 filesystems */
+	if (sb->s_magic != OCFS2_SUPER_MAGIC)
+		goto out_err;
+
 	/* First check whether we understand local quota file */
 	status = ocfs2_read_quota_block(linode, 0, &bh);
 	if (status) {
@@ -245,6 +249,25 @@ static void ocfs2_release_local_quota_bitmaps(struct list_head *head)
 	}
 }
 
+/* Check that the on-disk chunk and block counts match the file layout */
+static int ocfs2_check_local_quota_info(struct inode *inode,
+					unsigned int chunks,
+					unsigned int blocks)
+{
+	u64 chunk_len = ol_chunk_blocks(inode->i_sb) + 1;
+	u64 min_blocks = chunks ? 1 + chunk_len * (chunks - 1) + 1 : 1;
+	u64 max_blocks = 1 + chunk_len * chunks;
+
+	if (blocks >= min_blocks && blocks <= max_blocks &&
+	    blocks <= i_size_read(inode) >> inode->i_sb->s_blocksize_bits)
+		return 0;
+
+	return ocfs2_error(inode->i_sb,
+			   "Quota file %llu has bad info: %u chunks, %u blocks\n",
+			   (unsigned long long)OCFS2_I(inode)->ip_blkno,
+			   chunks, blocks);
+}
+
 /* Load quota bitmaps into memory */
 static int ocfs2_load_local_quota_bitmaps(struct inode *inode,
 			struct ocfs2_local_disk_dqinfo *ldinfo,
@@ -298,11 +321,11 @@ static int ocfs2_add_recovery_chunk(struct super_block *sb,
 {
 	struct ocfs2_recovery_chunk *rc;
 
-	rc = kmalloc(sizeof(struct ocfs2_recovery_chunk), GFP_NOFS);
+	rc = kmalloc_obj(struct ocfs2_recovery_chunk, GFP_NOFS);
 	if (!rc)
 		return -ENOMEM;
 	rc->rc_chunk = chunk;
-	rc->rc_bitmap = kmalloc(sb->s_blocksize, GFP_NOFS);
+	rc->rc_bitmap = kzalloc(sb->s_blocksize, GFP_NOFS);
 	if (!rc->rc_bitmap) {
 		kfree(rc);
 		return -ENOMEM;
@@ -372,7 +395,7 @@ static struct ocfs2_quota_recovery *ocfs2_alloc_quota_recovery(void)
 	int type;
 	struct ocfs2_quota_recovery *rec;
 
-	rec = kmalloc(sizeof(struct ocfs2_quota_recovery), GFP_NOFS);
+	rec = kmalloc_obj(struct ocfs2_quota_recovery, GFP_NOFS);
 	if (!rec)
 		return NULL;
 	for (type = 0; type < OCFS2_MAXQUOTAS; type++)
@@ -471,7 +494,7 @@ static int ocfs2_recover_local_quota_file(struct inode *lqinode,
 	qsize_t spacechange, inodechange;
 	unsigned int memalloc;
 
-	trace_ocfs2_recover_local_quota_file((unsigned long)lqinode->i_ino, type);
+	trace_ocfs2_recover_local_quota_file(lqinode->i_ino, type);
 
 	list_for_each_entry_safe(rchunk, next, &(rec->r_list[type]), rc_list) {
 		chunk = rchunk->rc_chunk;
@@ -692,7 +715,7 @@ static int ocfs2_local_read_info(struct super_block *sb, int type)
 
 	info->dqi_max_spc_limit = 0x7fffffffffffffffLL;
 	info->dqi_max_ino_limit = 0x7fffffffffffffffLL;
-	oinfo = kmalloc(sizeof(struct ocfs2_mem_dqinfo), GFP_NOFS);
+	oinfo = kmalloc_obj(struct ocfs2_mem_dqinfo, GFP_NOFS);
 	if (!oinfo) {
 		mlog(ML_ERROR, "failed to allocate memory for ocfs2 quota"
 			       " info.");
@@ -732,6 +755,11 @@ static int ocfs2_local_read_info(struct super_block *sb, int type)
 	oinfo->dqi_chunks = le32_to_cpu(ldinfo->dqi_chunks);
 	oinfo->dqi_blocks = le32_to_cpu(ldinfo->dqi_blocks);
 	oinfo->dqi_libh = bh;
+
+	status = ocfs2_check_local_quota_info(lqinode, oinfo->dqi_chunks,
+					      oinfo->dqi_blocks);
+	if (status < 0)
+		goto out_err;
 
 	/* We crashed when using local quota file? */
 	if (!(oinfo->dqi_flags & OLQF_CLEAN)) {
@@ -815,6 +843,9 @@ static int ocfs2_local_free_info(struct super_block *sb, int type)
 	struct ocfs2_local_disk_chunk *dchunk;
 	int mark_clean = 1, len;
 	int status = 0;
+
+	/* Quota-core error paths can bypass ocfs2_disable_quotas(). */
+	cancel_delayed_work_sync(&oinfo->dqi_sync_work);
 
 	iput(oinfo->dqi_gqinode);
 	ocfs2_simple_drop_lockres(OCFS2_SB(sb), &oinfo->dqi_gqlock);
@@ -1071,10 +1102,13 @@ static struct ocfs2_quota_chunk *ocfs2_local_quota_add_chunk(
 		goto out;
 	}
 
+	if (list_empty(&oinfo->dqi_chunk))
+		chunk->qc_num = 0;
+	else
+		chunk->qc_num = list_entry(oinfo->dqi_chunk.prev,
+					   struct ocfs2_quota_chunk,
+					   qc_chunk)->qc_num + 1;
 	list_add_tail(&chunk->qc_chunk, &oinfo->dqi_chunk);
-	chunk->qc_num = list_entry(chunk->qc_chunk.prev,
-				   struct ocfs2_quota_chunk,
-				   qc_chunk)->qc_num + 1;
 	chunk->qc_headerbh = bh;
 	*offset = 0;
 	return chunk;
@@ -1224,7 +1258,9 @@ int ocfs2_create_local_dquot(struct dquot *dquot)
 	int status;
 	u64 pcount;
 
-	down_write(&OCFS2_I(lqinode)->ip_alloc_sem);
+	if (!down_write_trylock(&OCFS2_I(lqinode)->ip_alloc_sem))
+		return -EBUSY;
+
 	chunk = ocfs2_find_free_entry(sb, type, &offset);
 	if (!chunk) {
 		chunk = ocfs2_extend_local_quota_file(sb, type, &offset);

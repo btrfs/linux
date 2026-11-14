@@ -783,8 +783,7 @@ static int ulite_probe(struct platform_device *pdev)
 	int irq, ret;
 	int id = pdev->id;
 
-	pdata = devm_kzalloc(&pdev->dev, sizeof(struct uartlite_data),
-			     GFP_KERNEL);
+	pdata = devm_kzalloc_obj(&pdev->dev, struct uartlite_data);
 	if (!pdata)
 		return -ENOMEM;
 
@@ -878,6 +877,7 @@ of_err:
 	pm_runtime_use_autosuspend(&pdev->dev);
 	pm_runtime_set_autosuspend_delay(&pdev->dev, UART_AUTOSUSPEND_TIMEOUT);
 	pm_runtime_set_active(&pdev->dev);
+	pm_runtime_get_noresume(&pdev->dev);
 	pm_runtime_enable(&pdev->dev);
 
 	ret = ulite_assign(&pdev->dev, id, res->start, irq, pdata);

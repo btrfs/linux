@@ -1008,7 +1008,7 @@ static int exynos_tmu_probe(struct platform_device *pdev)
 	struct exynos_tmu_data *data;
 	int ret;
 
-	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, *data);
 	if (!data)
 		return -ENOMEM;
 
@@ -1102,10 +1102,8 @@ static int exynos_tmu_probe(struct platform_device *pdev)
 					IRQF_TRIGGER_RISING
 						| IRQF_SHARED | IRQF_ONESHOT,
 					dev_name(dev), data);
-	if (ret) {
-		dev_err(dev, "Failed to request irq: %d\n", data->irq);
+	if (ret)
 		goto err_sclk;
-	}
 
 	exynos_tmu_control(pdev, true);
 	return 0;

@@ -250,6 +250,10 @@ char *dc_status_to_str(enum dc_status status)
 		return "No DSC resource";
 	case DC_FAIL_UNSUPPORTED_1:
 		return "Unsupported";
+	case DC_FAIL_HDMI_FRL_LINK_TRAINING:
+		return "HDMI frl link training failure";
+	case DC_NO_HDMI_FRL_LINK_BANDWIDTH:
+		return "No DHMI frl link bandwidth";
 	case DC_FAIL_CLK_EXCEED_MAX:
 		return "Clk exceed max failure";
 	case DC_FAIL_CLK_BELOW_MIN:
@@ -270,11 +274,13 @@ char *dc_status_to_str(enum dc_status status)
 		return "HW Cursor not supported";
 	case DC_FAIL_DP_TUNNEL_BW_VALIDATE:
 		return "Fail DP Tunnel BW validation";
+	case DC_NO_DRAM_BUFFER_RESOURCE:
+		return "No DRAM buffer resource";
 	case DC_ERROR_UNEXPECTED:
 		return "Unexpected error";
+	default:
+		return "Unexpected status error";
 	}
-
-	return "Unexpected status error";
 }
 
 char *dc_pixel_encoding_to_str(enum dc_pixel_encoding pixel_encoding)

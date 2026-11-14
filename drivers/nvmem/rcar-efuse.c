@@ -8,7 +8,6 @@
 #include <linux/device.h>
 #include <linux/export.h>
 #include <linux/io.h>
-#include <linux/mod_devicetable.h>
 #include <linux/nvmem-provider.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -68,7 +67,7 @@ static int rcar_fuse_probe(struct platform_device *pdev)
 	if (ret < 0)
 		return ret;
 
-	fuse = devm_kzalloc(dev, sizeof(*fuse), GFP_KERNEL);
+	fuse = devm_kzalloc_obj(dev, *fuse);
 	if (!fuse)
 		return -ENOMEM;
 

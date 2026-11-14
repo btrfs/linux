@@ -19,6 +19,10 @@
 		reg = <0x11>;
 		clocks = <&cru SCLK_I2S_8CH_OUT>;
 		clock-names = "mclk";
+		avdd-supply = <&vcca3v0_codec>;
+		cpvdd-supply = <&vcca1v8_codec>;
+		dvdd-supply = <&vcca1v8_codec>;
+		pvdd-supply = <&vcc_3v0>;
 		#sound-dai-cells = <0>;
 
 		port {
@@ -26,5 +30,12 @@
 				remote-endpoint = <&i2s1_p0_0>;
 			};
 		};
+	};
+};
+
+&uart0 {
+	bluetooth {
+		compatible = "brcm,bcm4345c5";
+		max-speed = <1500000>;
 	};
 };

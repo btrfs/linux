@@ -48,6 +48,9 @@ static void (*access_kernels[2])(void);
 
 static struct task_struct **threads; /* Lists of threads. */
 static unsigned long end_time;       /* End time of test. */
+static unsigned long end_time_max;   /* Upper bound for end time of test. */
+static unsigned long report_budget;  /* Time left when report printing began. */
+static bool report_paused;           /* Paused while a report is printing. */
 
 /* Report as observed from console. */
 static struct {
@@ -69,17 +72,46 @@ begin_test_checks(void (*func1)(void), void (*func2)(void))
 	 * least one race is reported.
 	 */
 	end_time = jiffies + msecs_to_jiffies(CONFIG_KCSAN_REPORT_ONCE_IN_MS + 500);
+	end_time_max = end_time + msecs_to_jiffies(10000);
+	report_paused = false;
 
 	/* Signal start; release potential initialization of shared data. */
 	smp_store_release(&access_kernels[0], func1);
 	smp_store_release(&access_kernels[1], func2);
 }
 
+/*
+ * Printing a report may take a while, e.g. if a printk emergency section (such
+ * as with CONFIG_KCSAN_VERBOSE) flushes a console backlog synchronously. Do not
+ * count the time a test-related report is being printed against the test's
+ * time budget, so that a slow report is neither missed, nor prevents observing
+ * other reports. Returns true if checking must continue.
+ */
+static __no_kcsan bool pause_for_report(void)
+{
+	const int nlines = READ_ONCE(observed.nlines);
+	const bool in_progress = nlines == 1 || nlines == 2;
+
+	if (in_progress && !report_paused) {
+		report_paused = true;
+		report_budget = time_before(jiffies, end_time) ? end_time - jiffies : 0;
+	} else if (!in_progress && report_paused) {
+		report_paused = false;
+		end_time = jiffies + report_budget;
+		if (time_after(end_time, end_time_max))
+			end_time = end_time_max;
+		/* Check the now complete report at least once. */
+		return true;
+	}
+
+	return report_paused && time_before(jiffies, end_time_max);
+}
+
 /* End test checking loop. */
 static __no_kcsan inline bool
 end_test_checks(bool stop)
 {
-	if (!stop && time_before(jiffies, end_time)) {
+	if (!stop && (pause_for_report() || time_before(jiffies, end_time))) {
 		/* Continue checking */
 		might_sleep();
 		return false;
@@ -168,7 +200,7 @@ static bool __report_matches(const struct expect_report *r)
 	if (!report_available())
 		return false;
 
-	expect = kmalloc(sizeof(observed.lines), GFP_KERNEL);
+	expect = (typeof(expect))kmalloc_obj(observed.lines);
 	if (WARN_ON(!expect))
 		return false;
 
@@ -176,7 +208,7 @@ static bool __report_matches(const struct expect_report *r)
 
 	/* Title */
 	cur = expect[0];
-	end = &expect[0][sizeof(expect[0]) - 1];
+	end = ARRAY_END(expect[0]);
 	cur += scnprintf(cur, end - cur, "BUG: KCSAN: %s in ",
 			 is_assert ? "assert: race" : "data-race");
 	if (r->access[1].fn) {
@@ -200,7 +232,7 @@ static bool __report_matches(const struct expect_report *r)
 
 	/* Access 1 */
 	cur = expect[1];
-	end = &expect[1][sizeof(expect[1]) - 1];
+	end = ARRAY_END(expect[1]);
 	if (!r->access[1].fn)
 		cur += scnprintf(cur, end - cur, "race at unknown origin, with ");
 
@@ -1538,7 +1570,7 @@ static int test_init(struct kunit *test)
 	if (WARN_ON(!nthreads))
 		goto err;
 
-	threads = kcalloc(nthreads + 1, sizeof(struct task_struct *), GFP_KERNEL);
+	threads = kzalloc_objs(struct task_struct *, nthreads + 1);
 	if (WARN_ON(!threads))
 		goto err;
 

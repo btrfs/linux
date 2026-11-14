@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Copyright (c) 2024 Google LLC. */
 
+#include <linux/binfmt_misc.h>
 #include <linux/bpf.h>
 #include <linux/bpf_lsm.h>
 #include <linux/btf.h>
@@ -10,7 +11,9 @@
 #include <linux/fsnotify.h>
 #include <linux/file.h>
 #include <linux/kernfs.h>
+#include <linux/lsm_hooks.h>
 #include <linux/mm.h>
+#include <linux/net.h>
 #include <linux/xattr.h>
 
 __bpf_kfunc_start_defs();
@@ -68,10 +71,7 @@ __bpf_kfunc void bpf_put_file(struct file *file)
  *
  * Resolve the pathname for the supplied *path* and store it in *buf*. This BPF
  * kfunc is the safer variant of the legacy bpf_d_path() helper and should be
- * used in place of bpf_d_path() whenever possible. It enforces KF_TRUSTED_ARGS
- * semantics, meaning that the supplied *path* must itself hold a valid
- * reference, or else the BPF program will be outright rejected by the BPF
- * verifier.
+ * used in place of bpf_d_path() whenever possible.
  *
  * This BPF kfunc may only be called from BPF LSM programs.
  *
@@ -103,7 +103,7 @@ static bool match_security_bpf_prefix(const char *name__str)
 
 static int bpf_xattr_read_permission(const char *name, struct inode *inode)
 {
-	if (WARN_ON(!inode))
+	if (!inode)
 		return -EINVAL;
 
 	/* Allow reading xattr with user. and security.bpf. prefix */
@@ -173,7 +173,7 @@ __bpf_kfunc_end_defs();
 
 static int bpf_xattr_write_permission(const char *name, struct inode *inode)
 {
-	if (WARN_ON(!inode))
+	if (!inode)
 		return -EINVAL;
 
 	/* Only allow setting and removing security.bpf. xattrs */
@@ -203,7 +203,7 @@ int bpf_set_dentry_xattr_locked(struct dentry *dentry, const char *name__str,
 				const struct bpf_dynptr *value_p, int flags)
 {
 
-	struct bpf_dynptr_kern *value_ptr = (struct bpf_dynptr_kern *)value_p;
+	const struct bpf_dynptr_kern *value_ptr = (struct bpf_dynptr_kern *)value_p;
 	struct inode *inode = d_inode(dentry);
 	const void *value;
 	u32 value_len;
@@ -238,7 +238,7 @@ int bpf_set_dentry_xattr_locked(struct dentry *dentry, const char *name__str,
  * @dentry: dentry to get xattr from
  * @name__str: name of the xattr
  *
- * Rmove xattr *name__str* of *dentry*.
+ * Remove xattr *name__str* of *dentry*.
  *
  * For security reasons, only *name__str* with prefix "security.bpf."
  * is allowed.
@@ -292,6 +292,9 @@ __bpf_kfunc int bpf_set_dentry_xattr(struct dentry *dentry, const char *name__st
 	struct inode *inode = d_inode(dentry);
 	int ret;
 
+	if (!inode)
+		return -EINVAL;
+
 	inode_lock(inode);
 	ret = bpf_set_dentry_xattr_locked(dentry, name__str, value_p, flags);
 	inode_unlock(inode);
@@ -303,7 +306,7 @@ __bpf_kfunc int bpf_set_dentry_xattr(struct dentry *dentry, const char *name__st
  * @dentry: dentry to get xattr from
  * @name__str: name of the xattr
  *
- * Rmove xattr *name__str* of *dentry*.
+ * Remove xattr *name__str* of *dentry*.
  *
  * For security reasons, only *name__str* with prefix "security.bpf."
  * is allowed.
@@ -317,10 +320,96 @@ __bpf_kfunc int bpf_remove_dentry_xattr(struct dentry *dentry, const char *name_
 	struct inode *inode = d_inode(dentry);
 	int ret;
 
+	if (!inode)
+		return -EINVAL;
+
 	inode_lock(inode);
 	ret = bpf_remove_dentry_xattr_locked(dentry, name__str);
 	inode_unlock(inode);
 	return ret;
+}
+
+static int bpf_inode_init_xattrs_claimed(const struct xattr *xattrs, int xattr_count)
+{
+	const size_t suffix_len = sizeof(XATTR_BPF_LSM_SUFFIX) - 1;
+	int i, claimed = 0;
+
+	for (i = 0; i < xattr_count; i++) {
+		const char *name = xattrs[i].name;
+
+		if (name && !strncmp(name, XATTR_BPF_LSM_SUFFIX, suffix_len))
+			claimed++;
+	}
+	return claimed;
+}
+
+/**
+ * bpf_inode_init_xattr - attach a xattr to an inode that is being created
+ * @xattrs: xattr array the inode_init_security hook was handed
+ * @xattr_count__ctx_out: xattr count the inode_init_security hook was handed
+ * @name__str: name of the xattr
+ * @value_p: xattr value
+ *
+ * Claim one of the slots the BPF LSM reserved in the xattr array, so that
+ * the xattr is written out as part of the transaction creating the inode.
+ *
+ * For security reasons, only *name__str* with prefix "security.bpf." is
+ * allowed. The slot stores the name without that "security." prefix, which
+ * the filesystem's initxattrs() callback puts back.
+ *
+ * At most BPF_LSM_INODE_INIT_XATTRS xattrs can be attached to one inode,
+ * matching the number of slots the BPF LSM reserves.
+ *
+ * Return: 0 on success, a negative value on error.
+ */
+__bpf_kfunc int bpf_inode_init_xattr(struct xattr *xattrs,
+				     int *xattr_count__ctx_out,
+				     const char *name__str,
+				     const struct bpf_dynptr *value_p)
+{
+	const struct bpf_dynptr_kern *value_ptr = (struct bpf_dynptr_kern *)value_p;
+	int *xattr_count = xattr_count__ctx_out;
+	const char *suffix;
+	struct xattr *slot;
+	const void *value;
+	size_t name_len;
+	u32 value_len;
+	char *buf;
+
+	if (!match_security_bpf_prefix(name__str))
+		return -EPERM;
+	if (bpf_inode_init_xattrs_claimed(xattrs, *xattr_count) >=
+	    BPF_LSM_INODE_INIT_XATTRS)
+		return -ENOSPC;
+
+	suffix = name__str + XATTR_SECURITY_PREFIX_LEN;
+	name_len = strlen(suffix);
+	if (name_len <= sizeof(XATTR_BPF_LSM_SUFFIX) - 1 ||
+	    name_len > XATTR_NAME_MAX - XATTR_SECURITY_PREFIX_LEN)
+		return -EINVAL;
+
+	value_len = __bpf_dynptr_size(value_ptr);
+	value = __bpf_dynptr_data(value_ptr, value_len);
+	if (!value)
+		return -EINVAL;
+	if (value_len > XATTR_SIZE_MAX)
+		return -E2BIG;
+
+	buf = kmalloc(value_len + name_len + 1, GFP_NOWAIT | __GFP_NOWARN);
+	if (!buf)
+		return -ENOMEM;
+	memcpy(buf, value, value_len);
+	memcpy(buf + value_len, suffix, name_len + 1);
+
+	slot = lsm_get_xattr_slot(xattrs, xattr_count);
+	if (!slot) {
+		kfree(buf);
+		return -ENOSPC;
+	}
+	slot->value = buf;
+	slot->value_len = value_len;
+	slot->name = buf + value_len;
+	return 0;
 }
 
 #ifdef CONFIG_CGROUPS
@@ -356,30 +445,115 @@ __bpf_kfunc int bpf_cgroup_read_xattr(struct cgroup *cgroup, const char *name__s
 }
 #endif /* CONFIG_CGROUPS */
 
+#ifdef CONFIG_NET
+/**
+ * bpf_sock_read_xattr - read xattr of a socket's inode in sockfs
+ * @sock: socket to get xattr from
+ * @name__str: name of the xattr
+ * @value_p: output buffer of the xattr value
+ *
+ * Get xattr *name__str* of *sock* and store the output in *value_p*.
+ *
+ * For security reasons, only *name__str* with prefix "user." is allowed.
+ *
+ * Return: length of the xattr value on success, a negative value on error.
+ */
+__bpf_kfunc int bpf_sock_read_xattr(struct socket *sock, const char *name__str,
+				    struct bpf_dynptr *value_p)
+{
+	struct bpf_dynptr_kern *value_ptr = (struct bpf_dynptr_kern *)value_p;
+	u32 value_len;
+	void *value;
+
+	/* Only allow reading "user.*" xattrs */
+	if (strncmp(name__str, XATTR_USER_PREFIX, XATTR_USER_PREFIX_LEN))
+		return -EPERM;
+
+	value_len = __bpf_dynptr_size(value_ptr);
+	value = __bpf_dynptr_data_rw(value_ptr, value_len);
+	if (!value)
+		return -EINVAL;
+
+	return sock_read_xattr(sock, name__str, value, value_len);
+}
+#endif /* CONFIG_NET */
+
+/**
+ * bpf_real_data_inode - get the real inode hosting a file's data
+ * @file: file to resolve
+ *
+ * Resolve @file to the inode that hosts its data. For a regular file on a
+ * union/overlay filesystem this is the underlying (upper or lower) inode that
+ * stores the data, not the overlay inode.
+ *
+ * Data resolution only applies to regular files. For a non-regular file (e.g.
+ * a device node, fifo or socket) on a union/overlay filesystem the overlay
+ * inode itself is returned; for any file on a non-union filesystem the inode
+ * attached to @file is returned.
+ *
+ * Return: The inode hosting @file's data, or NULL.
+ */
+__bpf_kfunc struct inode *bpf_real_data_inode(struct file *file)
+{
+	return d_real_inode(file_dentry(file));
+}
+
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(bpf_fs_kfunc_set_ids)
-BTF_ID_FLAGS(func, bpf_get_task_exe_file,
-	     KF_ACQUIRE | KF_TRUSTED_ARGS | KF_RET_NULL)
+BTF_ID_FLAGS(func, bpf_get_task_exe_file, KF_ACQUIRE | KF_RET_NULL)
 BTF_ID_FLAGS(func, bpf_put_file, KF_RELEASE)
-BTF_ID_FLAGS(func, bpf_path_d_path, KF_TRUSTED_ARGS)
-BTF_ID_FLAGS(func, bpf_get_dentry_xattr, KF_SLEEPABLE | KF_TRUSTED_ARGS)
-BTF_ID_FLAGS(func, bpf_get_file_xattr, KF_SLEEPABLE | KF_TRUSTED_ARGS)
-BTF_ID_FLAGS(func, bpf_set_dentry_xattr, KF_SLEEPABLE | KF_TRUSTED_ARGS)
-BTF_ID_FLAGS(func, bpf_remove_dentry_xattr, KF_SLEEPABLE | KF_TRUSTED_ARGS)
+BTF_ID_FLAGS(func, bpf_path_d_path)
+BTF_ID_FLAGS(func, bpf_get_dentry_xattr, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_get_file_xattr, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_set_dentry_xattr, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_remove_dentry_xattr, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_real_data_inode, KF_SLEEPABLE | KF_RET_NULL)
+BTF_ID_FLAGS(func, bpf_inode_init_xattr)
+#ifdef CONFIG_NET
+BTF_ID_FLAGS(func, bpf_sock_read_xattr, KF_RCU)
+#endif
 BTF_KFUNCS_END(bpf_fs_kfunc_set_ids)
+
+/* Side-effecting kfuncs that stay exclusive to LSM programs. */
+BTF_SET_START(bpf_fs_kfunc_lsm_only_ids)
+BTF_ID(func, bpf_set_dentry_xattr)
+BTF_ID(func, bpf_remove_dentry_xattr)
+BTF_SET_END(bpf_fs_kfunc_lsm_only_ids)
+
+BTF_ID_LIST_SINGLE(bpf_inode_init_xattr_ids, func, bpf_inode_init_xattr)
+
+BTF_SET_START(bpf_inode_init_xattr_hooks)
+BTF_ID(func, bpf_lsm_inode_init_security)
+BTF_SET_END(bpf_inode_init_xattr_hooks)
 
 static int bpf_fs_kfuncs_filter(const struct bpf_prog *prog, u32 kfunc_id)
 {
-	if (!btf_id_set8_contains(&bpf_fs_kfunc_set_ids, kfunc_id) ||
-	    prog->type == BPF_PROG_TYPE_LSM)
+	if (!btf_id_set8_contains(&bpf_fs_kfunc_set_ids, kfunc_id))
+		return 0;
+	if (kfunc_id == bpf_inode_init_xattr_ids[0]) {
+		if (prog->type != BPF_PROG_TYPE_LSM ||
+		    prog->expected_attach_type != BPF_LSM_MAC ||
+		    !btf_id_set_contains(&bpf_inode_init_xattr_hooks,
+					 prog->aux->attach_btf_id))
+			return -EACCES;
+		return 0;
+	}
+	if (prog->type == BPF_PROG_TYPE_LSM)
+		return 0;
+	if (prog->type != BPF_PROG_TYPE_STRUCT_OPS)
+		return -EACCES;
+	/* ->st_ops is unset during the cfg pass; enforced once it is set. */
+	if (!prog->aux->st_ops)
+		return 0;
+	if (bpf_prog_is_binfmt_misc_ops(prog) &&
+	    !btf_id_set_contains(&bpf_fs_kfunc_lsm_only_ids, kfunc_id))
 		return 0;
 	return -EACCES;
 }
 
-/* bpf_[set|remove]_dentry_xattr.* hooks have KF_TRUSTED_ARGS and
- * KF_SLEEPABLE, so they are only available to sleepable hooks with
- * dentry arguments.
+/* bpf_[set|remove]_dentry_xattr.* hooks have KF_SLEEPABLE, so they are only
+ * available to sleepable hooks with dentry arguments.
  *
  * Setting and removing xattr requires exclusive lock on dentry->d_inode.
  * Some hooks already locked d_inode, while some hooks have not locked
@@ -397,10 +571,6 @@ BTF_ID(func, bpf_lsm_inode_rmdir)
 BTF_ID(func, bpf_lsm_inode_setattr)
 BTF_ID(func, bpf_lsm_inode_setxattr)
 BTF_ID(func, bpf_lsm_inode_unlink)
-#ifdef CONFIG_SECURITY_PATH
-BTF_ID(func, bpf_lsm_path_unlink)
-BTF_ID(func, bpf_lsm_path_rmdir)
-#endif /* CONFIG_SECURITY_PATH */
 BTF_SET_END(d_inode_locked_hooks)
 
 bool bpf_lsm_has_d_inode_locked(const struct bpf_prog *prog)
@@ -416,7 +586,13 @@ static const struct btf_kfunc_id_set bpf_fs_kfunc_set = {
 
 static int __init bpf_fs_kfuncs_init(void)
 {
-	return register_btf_kfunc_id_set(BPF_PROG_TYPE_LSM, &bpf_fs_kfunc_set);
+	int ret;
+
+	ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_LSM, &bpf_fs_kfunc_set);
+	if (ret || !IS_ENABLED(CONFIG_BINFMT_MISC_BPF))
+		return ret;
+	return register_btf_kfunc_id_set(BPF_PROG_TYPE_STRUCT_OPS,
+					 &bpf_fs_kfunc_set);
 }
 
 late_initcall(bpf_fs_kfuncs_init);

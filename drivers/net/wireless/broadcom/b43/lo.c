@@ -7,7 +7,7 @@
 
   Copyright (c) 2005 Martin Langer <martin-langer@gmx.de>,
   Copyright (c) 2005, 2006 Stefano Brivio <stefano.brivio@polimi.it>
-  Copyright (c) 2005-2007 Michael Buesch <m@bues.ch>
+  Copyright (c) 2005-2007 Michael Buesch
   Copyright (c) 2005, 2006 Danny van Dyk <kugelfang@gentoo.org>
   Copyright (c) 2005, 2006 Andreas Jaggi <andreas.jaggi@waterwave.ch>
 
@@ -766,7 +766,7 @@ struct b43_lo_calib *b43_calibrate_lo_setting(struct b43_wldev *dev,
 		       loctl.i, loctl.q);
 	}
 
-	cal = kmalloc(sizeof(*cal), GFP_KERNEL);
+	cal = kmalloc_obj(*cal);
 	if (!cal) {
 		b43warn(dev->wl, "LO calib: out of memory\n");
 		return NULL;

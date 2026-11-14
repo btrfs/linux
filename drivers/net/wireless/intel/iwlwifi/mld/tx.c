@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright (C) 2024 - 2025 Intel Corporation
+ * Copyright (C) 2024 - 2026 Intel Corporation
  */
+#include <linux/timekeeping.h>
 #include <net/ip.h>
 
 #include "tx.h"
@@ -19,6 +20,133 @@
 #include "fw/api/time-event.h"
 
 #define MAX_ANT_NUM 2
+
+static u32 iwl_mld_tx_gp2_host_us(void)
+{
+	return div_u64(ktime_get_boottime_ns(), NSEC_PER_USEC);
+}
+
+/* Returns the gp2 for the TX command, or 0 to leave the frame unstamped.
+ * Sets @refresh when the estimate expired or is about to.
+ */
+VISIBLE_IF_IWLWIFI_KUNIT u32
+iwl_mld_tx_gp2_from_est(u32 delta_us, unsigned long valid_until, u32 host_us,
+			unsigned long now, bool *refresh)
+{
+	u32 gp2;
+
+	*refresh = time_after_eq(now, valid_until -
+				 IWL_MLD_TX_GP2_REFRESH_MARGIN);
+
+	if (time_after_eq(now, valid_until))
+		return 0;
+
+	gp2 = host_us + delta_us;
+
+	/* 0 means no timestamp; use 1 for a valid wrapped value. */
+	return gp2 ?: 1;
+}
+EXPORT_SYMBOL_IF_IWLWIFI_KUNIT(iwl_mld_tx_gp2_from_est);
+
+static u32
+iwl_mld_tx_gp2_timestamp(struct iwl_mld *mld)
+{
+	unsigned long valid_until =
+		atomic_long_read_acquire(&mld->tx_gp2.valid_until);
+	bool refresh = false;
+	u32 gp2;
+
+	if (!valid_until)
+		return 0;
+
+	gp2 = iwl_mld_tx_gp2_from_est(atomic_read(&mld->tx_gp2.delta_us),
+				      valid_until, iwl_mld_tx_gp2_host_us(),
+				      jiffies, &refresh);
+
+	if (refresh)
+		wiphy_delayed_work_queue(mld->wiphy, &mld->tx_gp2.wk, 0);
+
+	return gp2;
+}
+
+static void iwl_mld_tx_gp2_refresh(struct iwl_mld *mld)
+{
+	unsigned long valid_until, delay;
+	u32 gp2, host_us;
+
+	lockdep_assert_wiphy(mld->wiphy);
+
+	if (!mld->fw_status.running)
+		return;
+
+#ifdef CONFIG_PM_SLEEP
+	if (mld->fw_status.in_d3)
+		return;
+#endif
+
+	if (iwl_mld_get_systime(mld, &gp2))
+		goto retry;
+
+	host_us = iwl_mld_tx_gp2_host_us();
+	valid_until = jiffies + IWL_MLD_TX_GP2_VALID_PERIOD;
+
+	/* Keep arithmetic in u32 to match firmware wraparound semantics. */
+	atomic_set(&mld->tx_gp2.delta_us, gp2 - host_us);
+	atomic_long_set_release(&mld->tx_gp2.valid_until, valid_until ?: 1);
+
+	IWL_DEBUG_TX(mld, "gp2 sync: gp2=%u host_us=%u delta_us=%u\n",
+		     gp2, host_us, gp2 - host_us);
+	return;
+
+retry:
+	/* Stop new TX readers from requesting immediate retries. */
+	atomic_long_set(&mld->tx_gp2.valid_until, 0);
+	delay = round_jiffies_relative(IWL_MLD_TX_GP2_RETRY_PERIOD);
+	wiphy_delayed_work_queue(mld->wiphy, &mld->tx_gp2.wk, delay);
+}
+
+static void iwl_mld_tx_gp2_wk(struct wiphy *wiphy, struct wiphy_work *wk)
+{
+	struct iwl_mld *mld = container_of(wk, struct iwl_mld, tx_gp2.wk.work);
+	unsigned long valid_until = atomic_long_read(&mld->tx_gp2.valid_until);
+
+	/* TX may have queued this work using an older estimate. */
+	if (valid_until &&
+	    time_before(jiffies, valid_until - IWL_MLD_TX_GP2_REFRESH_MARGIN))
+		return;
+
+	iwl_mld_tx_gp2_refresh(mld);
+}
+
+void iwl_mld_tx_gp2_init(struct iwl_mld *mld)
+{
+	atomic_set(&mld->tx_gp2.delta_us, 0);
+	atomic_long_set(&mld->tx_gp2.valid_until, 0);
+	wiphy_delayed_work_init(&mld->tx_gp2.wk, iwl_mld_tx_gp2_wk);
+}
+
+void iwl_mld_tx_gp2_start(struct iwl_mld *mld)
+{
+	lockdep_assert_wiphy(mld->wiphy);
+
+	if (iwl_fw_lookup_cmd_ver(mld->fw, TX_CMD, 0) < 12)
+		return;
+
+	iwl_mld_tx_gp2_refresh(mld);
+}
+
+/* TX is quiesced before stopping the refresh work. */
+void iwl_mld_tx_gp2_stop(struct iwl_mld *mld)
+{
+	lockdep_assert_wiphy(mld->wiphy);
+
+	if (iwl_fw_lookup_cmd_ver(mld->fw, TX_CMD, 0) < 12)
+		return;
+
+	wiphy_delayed_work_cancel(mld->wiphy, &mld->tx_gp2.wk);
+
+	atomic_long_set(&mld->tx_gp2.valid_until, 0);
+}
 
 /* Toggles between TX antennas. Receives the bitmask of valid TX antennas and
  * the *index* used for the last TX, and returns the next valid *index* to use.
@@ -71,13 +199,18 @@ static int iwl_mld_allocate_txq(struct iwl_mld *mld, struct ieee80211_txq *txq)
 {
 	u8 tid = txq->tid == IEEE80211_NUM_TIDS ? IWL_MGMT_TID : txq->tid;
 	u32 fw_sta_mask = iwl_mld_fw_sta_id_mask(mld, txq->sta);
-	/* We can't know when the station is asleep or awake, so we
-	 * must disable the queue hang detection.
-	 */
-	unsigned int watchdog_timeout = txq->vif->type == NL80211_IFTYPE_AP ?
-				IWL_WATCHDOG_DISABLED :
-				mld->trans->mac_cfg->base->wd_timeout;
+	unsigned int watchdog_timeout;
 	int queue, size;
+
+	switch (txq->vif->type) {
+	case NL80211_IFTYPE_AP:		/* STA might go to PS */
+	case NL80211_IFTYPE_NAN_DATA:	/* peer might ULW/break schedule */
+		watchdog_timeout = IWL_WATCHDOG_DISABLED;
+		break;
+	default:
+		watchdog_timeout = mld->trans->mac_cfg->base->wd_timeout;
+		break;
+	}
 
 	lockdep_assert_wiphy(mld->wiphy);
 
@@ -345,6 +478,12 @@ u8 iwl_mld_get_lowest_rate(struct iwl_mld *mld,
 
 	iwl_mld_get_basic_rates_and_band(mld, vif, info, &basic_rates, &band);
 
+	if (band >= NUM_NL80211_BANDS) {
+		WARN_ON(vif->type != NL80211_IFTYPE_NAN &&
+			vif->type != NL80211_IFTYPE_NAN_DATA);
+		return IWL_FIRST_OFDM_RATE;
+	}
+
 	sband = mld->hw->wiphy->bands[band];
 	for_each_set_bit(i, &basic_rates, BITS_PER_LONG) {
 		u16 hw = sband->bitrates[i].hw_value;
@@ -484,7 +623,7 @@ static __le32 iwl_mld_get_tx_rate_n_flags(struct iwl_mld *mld,
 		rate = iwl_mld_mac80211_rate_idx_to_fw(mld, info, -1) |
 		       iwl_mld_get_tx_ant(mld, info, sta, fc);
 
-	return iwl_v3_rate_to_v2_v3(rate, mld->fw_rates_ver_3);
+	return cpu_to_le32(rate);
 }
 
 static void
@@ -547,10 +686,13 @@ iwl_mld_fill_tx_cmd(struct iwl_mld *mld, struct sk_buff *skb,
 		flags |= IWL_TX_FLAGS_ENCRYPT_DIS;
 
 	/* For data and mgmt packets rate info comes from the fw.
-	 * Only set rate/antenna for injected frames with fixed rate, or
-	 * when no sta is given.
+	 * Only set rate/antenna for:
+	 * - injected frames with fixed rate,
+	 * - when no sta is given.
+	 * - frames that are sent to an NMI sta, which is only used for management.
 	 */
 	if (unlikely(!sta ||
+		     (mld_sta && mld_sta->vif->type == NL80211_IFTYPE_NAN) ||
 		     info->control.flags & IEEE80211_TX_CTRL_RATE_INJECT)) {
 		flags |= IWL_TX_FLAGS_CMD_RATE;
 		rate_n_flags = iwl_mld_get_tx_rate_n_flags(mld, info, sta,
@@ -574,6 +716,9 @@ iwl_mld_fill_tx_cmd(struct iwl_mld *mld, struct sk_buff *skb,
 	tx_cmd->flags = cpu_to_le16(flags);
 
 	tx_cmd->rate_n_flags = rate_n_flags;
+
+	tx_cmd->driver_timestamp =
+		cpu_to_le32(iwl_mld_tx_gp2_timestamp(mld));
 }
 
 /* Caller of this need to check that info->control.vif is not NULL */
@@ -667,6 +812,17 @@ iwl_mld_get_tx_queue_id(struct iwl_mld *mld, struct ieee80211_txq *txq,
 
 		WARN_ON(!ieee80211_is_mgmt(fc));
 		return mld_vif->aux_sta.queue_id;
+	case NL80211_IFTYPE_NAN:
+		WARN_ON(!ieee80211_is_mgmt(fc));
+		return iwl_mld_nan_get_mgmt_queue(mld, info->control.vif);
+	case NL80211_IFTYPE_NAN_DATA:
+		WARN_ON(!ieee80211_is_data(fc));
+
+		if (!iwl_mld_nan_use_nan_stations(mld))
+			break;
+
+		mld_vif = iwl_mld_vif_from_mac80211(info->control.vif);
+		return mld_vif->nan.mcast_data_sta.queue_id;
 	default:
 		WARN_ONCE(1, "Unsupported vif type\n");
 		break;
@@ -823,7 +979,7 @@ static int iwl_mld_tx_tso_segment(struct iwl_mld *mld, struct sk_buff *skb,
 		return -EINVAL;
 
 	max_tid_amsdu_len = sta->cur->max_tid_amsdu_len[tid];
-	if (!max_tid_amsdu_len)
+	if (!max_tid_amsdu_len || max_tid_amsdu_len == 1)
 		return iwl_tx_tso_segment(skb, 1, netdev_flags, mpdus_skbs);
 
 	/* Sub frame header + SNAP + IP header + TCP header + MSS */
@@ -834,6 +990,9 @@ static int iwl_mld_tx_tso_segment(struct iwl_mld *mld, struct sk_buff *skb,
 	 * N * subf_len + (N - 1) * pad.
 	 */
 	num_subframes = (max_tid_amsdu_len + pad) / (subf_len + pad);
+
+	if (WARN_ON_ONCE(!num_subframes))
+		return iwl_tx_tso_segment(skb, 1, netdev_flags, mpdus_skbs);
 
 	if (sta->max_amsdu_subframes &&
 	    num_subframes > sta->max_amsdu_subframes)
@@ -960,6 +1119,16 @@ void iwl_mld_tx_from_txq(struct iwl_mld *mld, struct ieee80211_txq *txq)
 	u8 zero_addr[ETH_ALEN] = {};
 
 	/*
+	 * Don't transmit during firmware restart. The firmware is dead,
+	 * so iwl_trans_tx() would return -EIO for each frame. Avoid the
+	 * overhead of dequeuing from mac80211 only to immediately free
+	 * the skbs, and the potential memory pressure from rapid skb
+	 * allocation churn during high-throughput restart scenarios.
+	 */
+	if (unlikely(mld->fw_status.in_hw_restart))
+		return;
+
+	/*
 	 * No need for threads to be pending here, they can leave the first
 	 * taker all the work.
 	 *
@@ -994,14 +1163,11 @@ void iwl_mld_tx_from_txq(struct iwl_mld *mld, struct ieee80211_txq *txq)
 	rcu_read_unlock();
 }
 
-static void iwl_mld_hwrate_to_tx_rate(struct iwl_mld *mld,
-				      __le32 rate_n_flags_fw,
+static void iwl_mld_hwrate_to_tx_rate(u32 rate_n_flags,
 				      struct ieee80211_tx_info *info)
 {
 	enum nl80211_band band = info->band;
 	struct ieee80211_tx_rate *tx_rate = &info->status.rates[0];
-	u32 rate_n_flags = iwl_v3_rate_from_v2_v3(rate_n_flags_fw,
-						  mld->fw_rates_ver_3);
 	u32 sgi = rate_n_flags & RATE_MCS_SGI_MSK;
 	u32 chan_width = rate_n_flags & RATE_MCS_CHAN_WIDTH_MSK;
 	u32 format = rate_n_flags & RATE_MCS_MOD_TYPE_MSK;
@@ -1085,6 +1251,10 @@ void iwl_mld_handle_tx_resp_notif(struct iwl_mld *mld,
 	ssn = le32_to_cpup((__le32 *)agg_status +
 			   tx_resp->frame_count) & 0xFFFF;
 
+	if (IWL_FW_CHECK(mld, txq_id >= ARRAY_SIZE(mld->fw_id_to_txq),
+			 "Invalid txq id %d\n", txq_id))
+		return;
+
 	__skb_queue_head_init(&skbs);
 
 	/* we can free until ssn % q.n_bd not inclusive */
@@ -1132,7 +1302,8 @@ void iwl_mld_handle_tx_resp_notif(struct iwl_mld *mld,
 			iwl_dbg_tlv_time_point(&mld->fwrt, tp, NULL);
 		}
 
-		iwl_mld_hwrate_to_tx_rate(mld, tx_resp->initial_rate, info);
+		iwl_mld_hwrate_to_tx_rate(le32_to_cpu(tx_resp->initial_rate),
+					  info);
 
 		if (likely(!iwl_mld_time_sync_frame(mld, skb, hdr->addr1)))
 			ieee80211_tx_status_skb(mld->hw, skb);
@@ -1312,6 +1483,10 @@ int iwl_mld_update_sta_txqs(struct iwl_mld *mld,
 	};
 
 	lockdep_assert_wiphy(mld->wiphy);
+
+	if (mld->trans->conf.queue_alloc_cmd_ver >= 4)
+		cmd.u.modify.flags =
+			cpu_to_le16(IWL_SCD_QUEUE_MODIFY_FLAG_STA_MSK);
 
 	for (int tid = 0; tid <= IWL_MAX_TID_COUNT; tid++) {
 		struct ieee80211_txq *txq =

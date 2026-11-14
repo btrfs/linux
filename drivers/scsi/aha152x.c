@@ -636,7 +636,7 @@ static struct {
 /* setup & interrupt */
 static irqreturn_t intr(int irq, void *dev_id);
 static void reset_ports(struct Scsi_Host *shpnt);
-static void aha152x_error(struct Scsi_Host *shpnt, char *msg);
+static void __noreturn aha152x_error(struct Scsi_Host *shpnt, char *msg);
 static void done(struct Scsi_Host *shpnt, unsigned char status_byte,
 		 unsigned char host_byte);
 
@@ -924,7 +924,7 @@ static int setup_expected_interrupts(struct Scsi_Host *shpnt)
 /*
  *  Queue a command and setup interrupts for a free bus.
  */
-static int aha152x_internal_queue(struct scsi_cmnd *SCpnt,
+static enum scsi_qc_status aha152x_internal_queue(struct scsi_cmnd *SCpnt,
 				  struct completion *complete, int phase)
 {
 	struct aha152x_cmd_priv *acp = aha152x_priv(SCpnt);
@@ -939,13 +939,13 @@ static int aha152x_internal_queue(struct scsi_cmnd *SCpnt,
 	if (acp->phase & (resetting | check_condition)) {
 		if (!SCpnt->host_scribble || SCSEM(SCpnt) || SCNEXT(SCpnt)) {
 			scmd_printk(KERN_ERR, SCpnt, "cannot reuse command\n");
-			return FAILED;
+			return SCSI_MLQUEUE_HOST_BUSY;
 		}
 	} else {
 		SCpnt->host_scribble = kmalloc(sizeof(struct aha152x_scdata), GFP_ATOMIC);
 		if(!SCpnt->host_scribble) {
 			scmd_printk(KERN_ERR, SCpnt, "allocation failed\n");
-			return FAILED;
+			return SCSI_MLQUEUE_HOST_BUSY;
 		}
 	}
 
@@ -995,7 +995,7 @@ static int aha152x_internal_queue(struct scsi_cmnd *SCpnt,
  *  queue a command
  *
  */
-static int aha152x_queue_lck(struct scsi_cmnd *SCpnt)
+static enum scsi_qc_status aha152x_queue_lck(struct scsi_cmnd *SCpnt)
 {
 	return aha152x_internal_queue(SCpnt, NULL, 0);
 }
@@ -2441,7 +2441,7 @@ static void is_complete(struct Scsi_Host *shpnt)
 /*
  * Dump the current driver status and panic
  */
-static void aha152x_error(struct Scsi_Host *shpnt, char *msg)
+static void __noreturn aha152x_error(struct Scsi_Host *shpnt, char *msg)
 {
 	shost_printk(KERN_EMERG, shpnt, "%s\n", msg);
 	show_queues(shpnt);

@@ -324,7 +324,7 @@ static int mtk_adda_dl_event(struct snd_soc_dapm_widget *w,
 static int mt8186_adda_dmic_get(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
 	struct mt8186_afe_private *afe_priv = afe->platform_priv;
 
@@ -336,7 +336,7 @@ static int mt8186_adda_dmic_get(struct snd_kcontrol *kcontrol,
 static int mt8186_adda_dmic_set(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
 	struct mt8186_afe_private *afe_priv = afe->platform_priv;
 	int dmic_on;
@@ -746,7 +746,7 @@ int mt8186_dai_adda_register(struct mtk_base_afe *afe)
 	struct mt8186_afe_private *afe_priv = afe->platform_priv;
 	int ret;
 
-	dai = devm_kzalloc(afe->dev, sizeof(*dai), GFP_KERNEL);
+	dai = devm_kzalloc_obj(afe->dev, *dai);
 	if (!dai)
 		return -ENOMEM;
 

@@ -10,6 +10,8 @@
 #include "compiler.h"
 #include "crt.h"
 
+#include <linux/unistd.h>
+
 /*
  * Syscalls for SuperH:
  *   - registers are 32bit wide
@@ -19,7 +21,7 @@
  *   - syscall return value is in r0
  */
 
-#define my_syscall0(num)                                                      \
+#define __nolibc_syscall0(num)                                                \
 ({                                                                            \
 	register long _num __asm__ ("r3") = (num);                            \
 	register long _ret __asm__ ("r0");                                    \
@@ -33,7 +35,7 @@
 	_ret;                                                                 \
 })
 
-#define my_syscall1(num, arg1)                                                \
+#define __nolibc_syscall1(num, arg1)                                          \
 ({                                                                            \
 	register long _num __asm__ ("r3") = (num);                            \
 	register long _ret __asm__ ("r0");                                    \
@@ -48,7 +50,7 @@
 	_ret;                                                                 \
 })
 
-#define my_syscall2(num, arg1, arg2)                                          \
+#define __nolibc_syscall2(num, arg1, arg2)                                    \
 ({                                                                            \
 	register long _num __asm__ ("r3") = (num);                            \
 	register long _ret __asm__ ("r0");                                    \
@@ -64,7 +66,7 @@
 	_ret;                                                                 \
 })
 
-#define my_syscall3(num, arg1, arg2, arg3)                                    \
+#define __nolibc_syscall3(num, arg1, arg2, arg3)                              \
 ({                                                                            \
 	register long _num __asm__ ("r3") = (num);                            \
 	register long _ret __asm__ ("r0");                                    \
@@ -81,7 +83,7 @@
 	_ret;                                                                 \
 })
 
-#define my_syscall4(num, arg1, arg2, arg3, arg4)                              \
+#define __nolibc_syscall4(num, arg1, arg2, arg3, arg4)                        \
 ({                                                                            \
 	register long _num __asm__ ("r3") = (num);                            \
 	register long _ret __asm__ ("r0");                                    \
@@ -99,7 +101,7 @@
 	_ret;                                                                 \
 })
 
-#define my_syscall5(num, arg1, arg2, arg3, arg4, arg5)                        \
+#define __nolibc_syscall5(num, arg1, arg2, arg3, arg4, arg5)                  \
 ({                                                                            \
 	register long _num __asm__ ("r3") = (num);                            \
 	register long _ret __asm__ ("r0");                                    \
@@ -119,7 +121,7 @@
 	_ret;                                                                 \
 })
 
-#define my_syscall6(num, arg1, arg2, arg3, arg4, arg5, arg6)                  \
+#define __nolibc_syscall6(num, arg1, arg2, arg3, arg4, arg5, arg6)            \
 ({                                                                            \
 	register long _num __asm__ ("r3") = (num);                            \
 	register long _ret __asm__ ("r0");                                    \
@@ -140,9 +142,10 @@
 	_ret;                                                                 \
 })
 
+#ifndef NOLIBC_NO_RUNTIME
 /* startup code */
 void _start_wrapper(void);
-void __attribute__((weak,noreturn)) __nolibc_entrypoint __no_stack_protector _start_wrapper(void)
+void __attribute__((weak, noreturn)) __nolibc_entrypoint __nolibc_no_stack_protector _start_wrapper(void)
 {
 	__asm__ volatile (
 		".global _start\n"           /* The C function will have a prologue,         */
@@ -158,5 +161,22 @@ void __attribute__((weak,noreturn)) __nolibc_entrypoint __no_stack_protector _st
 	);
 	__nolibc_entrypoint_epilogue();
 }
+#endif /* NOLIBC_NO_RUNTIME */
+
+static __attribute__((unused))
+ssize_t _sys_pread(int fd, void *buf, size_t count, off_t offset)
+{
+	return __nolibc_syscall6(__NR_pread64, fd, buf, count, 0,
+				 __NOLIBC_LLARGPART(offset, 0), __NOLIBC_LLARGPART(offset, 1));
+}
+#define _sys_pread _sys_pread
+
+static __attribute__((unused))
+ssize_t _sys_pwrite(int fd, const void *buf, size_t count, off_t offset)
+{
+	return __nolibc_syscall6(__NR_pwrite64, fd, buf, count, 0,
+				 __NOLIBC_LLARGPART(offset, 0), __NOLIBC_LLARGPART(offset, 1));
+}
+#define _sys_pwrite _sys_pwrite
 
 #endif /* _NOLIBC_ARCH_SH_H */

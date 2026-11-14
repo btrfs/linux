@@ -423,7 +423,7 @@ ef4_alloc_channel(struct ef4_nic *efx, int i, struct ef4_channel *old_channel)
 	struct ef4_tx_queue *tx_queue;
 	int j;
 
-	channel = kzalloc(sizeof(*channel), GFP_KERNEL);
+	channel = kzalloc_obj(*channel);
 	if (!channel)
 		return NULL;
 
@@ -456,7 +456,7 @@ ef4_copy_channel(const struct ef4_channel *old_channel)
 	struct ef4_tx_queue *tx_queue;
 	int j;
 
-	channel = kmalloc(sizeof(*channel), GFP_KERNEL);
+	channel = kmalloc_obj(*channel);
 	if (!channel)
 		return NULL;
 
@@ -1693,9 +1693,8 @@ static int ef4_probe_filters(struct ef4_nic *efx)
 
 		ef4_for_each_channel(channel, efx) {
 			channel->rps_flow_id =
-				kcalloc(efx->type->max_rx_ip_filters,
-					sizeof(*channel->rps_flow_id),
-					GFP_KERNEL);
+				kzalloc_objs(*channel->rps_flow_id,
+					     efx->type->max_rx_ip_filters);
 			if (!channel->rps_flow_id)
 				success = 0;
 			else

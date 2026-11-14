@@ -49,16 +49,30 @@ struct lease {
 	int			version;
 	unsigned short		epoch;
 	bool			is_dir;
+	bool			reuse_epoch;
+	bool			breaking;
+	bool			break_timeout_set;
+	unsigned long		break_timeout;
+	struct ksmbd_inode	*ci;
 	struct lease_table	*l_lb;
+	struct list_head	l_entry;
+	struct list_head	open_list;
+	spinlock_t		lock;
+	atomic_t		refcount;
 };
 
 struct oplock_info {
 	struct ksmbd_conn	*conn;
 	struct ksmbd_session	*sess;
+	u64			session_id;
 	struct ksmbd_work	*work;
 	struct ksmbd_file	*o_fp;
 	int                     level;
 	int                     op_state;
+	spinlock_t		state_lock;
+	unsigned long		oplock_timeout;
+	bool			oplock_timeout_set;
+	bool			oplock_timed_out;
 	unsigned long		pending_break;
 	u64			fid;
 	atomic_t		breaking_cnt;
@@ -69,28 +83,21 @@ struct oplock_info {
 	struct lease		*o_lease;
 	struct list_head        op_entry;
 	struct list_head        lease_entry;
-	wait_queue_head_t oplock_q; /* Other server threads */
-	wait_queue_head_t oplock_brk; /* oplock breaking wait */
-};
-
-struct lease_break_info {
-	__le32			curr_state;
-	__le32			new_state;
-	__le16			epoch;
-	char			lease_key[SMB2_LEASE_KEY_SIZE];
-};
-
-struct oplock_break_info {
-	int level;
-	int open_trunc;
-	int fid;
+	wait_queue_head_t	oplock_q; /* Other server threads */
+	wait_queue_head_t	oplock_brk; /* oplock breaking wait */
+	struct rcu_head		rcu;
 };
 
 int smb_grant_oplock(struct ksmbd_work *work, int req_op_level,
 		     u64 pid, struct ksmbd_file *fp, __u16 tid,
-		     struct lease_ctx_info *lctx, int share_ret);
+		     struct lease_ctx_info *lctx, int share_ret, bool replay);
 void smb_break_all_levII_oplock(struct ksmbd_work *work,
-				struct ksmbd_file *fp, int is_trunc);
+					struct ksmbd_file *fp, int is_trunc);
+void smb_break_all_levII_oplock_rename(struct ksmbd_work *work, struct ksmbd_file *fp);
+void smb_break_all_levII_oplock_no_interim(struct ksmbd_work *work,
+					   struct ksmbd_file *fp, int is_trunc);
+void smb_break_all_levII_oplock_for_delete(struct ksmbd_work *work,
+					   struct ksmbd_file *fp);
 int opinfo_write_to_read(struct oplock_info *opinfo);
 int opinfo_read_handle_to_read(struct oplock_info *opinfo);
 int opinfo_write_to_none(struct oplock_info *opinfo);
@@ -104,6 +111,7 @@ void opinfo_put(struct oplock_info *opinfo);
 void create_lease_buf(u8 *rbuf, struct lease *lease);
 struct lease_ctx_info *parse_lease_state(void *open_req);
 __u8 smb2_map_lease_to_oplock(__le32 lease_state);
+void lease_update_oplock_levels(struct lease *lease);
 int lease_read_to_write(struct oplock_info *opinfo);
 
 /* Durable related functions */
@@ -112,12 +120,14 @@ void create_durable_v2_rsp_buf(char *cc, struct ksmbd_file *fp);
 void create_mxac_rsp_buf(char *cc, int maximal_access);
 void create_disk_id_rsp_buf(char *cc, __u64 file_id, __u64 vol_id);
 void create_posix_rsp_buf(char *cc, struct ksmbd_file *fp);
+void create_aapl_rsp_buf(char *cc, __u64 vol_caps, __u64 req_bitmap,
+			 bool readdir_attr_v2);
 struct create_context *smb2_find_context_vals(void *open_req, const char *tag, int tag_len);
 struct oplock_info *lookup_lease_in_table(struct ksmbd_conn *conn,
 					  char *lease_key);
-int find_same_lease_key(struct ksmbd_session *sess, struct ksmbd_inode *ci,
+int find_same_lease_key(struct ksmbd_conn *conn, struct ksmbd_inode *ci,
 			struct lease_ctx_info *lctx);
-void destroy_lease_table(struct ksmbd_conn *conn);
+void destroy_lease_table(void);
 void smb_send_parent_lease_break_noti(struct ksmbd_file *fp,
 				      struct lease_ctx_info *lctx);
 void smb_lazy_parent_lease_break_close(struct ksmbd_file *fp);
@@ -125,5 +135,6 @@ int smb2_check_durable_oplock(struct ksmbd_conn *conn,
 			      struct ksmbd_share_config *share,
 			      struct ksmbd_file *fp,
 			      struct lease_ctx_info *lctx,
+			      struct ksmbd_user *user,
 			      char *name);
 #endif /* __KSMBD_OPLOCK_H */

@@ -31,6 +31,7 @@ static const struct acpi_device_id usbio_gpio_acpi_hids[] = {
 	{ "INTC10B5" }, /* LNL */
 	{ "INTC10D1" }, /* MTL-CVF */
 	{ "INTC10E2" }, /* PTL */
+	{ "INTC1116" }, /* NVL */
 	{ }
 };
 
@@ -189,7 +190,7 @@ static int usbio_gpio_probe(struct auxiliary_device *adev,
 	if (!bank_desc)
 		return -EINVAL;
 
-	gpio = devm_kzalloc(dev, sizeof(*gpio), GFP_KERNEL);
+	gpio = devm_kzalloc_obj(dev, *gpio);
 	if (!gpio)
 		return -ENOMEM;
 

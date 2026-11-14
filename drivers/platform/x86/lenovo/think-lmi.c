@@ -14,13 +14,13 @@
 #include <linux/acpi.h>
 #include <linux/array_size.h>
 #include <linux/errno.h>
+#include <linux/firmware_attributes.h>
 #include <linux/fs.h>
 #include <linux/mutex.h>
 #include <linux/string_helpers.h>
 #include <linux/types.h>
 #include <linux/dmi.h>
 #include <linux/wmi.h>
-#include "../firmware_attributes_class.h"
 #include "think-lmi.h"
 
 static bool debug_support;
@@ -195,7 +195,7 @@ static const struct tlmi_cert_guids thinkpad_cert_guid = {
 };
 
 static const struct tlmi_cert_guids thinkcenter_cert_guid = {
-	.thumbprint = NULL,
+	.thumbprint = LENOVO_CERT_THUMBPRINT_GUID, /* Same GUID as TP */
 	.set_bios_setting = LENOVO_TC_SET_BIOS_SETTING_CERT_GUID,
 	.save_bios_setting = LENOVO_TC_SAVE_BIOS_SETTING_CERT_GUID,
 	.cert_to_password = LENOVO_TC_CERT_TO_PASSWORD_GUID,
@@ -249,7 +249,7 @@ static int tlmi_errstr_to_err(const char *errstr)
 {
 	int i;
 
-	for (i = 0; i < sizeof(tlmi_errs)/sizeof(struct tlmi_err_codes); i++) {
+	for (i = 0; i < ARRAY_SIZE(tlmi_errs); i++) {
 		if (!strcmp(tlmi_errs[i].err_str, errstr))
 			return tlmi_errs[i].err_code;
 	}
@@ -438,14 +438,13 @@ static ssize_t current_password_store(struct kobject *kobj,
 	struct tlmi_pwd_setting *setting = to_tlmi_pwd_setting(kobj);
 	size_t pwdlen;
 
-	pwdlen = strlen(buf);
+	/* Strip newline; setting password won't work if one is present. */
+	pwdlen = strchrnul(buf, '\n') - buf;
 	/* pwdlen == 0 is allowed to clear the password */
 	if (pwdlen && ((pwdlen < setting->minlen) || (pwdlen > setting->maxlen)))
 		return -EINVAL;
 
-	strscpy(setting->password, buf, setting->maxlen);
-	/* Strip out CR if one is present, setting password won't work if it is present */
-	strreplace(setting->password, '\n', '\0');
+	strscpy(setting->password, buf, pwdlen + 1);
 	return count;
 }
 
@@ -488,16 +487,16 @@ static ssize_t new_password_store(struct kobject *kobj,
 		/* Special handling required for HDD and NVMe passwords */
 		if (setting == tlmi_priv.pwd_hdd) {
 			if (setting->level == TLMI_LEVEL_USER)
-				sprintf(pwd_type, "uhdp%d", setting->index);
+				scnprintf(pwd_type, sizeof(pwd_type), "uhdp%d", setting->index);
 			else
-				sprintf(pwd_type, "mhdp%d", setting->index);
+				scnprintf(pwd_type, sizeof(pwd_type), "mhdp%d", setting->index);
 		} else if (setting == tlmi_priv.pwd_nvme) {
 			if (setting->level == TLMI_LEVEL_USER)
-				sprintf(pwd_type, "udrp%d", setting->index);
+				scnprintf(pwd_type, sizeof(pwd_type), "udrp%d", setting->index);
 			else
-				sprintf(pwd_type, "adrp%d", setting->index);
+				scnprintf(pwd_type, sizeof(pwd_type), "adrp%d", setting->index);
 		} else {
-			sprintf(pwd_type, "%s", setting->pwd_type);
+			scnprintf(pwd_type, sizeof(pwd_type), "%s", setting->pwd_type);
 		}
 
 		ret = tlmi_opcode_setting("WmiOpcodePasswordType", pwd_type);
@@ -709,6 +708,10 @@ static ssize_t cert_thumbprint(char *buf, const char *arg, int count)
 	if (!tlmi_priv.cert_guid->thumbprint)
 		return -EOPNOTSUPP;
 
+	/* Older ThinkCenter BIOS may not have support */
+	if (!wmi_has_guid(tlmi_priv.cert_guid->thumbprint))
+		return -EOPNOTSUPP;
+
 	status = wmi_evaluate_method(tlmi_priv.cert_guid->thumbprint, 0, 0, &input, &output);
 	if (ACPI_FAILURE(status)) {
 		kfree(output.pointer);
@@ -741,6 +744,8 @@ static ssize_t certificate_thumbprint_show(struct kobject *kobj, struct kobj_att
 		return -EOPNOTSUPP;
 
 	for (i = 0; i < ARRAY_SIZE(thumbtypes); i++) {
+		ssize_t ret;
+
 		if (tlmi_priv.pwdcfg.core.password_mode >= TLMI_PWDCFG_MODE_MULTICERT) {
 			/* Format: 'SVC | SMC, Thumbtype' */
 			wmistr = kasprintf(GFP_KERNEL, "%s,%s",
@@ -752,8 +757,12 @@ static ssize_t certificate_thumbprint_show(struct kobject *kobj, struct kobj_att
 		}
 		if (!wmistr)
 			return -ENOMEM;
-		count += cert_thumbprint(buf, wmistr, count);
+
+		ret = cert_thumbprint(buf, wmistr, count);
 		kfree(wmistr);
+		if (ret < 0)
+			return ret;
+		count = ret;
 	}
 
 	return count;
@@ -1272,7 +1281,7 @@ static const struct kobj_type tlmi_pwd_setting_ktype = {
 static ssize_t pending_reboot_show(struct kobject *kobj, struct kobj_attribute *attr,
 				   char *buf)
 {
-	return sprintf(buf, "%d\n", tlmi_priv.pending_changes);
+	return sysfs_emit(buf, "%d\n", tlmi_priv.pending_changes);
 }
 
 static struct kobj_attribute pending_reboot = __ATTR_RO(pending_reboot);
@@ -1452,6 +1461,10 @@ static void tlmi_release_attr(void)
 	/* Free up any saved signatures */
 	kfree(tlmi_priv.pwd_admin->signature);
 	kfree(tlmi_priv.pwd_admin->save_signature);
+	if (tlmi_priv.pwd_system) {
+		kfree(tlmi_priv.pwd_system->signature);
+		kfree(tlmi_priv.pwd_system->save_signature);
+	}
 
 	/* Authentication structures */
 	list_for_each_entry_safe(pos, n, &tlmi_priv.authentication_kset->list, entry)
@@ -1589,7 +1602,7 @@ static struct tlmi_pwd_setting *tlmi_create_auth(const char *pwd_type,
 {
 	struct tlmi_pwd_setting *new_pwd;
 
-	new_pwd = kzalloc(sizeof(struct tlmi_pwd_setting), GFP_KERNEL);
+	new_pwd = kzalloc_obj(struct tlmi_pwd_setting);
 	if (!new_pwd)
 		return NULL;
 
@@ -1664,7 +1677,7 @@ static int tlmi_analyze(struct wmi_device *wdev)
 		strreplace(item, ',', '\0');
 
 		/* Create a setting entry */
-		setting = kzalloc(sizeof(*setting), GFP_KERNEL);
+		setting = kzalloc_obj(*setting);
 		if (!setting) {
 			ret = -ENOMEM;
 			kfree(item);

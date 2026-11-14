@@ -70,6 +70,8 @@ static const char * const POWER_SUPPLY_USB_TYPE_TEXT[] = {
 	[POWER_SUPPLY_USB_TYPE_PD]		= "PD",
 	[POWER_SUPPLY_USB_TYPE_PD_DRP]		= "PD_DRP",
 	[POWER_SUPPLY_USB_TYPE_PD_PPS]		= "PD_PPS",
+	[POWER_SUPPLY_USB_TYPE_PD_SPR_AVS]	= "PD_SPR_AVS",
+	[POWER_SUPPLY_USB_TYPE_PD_PPS_SPR_AVS]	= "PD_PPS_SPR_AVS",
 	[POWER_SUPPLY_USB_TYPE_APPLE_BRICK_ID]	= "BrickID",
 };
 
@@ -122,6 +124,10 @@ static const char * const POWER_SUPPLY_TECHNOLOGY_TEXT[] = {
 	[POWER_SUPPLY_TECHNOLOGY_LiFe]		= "LiFe",
 	[POWER_SUPPLY_TECHNOLOGY_NiCd]		= "NiCd",
 	[POWER_SUPPLY_TECHNOLOGY_LiMn]		= "LiMn",
+	[POWER_SUPPLY_TECHNOLOGY_PbAc]		= "PbAc",
+	[POWER_SUPPLY_TECHNOLOGY_NiZn]		= "NiZn",
+	[POWER_SUPPLY_TECHNOLOGY_RAM]		= "RAM",
+	[POWER_SUPPLY_TECHNOLOGY_ZnAr]		= "ZnAr",
 };
 
 static const char * const POWER_SUPPLY_CAPACITY_LEVEL_TEXT[] = {
@@ -144,6 +150,14 @@ static const char * const POWER_SUPPLY_CHARGE_BEHAVIOUR_TEXT[] = {
 	[POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE]		= "inhibit-charge",
 	[POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE_AWAKE]	= "inhibit-charge-awake",
 	[POWER_SUPPLY_CHARGE_BEHAVIOUR_FORCE_DISCHARGE]		= "force-discharge",
+};
+
+static const char *const POWER_SUPPLY_LOAD_SWITCH_TEXT[] = {
+	[POWER_SUPPLY_LOAD_SWITCH_UNKNOWN] = "Unknown",
+	[POWER_SUPPLY_LOAD_SWITCH_ON]	   = "On",
+	[POWER_SUPPLY_LOAD_SWITCH_OFF]	   = "Off",
+	[POWER_SUPPLY_LOAD_SWITCH_STANDBY] = "Standby",
+	[POWER_SUPPLY_LOAD_SWITCH_SHIP]	   = "Ship",
 };
 
 static struct power_supply_attr power_supply_attrs[] __ro_after_init = {
@@ -225,6 +239,7 @@ static struct power_supply_attr power_supply_attrs[] __ro_after_init = {
 	POWER_SUPPLY_ATTR(MANUFACTURE_DAY),
 	POWER_SUPPLY_ATTR(INTERNAL_RESISTANCE),
 	POWER_SUPPLY_ATTR(STATE_OF_HEALTH),
+	POWER_SUPPLY_ENUM_ATTR(LOAD_SWITCH),
 	/* Properties of type `const char *' */
 	POWER_SUPPLY_ATTR(MODEL_NAME),
 	POWER_SUPPLY_ATTR(MANUFACTURER),
@@ -235,12 +250,12 @@ static struct power_supply_attr power_supply_attrs[] __ro_after_init = {
 static struct attribute *
 __power_supply_attrs[POWER_SUPPLY_ATTR_CNT + 1] __ro_after_init;
 
-static const struct power_supply_attr *to_ps_attr(struct device_attribute *attr)
+static const struct power_supply_attr *to_ps_attr(const struct device_attribute *attr)
 {
-	return container_of(attr, struct power_supply_attr, dev_attr);
+	return container_of_const(attr, struct power_supply_attr, dev_attr);
 }
 
-static enum power_supply_property dev_attr_psp(struct device_attribute *attr)
+static enum power_supply_property dev_attr_psp(const struct device_attribute *attr)
 {
 	return  to_ps_attr(attr) - power_supply_attrs;
 }
@@ -295,7 +310,8 @@ static ssize_t power_supply_show_enum_with_available(
 	}
 
 	if (!match) {
-		dev_warn(dev, "driver reporting unavailable enum value %d\n", value);
+		dev_warn_ratelimited(dev, "driver reporting unavailable enum value %d\n",
+				     value);
 		return -EINVAL;
 	}
 
@@ -393,6 +409,14 @@ static ssize_t power_supply_format_property(struct device *dev,
 			goto default_format;
 		ret = power_supply_show_charge_types(dev, psy,
 						     value.intval, buf);
+		break;
+	case POWER_SUPPLY_PROP_LOAD_SWITCH:
+		if (uevent) /* no possible values in uevents */
+			goto default_format;
+		ret = power_supply_show_enum_with_available(
+			dev, POWER_SUPPLY_LOAD_SWITCH_TEXT,
+			ARRAY_SIZE(POWER_SUPPLY_LOAD_SWITCH_TEXT),
+			psy->desc->load_switches, value.intval, buf);
 		break;
 	case POWER_SUPPLY_PROP_MODEL_NAME ... POWER_SUPPLY_PROP_SERIAL_NUMBER:
 		ret = sysfs_emit(buf, "%s\n", value.strval);

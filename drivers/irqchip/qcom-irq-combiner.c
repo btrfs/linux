@@ -222,7 +222,7 @@ static int get_registers(struct platform_device *pdev, struct combiner *comb)
 	return 0;
 }
 
-static int __init combiner_probe(struct platform_device *pdev)
+static int combiner_probe(struct platform_device *pdev)
 {
 	struct combiner *combiner;
 	int nregs;
@@ -234,8 +234,7 @@ static int __init combiner_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	combiner = devm_kzalloc(&pdev->dev, struct_size(combiner, regs, nregs),
-				GFP_KERNEL);
+	combiner = devm_kzalloc_flex(&pdev->dev, *combiner, regs, nregs);
 	if (!combiner)
 		return -ENOMEM;
 
@@ -262,15 +261,15 @@ static int __init combiner_probe(struct platform_device *pdev)
 }
 
 static const struct acpi_device_id qcom_irq_combiner_ids[] = {
-	{ "QCOM80B1", },
+	{ .id = "QCOM80B1" },
 	{ }
 };
 
-static struct platform_driver qcom_irq_combiner_probe = {
+static struct platform_driver qcom_irq_combiner_driver = {
 	.driver = {
 		.name = "qcom-irq-combiner",
 		.acpi_match_table = ACPI_PTR(qcom_irq_combiner_ids),
 	},
 	.probe = combiner_probe,
 };
-builtin_platform_driver(qcom_irq_combiner_probe);
+builtin_platform_driver(qcom_irq_combiner_driver);

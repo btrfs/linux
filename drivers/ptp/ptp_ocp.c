@@ -20,13 +20,16 @@
 #include <linux/spi/altera.h>
 #include <net/devlink.h>
 #include <linux/i2c.h>
+#include <linux/iopoll.h>
 #include <linux/mtd/mtd.h>
 #include <linux/nvmem-consumer.h>
 #include <linux/crc16.h>
 #include <linux/dpll.h>
+#include <linux/unaligned.h>
+#include <linux/delay.h>
+#include <linux/firmware.h>
 
-#define PCI_VENDOR_ID_FACEBOOK			0x1d9b
-#define PCI_DEVICE_ID_FACEBOOK_TIMECARD		0x0400
+#define PCI_DEVICE_ID_META_TIMECARD		0x0400
 
 #define PCI_VENDOR_ID_CELESTICA			0x18d4
 #define PCI_DEVICE_ID_CELESTICA_TIMECARD	0x1008
@@ -36,6 +39,7 @@
 
 #define PCI_VENDOR_ID_ADVA			0xad5a
 #define PCI_DEVICE_ID_ADVA_TIMECARD		0x0400
+#define PCI_DEVICE_ID_ADVA_TIMECARD_X1		0x0410
 
 static struct class timecard_class = {
 	.name		= "timecard",
@@ -71,6 +75,22 @@ struct ptp_ocp_servo_conf {
 	u32	servo_offset_i;
 	u32	servo_drift_p;
 	u32	servo_drift_i;
+};
+
+/*
+ * Combined servo + board-variant parameters for ADVA boards.
+ * Embedded in the resource table .extra so a single ptp_ocp_adva_board_init()
+ * can handle both ADVA and ADVA-X1 without per-variant init functions.
+ */
+struct ptp_ocp_adva_info {
+	struct ptp_ocp_servo_conf	servo;
+	u32				flash_start;
+	const struct ocp_sma_op		*sma_op;
+	u8				signals_nr;
+	u8				freq_in_nr;
+	const struct ocp_attr_group	*attr_groups;
+	/* x1: TAP CPLD present */
+	bool				has_cpld;
 };
 
 #define OCP_CTRL_ENABLE		BIT(0)
@@ -149,7 +169,8 @@ struct gpio_reg {
 	u32	gpio1;
 	u32	__pad0;
 	u32	gpio2;
-	u32	__pad1;
+	/* adva_x1: I2C bus ownership register; reserved on other variants */
+	u32	i2c_bus_ctrl;
 };
 
 struct irig_master_reg {
@@ -286,11 +307,26 @@ struct ptp_ocp_sma_connector {
 	u8	default_fcn;
 	struct dpll_pin		   *dpll_pin;
 	struct dpll_pin_properties dpll_prop;
+	dpll_tracker		   tracker;
 };
 
 struct ocp_attr_group {
 	u64 cap;
 	const struct attribute_group *group;
+};
+
+struct ocp_selector {
+	const char *name;
+	int value;
+	u64 frequency;
+};
+
+struct ocp_sma_op {
+	const struct ocp_selector *tbl[2];
+	void (*init)(struct ptp_ocp *bp);
+	u32 (*get)(struct ptp_ocp *bp, int sma_nr);
+	int (*set_inputs)(struct ptp_ocp *bp, int sma_nr, u32 val);
+	int (*set_output)(struct ptp_ocp *bp, int sma_nr, u32 val);
 };
 
 #define OCP_CAP_BASIC	BIT(0)
@@ -308,7 +344,7 @@ struct ptp_ocp_signal {
 };
 
 struct ptp_ocp_serial_port {
-	int line;
+	struct uart_8250_port *uport;
 	int baud;
 };
 
@@ -384,8 +420,34 @@ struct ptp_ocp {
 	struct ptp_ocp_sma_connector sma[OCP_SMA_NUM];
 	const struct ocp_sma_op *sma_op;
 	struct dpll_device *dpll;
+	dpll_tracker tracker;
 	int signals_nr;
 	int freq_in_nr;
+	/* adva_x1 CPLD I2C (internal use only) */
+	/* serialises CPLD operations */
+	struct mutex		cpld_lock;
+	/* guards cpld_i2c_adap_nr against the bus notifier */
+	spinlock_t		cpld_adap_lock;
+	/* I2C adapter nr; -1 if absent.  Under cpld_adap_lock */
+	int			cpld_i2c_adap_nr;
+	/* claimed adapter; valid under cpld_lock */
+	struct i2c_adapter	*cpld_adap;
+	/* scratch, write half then read half; valid under cpld_lock */
+	u8			*cpld_buf;
+	/* Lattice device ID; 0 if unread */
+	u32			cpld_id;
+	/* USERCODE of the image in the part; valid once cpld_usercode_ok */
+	u32			cpld_usercode;
+	/* cpld_usercode has been read since the last flash */
+	bool			cpld_usercode_ok;
+	/* one-shot ID read finished, successfully or not; under cpld_lock */
+	bool			cpld_id_tried;
+	/* failed ID read attempts so far; under cpld_lock */
+	unsigned int		cpld_id_attempts;
+	/* x1 TAP CPLD present */
+	bool			has_cpld;
+	/* EN_CFG_TP issued but not yet REFRESH'd */
+	bool			cpld_in_config_mode;
 };
 
 #define OCP_REQ_TIMESTAMP	BIT(0)
@@ -419,11 +481,23 @@ static int ptp_ocp_art_board_init(struct ptp_ocp *bp, struct ocp_resource *r);
 
 static int ptp_ocp_adva_board_init(struct ptp_ocp *bp, struct ocp_resource *r);
 
+static const struct ocp_sma_op ocp_adva_sma_op;
+static const struct ocp_sma_op ocp_adva_x1_sma_op;
+
+/* Flash component naming the CPLD image, as reported by ->info_get(). */
+#define ADVA_CPLD_COMPONENT	"fw.cpld"
+
+static int adva_x1_cpld_flash(struct ptp_ocp *bp, struct devlink *devlink,
+			      const struct firmware *fw,
+			      struct netlink_ext_ack *extack);
+
 static const struct ocp_attr_group fb_timecard_groups[];
 
 static const struct ocp_attr_group art_timecard_groups[];
 
 static const struct ocp_attr_group adva_timecard_groups[];
+
+static const struct ocp_attr_group adva_timecard_x1_groups[];
 
 struct ptp_ocp_eeprom_map {
 	u16	off;
@@ -1019,33 +1093,243 @@ static struct ocp_resource ocp_adva_resource[] = {
 	},
 	{
 		.setup = ptp_ocp_adva_board_init,
-		.extra = &(struct ptp_ocp_servo_conf) {
-			.servo_offset_p = 0xc000,
-			.servo_offset_i = 0x1000,
-			.servo_drift_p = 0,
-			.servo_drift_i = 0,
+		.extra = &(struct ptp_ocp_adva_info) {
+			.servo = {
+				.servo_offset_p = 0xc000,
+				.servo_offset_i = 0x1000,
+				.servo_drift_p = 0,
+				.servo_drift_i = 0,
+			},
+			.flash_start  = 0xA00000,
+			.sma_op       = &ocp_adva_sma_op,
+			.signals_nr   = 2,
+			.freq_in_nr   = 2,
+			.attr_groups  = adva_timecard_groups,
+		},
+	},
+	{ }
+};
+
+static struct ocp_resource ocp_adva_x1_resource[] = {
+	{
+		OCP_MEM_RESOURCE(reg),
+		.offset = 0x01000000, .size = 0x10000,
+	},
+	{
+		OCP_EXT_RESOURCE(ts0),
+		.offset = 0x01010000, .size = 0x10000, .irq_vec = 1,
+		.extra = &(struct ptp_ocp_ext_info) {
+			.index = 0,
+			.irq_fcn = ptp_ocp_ts_irq,
+			.enable = ptp_ocp_ts_enable,
+		},
+	},
+	{
+		OCP_EXT_RESOURCE(ts1),
+		.offset = 0x01020000, .size = 0x10000, .irq_vec = 2,
+		.extra = &(struct ptp_ocp_ext_info) {
+			.index = 1,
+			.irq_fcn = ptp_ocp_ts_irq,
+			.enable = ptp_ocp_ts_enable,
+		},
+	},
+	{
+		OCP_EXT_RESOURCE(ts2),
+		.offset = 0x01060000, .size = 0x10000, .irq_vec = 6,
+		.extra = &(struct ptp_ocp_ext_info) {
+			.index = 2,
+			.irq_fcn = ptp_ocp_ts_irq,
+			.enable = ptp_ocp_ts_enable,
+		},
+	},
+	{
+		OCP_EXT_RESOURCE(ts3),
+		.offset = 0x01110000, .size = 0x10000, .irq_vec = 15,
+		.extra = &(struct ptp_ocp_ext_info) {
+			.index = 3,
+			.irq_fcn = ptp_ocp_ts_irq,
+			.enable = ptp_ocp_ts_enable,
+		},
+	},
+	{
+		OCP_EXT_RESOURCE(ts4),
+		.offset = 0x01120000, .size = 0x10000, .irq_vec = 16,
+		.extra = &(struct ptp_ocp_ext_info) {
+			.index = 4,
+			.irq_fcn = ptp_ocp_ts_irq,
+			.enable = ptp_ocp_ts_enable,
+		},
+	},
+	/* Timestamp for PHC and/or PPS generator */
+	{
+		OCP_EXT_RESOURCE(pps),
+		.offset = 0x010C0000, .size = 0x10000, .irq_vec = 0,
+		.extra = &(struct ptp_ocp_ext_info) {
+			.index = 5,
+			.irq_fcn = ptp_ocp_ts_irq,
+			.enable = ptp_ocp_ts_enable,
+		},
+	},
+	{
+		OCP_EXT_RESOURCE(signal_out[0]),
+		.offset = 0x010D0000, .size = 0x10000, .irq_vec = 11,
+		.extra = &(struct ptp_ocp_ext_info) {
+			.index = 1,
+			.irq_fcn = ptp_ocp_signal_irq,
+			.enable = ptp_ocp_signal_enable,
+		},
+	},
+	{
+		OCP_EXT_RESOURCE(signal_out[1]),
+		.offset = 0x010E0000, .size = 0x10000, .irq_vec = 12,
+		.extra = &(struct ptp_ocp_ext_info) {
+			.index = 2,
+			.irq_fcn = ptp_ocp_signal_irq,
+			.enable = ptp_ocp_signal_enable,
+		},
+	},
+	{
+		OCP_EXT_RESOURCE(signal_out[2]),
+		.offset = 0x010F0000, .size = 0x10000, .irq_vec = 13,
+		.extra = &(struct ptp_ocp_ext_info) {
+			.index = 3,
+			.irq_fcn = ptp_ocp_signal_irq,
+			.enable = ptp_ocp_signal_enable,
+		},
+	},
+	{
+		OCP_EXT_RESOURCE(signal_out[3]),
+		.offset = 0x01100000, .size = 0x10000, .irq_vec = 14,
+		.extra = &(struct ptp_ocp_ext_info) {
+			.index = 4,
+			.irq_fcn = ptp_ocp_signal_irq,
+			.enable = ptp_ocp_signal_enable,
+		},
+	},
+	{
+		OCP_MEM_RESOURCE(pps_to_ext),
+		.offset = 0x01030000, .size = 0x10000,
+	},
+	{
+		OCP_MEM_RESOURCE(pps_to_clk),
+		.offset = 0x01040000, .size = 0x10000,
+	},
+	{
+		OCP_MEM_RESOURCE(tod),
+		.offset = 0x01050000, .size = 0x10000,
+	},
+	{
+		OCP_MEM_RESOURCE(image),
+		.offset = 0x00020000, .size = 0x1000,
+	},
+	{
+		OCP_MEM_RESOURCE(pps_select),
+		.offset = 0x00130000, .size = 0x1000,
+	},
+	{
+		OCP_MEM_RESOURCE(sma_map1),
+		.offset = 0x00140000, .size = 0x1000,
+	},
+	{
+		OCP_MEM_RESOURCE(sma_map2),
+		.offset = 0x00220000, .size = 0x1000,
+	},
+	{
+		OCP_SERIAL_RESOURCE(port[PORT_GNSS]),
+		.offset = 0x00160000 + 0x1000, .irq_vec = 3,
+		.extra = &(struct ptp_ocp_serial_port) {
+			.baud = 9600,
+		},
+	},
+	{
+		OCP_SERIAL_RESOURCE(port[PORT_MAC]),
+		.offset = 0x00180000 + 0x1000, .irq_vec = 5,
+		.extra = &(struct ptp_ocp_serial_port) {
+			.baud = 115200,
+		},
+	},
+	{
+		OCP_MEM_RESOURCE(freq_in[0]),
+		.offset = 0x01200000, .size = 0x10000,
+	},
+	{
+		OCP_MEM_RESOURCE(freq_in[1]),
+		.offset = 0x01210000, .size = 0x10000,
+	},
+	{
+		OCP_MEM_RESOURCE(freq_in[2]),
+		.offset = 0x01220000, .size = 0x10000,
+	},
+	{
+		OCP_MEM_RESOURCE(freq_in[3]),
+		.offset = 0x01230000, .size = 0x10000,
+	},
+	{
+		OCP_SPI_RESOURCE(spi_flash),
+		.offset = 0x00310000, .size = 0x10000, .irq_vec = 9,
+		.extra = &(struct ptp_ocp_flash_info) {
+			.name = "xilinx_spi", .pci_offset = 0,
+			.data_size = sizeof(struct xspi_platform_data),
+			.data = &(struct xspi_platform_data) {
+				.num_chipselect = 1,
+				.bits_per_word = 8,
+				.num_devices = 1,
+				.force_irq = true,
+				.devices = &(struct spi_board_info) {
+					.modalias = "spi-nor",
+				},
+			},
+		},
+	},
+	{
+		OCP_I2C_RESOURCE(i2c_ctrl),
+		.offset = 0x00150000, .size = 0x10000, .irq_vec = 7,
+		.extra = &(struct ptp_ocp_i2c_info) {
+			.name = "xiic-i2c",
+			.fixed_rate = 50000000,
+			.data_size = sizeof(struct xiic_i2c_platform_data),
+			.data = &(struct xiic_i2c_platform_data) {
+				.num_devices = 2,
+				.devices = (struct i2c_board_info[]) {
+					{ I2C_BOARD_INFO("24c02", 0x50) },
+					{ I2C_BOARD_INFO("24mac402", 0x58),
+					  .platform_data = "mac" },
+				},
+			},
+		},
+	},
+	{
+		.setup = ptp_ocp_adva_board_init,
+		.extra = &(struct ptp_ocp_adva_info) {
+			.servo = {
+				.servo_offset_p = 0xc000,
+				.servo_offset_i = 0x1000,
+				.servo_drift_p = 0,
+				.servo_drift_i = 0,
+			},
+			.flash_start  = 0x1000000,
+			.sma_op       = &ocp_adva_x1_sma_op,
+			.signals_nr   = 4,
+			.freq_in_nr   = 4,
+			.attr_groups  = adva_timecard_x1_groups,
+			.has_cpld     = true,
 		},
 	},
 	{ }
 };
 
 static const struct pci_device_id ptp_ocp_pcidev_id[] = {
-	{ PCI_DEVICE_DATA(FACEBOOK, TIMECARD, &ocp_fb_resource) },
+	{ PCI_DEVICE_DATA(META, TIMECARD, &ocp_fb_resource) },
 	{ PCI_DEVICE_DATA(CELESTICA, TIMECARD, &ocp_fb_resource) },
 	{ PCI_DEVICE_DATA(OROLIA, ARTCARD, &ocp_art_resource) },
 	{ PCI_DEVICE_DATA(ADVA, TIMECARD, &ocp_adva_resource) },
+	{ PCI_DEVICE_DATA(ADVA, TIMECARD_X1, &ocp_adva_x1_resource) },
 	{ }
 };
 MODULE_DEVICE_TABLE(pci, ptp_ocp_pcidev_id);
 
 static DEFINE_MUTEX(ptp_ocp_lock);
 static DEFINE_IDR(ptp_ocp_idr);
-
-struct ocp_selector {
-	const char *name;
-	int value;
-	u64 frequency;
-};
 
 static const struct ocp_selector ptp_ocp_clock[] = {
 	{ .name = "NONE",	.value = 0 },
@@ -1136,12 +1420,32 @@ static const struct ocp_selector ptp_ocp_adva_sma_out[] = {
 	{ }
 };
 
-struct ocp_sma_op {
-	const struct ocp_selector *tbl[2];
-	void (*init)(struct ptp_ocp *bp);
-	u32 (*get)(struct ptp_ocp *bp, int sma_nr);
-	int (*set_inputs)(struct ptp_ocp *bp, int sma_nr, u32 val);
-	int (*set_output)(struct ptp_ocp *bp, int sma_nr, u32 val);
+static const struct ocp_selector ptp_ocp_adva_x1_sma_in[] = {
+	{ .name = "PPS1",	.value = 0x0001,      .frequency = 1 },
+	{ .name = "TS1",	.value = 0x0004,      .frequency = 0 },
+	{ .name = "TS2",	.value = 0x0008,      .frequency = 0 },
+	{ .name = "TS3",    .value = 0x0040,      .frequency = 0 },
+	{ .name = "TS4",    .value = 0x0080,      .frequency = 0 },
+	{ .name = "FREQ1",	.value = 0x0100,      .frequency = 0 },
+	{ .name = "FREQ2",	.value = 0x0200,      .frequency = 0 },
+	{ .name = "FREQ3",  .value = 0x0400,      .frequency = 0 },
+	{ .name = "FREQ4",  .value = 0x0800,      .frequency = 0 },
+	{ .name = "None",	.value = SMA_DISABLE, .frequency = 0 },
+	{ }
+};
+
+static const struct ocp_selector ptp_ocp_adva_x1_sma_out[] = {
+	{ .name = "10Mhz",	.value = 0x0000,  .frequency = 10000000},
+	{ .name = "PHC",	.value = 0x0001,  .frequency = 1 },
+	{ .name = "MAC",	.value = 0x0002,  .frequency = 1 },
+	{ .name = "GNSS1",	.value = 0x0004,  .frequency = 1 },
+	{ .name = "GEN1",	.value = 0x0040 },
+	{ .name = "GEN2",	.value = 0x0080 },
+	{ .name = "GEN3",	.value = 0x0100 },
+	{ .name = "GEN4",	.value = 0x0200 },
+	{ .name = "GND",	.value = 0x2000 },
+	{ .name = "VCC",	.value = 0x4000 },
+	{ }
 };
 
 static void
@@ -1227,11 +1531,8 @@ __ptp_ocp_gettime_locked(struct ptp_ocp *bp, struct timespec64 *ts,
 	}
 	ptp_read_system_postts(sts);
 
-	if (sts && bp->ts_window_adjust) {
-		s64 ns = timespec64_to_ns(&sts->post_ts);
-
-		sts->post_ts = ns_to_timespec64(ns - bp->ts_window_adjust);
-	}
+	if (sts && bp->ts_window_adjust)
+		sts->post_sts.systime -= bp->ts_window_adjust;
 
 	time_ns = ioread32(&bp->reg->time_ns);
 	time_sec = ioread32(&bp->reg->time_sec);
@@ -1564,7 +1865,7 @@ ptp_ocp_watchdog(struct timer_list *t)
 static void
 ptp_ocp_estimate_pci_timing(struct ptp_ocp *bp)
 {
-	ktime_t start, end, delay = U64_MAX;
+	ktime_t start, end, delay = KTIME_MAX;
 	u32 ctrl;
 	int i;
 
@@ -1872,6 +2173,21 @@ ptp_ocp_devlink_flash_update(struct devlink *devlink,
 	const char *msg;
 	int err;
 
+	if (params->component) {
+		if (!bp->has_cpld ||
+		    strcmp(params->component, ADVA_CPLD_COMPONENT)) {
+			NL_SET_ERR_MSG_MOD(extack,
+					   "unsupported flash component");
+			return -EOPNOTSUPP;
+		}
+
+		err = adva_x1_cpld_flash(bp, devlink, params->fw, extack);
+		msg = err ? "Flash error" : "Flash complete";
+		devlink_flash_update_status_notify(devlink, msg,
+						   ADVA_CPLD_COMPONENT, 0, 0);
+		return err;
+	}
+
 	dev = ptp_ocp_find_flash(bp);
 	if (!dev) {
 		dev_err(&bp->pdev->dev, "Can't find Flash SPI adapter\n");
@@ -1894,16 +2210,52 @@ static int
 ptp_ocp_devlink_info_get(struct devlink *devlink, struct devlink_info_req *req,
 			 struct netlink_ext_ack *extack)
 {
+	enum devlink_info_version_type ver_type =
+					DEVLINK_INFO_VERSION_TYPE_COMPONENT;
 	struct ptp_ocp *bp = devlink_priv(devlink);
 	const char *fw_image;
 	char buf[32];
 	int err;
+	u32 id;
 
 	fw_image = bp->fw_loader ? "loader" : "fw";
 	sprintf(buf, "%d.%d", bp->fw_tag, bp->fw_version);
 	err = devlink_info_version_running_put(req, fw_image, buf);
 	if (err)
 		return err;
+
+	if (bp->has_cpld) {
+		/* Read by the worker, not here: this command is unprivileged
+		 * and reading the ID claims the I2C bus.  0 means unread -
+		 * skip it rather than fail, devlink discards the whole reply
+		 * on error.
+		 */
+		id = READ_ONCE(bp->cpld_id);
+		if (id) {
+			sprintf(buf, "0x%08x", id);
+			err = devlink_info_version_fixed_put(req, "cpld.id",
+							     buf);
+			if (err)
+				return err;
+		}
+
+		/* The flashable component.  Naming it here is what lets
+		 * "devlink dev flash ... component fw.cpld" through, as the
+		 * core matches the name against the versions reported here,
+		 * so it is reported for every board that has the part and not
+		 * only once its USERCODE has been read: a part left holding a
+		 * bad image answers neither, and gating the component on the
+		 * read would make that state unrecoverable.
+		 */
+		if (smp_load_acquire(&bp->cpld_usercode_ok))
+			sprintf(buf, "0x%08x", READ_ONCE(bp->cpld_usercode));
+		else
+			strscpy(buf, "unknown", sizeof(buf));
+		err = devlink_info_version_running_put_ext(req, "fw.cpld", buf,
+							   ver_type);
+		if (err)
+			return err;
+	}
 
 	if (!bp->has_eeprom_data) {
 		ptp_ocp_read_eeprom(bp);
@@ -1916,9 +2268,11 @@ ptp_ocp_devlink_info_get(struct devlink *devlink, struct devlink_info_req *req,
 	if (err)
 		return err;
 
+	snprintf(buf, sizeof(buf), "%.*s", OCP_BOARD_ID_LEN,
+		 (const char *)bp->board_id);
 	err = devlink_info_version_fixed_put(req,
 			DEVLINK_INFO_VERSION_GENERIC_BOARD_ID,
-			bp->board_id);
+			buf);
 	if (err)
 		return err;
 
@@ -2215,8 +2569,13 @@ ptp_ocp_ts_enable(void *priv, u32 req, bool enable)
 		iowrite32(1, &reg->intr_mask);
 		iowrite32(1, &reg->intr);
 	} else {
+		int irq_vec = pci_irq_vector(bp->pdev, ext->irq_vec);
+
 		iowrite32(0, &reg->intr_mask);
 		iowrite32(0, &reg->enable);
+		ioread32(&reg->intr_mask);
+		if (irq_vec > 0)
+			synchronize_irq(irq_vec);
 	}
 
 	return 0;
@@ -2225,6 +2584,9 @@ ptp_ocp_ts_enable(void *priv, u32 req, bool enable)
 static void
 ptp_ocp_unregister_ext(struct ptp_ocp_ext_src *ext)
 {
+	if (!ext)
+		return;
+
 	ext->info->enable(ext, ~0, false);
 	pci_free_irq(ext->bp->pdev, ext->irq_vec, ext);
 	kfree(ext);
@@ -2237,7 +2599,7 @@ ptp_ocp_register_ext(struct ptp_ocp *bp, struct ocp_resource *r)
 	struct ptp_ocp_ext_src *ext;
 	int err;
 
-	ext = kzalloc(sizeof(*ext), GFP_KERNEL);
+	ext = kzalloc_obj(*ext);
 	if (!ext)
 		return -ENOMEM;
 
@@ -2267,7 +2629,7 @@ out:
 	return err;
 }
 
-static int
+static struct uart_8250_port *
 ptp_ocp_serial_line(struct ptp_ocp *bp, struct ocp_resource *r)
 {
 	struct pci_dev *pdev = bp->pdev;
@@ -2295,9 +2657,11 @@ ptp_ocp_register_serial(struct ptp_ocp *bp, struct ocp_resource *r)
 	struct ptp_ocp_serial_port *p = (struct ptp_ocp_serial_port *)r->extra;
 	struct ptp_ocp_serial_port port = {};
 
-	port.line = ptp_ocp_serial_line(bp, r);
-	if (port.line < 0)
-		return port.line;
+	struct uart_8250_port *uport = ptp_ocp_serial_line(bp, r);
+	if (IS_ERR(uport))
+		return PTR_ERR(uport);
+
+	port.uport = uport;
 
 	if (p)
 		port.baud = p->baud;
@@ -2374,8 +2738,7 @@ ptp_ocp_attr_group_add(struct ptp_ocp *bp,
 		if (attr_tbl[i].cap & bp->fw_cap)
 			count++;
 
-	bp->attr_group = kcalloc(count + 1, sizeof(*bp->attr_group),
-				 GFP_KERNEL);
+	bp->attr_group = kzalloc_objs(*bp->attr_group, count + 1);
 	if (!bp->attr_group)
 		return -ENOMEM;
 
@@ -2636,13 +2999,21 @@ static const struct ocp_sma_op ocp_adva_sma_op = {
 	.set_output	= ptp_ocp_sma_adva_set_output,
 };
 
+static const struct ocp_sma_op ocp_adva_x1_sma_op = {
+	.tbl		= { ptp_ocp_adva_x1_sma_in, ptp_ocp_adva_x1_sma_out },
+	.init		= ptp_ocp_sma_fb_init,
+	.get		= ptp_ocp_sma_fb_get,
+	.set_inputs	= ptp_ocp_sma_adva_set_inputs,
+	.set_output	= ptp_ocp_sma_adva_set_output,
+};
+
 static int
 ptp_ocp_set_pins(struct ptp_ocp *bp)
 {
 	struct ptp_pin_desc *config;
 	int i;
 
-	config = kcalloc(4, sizeof(*config), GFP_KERNEL);
+	config = kzalloc_objs(*config, 4);
 	if (!config)
 		return -ENOMEM;
 
@@ -2884,18 +3255,19 @@ ptp_ocp_art_board_init(struct ptp_ocp *bp, struct ocp_resource *r)
 	return ptp_ocp_init_clock(bp, r->extra);
 }
 
-/* ADVA specific board initializers; last "resource" registered. */
+/* ADVA board initializer; variant differences come from r->extra. */
 static int
 ptp_ocp_adva_board_init(struct ptp_ocp *bp, struct ocp_resource *r)
 {
-	int err;
+	struct ptp_ocp_adva_info *info = r->extra;
 	u32 version;
+	int err;
 
-	bp->flash_start = 0xA00000;
-	bp->eeprom_map = fb_eeprom_map;
-	bp->sma_op = &ocp_adva_sma_op;
-	bp->signals_nr = 2;
-	bp->freq_in_nr = 2;
+	bp->flash_start = info->flash_start;
+	bp->eeprom_map  = fb_eeprom_map;
+	bp->sma_op      = info->sma_op;
+	bp->signals_nr  = info->signals_nr;
+	bp->freq_in_nr  = info->freq_in_nr;
 
 	version = ioread32(&bp->image->version);
 	/* if lower 16 bits are empty, this is the fw loader. */
@@ -2903,15 +3275,15 @@ ptp_ocp_adva_board_init(struct ptp_ocp *bp, struct ocp_resource *r)
 		version = version >> 16;
 		bp->fw_loader = true;
 	}
-	bp->fw_tag = 3;
+	bp->fw_tag     = 3;
 	bp->fw_version = version & 0xffff;
-	bp->fw_cap = OCP_CAP_BASIC | OCP_CAP_SIGNAL | OCP_CAP_FREQ;
+	bp->fw_cap     = OCP_CAP_BASIC | OCP_CAP_SIGNAL | OCP_CAP_FREQ;
 
 	ptp_ocp_tod_init(bp);
 	ptp_ocp_nmea_out_init(bp);
 	ptp_ocp_signal_init(bp);
 
-	err = ptp_ocp_attr_group_add(bp, adva_timecard_groups);
+	err = ptp_ocp_attr_group_add(bp, info->attr_groups);
 	if (err)
 		return err;
 
@@ -2920,7 +3292,9 @@ ptp_ocp_adva_board_init(struct ptp_ocp *bp, struct ocp_resource *r)
 		return err;
 	ptp_ocp_sma_init(bp);
 
-	return ptp_ocp_init_clock(bp, r->extra);
+	bp->has_cpld = info->has_cpld;
+
+	return ptp_ocp_init_clock(bp, &info->servo);
 }
 
 static ssize_t
@@ -3250,20 +3624,16 @@ signal_show(struct device *dev, struct device_attribute *attr, char *buf)
 	struct dev_ext_attribute *ea = to_ext_attr(attr);
 	struct ptp_ocp *bp = dev_get_drvdata(dev);
 	struct ptp_ocp_signal *signal;
+	int gen = (uintptr_t)ea->var;
 	struct timespec64 ts;
-	ssize_t count;
-	int i;
 
-	i = (uintptr_t)ea->var;
-	signal = &bp->signal[i];
-
-	count = sysfs_emit(buf, "%llu %d %llu %d", signal->period,
-			   signal->duty, signal->phase, signal->polarity);
+	signal = &bp->signal[gen];
 
 	ts = ktime_to_timespec64(signal->start);
-	count += sysfs_emit_at(buf, count, " %ptT TAI\n", &ts);
 
-	return count;
+	return sysfs_emit(buf, "%llu %d %llu %d %ptT TAI\n",
+			  signal->period, signal->duty, signal->phase, signal->polarity,
+			  &ts.tv_sec);
 }
 static EXT_ATTR_RW(signal, signal, 0);
 static EXT_ATTR_RW(signal, signal, 1);
@@ -3430,7 +3800,13 @@ ptp_ocp_tty_show(struct device *dev, struct device_attribute *attr, char *buf)
 	struct dev_ext_attribute *ea = to_ext_attr(attr);
 	struct ptp_ocp *bp = dev_get_drvdata(dev);
 
-	return sysfs_emit(buf, "ttyS%d", bp->port[(uintptr_t)ea->var].line);
+	/*
+	 * NOTE: This output does not include a trailing newline for backward
+	 * compatibility. Existing userspace software uses this value directly
+	 * as a device path (e.g., "/dev/ttyS4"), and adding a newline would
+	 * break those applications. Do not add a newline to this output.
+	 */
+	return sysfs_emit(buf, "ttyS%d", bp->port[(uintptr_t)ea->var].uport->port.line);
 }
 
 static umode_t
@@ -3447,7 +3823,7 @@ ptp_ocp_timecard_tty_is_visible(struct kobject *kobj, struct attribute *attr, in
 	dattr = container_of(attr, struct device_attribute, attr);
 	ea = container_of(dattr, struct dev_ext_attribute, attr);
 	port = &bp->port[(uintptr_t)ea->var];
-	return port->line == -1 ? 0 : 0444;
+	return port->uport ? 0444 : 0;
 }
 
 #define EXT_TTY_ATTR_RO(_name, _val)			\
@@ -3945,6 +4321,794 @@ static const struct ocp_attr_group art_timecard_groups[] = {
 	{ },
 };
 
+/*
+ * adva_x1 TAP CPLD (Lattice LCMXO3LF-2100) helpers.
+ *
+ * The card has two I2C controllers; Linux registers only 0x00150000.
+ * The i2c_bus_ctrl handshake re-routes what each is wired to:
+ *
+ *   grant 0:  0x150000 -> EEPROMs     0x120000 -> TMC or M.2, MB's choice
+ *   grant 1:  0x150000 -> TMC bus     0x120000 -> M.2
+ *
+ * The PCA9548 at 0x74 and the CPLD at 0x40 behind its channel 0 are on the
+ * TMC bus, reachable only while the grant is held.  The EEPROMs are not
+ * behind the adapter for that window, so a CPLD operation holds cpld_lock
+ * and the adapter lock to keep the EEPROM and nvmem paths off it.
+ */
+
+#define ADVA_MUX_ADDR     0x74
+#define ADVA_CPLD_ADDR    0x40
+#define ADVA_MUX_CHANNEL  0
+
+/* Longest command or reply; bounds each half of the per-claim scratch. */
+#define ADVA_CPLD_XFER_MAX 32
+
+/* i2c_bus_ctrl carries a host-written request half and a firmware-written
+ * grant half.  MBLAZE_GRANTED is what a granted register reads while our
+ * request still stands; the release write clears the request half, so from
+ * then on only the grant field can be tested.  Measured on an ADVA
+ * TimeCard X1: the register reads 0x00000012 once the firmware has handed
+ * the segment back, about 670 ms after the release write, so the low half
+ * is not zero then and only the grant field is a valid test.
+ */
+#define MBLAZE_REQUEST    0x0000aaaaU
+#define MBLAZE_GRANTED    0x5555aaaaU
+#define MBLAZE_RELEASE    0x55550000U
+#define MBLAZE_GRANT_MASK 0xffff0000U
+#define MBLAZE_GRANT      0x55550000U
+#define MBLAZE_RETRIES    200
+#define MBLAZE_RETRY_US   10000
+
+/* Lattice LCMXO3LF ISC command codes */
+#define CPLD_CMD_READ_ID      0xE0000000UL
+/* The USERCODE lives in the configuration flash that ERASE wipes, and the
+ * page writes carry it: after programming an image whose JEDEC UH field is
+ * 0x00000004 the part reads back 0x00000004, not an erased value.  So there
+ * is no separate ISC_PROGRAM_USERCODE step here.
+ */
+#define CPLD_CMD_READ_USERCODE 0xC0000000UL
+#define CPLD_CMD_READ_STATUS  0x3C000000UL
+#define CPLD_CMD_EN_CFG_TP    0x74   /* enable config, transparent mode */
+#define CPLD_CMD_DIS_CFG      0x26
+#define CPLD_CMD_ERASE        0x0E
+#define CPLD_CMD_RESET_ADDR   0x46
+#define CPLD_CMD_WRITE_PAGE   0x70
+#define CPLD_CMD_SET_DONE     0x5E
+#define CPLD_CMD_REFRESH      0x79
+#define CPLD_PAGE_SIZE        16
+#define CPLD_POLL_US          10000  /* status poll interval while busy */
+/* Bounds how long a claim can hold the i2c root lock, not image validity:
+ * far above any bitstream this part takes.
+ */
+#define CPLD_MAX_IMAGE_SZ     (256 * 1024)
+#define CPLD_EXIT_CFG_TRIES   3
+#define CPLD_ERASE_MS         15000  /* config sector erase, datasheet max */
+#define CPLD_ID_MAX_ATTEMPTS  10     /* one per sync_work tick */
+
+/* Status register bit positions (Lattice LCMXO3LF datasheet) */
+#define CPLD_STATUS_DONE   BIT(8)
+#define CPLD_STATUS_ENAB   BIT(9)
+#define CPLD_STATUS_BUSY   BIT(12)
+#define CPLD_STATUS_FAILED BIT(13)
+#define CPLD_STATUS_ERR    GENMASK(25, 23)
+
+/*
+ * Issue one I2C transaction on the TMC bus: @cmd if not negative, then
+ * @wlen bytes of @wdata (NULL sends zeros), then @rlen bytes read back.
+ * The message is built in the scratch buffer from adva_x1_bus_claim(), so
+ * a run of transfers costs one allocation, not one each.  I2C_M_DMA_SAFE
+ * is not set: the two halves are not separately aligned, so let the core
+ * bounce.  Caller holds the claim, hence __i2c_transfer().
+ */
+static int adva_x1_i2c_xfer(struct ptp_ocp *bp, u8 addr, int cmd,
+			    const void *wdata, u8 wlen,
+			    void *rdata, u8 rlen)
+{
+	u8 *wbuf, *rbuf;
+	struct i2c_adapter *adap;
+	struct i2c_msg msgs[2];
+	int nmsgs = 0, ret;
+	u16 hdr = cmd >= 0;
+
+	lockdep_assert_held(&bp->cpld_lock);
+
+	adap = bp->cpld_adap;
+	if (!adap || !bp->cpld_buf)
+		return -ENODEV;
+
+	if (hdr + wlen > ADVA_CPLD_XFER_MAX || rlen > ADVA_CPLD_XFER_MAX)
+		return -EINVAL;
+
+	wbuf = bp->cpld_buf;
+	rbuf = bp->cpld_buf + ADVA_CPLD_XFER_MAX;
+
+	if (hdr + wlen) {
+		if (hdr)
+			wbuf[0] = cmd;
+		if (wdata)
+			memcpy(wbuf + hdr, wdata, wlen);
+		else
+			memset(wbuf + hdr, 0, wlen);
+		msgs[nmsgs++] = (struct i2c_msg){
+			.addr  = addr,
+			.flags = 0,
+			.len   = hdr + wlen,
+			.buf   = wbuf,
+		};
+	}
+	if (rlen) {
+		msgs[nmsgs++] = (struct i2c_msg){
+			.addr  = addr,
+			.flags = I2C_M_RD,
+			.len   = rlen,
+			.buf   = rbuf,
+		};
+	}
+
+	ret = __i2c_transfer(adap, msgs, nmsgs);
+	if (ret != nmsgs)
+		return (ret < 0) ? ret : -EIO;
+
+	if (rdata && rlen)
+		memcpy(rdata, rbuf, rlen);
+
+	return 0;
+}
+
+/* Hand the segment back, and wait for the firmware to drop the grant before
+ * the caller unlocks the adapter: a transfer queued behind us would
+ * otherwise be clocked out while the controller is still on the TMC bus,
+ * which is what holding the adapter lock across the grant exists to stop.
+ */
+static int adva_x1_mblaze_release(struct ptp_ocp *bp)
+{
+	u32 val = 0;
+	int i;
+
+	if (!bp->pps_select)
+		return 0;
+
+	iowrite32(MBLAZE_RELEASE, &bp->pps_select->i2c_bus_ctrl);
+	/* Flush the posted write, as the acquire path does. */
+	ioread32(&bp->pps_select->i2c_bus_ctrl);
+
+	for (i = 0; i < MBLAZE_RETRIES; i++) {
+		val = ioread32(&bp->pps_select->i2c_bus_ctrl);
+		if ((val & MBLAZE_GRANT_MASK) != MBLAZE_GRANT)
+			return 0;
+		usleep_range(MBLAZE_RETRY_US, MBLAZE_RETRY_US + 1000);
+	}
+
+	dev_err(&bp->pdev->dev,
+		"TMC bus still granted after release, i2c_bus_ctrl 0x%08x\n",
+		val);
+
+	return -ETIMEDOUT;
+}
+
+/* Acquire the shared I2C bus from the MicroBlaze firmware.  Returns with no
+ * request outstanding on failure, so the firmware is never left granting a
+ * segment to a host that has given up waiting for it.
+ */
+static int adva_x1_mblaze_acquire(struct ptp_ocp *bp)
+{
+	u32 val;
+	int i;
+
+	if (!bp->pps_select)
+		return -ENODEV;
+
+	/* Drop a request left by a caller that died mid-sequence; cpld_lock
+	 * keeps live ones out.  The read back only flushes the posted write.
+	 */
+	iowrite32(0, &bp->pps_select->i2c_bus_ctrl);
+	ioread32(&bp->pps_select->i2c_bus_ctrl);
+
+	iowrite32(MBLAZE_REQUEST, &bp->pps_select->i2c_bus_ctrl);
+	for (i = 0; i < MBLAZE_RETRIES; i++) {
+		usleep_range(MBLAZE_RETRY_US, MBLAZE_RETRY_US + 1000);
+		val = ioread32(&bp->pps_select->i2c_bus_ctrl);
+		if (val == MBLAZE_GRANTED)
+			return 0;
+	}
+
+	/* Drop the request we gave up on.  Any error from the hand-back is
+	 * subsumed by the -ETIMEDOUT we are already returning.
+	 */
+	adva_x1_mblaze_release(bp);
+	return -ETIMEDOUT;
+}
+
+/* Route the host controller back to the EEPROMs and release the adapter.
+ * Safe after a failed claim: it also clears a request that was never granted.
+ *
+ * The adapter is unlocked even when the hand-back timed out: keeping the
+ * root lock would stall every other user of the controller for good, with
+ * no way to recover it.  The error is returned instead, so the operation
+ * that held the claim fails rather than reporting success over a bus that
+ * may still be routed to the TMC segment.
+ */
+static int adva_x1_bus_release(struct ptp_ocp *bp)
+{
+	struct i2c_adapter *adap = bp->cpld_adap;
+	int err;
+
+	if (!adap)
+		return 0;
+
+	err = adva_x1_mblaze_release(bp);
+	bp->cpld_adap = NULL;
+	kfree(bp->cpld_buf);
+	bp->cpld_buf = NULL;
+	i2c_unlock_bus(adap, I2C_LOCK_ROOT_ADAPTER);
+	i2c_put_adapter(adap);
+
+	return err;
+}
+
+static int adva_x1_i2c_adap_match(struct device *dev, const void *data)
+{
+	return !!i2c_verify_adapter(dev);
+}
+
+/*
+ * Cache the adapter the CPLD hangs off.  ptp_ocp_i2c_notifier_call() misses
+ * it when the i2c controller driver is already loaded: the adapter is then
+ * added from inside platform_device_register(), before bp->i2c_ctrl is set.
+ * Only direct children are searched, so a mux adapter cannot match.
+ *
+ * Called from the worker rather than once from probe: device_add() notifies
+ * before it links the device to its parent, so with asynchronous probing
+ * both the notifier and a single lookup here can miss the same adapter.
+ * Retrying costs a short klist walk per tick until one of them succeeds.
+ */
+static void adva_x1_cache_i2c_adap(struct ptp_ocp *bp)
+{
+	struct device *child;
+
+	if (!bp->has_cpld || !bp->i2c_ctrl ||
+	    READ_ONCE(bp->cpld_i2c_adap_nr) >= 0)
+		return;
+
+	child = device_find_child(&bp->i2c_ctrl->dev, NULL,
+				  adva_x1_i2c_adap_match);
+	if (!child)
+		return;
+
+	/* Re-test under the lock so this does not overwrite a number the
+	 * notifier published meanwhile.  It cannot tell that apart from a
+	 * number the notifier has just invalidated, so an adapter removed in
+	 * this window can still be cached; adva_x1_bus_claim() rejects it on
+	 * the parent check and forgets it, and the next tick looks again.
+	 */
+	scoped_guard(spinlock, &bp->cpld_adap_lock) {
+		if (bp->cpld_i2c_adap_nr < 0)
+			bp->cpld_i2c_adap_nr = i2c_verify_adapter(child)->nr;
+	}
+
+	put_device(child);
+}
+
+/*
+ * Claim the TMC bus.  The adapter lock is held across the handshake to keep
+ * the EEPROM, nvmem and at24 paths off the controller while it is routed
+ * away from the EEPROMs; an EEPROM read blocks until the claim is dropped.
+ */
+static int adva_x1_bus_claim(struct ptp_ocp *bp)
+{
+	struct i2c_adapter *adap;
+	int ret;
+
+	lockdep_assert_held(&bp->cpld_lock);
+
+	adap = i2c_get_adapter(READ_ONCE(bp->cpld_i2c_adap_nr));
+	if (!adap)
+		return -ENODEV;
+
+	/* The number is freed before the notifier clears it, so it can
+	 * already be another adapter's.  Check this is still ours, and drop
+	 * a number that is not: otherwise every later claim fails the same
+	 * way, where forgetting it lets the worker look the adapter up again.
+	 */
+	if (!bp->i2c_ctrl || adap->dev.parent != &bp->i2c_ctrl->dev) {
+		scoped_guard(spinlock, &bp->cpld_adap_lock) {
+			if (bp->cpld_i2c_adap_nr == adap->nr)
+				bp->cpld_i2c_adap_nr = -1;
+		}
+		i2c_put_adapter(adap);
+		return -ENODEV;
+	}
+
+	/* One scratch buffer per claim rather than per transfer: a claim can
+	 * cover many transfers.
+	 */
+	bp->cpld_buf = kzalloc(2 * ADVA_CPLD_XFER_MAX, GFP_KERNEL);
+	if (!bp->cpld_buf) {
+		i2c_put_adapter(adap);
+		return -ENOMEM;
+	}
+
+	i2c_lock_bus(adap, I2C_LOCK_ROOT_ADAPTER);
+	bp->cpld_adap = adap;
+
+	ret = adva_x1_mblaze_acquire(bp);
+	if (ret)
+		adva_x1_bus_release(bp);	/* keeps the acquire error */
+
+	return ret;
+}
+
+/* Select a mux channel, or deselect all with ch < 0 - the power-on state.
+ * The mux is on the TMC bus, so what it is left set to never affects the
+ * EEPROM paths.
+ */
+static int adva_x1_mux_select(struct ptp_ocp *bp, int ch)
+{
+	u8 val = (ch >= 0) ? BIT(ch) : 0;
+
+	return adva_x1_i2c_xfer(bp, ADVA_MUX_ADDR, val, NULL, 0, NULL, 0);
+}
+
+/*
+ * Argument bytes that follow an ISC opcode.  Returns NULL with @nargs set
+ * when the arguments are all zero: adva_x1_i2c_xfer() zeroes the buffer.
+ *
+ * EN_CFG_TP, DIS_CFG and REFRESH take two operand bytes here where the SPI
+ * drivers in drivers/fpga send three.  These are the frames the part on this
+ * board answers: the sequence below has programmed and refreshed it
+ * successfully over I2C, so the counts are kept as validated rather than
+ * aligned with the SPI framing.
+ */
+static const u8 *adva_x1_cpld_args(u8 cmd, u8 *nargs)
+{
+	static const u8 en_cfg_tp[] = { 0x08, 0x00 };
+	/* cfg sector only */
+	static const u8 erase_cfg[] = { 0x04, 0x00, 0x00 };
+
+	switch (cmd) {
+	case CPLD_CMD_EN_CFG_TP:
+		*nargs = sizeof(en_cfg_tp);
+		return en_cfg_tp;
+	case CPLD_CMD_ERASE:
+		*nargs = sizeof(erase_cfg);
+		return erase_cfg;
+	case CPLD_CMD_RESET_ADDR:
+	case CPLD_CMD_SET_DONE:
+		*nargs = 3;
+		return NULL;
+	case CPLD_CMD_DIS_CFG:
+	case CPLD_CMD_REFRESH:
+		*nargs = 2;
+		return NULL;
+	default:
+		*nargs = 0;
+		return NULL;
+	}
+}
+
+/* Send an ISC command with the fixed arguments that belong to it. */
+static int adva_x1_cpld_write(struct ptp_ocp *bp, u8 cmd)
+{
+	const u8 *args;
+	u8 nargs;
+
+	args = adva_x1_cpld_args(cmd, &nargs);
+
+	return adva_x1_i2c_xfer(bp, ADVA_CPLD_ADDR, cmd, args, nargs, NULL, 0);
+}
+
+/*
+ * Send a 4-byte command and read back without an intermediate STOP: two
+ * messages in one transfer is the Lattice write -> repeated START -> read,
+ * so no protocol-mangling flag is needed.
+ */
+static int adva_x1_cpld_cmd_read(struct ptp_ocp *bp,
+				 u32 cmd_be, u8 *out, u8 out_len)
+{
+	__be32 cmd = cpu_to_be32(cmd_be);
+
+	return adva_x1_i2c_xfer(bp, ADVA_CPLD_ADDR, -1, &cmd, 4, out, out_len);
+}
+
+static int adva_x1_cpld_read_status(struct ptp_ocp *bp, u32 *status)
+{
+	u8 buf[4];
+	int ret;
+
+	ret = adva_x1_cpld_cmd_read(bp, CPLD_CMD_READ_STATUS, buf, 4);
+	if (ret)
+		return ret;
+	*status = get_unaligned_be32(buf);
+	return 0;
+}
+
+/* Poll the status register until the CPLD goes idle, or @max_ms elapses.
+ * The deadline is on wall time, so the I2C transactions count against it,
+ * and the status is read once more after it expires before giving up.
+ */
+static int adva_x1_cpld_wait_ready(struct ptp_ocp *bp, unsigned int max_ms)
+{
+	u32 status = 0;
+	int err = 0, ret;
+
+	ret = read_poll_timeout(adva_x1_cpld_read_status, err,
+				err || (status & CPLD_STATUS_FAILED) ||
+				!(status & CPLD_STATUS_BUSY),
+				CPLD_POLL_US, max_ms * USEC_PER_MSEC, false,
+				bp, &status);
+	if (ret)
+		return ret;
+	/* Keep the transport errno so it reaches userspace as-is; -EIO is
+	 * reserved for the CPLD itself reporting FAILED.
+	 */
+	if (err)
+		return err;
+	if (status & CPLD_STATUS_FAILED)
+		return -EIO;
+
+	return 0;
+}
+
+/* Wait for BUSY to clear.  Unlike adva_x1_cpld_wait_ready() a latched FAILED
+ * status is not an error here: this is used on the exit path, where an ISC
+ * command issued while the part is still erasing or programming may not
+ * latch, so the operation has to be waited out whatever its outcome.
+ */
+static int adva_x1_cpld_wait_idle(struct ptp_ocp *bp, unsigned int max_ms)
+{
+	u32 status = 0;
+	int err = 0, ret;
+
+	ret = read_poll_timeout(adva_x1_cpld_read_status, err,
+				err || !(status & CPLD_STATUS_BUSY),
+				CPLD_POLL_US, max_ms * USEC_PER_MSEC, false,
+				bp, &status);
+	if (ret)
+		return ret;
+
+	return err;
+}
+
+/* Leave transparent configuration mode.
+ *
+ * A DIS_CFG issued while the part is still busy may not latch, so the wait
+ * has to succeed before the write is believed - an ACKed write after a
+ * timed-out wait says nothing about whether the part left the mode.  Retry
+ * a few times rather than leaving it latched on one bad attempt; there is
+ * no other caller that would try again.
+ */
+static void adva_x1_cpld_exit_config(struct ptp_ocp *bp)
+{
+	int err, i;
+
+	if (!bp->cpld_in_config_mode)
+		return;
+
+	for (i = 0; i < CPLD_EXIT_CFG_TRIES; i++) {
+		err = adva_x1_cpld_wait_idle(bp, CPLD_ERASE_MS);
+		if (!err)
+			err = adva_x1_cpld_write(bp, CPLD_CMD_DIS_CFG);
+		if (!err) {
+			bp->cpld_in_config_mode = false;
+			return;
+		}
+	}
+
+	dev_err(&bp->pdev->dev, "CPLD left in configuration mode: %d\n", err);
+}
+
+/*
+ * Read the Lattice device ID and the image USERCODE under one bus claim.
+ * Done once, off the unprivileged devlink path, which reports the cached
+ * values.  -EBUSY means cpld_lock is held, so the caller can retry rather
+ * than wait behind a long CPLD operation.
+ */
+static int adva_x1_cpld_read_id(struct ptp_ocp *bp)
+{
+	u8 data[4];
+	int err, ret;
+
+	if (!mutex_trylock(&bp->cpld_lock))
+		return -EBUSY;
+
+	ret = adva_x1_bus_claim(bp);
+	if (ret)
+		goto out;
+	/* A select reported as failed may still have been ACKed, so the
+	 * deselect runs either way rather than handing the mux back with a
+	 * channel possibly left open.
+	 */
+	ret = adva_x1_mux_select(bp, ADVA_MUX_CHANNEL);
+	if (ret)
+		goto deselect;
+	ret = adva_x1_cpld_cmd_read(bp, CPLD_CMD_READ_ID, data, 4);
+	if (ret)
+		goto deselect;
+	/* Publish the ID before the USERCODE is attempted: a part that does
+	 * not answer 0xC0 must not cost us the device ID as well.
+	 */
+	WRITE_ONCE(bp->cpld_id, get_unaligned_be32(data));
+
+	ret = adva_x1_cpld_cmd_read(bp, CPLD_CMD_READ_USERCODE, data, 4);
+	if (ret)
+		goto deselect;
+	WRITE_ONCE(bp->cpld_usercode, get_unaligned_be32(data));
+	/* Pairs with the acquire in ptp_ocp_devlink_info_get(): the value has
+	 * to be visible before the flag that declares it valid.
+	 */
+	smp_store_release(&bp->cpld_usercode_ok, true);
+deselect:
+	err = adva_x1_mux_select(bp, -1);
+	if (!ret)
+		ret = err;
+	err = adva_x1_bus_release(bp);
+	if (!ret)
+		ret = err;
+out:
+	/* Under cpld_lock, so an operation that resets this bookkeeping
+	 * while holding the lock cannot have it overwritten afterwards by a
+	 * worker that had already finished reading.
+	 */
+	if (!ret || ++bp->cpld_id_attempts >= CPLD_ID_MAX_ATTEMPTS)
+		bp->cpld_id_tried = true;
+	mutex_unlock(&bp->cpld_lock);
+	if (ret)
+		dev_dbg(&bp->pdev->dev,
+			"CPLD device ID unavailable: %d\n", ret);
+
+	return ret;
+}
+
+/* cpld_status - show the flags set in the TAP CPLD status register. */
+static ssize_t
+cpld_status_show(struct device *dev, struct device_attribute *attr,
+		 char *buf)
+{
+	struct ptp_ocp *bp = dev_get_drvdata(dev);
+	int count = 0;
+	u32 st = 0;
+	int err, ret;
+
+	/* A CPLD operation can hold cpld_lock a long time; stay killable. */
+	ret = mutex_lock_interruptible(&bp->cpld_lock);
+	if (ret)
+		return ret;
+
+	ret = adva_x1_bus_claim(bp);
+	if (ret)
+		goto out;
+	ret = adva_x1_mux_select(bp, ADVA_MUX_CHANNEL);
+	if (ret)
+		goto deselect;
+	ret = adva_x1_cpld_read_status(bp, &st);
+deselect:
+	err = adva_x1_mux_select(bp, -1);
+	if (!ret)
+		ret = err;
+	err = adva_x1_bus_release(bp);
+	if (!ret)
+		ret = err;
+out:
+	mutex_unlock(&bp->cpld_lock);
+	if (ret)
+		return ret;
+
+	/* Flags: the names of the bits that are set, nothing when none is,
+	 * rather than a value per bit in one file.
+	 */
+	if (st & CPLD_STATUS_DONE)
+		count += sysfs_emit_at(buf, count, "done");
+	if (st & CPLD_STATUS_BUSY)
+		count += sysfs_emit_at(buf, count, "%sbusy", count ? " " : "");
+	if (st & CPLD_STATUS_FAILED)
+		count += sysfs_emit_at(buf, count, "%sfailed",
+				       count ? " " : "");
+
+	return count + sysfs_emit_at(buf, count, "\n");
+}
+static DEVICE_ATTR_ADMIN_RO(cpld_status);
+
+/*
+ * Program the CPLD configuration flash from @fw and activate it.  Selected
+ * by the "fw.cpld" flash component; the SPI flash keeps the default path.
+ * Runs under cpld_lock with the i2c adapter lock held, so an EEPROM read
+ * blocks for as long as programming takes.
+ */
+static int adva_x1_cpld_flash(struct ptp_ocp *bp, struct devlink *devlink,
+			      const struct firmware *fw,
+			      struct netlink_ext_ack *extack)
+{
+	size_t offset;
+	int err, ret;
+	u32 st;
+
+	if (!fw->size || fw->size % CPLD_PAGE_SIZE) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "image must be a whole number of 16-byte pages");
+		return -EINVAL;
+	}
+	if (fw->size > CPLD_MAX_IMAGE_SZ) {
+		NL_SET_ERR_MSG_MOD(extack, "image too large for this part");
+		return -EINVAL;
+	}
+
+	mutex_lock(&bp->cpld_lock);
+
+	err = adva_x1_bus_claim(bp);
+	if (err)
+		goto unlock;
+	/* A select reported as failed may still have been ACKed, so hand the
+	 * mux back deselected either way.
+	 */
+	err = adva_x1_mux_select(bp, ADVA_MUX_CHANNEL);
+	if (err)
+		goto deselect;
+
+	/* A previous flash may have failed to leave configuration mode.  Now
+	 * that the bus is claimed again, retry the exit before re-entering;
+	 * a no-op when the flag is already clear.
+	 */
+	adva_x1_cpld_exit_config(bp);
+
+	/* Set before EN_CFG_TP, not after: the CPLD may have entered config
+	 * mode even if the write errors or the wait times out, and only this
+	 * makes the exit path send DIS_CFG.  A stray DIS_CFG is harmless;
+	 * leaving config mode enabled is not.
+	 */
+	bp->cpld_in_config_mode = true;
+
+	err = adva_x1_cpld_write(bp, CPLD_CMD_EN_CFG_TP);
+	if (!err)
+		err = adva_x1_cpld_wait_ready(bp, 5000);
+	if (err)
+		goto exit_config;
+
+	/* Confirm the part really entered configuration mode.  An enable
+	 * frame that did not latch leaves an idle part reporting neither
+	 * BUSY nor FAILED, the erase and page writes are ignored, and DONE
+	 * is still set from the old image - so every later check passes and
+	 * the update would be reported successful with the flash untouched.
+	 */
+	err = adva_x1_cpld_read_status(bp, &st);
+	if (err)
+		goto exit_config;
+	if (!(st & CPLD_STATUS_ENAB)) {
+		dev_err(&bp->pdev->dev,
+			"CPLD did not enter configuration mode, status 0x%08x\n",
+			st);
+		NL_SET_ERR_MSG_MOD(extack,
+				   "CPLD did not enter configuration mode");
+		err = -EIO;
+		goto exit_config;
+	}
+
+	devlink_flash_update_status_notify(devlink, "Erasing",
+					   ADVA_CPLD_COMPONENT, 0, 0);
+	err = adva_x1_cpld_write(bp, CPLD_CMD_ERASE);
+	if (!err)
+		err = adva_x1_cpld_wait_ready(bp, CPLD_ERASE_MS);
+	if (err)
+		goto exit_config;
+
+	/* The old image is gone from here on, so stop reporting its
+	 * identity even if the rest of the sequence fails.  Written under
+	 * cpld_lock, which adva_x1_cpld_read_id() also holds across its own
+	 * bookkeeping, so the worker cannot resurrect any of it.
+	 */
+	WRITE_ONCE(bp->cpld_id, 0);
+	WRITE_ONCE(bp->cpld_usercode_ok, false);
+	bp->cpld_id_tried = false;
+	bp->cpld_id_attempts = 0;
+
+	err = adva_x1_cpld_write(bp, CPLD_CMD_RESET_ADDR);
+	if (err)
+		goto exit_config;
+
+	for (offset = 0; offset < fw->size; offset += CPLD_PAGE_SIZE) {
+		u8 args[3 + CPLD_PAGE_SIZE] = { 0x00, 0x00, 0x01 };
+
+		/* The loop holds cpld_lock and the i2c root lock for the
+		 * whole image, so give a dying task a way out.  The part is
+		 * left unconfigured, which is recoverable: fw.cpld stays
+		 * advertised so the image can be written again.
+		 */
+		if (fatal_signal_pending(current)) {
+			err = -EINTR;
+			goto exit_config;
+		}
+
+		memcpy(&args[3], fw->data + offset, CPLD_PAGE_SIZE);
+		err = adva_x1_i2c_xfer(bp, ADVA_CPLD_ADDR, CPLD_CMD_WRITE_PAGE,
+				       args, sizeof(args), NULL, 0);
+		if (!err)
+			err = adva_x1_cpld_wait_ready(bp, 100);
+		if (err)
+			goto exit_config;
+
+		if (!(offset % (CPLD_PAGE_SIZE * 64)))
+			devlink_flash_update_status_notify(devlink,
+							   "Programming",
+							   ADVA_CPLD_COMPONENT,
+							   offset, fw->size);
+	}
+	devlink_flash_update_status_notify(devlink, "Programming",
+					   ADVA_CPLD_COMPONENT,
+					   fw->size, fw->size);
+
+	err = adva_x1_cpld_write(bp, CPLD_CMD_SET_DONE);
+	if (!err)
+		err = adva_x1_cpld_wait_ready(bp, 1000);
+	if (err)
+		goto exit_config;
+
+	err = adva_x1_cpld_read_status(bp, &st);
+	if (err)
+		goto exit_config;
+	if (!(st & CPLD_STATUS_DONE)) {
+		dev_err(&bp->pdev->dev,
+			"CPLD SET_DONE left status 0x%08x\n", st);
+		NL_SET_ERR_MSG_MOD(extack, "CPLD did not accept the image");
+		err = -EIO;
+		goto exit_config;
+	}
+
+	devlink_flash_update_status_notify(devlink, "Activating",
+					   ADVA_CPLD_COMPONENT, 0, 0);
+	err = adva_x1_cpld_write(bp, CPLD_CMD_REFRESH);
+	if (err)
+		goto exit_config;
+
+	/* REFRESH reboots the CPLD out of configuration mode, so the exit
+	 * path must not send DIS_CFG afterwards even if a check below fails.
+	 */
+	bp->cpld_in_config_mode = false;
+
+	/* The new image is already running, so a segment that is not back
+	 * yet must not be reported as a failed update: retry the reselect
+	 * rather than sampling the mux once at a fixed delay.
+	 */
+	msleep(1500);
+	err = read_poll_timeout(adva_x1_mux_select, err, !err, CPLD_POLL_US,
+				3000 * USEC_PER_MSEC, false,
+				bp, ADVA_MUX_CHANNEL);
+	if (err)
+		goto deselect;
+
+	err = adva_x1_cpld_wait_ready(bp, 3000);
+	if (err)
+		goto deselect;
+
+	/* Require DONE set, not busy and no error code, as machxo2-spi.c does
+	 * after a refresh: without it a CRC or preamble error reads back as a
+	 * successful update.
+	 */
+	err = adva_x1_cpld_read_status(bp, &st);
+	if (err)
+		goto deselect;
+	if (!(st & CPLD_STATUS_DONE) || (st & CPLD_STATUS_BUSY) ||
+	    (st & CPLD_STATUS_ERR)) {
+		dev_err(&bp->pdev->dev,
+			"CPLD refresh left status 0x%08x\n", st);
+		NL_SET_ERR_MSG_MOD(extack, "CPLD did not come back configured");
+		err = -EIO;
+		goto deselect;
+	}
+
+exit_config:
+	adva_x1_cpld_exit_config(bp);
+deselect:
+	ret = adva_x1_mux_select(bp, -1);
+	if (!err)
+		err = ret;
+	ret = adva_x1_bus_release(bp);
+	if (!err)
+		err = ret;
+unlock:
+	mutex_unlock(&bp->cpld_lock);
+
+	return err;
+}
+
 static struct attribute *adva_timecard_attrs[] = {
 	&dev_attr_serialnum.attr,
 	&dev_attr_gnss_sync.attr,
@@ -3974,6 +5138,44 @@ static const struct ocp_attr_group adva_timecard_groups[] = {
 	{ .cap = OCP_CAP_SIGNAL,    .group = &fb_timecard_signal1_group },
 	{ .cap = OCP_CAP_FREQ,	    .group = &fb_timecard_freq0_group },
 	{ .cap = OCP_CAP_FREQ,	    .group = &fb_timecard_freq1_group },
+	{ },
+};
+
+static struct attribute *adva_timecard_x1_attrs[] = {
+	&dev_attr_serialnum.attr,
+	&dev_attr_gnss_sync.attr,
+	&dev_attr_clock_source.attr,
+	&dev_attr_available_clock_sources.attr,
+	&dev_attr_sma1.attr,
+	&dev_attr_sma2.attr,
+	&dev_attr_sma3.attr,
+	&dev_attr_sma4.attr,
+	&dev_attr_available_sma_inputs.attr,
+	&dev_attr_available_sma_outputs.attr,
+	&dev_attr_clock_status_drift.attr,
+	&dev_attr_clock_status_offset.attr,
+	&dev_attr_ts_window_adjust.attr,
+	&dev_attr_utc_tai_offset.attr,
+	&dev_attr_tod_correction.attr,
+	&dev_attr_cpld_status.attr,
+	NULL,
+};
+
+static const struct attribute_group adva_timecard_x1_group = {
+	.attrs = adva_timecard_x1_attrs,
+};
+
+static const struct ocp_attr_group adva_timecard_x1_groups[] = {
+	{ .cap = OCP_CAP_BASIC,	    .group = &adva_timecard_x1_group },
+	{ .cap = OCP_CAP_BASIC,	    .group = &ptp_ocp_timecard_tty_group },
+	{ .cap = OCP_CAP_SIGNAL,    .group = &fb_timecard_signal0_group },
+	{ .cap = OCP_CAP_SIGNAL,    .group = &fb_timecard_signal1_group },
+	{ .cap = OCP_CAP_SIGNAL,    .group = &fb_timecard_signal2_group },
+	{ .cap = OCP_CAP_SIGNAL,    .group = &fb_timecard_signal3_group },
+	{ .cap = OCP_CAP_FREQ,	    .group = &fb_timecard_freq0_group },
+	{ .cap = OCP_CAP_FREQ,	    .group = &fb_timecard_freq1_group },
+	{ .cap = OCP_CAP_FREQ,	    .group = &fb_timecard_freq2_group },
+	{ .cap = OCP_CAP_FREQ,	    .group = &fb_timecard_freq3_group },
 	{ },
 };
 
@@ -4087,9 +5289,9 @@ ptp_ocp_summary_show(struct seq_file *s, void *data)
 
 	seq_printf(s, "%7s: /dev/ptp%d\n", "PTP", ptp_clock_index(bp->ptp));
 	for (i = 0; i < __PORT_COUNT; i++) {
-		if (bp->port[i].line != -1)
+		if (bp->port[i].uport)
 			seq_printf(s, "%7s: /dev/ttyS%d\n", ptp_ocp_tty_port_name(i),
-				   bp->port[i].line);
+				   bp->port[i].uport->port.line);
 	}
 
 	memset(sma_val, 0xff, sizeof(sma_val));
@@ -4281,17 +5483,15 @@ ptp_ocp_summary_show(struct seq_file *s, void *data)
 		struct timespec64 sys_ts;
 		s64 pre_ns, post_ns, ns;
 
-		pre_ns = timespec64_to_ns(&sts.pre_ts);
-		post_ns = timespec64_to_ns(&sts.post_ts);
+		pre_ns = ktime_to_ns(sts.pre_sts.systime);
+		post_ns = ktime_to_ns(sts.post_sts.systime);
 		ns = (pre_ns + post_ns) / 2;
 		ns += (s64)bp->utc_tai_offset * NSEC_PER_SEC;
 		sys_ts = ns_to_timespec64(ns);
 
-		seq_printf(s, "%7s: %lld.%ld == %ptT TAI\n", "PHC",
-			   ts.tv_sec, ts.tv_nsec, &ts);
-		seq_printf(s, "%7s: %lld.%ld == %ptT UTC offset %d\n", "SYS",
-			   sys_ts.tv_sec, sys_ts.tv_nsec, &sys_ts,
-			   bp->utc_tai_offset);
+		seq_printf(s, "%7s: %ptSp == %ptS TAI\n", "PHC", &ts, &ts);
+		seq_printf(s, "%7s: %ptSp == %ptS UTC offset %d\n", "SYS",
+			   &sys_ts, &sys_ts, bp->utc_tai_offset);
 		seq_printf(s, "%7s: PHC:SYS offset: %lld  window: %lld\n", "",
 			   timespec64_to_ns(&ts) - ns,
 			   post_ns - pre_ns);
@@ -4415,7 +5615,7 @@ ptp_ocp_device_init(struct ptp_ocp *bp, struct pci_dev *pdev)
 	spin_lock_init(&bp->lock);
 
 	for (i = 0; i < __PORT_COUNT; i++)
-		bp->port[i].line = -1;
+		bp->port[i].uport = NULL;
 
 	bp->pdev = pdev;
 
@@ -4499,16 +5699,15 @@ ptp_ocp_phc_info(struct ptp_ocp *bp)
 		 ptp_clock_index(bp->ptp));
 
 	if (!ptp_ocp_gettimex(&bp->ptp_info, &ts, NULL))
-		dev_info(&bp->pdev->dev, "Time: %lld.%ld, %s\n",
-			 ts.tv_sec, ts.tv_nsec,
-			 bp->sync ? "in-sync" : "UNSYNCED");
+		dev_info(&bp->pdev->dev, "Time: %ptSp, %s\n",
+			 &ts, bp->sync ? "in-sync" : "UNSYNCED");
 }
 
 static void
-ptp_ocp_serial_info(struct device *dev, const char *name, int port, int baud)
+ptp_ocp_serial_info(struct device *dev, const char *name, struct uart_8250_port *port, int baud)
 {
-	if (port != -1)
-		dev_info(dev, "%5s: /dev/ttyS%-2d @ %6d\n", name, port, baud);
+	if (port)
+		dev_info(dev, "%5s: /dev/ttyS%-2d @ %6d\n", name, port->port.line, baud);
 }
 
 static void
@@ -4526,14 +5725,14 @@ ptp_ocp_info(struct ptp_ocp *bp)
 	ptp_ocp_phc_info(bp);
 
 	for (i = 0; i < __PORT_COUNT; i++) {
-		if (i == PORT_NMEA && bp->nmea_out && bp->port[PORT_NMEA].line != -1) {
+		if (i == PORT_NMEA && bp->nmea_out && bp->port[PORT_NMEA].uport) {
 			bp->port[PORT_NMEA].baud = -1;
 
 			reg = ioread32(&bp->nmea_out->uart_baud);
 			if (reg < ARRAY_SIZE(nmea_baud))
 				bp->port[PORT_NMEA].baud = nmea_baud[reg];
 		}
-		ptp_ocp_serial_info(dev, ptp_ocp_tty_port_name(i), bp->port[i].line,
+		ptp_ocp_serial_info(dev, ptp_ocp_tty_port_name(i), bp->port[i].uport,
 				    bp->port[i].baud);
 	}
 }
@@ -4556,33 +5755,40 @@ ptp_ocp_detach(struct ptp_ocp *bp)
 	ptp_ocp_detach_sysfs(bp);
 	ptp_ocp_attr_group_del(bp);
 	timer_delete_sync(&bp->watchdog);
+	/* Disable interrupts on all timestampers */
 	if (bp->ts0)
-		ptp_ocp_unregister_ext(bp->ts0);
+		ptp_ocp_ts_enable(bp->ts0, 0, false);
 	if (bp->ts1)
-		ptp_ocp_unregister_ext(bp->ts1);
+		ptp_ocp_ts_enable(bp->ts1, 0, false);
 	if (bp->ts2)
-		ptp_ocp_unregister_ext(bp->ts2);
+		ptp_ocp_ts_enable(bp->ts2, 0, false);
 	if (bp->ts3)
-		ptp_ocp_unregister_ext(bp->ts3);
+		ptp_ocp_ts_enable(bp->ts3, 0, false);
 	if (bp->ts4)
-		ptp_ocp_unregister_ext(bp->ts4);
+		ptp_ocp_ts_enable(bp->ts4, 0, false);
 	if (bp->pps)
-		ptp_ocp_unregister_ext(bp->pps);
+		ptp_ocp_ts_enable(bp->pps, ~0, false);
+	if (bp->ptp)
+		ptp_clock_unregister(bp->ptp);
+	kfree(bp->ptp_info.pin_config);
+	ptp_ocp_unregister_ext(bp->ts0);
+	ptp_ocp_unregister_ext(bp->ts1);
+	ptp_ocp_unregister_ext(bp->ts2);
+	ptp_ocp_unregister_ext(bp->ts3);
+	ptp_ocp_unregister_ext(bp->ts4);
+	ptp_ocp_unregister_ext(bp->pps);
 	for (i = 0; i < 4; i++)
-		if (bp->signal_out[i])
-			ptp_ocp_unregister_ext(bp->signal_out[i]);
+		ptp_ocp_unregister_ext(bp->signal_out[i]);
 	for (i = 0; i < __PORT_COUNT; i++)
-		if (bp->port[i].line != -1)
-			serial8250_unregister_port(bp->port[i].line);
+		if (bp->port[i].uport)
+			serial8250_unregister_port(bp->port[i].uport);
 	platform_device_unregister(bp->spi_flash);
 	platform_device_unregister(bp->i2c_ctrl);
 	if (bp->i2c_clk)
 		clk_hw_unregister_fixed_rate(bp->i2c_clk);
 	if (bp->n_irqs)
 		pci_free_irq_vectors(bp->pdev);
-	if (bp->ptp)
-		ptp_clock_unregister(bp->ptp);
-	kfree(bp->ptp_info.pin_config);
+	mutex_destroy(&bp->cpld_lock);
 	device_unregister(&bp->dev);
 }
 
@@ -4731,6 +5937,17 @@ ptp_ocp_sync_work(struct work_struct *work)
 
 	bp->sync = sync;
 
+	/* Resolve the adapter here rather than once in probe, where it can
+	 * race the adapter's own registration, and read the ID as soon as it
+	 * turns up.  A claim can fail transiently - the firmware may not
+	 * grant the segment straight after power-up - so adva_x1_cpld_read_id()
+	 * retries a bounded number of times before giving up.
+	 */
+	adva_x1_cache_i2c_adap(bp);
+	if (bp->has_cpld && !READ_ONCE(bp->cpld_id_tried) &&
+	    READ_ONCE(bp->cpld_i2c_adap_nr) >= 0)
+		adva_x1_cpld_read_id(bp);
+
 	queue_delayed_work(system_power_efficient_wq, &bp->sync_work, HZ);
 }
 
@@ -4758,6 +5975,15 @@ ptp_ocp_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	err = ptp_ocp_device_init(bp, pdev);
 	if (err)
 		goto out_disable;
+
+	/* Before the first error path that calls ptp_ocp_detach(), so
+	 * mutex_destroy() runs on an initialised mutex, and before
+	 * ptp_ocp_register_resources(), so this sentinel cannot overwrite an
+	 * adapter number the i2c notifier stores during registration.
+	 */
+	mutex_init(&bp->cpld_lock);
+	spin_lock_init(&bp->cpld_adap_lock);
+	bp->cpld_i2c_adap_nr = -1;
 
 	INIT_DELAYED_WORK(&bp->sync_work, ptp_ocp_sync_work);
 
@@ -4794,19 +6020,21 @@ ptp_ocp_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	devlink_register(devlink);
 
 	clkid = pci_get_dsn(pdev);
-	bp->dpll = dpll_device_get(clkid, 0, THIS_MODULE);
+	bp->dpll = dpll_device_get(clkid, 0, THIS_MODULE, &bp->tracker);
 	if (IS_ERR(bp->dpll)) {
 		err = PTR_ERR(bp->dpll);
 		dev_err(&pdev->dev, "dpll_device_alloc failed\n");
-		goto out;
+		goto out_devlink;
 	}
 
 	err = dpll_device_register(bp->dpll, DPLL_TYPE_PPS, &dpll_ops, bp);
 	if (err)
-		goto out;
+		goto out_dpll_put;
 
 	for (i = 0; i < OCP_SMA_NUM; i++) {
-		bp->sma[i].dpll_pin = dpll_pin_get(clkid, i, THIS_MODULE, &bp->sma[i].dpll_prop);
+		bp->sma[i].dpll_pin = dpll_pin_get(clkid, i, THIS_MODULE,
+						   &bp->sma[i].dpll_prop,
+						   &bp->sma[i].tracker);
 		if (IS_ERR(bp->sma[i].dpll_pin)) {
 			err = PTR_ERR(bp->sma[i].dpll_pin);
 			goto out_dpll;
@@ -4815,7 +6043,7 @@ ptp_ocp_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		err = dpll_pin_register(bp->dpll, bp->sma[i].dpll_pin, &dpll_pins_ops,
 					&bp->sma[i]);
 		if (err) {
-			dpll_pin_put(bp->sma[i].dpll_pin);
+			dpll_pin_put(bp->sma[i].dpll_pin, &bp->sma[i].tracker);
 			goto out_dpll;
 		}
 	}
@@ -4823,12 +6051,20 @@ ptp_ocp_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	return 0;
 out_dpll:
-	while (i) {
-		--i;
+	while (i--) {
 		dpll_pin_unregister(bp->dpll, bp->sma[i].dpll_pin, &dpll_pins_ops, &bp->sma[i]);
-		dpll_pin_put(bp->sma[i].dpll_pin);
+		dpll_pin_put(bp->sma[i].dpll_pin, &bp->sma[i].tracker);
 	}
-	dpll_device_put(bp->dpll);
+	/* dpll_device_register() takes a second reference and stores bp; only
+	 * dpll_device_unregister() drops it.  Without this the device stays
+	 * visible with a priv pointer into storage devlink_free() will release.
+	 */
+	dpll_device_unregister(bp->dpll, &dpll_ops, bp);
+out_dpll_put:
+	dpll_device_put(bp->dpll, &bp->tracker);
+out_devlink:
+	/* detach() destroys cpld_lock; no devlink op may still reach it */
+	devlink_unregister(devlink);
 out:
 	ptp_ocp_detach(bp);
 out_disable:
@@ -4849,11 +6085,11 @@ ptp_ocp_remove(struct pci_dev *pdev)
 	for (i = 0; i < OCP_SMA_NUM; i++) {
 		if (bp->sma[i].dpll_pin) {
 			dpll_pin_unregister(bp->dpll, bp->sma[i].dpll_pin, &dpll_pins_ops, &bp->sma[i]);
-			dpll_pin_put(bp->sma[i].dpll_pin);
+			dpll_pin_put(bp->sma[i].dpll_pin, &bp->sma[i].tracker);
 		}
 	}
 	dpll_device_unregister(bp->dpll, &dpll_ops, bp);
-	dpll_device_put(bp->dpll);
+	dpll_device_put(bp->dpll, &bp->tracker);
 	devlink_unregister(devlink);
 	ptp_ocp_detach(bp);
 	pci_disable_device(pdev);
@@ -4866,6 +6102,7 @@ static struct pci_driver ptp_ocp_driver = {
 	.id_table	= ptp_ocp_pcidev_id,
 	.probe		= ptp_ocp_probe,
 	.remove		= ptp_ocp_remove,
+	.shutdown	= ptp_ocp_remove,
 };
 
 static int
@@ -4873,6 +6110,7 @@ ptp_ocp_i2c_notifier_call(struct notifier_block *nb,
 			  unsigned long action, void *data)
 {
 	struct device *dev, *child = data;
+	struct i2c_adapter *adap;
 	struct ptp_ocp *bp;
 	bool add;
 
@@ -4896,11 +6134,25 @@ ptp_ocp_i2c_notifier_call(struct notifier_block *nb,
 
 found:
 	bp = dev_get_drvdata(dev);
-	if (add)
+	adap = i2c_verify_adapter(child);
+	if (add) {
 		ptp_ocp_symlink(bp, child, "i2c");
-	else
+		/* Only the card's own controller: a mux child added on it
+		 * reaches ptp_ocp through the same walk.  Numbers are
+		 * recycled, so the claim re-checks the parent itself.
+		 */
+		if (bp->i2c_ctrl && adap->dev.parent == &bp->i2c_ctrl->dev) {
+			scoped_guard(spinlock, &bp->cpld_adap_lock)
+				bp->cpld_i2c_adap_nr = adap->nr;
+		}
+	} else {
+		/* invalidate before free, but only for the cached adapter */
+		scoped_guard(spinlock, &bp->cpld_adap_lock) {
+			if (bp->cpld_i2c_adap_nr == adap->nr)
+				bp->cpld_i2c_adap_nr = -1;
+		}
 		sysfs_remove_link(&bp->dev.kobj, "i2c");
-
+	}
 	return 0;
 }
 

@@ -14,6 +14,8 @@
 
 #define EDMA_MAX_WR_CH                                  8
 #define EDMA_MAX_RD_CH                                  8
+#define HDMA_MAX_WR_CH                                  64
+#define HDMA_MAX_RD_CH                                  64
 
 struct dw_edma;
 
@@ -27,7 +29,7 @@ struct dw_edma_region {
 };
 
 /**
- * struct dw_edma_core_ops - platform-specific eDMA methods
+ * struct dw_edma_plat_ops - platform-specific eDMA methods
  * @irq_vector:		Get IRQ number of the passed eDMA channel. Note the
  *			method accepts the channel id in the end-to-end
  *			numbering with the eDMA write channels being placed
@@ -55,27 +57,88 @@ enum dw_edma_map_format {
 /**
  * enum dw_edma_chip_flags - Flags specific to an eDMA chip
  * @DW_EDMA_CHIP_LOCAL:		eDMA is used locally by an endpoint
+ * @DW_EDMA_CHIP_PARTIAL:	Only channels described by this instance are
+ *				owned by this driver. Controller-wide state
+ *				must be preserved, and layouts with shared
+ *				direction-wide registers must only be shared at
+ *				direction granularity. Layouts with per-channel
+ *				registers may be shared at channel granularity.
  */
 enum dw_edma_chip_flags {
 	DW_EDMA_CHIP_LOCAL	= BIT(0),
+	DW_EDMA_CHIP_PARTIAL	= BIT(1),
+};
+
+/**
+ * enum dw_edma_ch_irq_mode - per-channel interrupt routing control
+ * @DW_EDMA_CH_IRQ_LOCAL:     local interrupt only (edma_int[])
+ * @DW_EDMA_CH_IRQ_REMOTE:    remote interrupt only (IMWr/MSI), without
+ *                            delivering local edma_int[].
+ *
+ * DesignWare EP eDMA can signal interrupts locally through the edma_int[]
+ * bus, and remotely using posted memory writes (IMWr) that may be
+ * interpreted as MSI/MSI-X by the RC.
+ *
+ * For the v0 eDMA linked-list programming path, DMA_*_INT_MASK gates the local
+ * edma_int[] assertion, while there is no dedicated per-channel mask for IMWr
+ * generation. To request a remote-only interrupt, Synopsys recommends setting
+ * both LIE and RIE, and masking the local interrupt in DMA_*_INT_MASK. See the
+ * DesignWare endpoint databook 6.30a, Linked List Mode interrupt handling
+ * ("Software Programming of an Endpoint's LIE and RIE Bits for Linked List
+ * Transfers", Attention).
+ *
+ * A local (DW_EDMA_CHIP_LOCAL) instance never issues transfers on a
+ * remote-routed channel: REMOTE routing on such an instance denotes a channel
+ * handed over to and driven by the remote side, and the recipe above is
+ * applied by the driving instance.
+ *
+ * HDMA linked-list watermark interrupts have the same LWIE/RWIE guidance. HDMA
+ * non-linked-list mode has dedicated local and remote stop/abort interrupt
+ * enables.
+ */
+enum dw_edma_ch_irq_mode {
+	DW_EDMA_CH_IRQ_LOCAL	= 0,
+	DW_EDMA_CH_IRQ_REMOTE,
+};
+
+#define DW_EDMA_CH_CONFIG_NON_LL	BIT(0)
+#define DW_EDMA_CH_CONFIG_IRQ_MODE	BIT(1)
+
+/**
+ * struct dw_edma_chan_config - dw-edma channel configuration
+ * @flags: fields selected by DW_EDMA_CH_CONFIG_*
+ * @non_ll: use HDMA non-linked-list mode
+ * @irq_mode: interrupt routing mode
+ *
+ * Pass this structure through dma_slave_config.peripheral_config. Before
+ * synchronizing a remote-routed channel, the client must stop remote
+ * programming and own every channel affected by the hardware quiesce: the
+ * entire direction for eDMA-compatible layouts, or the individual channel for
+ * native HDMA.
+ */
+struct dw_edma_chan_config {
+	u32 flags;
+	bool non_ll;
+	enum dw_edma_ch_irq_mode irq_mode;
 };
 
 /**
  * struct dw_edma_chip - representation of DesignWare eDMA controller hardware
  * @dev:		 struct device of the eDMA controller
- * @id:			 instance ID
  * @nr_irqs:		 total number of DMA IRQs
- * @ops			 DMA channel to IRQ number mapping
- * @flags		 dw_edma_chip_flags
- * @reg_base		 DMA register base address
- * @ll_wr_cnt		 DMA write link list count
- * @ll_rd_cnt		 DMA read link list count
- * @rg_region		 DMA register region
- * @ll_region_wr	 DMA descriptor link list memory for write channel
- * @ll_region_rd	 DMA descriptor link list memory for read channel
- * @dt_region_wr	 DMA data memory for write channel
- * @dt_region_rd	 DMA data memory for read channel
- * @mf			 DMA register map format
+ * @ops:		 DMA channel to IRQ number mapping
+ * @flags:		 dw_edma_chip_flags
+ * @reg_base:		 DMA register base address
+ * @ll_wr_cnt:		 DMA write link list count
+ * @ll_rd_cnt:		 DMA read link list count
+ * @ll_region_wr:	 DMA descriptor link list memory for write channel
+ * @ll_region_rd:	 DMA descriptor link list memory for read channel
+ * @dt_region_wr:	 DMA data memory for write channel
+ * @dt_region_rd:	 DMA data memory for read channel
+ * @db_irq:		 Virtual IRQ dedicated to interrupt emulation
+ * @db_offset:		 Offset from DMA register base
+ * @mf:			 DMA register map format
+ * @func_no:		 PCI endpoint function number used by DMA TLPs
  * @dw:			 struct dw_edma that is filled by dw_edma_probe()
  */
 struct dw_edma_chip {
@@ -88,17 +151,24 @@ struct dw_edma_chip {
 
 	u16			ll_wr_cnt;
 	u16			ll_rd_cnt;
-	/* link list address */
-	struct dw_edma_region	ll_region_wr[EDMA_MAX_WR_CH];
-	struct dw_edma_region	ll_region_rd[EDMA_MAX_RD_CH];
+	/* Linked-list regions must not cross a 4 GiB address boundary. */
+	struct dw_edma_region	ll_region_wr[HDMA_MAX_WR_CH];
+	struct dw_edma_region	ll_region_rd[HDMA_MAX_RD_CH];
 
 	/* data region */
-	struct dw_edma_region	dt_region_wr[EDMA_MAX_WR_CH];
-	struct dw_edma_region	dt_region_rd[EDMA_MAX_RD_CH];
+	struct dw_edma_region	dt_region_wr[HDMA_MAX_WR_CH];
+	struct dw_edma_region	dt_region_rd[HDMA_MAX_RD_CH];
+
+	/* interrupt emulation */
+	int			db_irq;
+	resource_size_t		db_offset;
 
 	enum dw_edma_map_format	mf;
+	u8			func_no;
 
 	struct dw_edma		*dw;
+	bool			cfg_non_ll;
+	u32			ch_space_sz;
 };
 
 /* Export to the platform drivers */

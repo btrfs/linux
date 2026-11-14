@@ -8,7 +8,6 @@
  */
 
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/err.h>
 #include <linux/slab.h>
 #include <linux/leds.h>
@@ -136,7 +135,7 @@ static int regulator_led_probe(struct platform_device *pdev)
 		return PTR_ERR(vcc);
 	}
 
-	led = devm_kzalloc(dev, sizeof(*led), GFP_KERNEL);
+	led = devm_kzalloc_obj(dev, *led);
 	if (led == NULL)
 		return -ENOMEM;
 

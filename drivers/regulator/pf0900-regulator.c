@@ -771,7 +771,7 @@ static const struct pf0900_regulator_desc pf0900_regulators[] = {
 	},
 };
 
-struct pf0900_regulator_irq regu_irqs[] = {
+static const struct pf0900_regulator_irq regu_irqs[] = {
 	PF0900_REGU_IRQ(PF0900_REG_SW_ILIM_INT, PF0900_SW, REGULATOR_ERROR_OVER_CURRENT_WARN),
 	PF0900_REGU_IRQ(PF0900_REG_LDO_ILIM_INT, PF0900_LDO, REGULATOR_ERROR_OVER_CURRENT_WARN),
 	PF0900_REGU_IRQ(PF0900_REG_SW_UV_INT, PF0900_SW, REGULATOR_ERROR_UNDER_VOLTAGE_WARN),
@@ -837,7 +837,7 @@ static int pf0900_i2c_probe(struct i2c_client *i2c)
 	if (!i2c->irq)
 		return dev_err_probe(&i2c->dev, -EINVAL, "No IRQ configured?\n");
 
-	pf0900 = devm_kzalloc(&i2c->dev, sizeof(struct pf0900), GFP_KERNEL);
+	pf0900 = devm_kzalloc_obj(&i2c->dev, struct pf0900);
 	if (!pf0900)
 		return -ENOMEM;
 

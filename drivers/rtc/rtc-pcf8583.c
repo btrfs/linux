@@ -282,8 +282,7 @@ static int pcf8583_probe(struct i2c_client *client)
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C))
 		return -ENODEV;
 
-	pcf8583 = devm_kzalloc(&client->dev, sizeof(struct pcf8583),
-				GFP_KERNEL);
+	pcf8583 = devm_kzalloc_obj(&client->dev, struct pcf8583);
 	if (!pcf8583)
 		return -ENOMEM;
 
@@ -297,7 +296,7 @@ static int pcf8583_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id pcf8583_id[] = {
-	{ "pcf8583" },
+	{ .name = "pcf8583" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, pcf8583_id);

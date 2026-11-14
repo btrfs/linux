@@ -60,6 +60,11 @@ static int ip_metrics_convert(struct nlattr *fc_mx,
 	if (ecn_ca)
 		metrics[RTAX_FEATURES - 1] |= DST_FEATURE_ECN_CA;
 
+	if ((metrics[RTAX_LOCK - 1] & (1 << RTAX_CWND)) && !metrics[RTAX_CWND - 1]) {
+		NL_SET_ERR_MSG(extack, "Locked cwnd metric must be non zero");
+		return -EINVAL;
+	}
+
 	return 0;
 }
 
@@ -73,7 +78,7 @@ struct dst_metrics *ip_fib_metrics_init(struct nlattr *fc_mx,
 	if (!fc_mx)
 		return (struct dst_metrics *)&dst_default_metrics;
 
-	fib_metrics = kzalloc(sizeof(*fib_metrics), GFP_KERNEL);
+	fib_metrics = kzalloc_obj(*fib_metrics);
 	if (unlikely(!fib_metrics))
 		return ERR_PTR(-ENOMEM);
 
@@ -88,4 +93,3 @@ struct dst_metrics *ip_fib_metrics_init(struct nlattr *fc_mx,
 
 	return fib_metrics;
 }
-EXPORT_SYMBOL_GPL(ip_fib_metrics_init);

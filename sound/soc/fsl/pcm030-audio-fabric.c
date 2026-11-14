@@ -13,8 +13,6 @@
 
 #include <sound/soc.h>
 
-#include "mpc5200_dma.h"
-
 #define DRV_NAME "pcm030-audio-fabric"
 
 struct pcm030_audio_data {
@@ -65,8 +63,7 @@ static int pcm030_fabric_probe(struct platform_device *op)
 	if (!of_machine_is_compatible("phytec,pcm030"))
 		return -ENODEV;
 
-	pdata = devm_kzalloc(&op->dev, sizeof(struct pcm030_audio_data),
-			     GFP_KERNEL);
+	pdata = devm_kzalloc_obj(&op->dev, struct pcm030_audio_data);
 	if (!pdata)
 		return -ENOMEM;
 

@@ -22,15 +22,15 @@ enum chips { ucd9200, ucd9220, ucd9222, ucd9224, ucd9240, ucd9244, ucd9246,
 	     ucd9248 };
 
 static const struct i2c_device_id ucd9200_id[] = {
-	{"ucd9200", ucd9200},
-	{"ucd9220", ucd9220},
-	{"ucd9222", ucd9222},
-	{"ucd9224", ucd9224},
-	{"ucd9240", ucd9240},
-	{"ucd9244", ucd9244},
-	{"ucd9246", ucd9246},
-	{"ucd9248", ucd9248},
-	{}
+	{ .name = "ucd9200", .driver_data = ucd9200 },
+	{ .name = "ucd9220", .driver_data = ucd9220 },
+	{ .name = "ucd9222", .driver_data = ucd9222 },
+	{ .name = "ucd9224", .driver_data = ucd9224 },
+	{ .name = "ucd9240", .driver_data = ucd9240 },
+	{ .name = "ucd9244", .driver_data = ucd9244 },
+	{ .name = "ucd9246", .driver_data = ucd9246 },
+	{ .name = "ucd9248", .driver_data = ucd9248 },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ucd9200_id);
 
@@ -112,8 +112,7 @@ static int ucd9200_probe(struct i2c_client *client)
 			   "Device mismatch: Configured %s, detected %s\n",
 			   client->name, mid->name);
 
-	info = devm_kzalloc(&client->dev, sizeof(struct pmbus_driver_info),
-			    GFP_KERNEL);
+	info = devm_kzalloc_obj(&client->dev, struct pmbus_driver_info);
 	if (!info)
 		return -ENOMEM;
 

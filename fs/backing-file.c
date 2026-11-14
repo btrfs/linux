@@ -12,33 +12,59 @@
 #include <linux/backing-file.h>
 #include <linux/splice.h>
 #include <linux/mm.h>
+#include <linux/security.h>
 
 #include "internal.h"
 
 /**
  * backing_file_open - open a backing file for kernel internal use
- * @user_path:	path that the user reuqested to open
+ * @user_file:  file the user requested to open
  * @flags:	open flags
  * @real_path:	path of the backing file
  * @cred:	credentials for open
  *
  * Open a backing file for a stackable filesystem (e.g., overlayfs).
- * @user_path may be on the stackable filesystem and @real_path on the
- * underlying filesystem.  In this case, we want to be able to return the
- * @user_path of the stackable filesystem. This is done by embedding the
- * returned file into a container structure that also stores the stacked
- * file's path, which can be retrieved using backing_file_user_path().
+ * @user_file->f_path may be on the stackable filesystem and @real_path
+ * on the underlying filesystem. In this case, we want to be able to
+ * return the path of the stackable filesystem. This is done by
+ * embedding the returned file into a container structure that also
+ * stores the stacked file's path, which can be retrieved using
+ * backing_file_user_path().
  */
-struct file *backing_file_open(const struct path *user_path, int flags,
+struct file *backing_file_open(const struct file *user_file, int flags,
 			       const struct path *real_path,
 			       const struct cred *cred)
 {
+	const struct path *user_path = file_user_path(user_file);
+	struct inode *real_inode = d_inode(real_path->dentry);
 	struct file *f;
 	int error;
 
-	f = alloc_empty_backing_file(flags, cred);
+	/*
+	 * may_open() checked the inode of the user file, which need not carry
+	 * S_APPEND and S_IMMUTABLE of the backing inode.
+	 */
+	if ((flags & O_ACCMODE) != O_RDONLY) {
+		if (IS_IMMUTABLE(real_inode))
+			return ERR_PTR(-EPERM);
+		if (IS_APPEND(real_inode) && !(flags & O_APPEND))
+			return ERR_PTR(-EPERM);
+	}
+
+	f = alloc_empty_backing_file(flags, cred, user_file);
 	if (IS_ERR(f))
 		return f;
+
+	/*
+	 * A user file that must not generate fsnotify events (e.g. the fd
+	 * that fanotify creates for a permission event with
+	 * dentry_open_nonotify()) must not generate them through its backing
+	 * file either. Otherwise a listener watching the backing filesystem
+	 * gets a nested permission event from its own read(2), which only
+	 * another reader of the same group can answer.
+	 */
+	if (FMODE_FSNOTIFY_NONE(user_file->f_mode))
+		file_set_fsnotify_mode(f, FMODE_NONOTIFY);
 
 	path_get(user_path);
 	backing_file_set_user_path(f, user_path);
@@ -52,15 +78,16 @@ struct file *backing_file_open(const struct path *user_path, int flags,
 }
 EXPORT_SYMBOL_GPL(backing_file_open);
 
-struct file *backing_tmpfile_open(const struct path *user_path, int flags,
+struct file *backing_tmpfile_open(const struct file *user_file, int flags,
 				  const struct path *real_parentpath,
 				  umode_t mode, const struct cred *cred)
 {
-	struct mnt_idmap *real_idmap = mnt_idmap(real_parentpath->mnt);
+	const struct mnt_idmap *real_idmap = mnt_idmap(real_parentpath->mnt);
+	const struct path *user_path = &user_file->f_path;
 	struct file *f;
 	int error;
 
-	f = alloc_empty_backing_file(flags, cred);
+	f = alloc_empty_backing_file(flags, cred, user_file);
 	if (IS_ERR(f))
 		return f;
 
@@ -80,6 +107,7 @@ struct backing_aio {
 	refcount_t ref;
 	struct kiocb *orig_iocb;
 	/* used for aio completion */
+	bool is_write;
 	void (*end_write)(struct kiocb *iocb, ssize_t);
 	struct work_struct work;
 	long res;
@@ -87,8 +115,13 @@ struct backing_aio {
 
 static struct kmem_cache *backing_aio_cachep;
 
+/*
+ * RWF_NOAPPEND stays set in ki_flags.  Pass it on, because the backing file is
+ * in append mode as well and a new kiocb for it starts with IOCB_APPEND.
+ */
 #define BACKING_IOCB_MASK \
-	(IOCB_NOWAIT | IOCB_HIPRI | IOCB_DSYNC | IOCB_SYNC | IOCB_APPEND)
+	(IOCB_NOWAIT | IOCB_HIPRI | IOCB_DSYNC | IOCB_SYNC | IOCB_APPEND | \
+	 (__force int) RWF_NOAPPEND)
 
 static rwf_t iocb_to_rw_flags(int flags)
 {
@@ -120,7 +153,8 @@ static void backing_aio_rw_complete(struct kiocb *iocb, long res)
 	struct backing_aio *aio = container_of(iocb, struct backing_aio, iocb);
 	struct kiocb *orig_iocb = aio->orig_iocb;
 
-	if (iocb->ki_flags & IOCB_WRITE)
+	/* Pairs with kiocb_start_write() in vfs_iocb_iter_write() */
+	if (aio->is_write)
 		kiocb_end_write(iocb);
 
 	backing_aio_cleanup(aio, res);
@@ -157,13 +191,37 @@ static int backing_aio_init_wq(struct kiocb *iocb)
 	return sb_init_dio_done_wq(sb);
 }
 
+static int do_backing_file_read_iter(struct file *file, struct iov_iter *iter,
+				     struct kiocb *iocb, int flags)
+{
+	struct backing_aio *aio = NULL;
+	int ret;
+
+	if (is_sync_kiocb(iocb)) {
+		rwf_t rwf = iocb_to_rw_flags(flags);
+
+		return vfs_iter_read(file, iter, &iocb->ki_pos, rwf);
+	}
+
+	aio = kmem_cache_zalloc(backing_aio_cachep, GFP_KERNEL);
+	if (!aio)
+		return -ENOMEM;
+
+	aio->orig_iocb = iocb;
+	kiocb_clone(&aio->iocb, iocb, get_file(file));
+	aio->iocb.ki_complete = backing_aio_rw_complete;
+	refcount_set(&aio->ref, 2);
+	ret = vfs_iocb_iter_read(file, &aio->iocb, iter);
+	backing_aio_put(aio);
+	if (ret != -EIOCBQUEUED)
+		backing_aio_cleanup(aio, ret);
+	return ret;
+}
 
 ssize_t backing_file_read_iter(struct file *file, struct iov_iter *iter,
 			       struct kiocb *iocb, int flags,
 			       struct backing_file_ctx *ctx)
 {
-	struct backing_aio *aio = NULL;
-	const struct cred *old_cred;
 	ssize_t ret;
 
 	if (WARN_ON_ONCE(!(file->f_mode & FMODE_BACKING)))
@@ -176,28 +234,8 @@ ssize_t backing_file_read_iter(struct file *file, struct iov_iter *iter,
 	    !(file->f_mode & FMODE_CAN_ODIRECT))
 		return -EINVAL;
 
-	old_cred = override_creds(ctx->cred);
-	if (is_sync_kiocb(iocb)) {
-		rwf_t rwf = iocb_to_rw_flags(flags);
-
-		ret = vfs_iter_read(file, iter, &iocb->ki_pos, rwf);
-	} else {
-		ret = -ENOMEM;
-		aio = kmem_cache_zalloc(backing_aio_cachep, GFP_KERNEL);
-		if (!aio)
-			goto out;
-
-		aio->orig_iocb = iocb;
-		kiocb_clone(&aio->iocb, iocb, get_file(file));
-		aio->iocb.ki_complete = backing_aio_rw_complete;
-		refcount_set(&aio->ref, 2);
-		ret = vfs_iocb_iter_read(file, &aio->iocb, iter);
-		backing_aio_put(aio);
-		if (ret != -EIOCBQUEUED)
-			backing_aio_cleanup(aio, ret);
-	}
-out:
-	revert_creds(old_cred);
+	scoped_with_creds(ctx->cred)
+		ret = do_backing_file_read_iter(file, iter, iocb, flags);
 
 	if (ctx->accessed)
 		ctx->accessed(iocb->ki_filp);
@@ -206,11 +244,48 @@ out:
 }
 EXPORT_SYMBOL_GPL(backing_file_read_iter);
 
+static int do_backing_file_write_iter(struct file *file, struct iov_iter *iter,
+				      struct kiocb *iocb, int flags,
+				      void (*end_write)(struct kiocb *, ssize_t))
+{
+	struct backing_aio *aio;
+	int ret;
+
+	if (is_sync_kiocb(iocb)) {
+		rwf_t rwf = iocb_to_rw_flags(flags);
+
+		ret = vfs_iter_write(file, iter, &iocb->ki_pos, rwf);
+		if (end_write)
+			end_write(iocb, ret);
+		return ret;
+	}
+
+	ret = backing_aio_init_wq(iocb);
+	if (ret)
+		return ret;
+
+	aio = kmem_cache_zalloc(backing_aio_cachep, GFP_KERNEL);
+	if (!aio)
+		return -ENOMEM;
+
+	aio->orig_iocb = iocb;
+	aio->is_write = true;
+	aio->end_write = end_write;
+	kiocb_clone(&aio->iocb, iocb, get_file(file));
+	aio->iocb.ki_flags = flags;
+	aio->iocb.ki_complete = backing_aio_queue_completion;
+	refcount_set(&aio->ref, 2);
+	ret = vfs_iocb_iter_write(file, &aio->iocb, iter);
+	backing_aio_put(aio);
+	if (ret != -EIOCBQUEUED)
+		backing_aio_cleanup(aio, ret);
+	return ret;
+}
+
 ssize_t backing_file_write_iter(struct file *file, struct iov_iter *iter,
 				struct kiocb *iocb, int flags,
 				struct backing_file_ctx *ctx)
 {
-	const struct cred *old_cred;
 	ssize_t ret;
 
 	if (WARN_ON_ONCE(!(file->f_mode & FMODE_BACKING)))
@@ -218,6 +293,14 @@ ssize_t backing_file_write_iter(struct file *file, struct iov_iter *iter,
 
 	if (!iov_iter_count(iter))
 		return 0;
+
+	/*
+	 * F_SETFL and RWF_NOAPPEND can take append mode away from the user
+	 * file. They checked its inode, not the backing one.
+	 */
+	if ((file->f_flags & O_APPEND) && !(flags & IOCB_APPEND) &&
+	    IS_APPEND(file_inode(file)))
+		return -EPERM;
 
 	ret = file_remove_privs(iocb->ki_filp);
 	if (ret)
@@ -227,46 +310,8 @@ ssize_t backing_file_write_iter(struct file *file, struct iov_iter *iter,
 	    !(file->f_mode & FMODE_CAN_ODIRECT))
 		return -EINVAL;
 
-	/*
-	 * Stacked filesystems don't support deferred completions, don't copy
-	 * this property in case it is set by the issuer.
-	 */
-	flags &= ~IOCB_DIO_CALLER_COMP;
-
-	old_cred = override_creds(ctx->cred);
-	if (is_sync_kiocb(iocb)) {
-		rwf_t rwf = iocb_to_rw_flags(flags);
-
-		ret = vfs_iter_write(file, iter, &iocb->ki_pos, rwf);
-		if (ctx->end_write)
-			ctx->end_write(iocb, ret);
-	} else {
-		struct backing_aio *aio;
-
-		ret = backing_aio_init_wq(iocb);
-		if (ret)
-			goto out;
-
-		ret = -ENOMEM;
-		aio = kmem_cache_zalloc(backing_aio_cachep, GFP_KERNEL);
-		if (!aio)
-			goto out;
-
-		aio->orig_iocb = iocb;
-		aio->end_write = ctx->end_write;
-		kiocb_clone(&aio->iocb, iocb, get_file(file));
-		aio->iocb.ki_flags = flags;
-		aio->iocb.ki_complete = backing_aio_queue_completion;
-		refcount_set(&aio->ref, 2);
-		ret = vfs_iocb_iter_write(file, &aio->iocb, iter);
-		backing_aio_put(aio);
-		if (ret != -EIOCBQUEUED)
-			backing_aio_cleanup(aio, ret);
-	}
-out:
-	revert_creds(old_cred);
-
-	return ret;
+	scoped_with_creds(ctx->cred)
+		return do_backing_file_write_iter(file, iter, iocb, flags, ctx->end_write);
 }
 EXPORT_SYMBOL_GPL(backing_file_write_iter);
 
@@ -275,15 +320,13 @@ ssize_t backing_file_splice_read(struct file *in, struct kiocb *iocb,
 				 unsigned int flags,
 				 struct backing_file_ctx *ctx)
 {
-	const struct cred *old_cred;
 	ssize_t ret;
 
 	if (WARN_ON_ONCE(!(in->f_mode & FMODE_BACKING)))
 		return -EIO;
 
-	old_cred = override_creds(ctx->cred);
-	ret = vfs_splice_read(in, &iocb->ki_pos, pipe, len, flags);
-	revert_creds(old_cred);
+	scoped_with_creds(ctx->cred)
+		ret = vfs_splice_read(in, &iocb->ki_pos, pipe, len, flags);
 
 	if (ctx->accessed)
 		ctx->accessed(iocb->ki_filp);
@@ -297,7 +340,6 @@ ssize_t backing_file_splice_write(struct pipe_inode_info *pipe,
 				  size_t len, unsigned int flags,
 				  struct backing_file_ctx *ctx)
 {
-	const struct cred *old_cred;
 	ssize_t ret;
 
 	if (WARN_ON_ONCE(!(out->f_mode & FMODE_BACKING)))
@@ -306,15 +348,19 @@ ssize_t backing_file_splice_write(struct pipe_inode_info *pipe,
 	if (!out->f_op->splice_write)
 		return -EINVAL;
 
+	/* splice refuses a user file in append mode, so F_SETFL cleared it */
+	if ((out->f_flags & O_APPEND) && IS_APPEND(file_inode(out)))
+		return -EPERM;
+
 	ret = file_remove_privs(iocb->ki_filp);
 	if (ret)
 		return ret;
 
-	old_cred = override_creds(ctx->cred);
-	file_start_write(out);
-	ret = out->f_op->splice_write(pipe, out, &iocb->ki_pos, len, flags);
-	file_end_write(out);
-	revert_creds(old_cred);
+	scoped_with_creds(ctx->cred) {
+		file_start_write(out);
+		ret = out->f_op->splice_write(pipe, out, &iocb->ki_pos, len, flags);
+		file_end_write(out);
+	}
 
 	if (ctx->end_write)
 		ctx->end_write(iocb, ret);
@@ -326,7 +372,6 @@ EXPORT_SYMBOL_GPL(backing_file_splice_write);
 int backing_file_mmap(struct file *file, struct vm_area_struct *vma,
 		      struct backing_file_ctx *ctx)
 {
-	const struct cred *old_cred;
 	struct file *user_file = vma->vm_file;
 	int ret;
 
@@ -336,11 +381,19 @@ int backing_file_mmap(struct file *file, struct vm_area_struct *vma,
 	if (!can_mmap_file(file))
 		return -ENODEV;
 
+	/* do_mmap() checked the inode of the user file */
+	if ((vma->vm_flags & VM_SHARED) && IS_APPEND(file_inode(file)))
+		return -EACCES;
+
 	vma_set_file(vma, file);
 
-	old_cred = override_creds(ctx->cred);
-	ret = vfs_mmap(vma->vm_file, vma);
-	revert_creds(old_cred);
+	scoped_with_creds(ctx->cred) {
+		ret = security_mmap_backing_file(vma, file, user_file);
+		if (ret)
+			return ret;
+
+		ret = vfs_mmap(vma->vm_file, vma);
+	}
 
 	if (ctx->accessed)
 		ctx->accessed(user_file);

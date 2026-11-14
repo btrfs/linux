@@ -176,9 +176,12 @@ MODULE_PARM_DESC(debug, "Debug level (0=none,...,16=all)");
 MODULE_PARM_DESC(eeprom_bad_csum_allow, "Allow bad eeprom checksums");
 MODULE_PARM_DESC(use_io, "Force use of i/o access mode");
 
-#define INTEL_8255X_ETHERNET_DEVICE(device_id, ich) {\
-	PCI_VENDOR_ID_INTEL, device_id, PCI_ANY_ID, PCI_ANY_ID, \
-	PCI_CLASS_NETWORK_ETHERNET << 8, 0xFFFF00, ich }
+#define INTEL_8255X_ETHERNET_DEVICE(device_id, ich) { \
+	PCI_DEVICE(PCI_VENDOR_ID_INTEL, (device_id)), \
+	.class = PCI_CLASS_NETWORK_ETHERNET << 8, \
+	.class_mask = 0xFFFF00, \
+	.driver_data = (ich) }
+
 static const struct pci_device_id e100_id_table[] = {
 	INTEL_8255X_ETHERNET_DEVICE(0x1029, 0),
 	INTEL_8255X_ETHERNET_DEVICE(0x1030, 0),
@@ -2156,7 +2159,7 @@ static int e100_rx_alloc_list(struct nic *nic)
 	nic->rx_to_use = nic->rx_to_clean = NULL;
 	nic->ru_running = RU_UNINITIALIZED;
 
-	if (!(nic->rxs = kcalloc(count, sizeof(struct rx), GFP_KERNEL)))
+	if (!(nic->rxs = kzalloc_objs(struct rx, count)))
 		return -ENOMEM;
 
 	for (rx = nic->rxs, i = 0; i < count; rx++, i++) {

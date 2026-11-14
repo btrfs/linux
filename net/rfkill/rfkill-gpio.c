@@ -7,7 +7,6 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/rfkill.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -103,7 +102,7 @@ static int rfkill_gpio_probe(struct platform_device *pdev)
 	if (dmi_check_system(rfkill_gpio_deny_table))
 		return -ENODEV;
 
-	rfkill = devm_kzalloc(&pdev->dev, sizeof(*rfkill), GFP_KERNEL);
+	rfkill = devm_kzalloc_obj(&pdev->dev, *rfkill);
 	if (!rfkill)
 		return -ENOMEM;
 

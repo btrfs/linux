@@ -56,7 +56,7 @@ static int uda1342_probe(struct i2c_client *client)
 	dev_dbg(&client->dev, "initializing UDA1342 at address %d on %s\n",
 		client->addr, adapter->name);
 
-	sd = devm_kzalloc(&client->dev, sizeof(*sd), GFP_KERNEL);
+	sd = devm_kzalloc_obj(&client->dev, *sd);
 	if (sd == NULL)
 		return -ENOMEM;
 
@@ -79,7 +79,7 @@ static void uda1342_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id uda1342_id[] = {
-	{ "uda1342" },
+	{ .name = "uda1342" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, uda1342_id);

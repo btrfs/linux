@@ -9,7 +9,6 @@
 #include <linux/clk-provider.h>
 #include <linux/device.h>
 #include <linux/io.h>
-#include <linux/mod_devicetable.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -69,11 +68,11 @@ static void vbattb_clk_action(void *data)
 
 	ret = reset_control_assert(rstc);
 	if (ret)
-		dev_err(dev, "Failed to de-assert reset!");
+		dev_err(dev, "Failed to de-assert reset!\n");
 
 	ret = pm_runtime_put_sync(dev);
 	if (ret < 0)
-		dev_err(dev, "Failed to runtime suspend!");
+		dev_err(dev, "Failed to runtime suspend!\n");
 
 	of_clk_del_provider(dev->of_node);
 }
@@ -101,11 +100,11 @@ static int vbattb_clk_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	vbclk = devm_kzalloc(dev, sizeof(*vbclk), GFP_KERNEL);
+	vbclk = devm_kzalloc_obj(dev, *vbclk);
 	if (!vbclk)
 		return -ENOMEM;
 
-	clk_data = devm_kzalloc(dev, struct_size(clk_data, hws, num_clks), GFP_KERNEL);
+	clk_data = devm_kzalloc_flex(dev, *clk_data, hws, num_clks);
 	if (!clk_data)
 		return -ENOMEM;
 	clk_data->num = num_clks;

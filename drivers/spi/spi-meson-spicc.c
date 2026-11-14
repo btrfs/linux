@@ -235,6 +235,13 @@ static int meson_spicc_dma_map(struct meson_spicc_device *spicc,
 {
 	struct device *dev = spicc->host->dev.parent;
 
+	/*
+	 * Mark the DMA addresses as invalid so that meson_spicc_dma_unmap()
+	 * will not try to unmap a buffer which was not (successfully) mapped.
+	 */
+	t->tx_dma = DMA_MAPPING_ERROR;
+	t->rx_dma = DMA_MAPPING_ERROR;
+
 	if (!(t->tx_buf && t->rx_buf))
 		return -EINVAL;
 
@@ -257,9 +264,9 @@ static void meson_spicc_dma_unmap(struct meson_spicc_device *spicc,
 {
 	struct device *dev = spicc->host->dev.parent;
 
-	if (t->tx_dma)
+	if (!dma_mapping_error(dev, t->tx_dma))
 		dma_unmap_single(dev, t->tx_dma, t->len, DMA_TO_DEVICE);
-	if (t->rx_dma)
+	if (!dma_mapping_error(dev, t->rx_dma))
 		dma_unmap_single(dev, t->rx_dma, t->len, DMA_FROM_DEVICE);
 }
 
@@ -539,9 +546,8 @@ static void meson_spicc_setup_xfer(struct meson_spicc_device *spicc,
 	conf = conf_orig = readl_relaxed(spicc->base + SPICC_CONREG);
 
 	/* Setup word width */
-	conf &= ~SPICC_BITLENGTH_MASK;
-	conf |= FIELD_PREP(SPICC_BITLENGTH_MASK,
-			   (spicc->bytes_per_word << 3) - 1);
+	FIELD_MODIFY(SPICC_BITLENGTH_MASK, &conf,
+		     (spicc->bytes_per_word << 3) - 1);
 
 	/* Ignore if unchanged */
 	if (conf != conf_orig)
@@ -842,7 +848,7 @@ static int meson_spicc_pow2_clk_init(struct meson_spicc_device *spicc)
 
 	/* algorithm for pow2 div: rate = freq / 4 / (2 ^ N) */
 
-	pow2_fixed_div = devm_kzalloc(dev, sizeof(*pow2_fixed_div), GFP_KERNEL);
+	pow2_fixed_div = devm_kzalloc_obj(dev, *pow2_fixed_div);
 	if (!pow2_fixed_div)
 		return -ENOMEM;
 
@@ -908,7 +914,7 @@ static int meson_spicc_enh_clk_init(struct meson_spicc_device *spicc)
 
 	/* algorithm for enh div: rate = freq / 2 / (N + 1) */
 
-	enh_fixed_div = devm_kzalloc(dev, sizeof(*enh_fixed_div), GFP_KERNEL);
+	enh_fixed_div = devm_kzalloc_obj(dev, *enh_fixed_div);
 	if (!enh_fixed_div)
 		return -ENOMEM;
 
@@ -932,7 +938,7 @@ static int meson_spicc_enh_clk_init(struct meson_spicc_device *spicc)
 	if (WARN_ON(IS_ERR(clk)))
 		return PTR_ERR(clk);
 
-	enh_div = devm_kzalloc(dev, sizeof(*enh_div), GFP_KERNEL);
+	enh_div = devm_kzalloc_obj(dev, *enh_div);
 	if (!enh_div)
 		return -ENOMEM;
 
@@ -952,7 +958,7 @@ static int meson_spicc_enh_clk_init(struct meson_spicc_device *spicc)
 	if (WARN_ON(IS_ERR(clk)))
 		return PTR_ERR(clk);
 
-	mux = devm_kzalloc(dev, sizeof(*mux), GFP_KERNEL);
+	mux = devm_kzalloc_obj(dev, *mux);
 	if (!mux)
 		return -ENOMEM;
 
@@ -982,7 +988,7 @@ static int meson_spicc_probe(struct platform_device *pdev)
 	struct meson_spicc_device *spicc;
 	int ret, irq;
 
-	host = spi_alloc_host(&pdev->dev, sizeof(*spicc));
+	host = devm_spi_alloc_host(&pdev->dev, sizeof(*spicc));
 	if (!host) {
 		dev_err(&pdev->dev, "host allocation failed\n");
 		return -ENOMEM;
@@ -993,8 +999,7 @@ static int meson_spicc_probe(struct platform_device *pdev)
 	spicc->data = of_device_get_match_data(&pdev->dev);
 	if (!spicc->data) {
 		dev_err(&pdev->dev, "failed to get match data\n");
-		ret = -EINVAL;
-		goto out_host;
+		return -EINVAL;
 	}
 
 	spicc->pdev = pdev;
@@ -1005,8 +1010,7 @@ static int meson_spicc_probe(struct platform_device *pdev)
 	spicc->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(spicc->base)) {
 		dev_err(&pdev->dev, "io resource mapping failed\n");
-		ret = PTR_ERR(spicc->base);
-		goto out_host;
+		return PTR_ERR(spicc->base);
 	}
 
 	/* Set master mode and enable controller */
@@ -1017,44 +1021,37 @@ static int meson_spicc_probe(struct platform_device *pdev)
 	writel_relaxed(0, spicc->base + SPICC_INTREG);
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
-		ret = irq;
-		goto out_host;
-	}
+	if (irq < 0)
+		return irq;
 
 	ret = devm_request_irq(&pdev->dev, irq, meson_spicc_irq,
 			       0, NULL, spicc);
 	if (ret) {
 		dev_err(&pdev->dev, "irq request failed\n");
-		goto out_host;
+		return ret;
 	}
 
 	spicc->core = devm_clk_get_enabled(&pdev->dev, "core");
 	if (IS_ERR(spicc->core)) {
 		dev_err(&pdev->dev, "core clock request failed\n");
-		ret = PTR_ERR(spicc->core);
-		goto out_host;
+		return PTR_ERR(spicc->core);
 	}
 
 	if (spicc->data->has_pclk) {
 		spicc->pclk = devm_clk_get_enabled(&pdev->dev, "pclk");
 		if (IS_ERR(spicc->pclk)) {
 			dev_err(&pdev->dev, "pclk clock request failed\n");
-			ret = PTR_ERR(spicc->pclk);
-			goto out_host;
+			return PTR_ERR(spicc->pclk);
 		}
 	}
 
 	spicc->pinctrl = devm_pinctrl_get(&pdev->dev);
-	if (IS_ERR(spicc->pinctrl)) {
-		ret = PTR_ERR(spicc->pinctrl);
-		goto out_host;
-	}
+	if (IS_ERR(spicc->pinctrl))
+		return PTR_ERR(spicc->pinctrl);
 
 	device_reset_optional(&pdev->dev);
 
 	host->num_chipselect = 4;
-	host->dev.of_node = pdev->dev.of_node;
 	host->mode_bits = SPI_CPHA | SPI_CPOL | SPI_CS_HIGH | SPI_LOOP;
 	host->flags = (SPI_CONTROLLER_MUST_RX | SPI_CONTROLLER_MUST_TX);
 	host->min_speed_hz = spicc->data->min_speed_hz;
@@ -1071,39 +1068,34 @@ static int meson_spicc_probe(struct platform_device *pdev)
 	ret = meson_spicc_pow2_clk_init(spicc);
 	if (ret) {
 		dev_err(&pdev->dev, "pow2 clock registration failed\n");
-		goto out_host;
+		return ret;
 	}
 
 	if (spicc->data->has_enhance_clk_div) {
 		ret = meson_spicc_enh_clk_init(spicc);
 		if (ret) {
 			dev_err(&pdev->dev, "clock registration failed\n");
-			goto out_host;
+			return ret;
 		}
 	}
 
-	ret = devm_spi_register_controller(&pdev->dev, host);
+	ret = spi_register_controller(host);
 	if (ret) {
 		dev_err(&pdev->dev, "spi registration failed\n");
-		goto out_host;
+		return ret;
 	}
 
 	return 0;
-
-out_host:
-	spi_controller_put(host);
-
-	return ret;
 }
 
 static void meson_spicc_remove(struct platform_device *pdev)
 {
 	struct meson_spicc_device *spicc = platform_get_drvdata(pdev);
 
+	spi_unregister_controller(spicc->host);
+
 	/* Disable SPI */
 	writel(0, spicc->base + SPICC_CONREG);
-
-	spi_controller_put(spicc->host);
 }
 
 static const struct meson_spicc_data meson_spicc_gx_data = {

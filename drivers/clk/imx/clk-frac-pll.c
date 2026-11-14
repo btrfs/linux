@@ -208,12 +208,12 @@ struct clk_hw *imx_clk_hw_frac_pll(const char *name,
 				   const char *parent_name,
 				   void __iomem *base)
 {
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	struct clk_frac_pll *pll;
 	struct clk_hw *hw;
 	int ret;
 
-	pll = kzalloc(sizeof(*pll), GFP_KERNEL);
+	pll = kzalloc_obj(*pll);
 	if (!pll)
 		return ERR_PTR(-ENOMEM);
 

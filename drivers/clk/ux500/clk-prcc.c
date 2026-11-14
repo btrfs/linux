@@ -97,8 +97,8 @@ static struct clk *clk_reg_prcc(const char *name,
 				unsigned long flags,
 				const struct clk_ops *clk_prcc_ops)
 {
+	struct clk_init_data clk_prcc_init = {};
 	struct clk_prcc *clk;
-	struct clk_init_data clk_prcc_init;
 	struct clk *clk_reg;
 
 	if (!name) {
@@ -106,7 +106,7 @@ static struct clk *clk_reg_prcc(const char *name,
 		return ERR_PTR(-EINVAL);
 	}
 
-	clk = kzalloc(sizeof(*clk), GFP_KERNEL);
+	clk = kzalloc_obj(*clk);
 	if (!clk)
 		return ERR_PTR(-ENOMEM);
 

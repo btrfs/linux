@@ -3,6 +3,9 @@
 
 #include <linux/list.h>
 #include <linux/kref.h>
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+#include <linux/mount.h>
+#endif
 #include <linux/mutex.h>
 #include <linux/idr.h>
 #include <linux/sched.h>
@@ -34,6 +37,7 @@ struct pci_controller;
 #define DRM_WEDGE_RECOVERY_REBIND	BIT(1)	/* unbind + bind driver */
 #define DRM_WEDGE_RECOVERY_BUS_RESET	BIT(2)	/* unbind + reset bus device + bind */
 #define DRM_WEDGE_RECOVERY_VENDOR	BIT(3)	/* vendor specific recovery method */
+#define DRM_WEDGE_RECOVERY_COLD_RESET	BIT(4)	/* remove device + slot power cycle + rescan */
 
 /**
  * struct drm_wedge_task_info - information about the guilty task of a wedge dev
@@ -168,6 +172,18 @@ struct drm_device {
 	 */
 	struct drm_master *master;
 
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+	/**
+	 * @huge_mnt:
+	 *
+	 * Huge tmpfs mountpoint used at GEM object initialization
+	 * drm_gem_object_init(). Drivers can call drm_gem_huge_mnt_create() to
+	 * create, mount and use it. The default tmpfs mountpoint (`shm_mnt`) is
+	 * used if NULL.
+	 */
+	struct vfsmount *huge_mnt;
+#endif
+
 	/**
 	 * @driver_features: per-device driver features
 	 *
@@ -237,6 +253,14 @@ struct drm_device {
 	 * List of in-kernel clients. Protected by &clientlist_mutex.
 	 */
 	struct list_head clientlist;
+
+	/**
+	 * @client_sysrq_list:
+	 *
+	 * Entry into list of devices registered for sysrq. Allows in-kernel
+	 * clients on this device to handle sysrq keys.
+	 */
+	struct list_head client_sysrq_list;
 
 	/**
 	 * @vblank_disable_immediate:
@@ -352,6 +376,13 @@ struct drm_device {
 	 * Root directory for debugfs files.
 	 */
 	struct dentry *debugfs_root;
+
+	/**
+	 * @gem_lru_mutex:
+	 *
+	 * Lock protecting movement of GEM objects between LRUs.
+	 */
+	struct mutex gem_lru_mutex;
 };
 
 void drm_dev_set_dma_dev(struct drm_device *dev, struct device *dma_dev);

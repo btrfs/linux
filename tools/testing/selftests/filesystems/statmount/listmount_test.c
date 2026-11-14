@@ -11,7 +11,7 @@
 #include <unistd.h>
 
 #include "statmount.h"
-#include "../../kselftest_harness.h"
+#include "kselftest_harness.h"
 
 #ifndef LISTMOUNT_REVERSE
 #define LISTMOUNT_REVERSE    (1 << 0) /* List later mounts first */
@@ -61,6 +61,17 @@ TEST(listmount_backward)
 			last_mnt_id = list[cur];
 		}
 	}
+}
+
+/* A cursor at the largest possible mount id must not wrap around. */
+TEST(listmount_cursor_max)
+{
+	uint64_t list[LISTMNT_BUFFER];
+	ssize_t nr_mounts;
+
+	nr_mounts = listmount(LSMT_ROOT, 0, UINT64_MAX, list,
+			      LISTMNT_BUFFER, 0);
+	ASSERT_EQ(nr_mounts, 0);
 }
 
 TEST_HARNESS_MAIN

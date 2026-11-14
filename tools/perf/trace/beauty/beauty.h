@@ -35,6 +35,8 @@ bool strarray__strtoul(struct strarray *sa, char *bf, size_t size, u64 *ret);
 bool strarray__strtoul_flags(struct strarray *sa, char *bf, size_t size, u64 *ret);
 
 struct trace;
+bool trace__show_zeros(const struct trace *trace);
+struct machine *trace__host(const struct trace *trace);
 struct thread;
 
 struct file {
@@ -122,6 +124,23 @@ struct syscall_arg {
 
 unsigned long syscall_arg__val(struct syscall_arg *arg, u8 idx);
 
+/* Is there a whole augmented arg left with at least @need bytes of payload? */
+static inline bool syscall_arg__augmented_args_valid(struct syscall_arg *arg, size_t need)
+{
+	const struct augmented_arg *augmented_arg;
+
+	if (arg == NULL || arg->augmented.args == NULL ||
+	    arg->augmented.size < (int)sizeof(*augmented_arg))
+		return false;
+
+	augmented_arg = arg->augmented.args;
+	if (augmented_arg->size < 0 ||
+	    augmented_arg->size > arg->augmented.size - (int)sizeof(*augmented_arg))
+		return false;
+
+	return (size_t)augmented_arg->size >= need;
+}
+
 size_t syscall_arg__scnprintf_strarray_flags(char *bf, size_t size, struct syscall_arg *arg);
 #define SCA_STRARRAY_FLAGS syscall_arg__scnprintf_strarray_flags
 
@@ -158,6 +177,9 @@ size_t syscall_arg__scnprintf_hex(char *bf, size_t size, struct syscall_arg *arg
 size_t syscall_arg__scnprintf_ptr(char *bf, size_t size, struct syscall_arg *arg);
 #define SCA_PTR syscall_arg__scnprintf_ptr
 
+size_t syscall_arg__scnprintf_ksym(char *bf, size_t size, struct syscall_arg *arg);
+#define SCA_KSYM syscall_arg__scnprintf_ksym
+
 size_t syscall_arg__scnprintf_int(char *bf, size_t size, struct syscall_arg *arg);
 #define SCA_INT syscall_arg__scnprintf_int
 
@@ -178,6 +200,9 @@ size_t syscall_arg__scnprintf_fcntl_arg(char *bf, size_t size, struct syscall_ar
 
 size_t syscall_arg__scnprintf_flock(char *bf, size_t size, struct syscall_arg *arg);
 #define SCA_FLOCK syscall_arg__scnprintf_flock
+
+size_t syscall_arg__scnprintf_fsmount_flags(char *bf, size_t size, struct syscall_arg *arg);
+#define SCA_FSMOUNT_FLAGS syscall_arg__scnprintf_fsmount_flags
 
 size_t syscall_arg__scnprintf_fsmount_attr_flags(char *bf, size_t size, struct syscall_arg *arg);
 #define SCA_FSMOUNT_ATTR_FLAGS syscall_arg__scnprintf_fsmount_attr_flags
@@ -264,5 +289,63 @@ size_t open__scnprintf_flags(unsigned long flags, char *bf, size_t size, bool sh
 
 void syscall_arg__set_ret_scnprintf(struct syscall_arg *arg,
 				    size_t (*ret_scnprintf)(char *bf, size_t size, struct syscall_arg *arg));
+
+extern struct strarray strarray__fsconfig_cmds;
+
+size_t syscall_arg__scnprintf_eventfd_flags(char *bf, size_t size, struct syscall_arg *arg);
+#define SCA_EFD_FLAGS syscall_arg__scnprintf_eventfd_flags
+
+size_t syscall_arg__scnprintf_futex_op(char *bf, size_t size, struct syscall_arg *arg);
+#define SCA_FUTEX_OP syscall_arg__scnprintf_futex_op
+
+size_t syscall_arg__scnprintf_futex_val3(char *bf, size_t size, struct syscall_arg *arg);
+#define SCA_FUTEX_VAL3 syscall_arg__scnprintf_futex_val3
+
+size_t syscall_arg__scnprintf_mmap_prot(char *bf, size_t size, struct syscall_arg *arg);
+#define SCA_MMAP_PROT syscall_arg__scnprintf_mmap_prot
+
+extern struct strarray strarray__mmap_flags;
+
+size_t syscall_arg__scnprintf_mmap_flags(char *bf, size_t size, struct syscall_arg *arg);
+#define SCA_MMAP_FLAGS syscall_arg__scnprintf_mmap_flags
+
+size_t syscall_arg__scnprintf_mremap_flags(char *bf, size_t size, struct syscall_arg *arg);
+#define SCA_MREMAP_FLAGS syscall_arg__scnprintf_mremap_flags
+
+size_t syscall_arg__scnprintf_madvise_behavior(char *bf, size_t size, struct syscall_arg *arg);
+#define SCA_MADV_BHV syscall_arg__scnprintf_madvise_behavior
+
+size_t syscall_arg__scnprintf_mode_t(char *bf, size_t size, struct syscall_arg *arg);
+#define SCA_MODE_T syscall_arg__scnprintf_mode_t
+
+size_t syscall_arg__scnprintf_msg_flags(char *bf, size_t size, struct syscall_arg *arg);
+#define SCA_MSG_FLAGS syscall_arg__scnprintf_msg_flags
+
+size_t syscall_arg__scnprintf_perf_flags(char *bf, size_t size, struct syscall_arg *arg);
+#define SCA_PERF_FLAGS syscall_arg__scnprintf_perf_flags
+
+size_t syscall_arg__scnprintf_perf_event_attr(char *bf, size_t size, struct syscall_arg *arg);
+#define SCA_PERF_ATTR syscall_arg__scnprintf_perf_event_attr
+#define SCA_PERF_ATTR_FROM_USER(argname) \
+	{ .scnprintf	= SCA_PERF_ATTR, \
+	  .from_user	= true, }
+
+size_t syscall_arg__scnprintf_sched_policy(char *bf, size_t size, struct syscall_arg *arg);
+#define SCA_SCHED_POLICY syscall_arg__scnprintf_sched_policy
+
+size_t syscall_arg__scnprintf_seccomp_op(char *bf, size_t size, struct syscall_arg *arg);
+#define SCA_SECCOMP_OP syscall_arg__scnprintf_seccomp_op
+
+size_t syscall_arg__scnprintf_seccomp_flags(char *bf, size_t size, struct syscall_arg *arg);
+#define SCA_SECCOMP_FLAGS syscall_arg__scnprintf_seccomp_flags
+
+size_t syscall_arg__scnprintf_signum(char *bf, size_t size, struct syscall_arg *arg);
+#define SCA_SIGNUM syscall_arg__scnprintf_signum
+
+size_t syscall_arg__scnprintf_socket_type(char *bf, size_t size, struct syscall_arg *arg);
+#define SCA_SK_TYPE syscall_arg__scnprintf_socket_type
+
+size_t syscall_arg__scnprintf_waitid_options(char *bf, size_t size, struct syscall_arg *arg);
+#define SCA_WAITID_OPTIONS syscall_arg__scnprintf_waitid_options
 
 #endif /* _PERF_TRACE_BEAUTY_H */

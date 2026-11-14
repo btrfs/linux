@@ -35,13 +35,6 @@ enum {
 	P_L3_PLL,
 };
 
-struct apss_clk {
-	struct notifier_block cpu_clk_notifier;
-	struct clk_hw *hw;
-	struct device *dev;
-	struct clk *l3_clk;
-};
-
 static const struct alpha_pll_config apss_pll_config = {
 	.l = 0x3b,
 	.config_ctl_val = 0x08200920,
@@ -218,7 +211,7 @@ static struct clk_alpha_pll *ipa5424_apss_plls[] = {
 	&ipq5424_apss_pll,
 };
 
-static struct qcom_cc_driver_data ipa5424_apss_driver_data = {
+static const struct qcom_cc_driver_data ipa5424_apss_driver_data = {
 	.alpha_plls = ipa5424_apss_plls,
 	.num_alpha_plls = ARRAY_SIZE(ipa5424_apss_plls),
 };

@@ -75,7 +75,7 @@ static int qwiic_probe(struct i2c_client *client)
 	dev_dbg(&client->dev, "SparkFun Qwiic Joystick, FW: %u.%u\n",
 		vers.major, vers.minor);
 
-	priv = devm_kzalloc(&client->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&client->dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -126,7 +126,7 @@ MODULE_DEVICE_TABLE(of, of_qwiic_match);
 #endif /* CONFIG_OF */
 
 static const struct i2c_device_id qwiic_id_table[] = {
-	{ KBUILD_MODNAME },
+	{ .name = KBUILD_MODNAME },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, qwiic_id_table);

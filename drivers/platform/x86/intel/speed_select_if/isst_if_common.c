@@ -7,6 +7,7 @@
  * Author: Srinivas Pandruvada <srinivas.pandruvada@linux.intel.com>
  */
 
+#include <linux/acpi.h>
 #include <linux/cpufeature.h>
 #include <linux/cpuhotplug.h>
 #include <linux/fs.h>
@@ -89,7 +90,7 @@ static int isst_store_new_cmd(int cmd, u32 cpu, int mbox_cmd_type, u32 param,
 {
 	struct isst_cmd *sst_cmd;
 
-	sst_cmd = kmalloc(sizeof(*sst_cmd), GFP_KERNEL);
+	sst_cmd = kmalloc_obj(*sst_cmd);
 	if (!sst_cmd)
 		return -ENOMEM;
 
@@ -425,15 +426,11 @@ static int isst_if_cpu_info_init(void)
 {
 	int ret;
 
-	isst_cpu_info = kcalloc(num_possible_cpus(),
-				sizeof(*isst_cpu_info),
-				GFP_KERNEL);
+	isst_cpu_info = kzalloc_objs(*isst_cpu_info, num_possible_cpus());
 	if (!isst_cpu_info)
 		return -ENOMEM;
 
-	isst_pkg_info = kcalloc(topology_max_packages(),
-				sizeof(*isst_pkg_info),
-				GFP_KERNEL);
+	isst_pkg_info = kzalloc_objs(*isst_pkg_info, topology_max_packages());
 	if (!isst_pkg_info) {
 		kfree(isst_cpu_info);
 		return -ENOMEM;
@@ -778,6 +775,54 @@ void isst_if_cdev_unregister(int device_type)
 }
 EXPORT_SYMBOL_GPL(isst_if_cdev_unregister);
 
+#ifdef CONFIG_ACPI
+
+static bool isst_acpi_pm_profile_server(void)
+{
+	if (acpi_gbl_FADT.preferred_profile == PM_ENTERPRISE_SERVER ||
+	    acpi_gbl_FADT.preferred_profile == PM_PERFORMANCE_SERVER)
+		return true;
+
+	return false;
+}
+
+#else
+
+static bool isst_acpi_pm_profile_server(void)
+{
+	return false;
+}
+
+#endif
+
+static const struct x86_cpu_id isst_allowed_families[] = {
+	X86_MATCH_VENDOR_FAM(INTEL, 19, NULL),
+	{}
+};
+
+static bool isst_features_allowed(void)
+{
+	u64 data;
+
+	/* For hypervisors, explicit model addition is required */
+	if (cpu_feature_enabled(X86_FEATURE_HYPERVISOR))
+		return false;
+
+	/* SST is a server only feature */
+	if (!isst_acpi_pm_profile_server())
+		return false;
+
+	/*
+	 * Family 19 and the checks above guarantee the SST enumeration
+	 * interfaces are present
+	 */
+	if (!x86_match_cpu(isst_allowed_families))
+		return false;
+
+	/* MSR_PM_LOGICAL_ID is required to get PM logical CPU ID */
+	return !rdmsrq_safe(MSR_PM_LOGICAL_ID, &data);
+}
+
 #define SST_HPM_SUPPORTED	0x01
 #define SST_MBOX_SUPPORTED	0x02
 
@@ -802,8 +847,13 @@ static int __init isst_if_common_init(void)
 	const struct x86_cpu_id *id;
 
 	id = x86_match_cpu(isst_cpu_ids);
-	if (!id)
+	if (!id) {
+		if (isst_features_allowed()) {
+			isst_hpm_support = true;
+			goto misc_reg;
+		}
 		return -ENODEV;
+	}
 
 	if (id->driver_data == SST_HPM_SUPPORTED) {
 		isst_hpm_support = true;
@@ -816,6 +866,7 @@ static int __init isst_if_common_init(void)
 			return -ENODEV;
 	}
 
+misc_reg:
 	return isst_misc_reg();
 }
 module_init(isst_if_common_init)

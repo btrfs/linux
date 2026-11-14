@@ -71,17 +71,17 @@
 #define M41T80_FEATURE_SQ_ALT	BIT(4)	/* RSx bits are in reg 4 */
 
 static const struct i2c_device_id m41t80_id[] = {
-	{ "m41t62", M41T80_FEATURE_SQ | M41T80_FEATURE_SQ_ALT },
-	{ "m41t65", M41T80_FEATURE_WD },
-	{ "m41t80", M41T80_FEATURE_SQ },
-	{ "m41t81", M41T80_FEATURE_HT | M41T80_FEATURE_SQ},
-	{ "m41t81s", M41T80_FEATURE_HT | M41T80_FEATURE_BL | M41T80_FEATURE_SQ },
-	{ "m41t82", M41T80_FEATURE_HT | M41T80_FEATURE_BL | M41T80_FEATURE_SQ },
-	{ "m41t83", M41T80_FEATURE_HT | M41T80_FEATURE_BL | M41T80_FEATURE_SQ },
-	{ "m41st84", M41T80_FEATURE_HT | M41T80_FEATURE_BL | M41T80_FEATURE_SQ },
-	{ "m41st85", M41T80_FEATURE_HT | M41T80_FEATURE_BL | M41T80_FEATURE_SQ },
-	{ "m41st87", M41T80_FEATURE_HT | M41T80_FEATURE_BL | M41T80_FEATURE_SQ },
-	{ "rv4162", M41T80_FEATURE_SQ | M41T80_FEATURE_WD | M41T80_FEATURE_SQ_ALT },
+	{ .name = "m41t62", .driver_data = M41T80_FEATURE_SQ | M41T80_FEATURE_SQ_ALT },
+	{ .name = "m41t65", .driver_data = M41T80_FEATURE_WD },
+	{ .name = "m41t80", .driver_data = M41T80_FEATURE_SQ },
+	{ .name = "m41t81", .driver_data = M41T80_FEATURE_HT | M41T80_FEATURE_SQ},
+	{ .name = "m41t81s", .driver_data = M41T80_FEATURE_HT | M41T80_FEATURE_BL | M41T80_FEATURE_SQ },
+	{ .name = "m41t82", .driver_data = M41T80_FEATURE_HT | M41T80_FEATURE_BL | M41T80_FEATURE_SQ },
+	{ .name = "m41t83", .driver_data = M41T80_FEATURE_HT | M41T80_FEATURE_BL | M41T80_FEATURE_SQ },
+	{ .name = "m41st84", .driver_data = M41T80_FEATURE_HT | M41T80_FEATURE_BL | M41T80_FEATURE_SQ },
+	{ .name = "m41st85", .driver_data = M41T80_FEATURE_HT | M41T80_FEATURE_BL | M41T80_FEATURE_SQ },
+	{ .name = "m41st87", .driver_data = M41T80_FEATURE_HT | M41T80_FEATURE_BL | M41T80_FEATURE_SQ },
+	{ .name = "rv4162", .driver_data = M41T80_FEATURE_SQ | M41T80_FEATURE_WD | M41T80_FEATURE_SQ_ALT },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, m41t80_id);
@@ -162,19 +162,15 @@ static irqreturn_t m41t80_handle_irq(int irq, void *dev_id)
 	unsigned long events = 0;
 	int flags, flags_afe;
 
-	rtc_lock(m41t80->rtc);
+	guard(rtc_ops)(m41t80->rtc);
 
 	flags_afe = i2c_smbus_read_byte_data(client, M41T80_REG_ALARM_MON);
-	if (flags_afe < 0) {
-		rtc_unlock(m41t80->rtc);
+	if (flags_afe < 0)
 		return IRQ_NONE;
-	}
 
 	flags = i2c_smbus_read_byte_data(client, M41T80_REG_FLAGS);
-	if (flags <= 0) {
-		rtc_unlock(m41t80->rtc);
+	if (flags <= 0)
 		return IRQ_NONE;
-	}
 
 	if (flags & M41T80_FLAGS_AF) {
 		flags &= ~M41T80_FLAGS_AF;
@@ -188,8 +184,6 @@ static irqreturn_t m41t80_handle_irq(int irq, void *dev_id)
 		i2c_smbus_write_byte_data(client, M41T80_REG_ALARM_MON,
 					  flags_afe);
 	}
-
-	rtc_unlock(m41t80->rtc);
 
 	return IRQ_HANDLED;
 }
@@ -574,8 +568,8 @@ static struct clk *m41t80_sqw_register_clk(struct m41t80_data *m41t80)
 	struct i2c_client *client = m41t80->client;
 	struct device_node *node = client->dev.of_node;
 	struct device_node *fixed_clock;
+	struct clk_init_data init = {};
 	struct clk *clk;
-	struct clk_init_data init;
 	int ret;
 
 	fixed_clock = of_get_child_by_name(node, "clock");
@@ -918,19 +912,12 @@ static int m41t80_probe(struct i2c_client *client)
 		return -ENODEV;
 	}
 
-	m41t80_data = devm_kzalloc(&client->dev, sizeof(*m41t80_data),
-				   GFP_KERNEL);
+	m41t80_data = devm_kzalloc_obj(&client->dev, *m41t80_data);
 	if (!m41t80_data)
 		return -ENOMEM;
 
 	m41t80_data->client = client;
-	if (client->dev.of_node) {
-		m41t80_data->features = (unsigned long)
-			of_device_get_match_data(&client->dev);
-	} else {
-		const struct i2c_device_id *id = i2c_match_id(m41t80_id, client);
-		m41t80_data->features = id->driver_data;
-	}
+	m41t80_data->features = (unsigned long)i2c_get_match_data(client);
 	i2c_set_clientdata(client, m41t80_data);
 
 	m41t80_data->rtc =  devm_rtc_allocate_device(&client->dev);

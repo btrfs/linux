@@ -19,7 +19,6 @@
 #include <linux/mfd/core.h>
 #include <linux/mfd/intel_soc_pmic.h>
 #include <linux/mfd/intel_soc_pmic_bxtwc.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_data/x86/intel_scu_ipc.h>
 #include <linux/platform_device.h>
@@ -483,7 +482,7 @@ static int bxtwc_probe(struct platform_device *pdev)
 	if (hrv != BROXTON_PMIC_WC_HRV)
 		return dev_err_probe(dev, -ENODEV, "Invalid PMIC hardware revision: %llu\n", hrv);
 
-	pmic = devm_kzalloc(dev, sizeof(*pmic), GFP_KERNEL);
+	pmic = devm_kzalloc_obj(dev, *pmic);
 	if (!pmic)
 		return -ENOMEM;
 

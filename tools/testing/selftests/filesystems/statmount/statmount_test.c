@@ -7,17 +7,18 @@
 #include <sched.h>
 #include <fcntl.h>
 #include <sys/param.h>
+#include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <linux/stat.h>
 
 #include "statmount.h"
-#include "../../kselftest.h"
+#include "kselftest.h"
 
 static const char *const known_fs[] = {
 	"9p", "adfs", "affs", "afs", "aio", "anon_inodefs", "apparmorfs",
-	"autofs", "bcachefs", "bdev", "befs", "bfs", "binder", "binfmt_misc",
+	"autofs", "bcachefs", "bdev", "befs", "binder", "binfmt_misc",
 	"bpf", "btrfs", "btrfs_test_fs", "ceph", "cgroup", "cgroup2", "cifs",
 	"coda", "configfs", "cpuset", "cramfs", "cxl", "dax", "debugfs",
 	"devpts", "devtmpfs", "dmabuf", "drm", "ecryptfs", "efivarfs", "efs",
@@ -32,36 +33,6 @@ static const char *const known_fs[] = {
 	"selinuxfs", "smackfs", "smb3", "sockfs", "spufs", "squashfs", "sysfs",
 	"sysv", "tmpfs", "tracefs", "ubifs", "udf", "ufs", "v7", "vboxsf",
 	"vfat", "virtiofs", "vxfs", "xenfs", "xfs", "zonefs", NULL };
-
-static struct statmount *statmount_alloc(uint64_t mnt_id, uint64_t mask, unsigned int flags)
-{
-	size_t bufsize = 1 << 15;
-	struct statmount *buf = NULL, *tmp = alloca(bufsize);
-	int tofree = 0;
-	int ret;
-
-	for (;;) {
-		ret = statmount(mnt_id, 0, mask, tmp, bufsize, flags);
-		if (ret != -1)
-			break;
-		if (tofree)
-			free(tmp);
-		if (errno != EOVERFLOW)
-			return NULL;
-		bufsize <<= 1;
-		tofree = 1;
-		tmp = malloc(bufsize);
-		if (!tmp)
-			return NULL;
-	}
-	buf = malloc(tmp->size);
-	if (buf)
-		memcpy(buf, tmp, tmp->size);
-	if (tofree)
-		free(tmp);
-
-	return buf;
-}
 
 static void write_file(const char *path, const char *val)
 {
@@ -111,6 +82,9 @@ static FILE *f_mountinfo;
 static void cleanup_namespace(void)
 {
 	int ret;
+
+	if (f_mountinfo)
+		fclose(f_mountinfo);
 
 	ret = fchdir(orig_root);
 	if (ret == -1)
@@ -237,7 +211,7 @@ static void test_statmount_zero_mask(void)
 	struct statmount sm;
 	int ret;
 
-	ret = statmount(root_id, 0, 0, &sm, sizeof(sm), 0);
+	ret = statmount(root_id, 0, 0, 0, &sm, sizeof(sm), 0);
 	if (ret == -1) {
 		ksft_test_result_fail("statmount zero mask: %s\n",
 				      strerror(errno));
@@ -263,7 +237,7 @@ static void test_statmount_mnt_basic(void)
 	int ret;
 	uint64_t mask = STATMOUNT_MNT_BASIC;
 
-	ret = statmount(root_id, 0, mask, &sm, sizeof(sm), 0);
+	ret = statmount(root_id, 0, 0, mask, &sm, sizeof(sm), 0);
 	if (ret == -1) {
 		ksft_test_result_fail("statmount mnt basic: %s\n",
 				      strerror(errno));
@@ -323,7 +297,7 @@ static void test_statmount_sb_basic(void)
 	struct statx sx;
 	struct statfs sf;
 
-	ret = statmount(root_id, 0, mask, &sm, sizeof(sm), 0);
+	ret = statmount(root_id, 0, 0, mask, &sm, sizeof(sm), 0);
 	if (ret == -1) {
 		ksft_test_result_fail("statmount sb basic: %s\n",
 				      strerror(errno));
@@ -361,10 +335,10 @@ static void test_statmount_sb_basic(void)
 		return;
 	}
 
-	if (sm.sb_magic != sf.f_type) {
+	if (sm.sb_magic != (unsigned long)sf.f_type) {
 		ksft_test_result_fail("unexpected sb magic: 0x%llx != 0x%lx\n",
 				      (unsigned long long) sm.sb_magic,
-				      sf.f_type);
+				      (unsigned long) sf.f_type);
 		return;
 	}
 
@@ -375,7 +349,7 @@ static void test_statmount_mnt_point(void)
 {
 	struct statmount *sm;
 
-	sm = statmount_alloc(root_id, STATMOUNT_MNT_POINT, 0);
+	sm = statmount_alloc(root_id, 0, STATMOUNT_MNT_POINT, 0);
 	if (!sm) {
 		ksft_test_result_fail("statmount mount point: %s\n",
 				      strerror(errno));
@@ -405,7 +379,7 @@ static void test_statmount_mnt_root(void)
 	assert(last_dir);
 	last_dir++;
 
-	sm = statmount_alloc(root_id, STATMOUNT_MNT_ROOT, 0);
+	sm = statmount_alloc(root_id, 0, STATMOUNT_MNT_ROOT, 0);
 	if (!sm) {
 		ksft_test_result_fail("statmount mount root: %s\n",
 				      strerror(errno));
@@ -438,7 +412,7 @@ static void test_statmount_fs_type(void)
 	const char *fs_type;
 	const char *const *s;
 
-	sm = statmount_alloc(root_id, STATMOUNT_FS_TYPE, 0);
+	sm = statmount_alloc(root_id, 0, STATMOUNT_FS_TYPE, 0);
 	if (!sm) {
 		ksft_test_result_fail("statmount fs type: %s\n",
 				      strerror(errno));
@@ -467,7 +441,7 @@ static void test_statmount_mnt_opts(void)
 	char *line = NULL;
 	size_t len = 0;
 
-	sm = statmount_alloc(root_id, STATMOUNT_MNT_BASIC | STATMOUNT_MNT_OPTS,
+	sm = statmount_alloc(root_id, 0, STATMOUNT_MNT_BASIC | STATMOUNT_MNT_OPTS,
 			     0);
 	if (!sm) {
 		ksft_test_result_fail("statmount mnt opts: %s\n",
@@ -545,7 +519,7 @@ static void test_statmount_mnt_opts(void)
 		return;
 	}
 
-	ksft_test_result_fail("didnt't find mount entry\n");
+	ksft_test_result_fail("didn't find mount entry\n");
 	free(sm);
 	free(line);
 }
@@ -557,7 +531,7 @@ static void test_statmount_string(uint64_t mask, size_t off, const char *name)
 	uint32_t start, i;
 	int ret;
 
-	sm = statmount_alloc(root_id, mask, 0);
+	sm = statmount_alloc(root_id, 0, mask, 0);
 	if (!sm) {
 		ksft_test_result_fail("statmount %s: %s\n", name,
 				      strerror(errno));
@@ -586,14 +560,14 @@ static void test_statmount_string(uint64_t mask, size_t off, const char *name)
 	exactsize = sm->size;
 	shortsize = sizeof(*sm) + i;
 
-	ret = statmount(root_id, 0, mask, sm, exactsize, 0);
+	ret = statmount(root_id, 0, 0, mask, sm, exactsize, 0);
 	if (ret == -1) {
 		ksft_test_result_fail("statmount exact size: %s\n",
 				      strerror(errno));
 		goto out;
 	}
 	errno = 0;
-	ret = statmount(root_id, 0, mask, sm, shortsize, 0);
+	ret = statmount(root_id, 0, 0, mask, sm, shortsize, 0);
 	if (ret != -1 || errno != EOVERFLOW) {
 		ksft_test_result_fail("should have failed with EOVERFLOW: %s\n",
 				      strerror(errno));
@@ -603,6 +577,63 @@ static void test_statmount_string(uint64_t mask, size_t off, const char *name)
 	ksft_test_result_pass("statmount string %s\n", name);
 out:
 	free(sm);
+}
+
+/*
+ * A string request needs a buffer that is larger than the fixed part of
+ * struct statmount. That's true even if the string turns out to be empty
+ * since the empty string itself is placed past the fixed part.
+ */
+static void test_statmount_string_short_buffer(void)
+{
+	const struct {
+		uint64_t mask;
+		const char *name;
+	} reqs[] = {
+		{ STATMOUNT_FS_TYPE,	"fs type" },
+		{ STATMOUNT_FS_SUBTYPE,	"fs subtype" },
+		{ STATMOUNT_MNT_UIDMAP,	"mount uidmap" },
+	};
+	const size_t sizes[] = { 0, 1, 100, sizeof(struct statmount) - 1,
+				 sizeof(struct statmount) };
+	long page = sysconf(_SC_PAGESIZE);
+	unsigned char *map;
+	size_t i, j;
+	int ret;
+
+	map = mmap(NULL, 2 * page, PROT_READ | PROT_WRITE,
+		   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (map == MAP_FAILED) {
+		ksft_test_result_fail("mmap: %s\n", strerror(errno));
+		return;
+	}
+
+	/* Anything written past the end of the buffer faults. */
+	if (mprotect(map + page, page, PROT_NONE)) {
+		ksft_test_result_fail("mprotect: %s\n", strerror(errno));
+		goto out;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(reqs); i++) {
+		for (j = 0; j < ARRAY_SIZE(sizes); j++) {
+			/* The buffer ends right at the guard page. */
+			struct statmount *sm = (void *)(map + page - sizes[j]);
+
+			errno = 0;
+			ret = statmount(root_id, 0, 0, reqs[i].mask, sm,
+					sizes[j], 0);
+			if (ret != -1 || errno != EOVERFLOW) {
+				ksft_test_result_fail("statmount %s with %zu byte buffer: %s\n",
+						      reqs[i].name, sizes[j],
+						      ret ? strerror(errno) : "success");
+				goto out;
+			}
+		}
+	}
+
+	ksft_test_result_pass("statmount string short buffer\n");
+out:
+	munmap(map, 2 * page);
 }
 
 static void test_listmount_tree(void)
@@ -658,6 +689,226 @@ static void test_listmount_tree(void)
 	ksft_test_result_pass("listmount tree\n");
 }
 
+static void test_statmount_by_fd(void)
+{
+	struct statmount *sm = NULL;
+	char tmpdir[] = "/statmount.fd.XXXXXX";
+	const char root[] = "/test";
+	char subdir[PATH_MAX], tmproot[PATH_MAX];
+	int fd;
+
+	if (!mkdtemp(tmpdir)) {
+		ksft_perror("mkdtemp");
+		return;
+	}
+
+	if (mount("statmount.test", tmpdir, "tmpfs", 0, NULL)) {
+		ksft_perror("mount");
+		rmdir(tmpdir);
+		return;
+	}
+
+	snprintf(subdir, PATH_MAX, "%s%s", tmpdir, root);
+	snprintf(tmproot, PATH_MAX, "%s/%s", tmpdir, "chroot");
+
+	if (mkdir(subdir, 0755)) {
+		ksft_perror("mkdir");
+		goto err_tmpdir;
+	}
+
+	if (mount(subdir, subdir, NULL, MS_BIND, 0)) {
+		ksft_perror("mount");
+		goto err_subdir;
+	}
+
+	if (mkdir(tmproot, 0755)) {
+		ksft_perror("mkdir");
+		goto err_subdir;
+	}
+
+	fd = open(subdir, O_PATH);
+	if (fd < 0) {
+		ksft_perror("open");
+		goto err_tmproot;
+	}
+
+	if (chroot(tmproot)) {
+		ksft_perror("chroot");
+		goto err_fd;
+	}
+
+	sm = statmount_alloc_by_fd(fd, STATMOUNT_MNT_ROOT | STATMOUNT_MNT_POINT);
+	if (!sm) {
+		ksft_test_result_fail("statmount by fd failed: %s\n", strerror(errno));
+		goto err_chroot;
+	}
+
+	if (sm->size < sizeof(*sm)) {
+		ksft_test_result_fail("unexpected size: %u < %u\n",
+				      sm->size, (uint32_t) sizeof(*sm));
+		goto err_chroot;
+	}
+
+	if (sm->mask & STATMOUNT_MNT_POINT) {
+		ksft_test_result_fail("STATMOUNT_MNT_POINT unexpectedly set in statmount\n");
+		goto err_chroot;
+	}
+
+	if (!(sm->mask & STATMOUNT_MNT_ROOT)) {
+		ksft_test_result_fail("STATMOUNT_MNT_ROOT not set in statmount\n");
+		goto err_chroot;
+	}
+
+	if (strcmp(root, sm->str + sm->mnt_root) != 0) {
+		ksft_test_result_fail("statmount returned incorrect mnt_root,"
+			"statmount mnt_root: %s != %s\n",
+			sm->str + sm->mnt_root, root);
+		goto err_chroot;
+	}
+
+	if (chroot(".")) {
+		ksft_perror("chroot");
+		goto out;
+	}
+
+	free(sm);
+	sm = statmount_alloc_by_fd(fd, STATMOUNT_MNT_ROOT | STATMOUNT_MNT_POINT);
+	if (!sm) {
+		ksft_test_result_fail("statmount by fd failed: %s\n", strerror(errno));
+		goto err_fd;
+	}
+
+	if (sm->size < sizeof(*sm)) {
+		ksft_test_result_fail("unexpected size: %u < %u\n",
+				      sm->size, (uint32_t) sizeof(*sm));
+		goto out;
+	}
+
+	if (!(sm->mask & STATMOUNT_MNT_POINT)) {
+		ksft_test_result_fail("STATMOUNT_MNT_POINT not set in statmount\n");
+		goto out;
+	}
+
+	if (!(sm->mask & STATMOUNT_MNT_ROOT)) {
+		ksft_test_result_fail("STATMOUNT_MNT_ROOT not set in statmount\n");
+		goto out;
+	}
+
+	if (strcmp(subdir, sm->str + sm->mnt_point) != 0) {
+		ksft_test_result_fail("statmount returned incorrect mnt_point,"
+			"statmount mnt_point: %s != %s\n", sm->str + sm->mnt_point, subdir);
+		goto out;
+	}
+
+	if (strcmp(root, sm->str + sm->mnt_root) != 0) {
+		ksft_test_result_fail("statmount returned incorrect mnt_root,"
+			"statmount mnt_root: %s != %s\n", sm->str + sm->mnt_root, root);
+		goto out;
+	}
+
+	ksft_test_result_pass("statmount by fd\n");
+	goto out;
+err_chroot:
+	chroot(".");
+out:
+	free(sm);
+err_fd:
+	close(fd);
+err_tmproot:
+	rmdir(tmproot);
+err_subdir:
+	umount2(subdir, MNT_DETACH);
+	rmdir(subdir);
+err_tmpdir:
+	umount2(tmpdir, MNT_DETACH);
+	rmdir(tmpdir);
+}
+
+static void test_statmount_by_fd_unmounted(void)
+{
+	const char root[] = "/test.unmounted";
+	char tmpdir[] = "/statmount.fd.XXXXXX";
+	char subdir[PATH_MAX];
+	int fd;
+	struct statmount *sm = NULL;
+
+	if (!mkdtemp(tmpdir)) {
+		ksft_perror("mkdtemp");
+		return;
+	}
+
+	if (mount("statmount.test", tmpdir, "tmpfs", 0, NULL)) {
+		ksft_perror("mount");
+		rmdir(tmpdir);
+		return;
+	}
+
+	snprintf(subdir, PATH_MAX, "%s%s", tmpdir, root);
+
+	if (mkdir(subdir, 0755)) {
+		ksft_perror("mkdir");
+		goto err_tmpdir;
+	}
+
+	if (mount(subdir, subdir, 0, MS_BIND, NULL)) {
+		ksft_perror("mount");
+		goto err_subdir;
+	}
+
+	fd = open(subdir, O_PATH);
+	if (fd < 0) {
+		ksft_perror("open");
+		goto err_subdir;
+	}
+
+	if (umount2(tmpdir, MNT_DETACH)) {
+		ksft_perror("umount2");
+		goto err_fd;
+	}
+
+	sm = statmount_alloc_by_fd(fd, STATMOUNT_MNT_POINT | STATMOUNT_MNT_ROOT);
+	if (!sm) {
+		ksft_test_result_fail("statmount by fd unmounted: %s\n",
+				      strerror(errno));
+		goto err_sm;
+	}
+
+	if (sm->size < sizeof(*sm)) {
+		ksft_test_result_fail("unexpected size: %u < %u\n",
+				      sm->size, (uint32_t) sizeof(*sm));
+		goto err_sm;
+	}
+
+	if (sm->mask & STATMOUNT_MNT_POINT) {
+		ksft_test_result_fail("STATMOUNT_MNT_POINT unexpectedly set in mask\n");
+		goto err_sm;
+	}
+
+	if (!(sm->mask & STATMOUNT_MNT_ROOT)) {
+		ksft_test_result_fail("STATMOUNT_MNT_ROOT not set in mask\n");
+		goto err_sm;
+	}
+
+	if (strcmp(sm->str + sm->mnt_root, root) != 0) {
+		ksft_test_result_fail("statmount returned incorrect mnt_root,"
+			"statmount mnt_root: %s != %s\n",
+			sm->str + sm->mnt_root, root);
+		goto err_sm;
+	}
+
+	ksft_test_result_pass("statmount by fd on unmounted mount\n");
+err_sm:
+	free(sm);
+err_fd:
+	close(fd);
+err_subdir:
+	umount2(subdir, MNT_DETACH);
+	rmdir(subdir);
+err_tmpdir:
+	umount2(tmpdir, MNT_DETACH);
+	rmdir(tmpdir);
+}
+
 #define str_off(memb) (offsetof(struct statmount, memb) / sizeof(uint32_t))
 
 int main(void)
@@ -669,14 +920,14 @@ int main(void)
 
 	ksft_print_header();
 
-	ret = statmount(0, 0, 0, NULL, 0, 0);
+	ret = statmount(0, 0, 0, 0, NULL, 0, 0);
 	assert(ret == -1);
 	if (errno == ENOSYS)
 		ksft_exit_skip("statmount() syscall not supported\n");
 
 	setup_namespace();
 
-	ksft_set_plan(15);
+	ksft_set_plan(18);
 	test_listmount_empty_root();
 	test_statmount_zero_mask();
 	test_statmount_mnt_basic();
@@ -691,8 +942,11 @@ int main(void)
 	test_statmount_string(all_mask, str_off(mnt_root), "mount root & all");
 	test_statmount_string(all_mask, str_off(mnt_point), "mount point & all");
 	test_statmount_string(all_mask, str_off(fs_type), "fs type & all");
+	test_statmount_string_short_buffer();
 
 	test_listmount_tree();
+	test_statmount_by_fd_unmounted();
+	test_statmount_by_fd();
 
 
 	if (ksft_get_fail_cnt() + ksft_get_error_cnt() > 0)

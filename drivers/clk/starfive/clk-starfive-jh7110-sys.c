@@ -347,7 +347,7 @@ int jh7110_reset_controller_register(struct jh71x0_clk_priv *priv,
 	struct auxiliary_device *adev;
 	int ret;
 
-	rdev = kzalloc(sizeof(*rdev), GFP_KERNEL);
+	rdev = kzalloc_obj(*rdev);
 	if (!rdev)
 		return -ENOMEM;
 
@@ -390,6 +390,9 @@ static int jh7110_pll0_clk_notifier_cb(struct notifier_block *nb,
 	if (action == PRE_RATE_CHANGE) {
 		struct clk *osc = clk_get(priv->dev, "osc");
 
+		if (IS_ERR(osc))
+			return notifier_from_errno(PTR_ERR(osc));
+
 		priv->original_clk = clk_get_parent(cpu_root);
 		ret = clk_set_parent(cpu_root, osc);
 		clk_put(osc);
@@ -407,9 +410,7 @@ static int __init jh7110_syscrg_probe(struct platform_device *pdev)
 	int ret;
 	struct clk *pllclk;
 
-	priv = devm_kzalloc(&pdev->dev,
-			    struct_size(priv, reg, JH7110_SYSCLK_END),
-			    GFP_KERNEL);
+	priv = devm_kzalloc_flex(&pdev->dev, *priv, reg, JH7110_SYSCLK_END);
 	if (!priv)
 		return -ENOMEM;
 

@@ -347,7 +347,7 @@ static struct usb_request *gr_alloc_request(struct usb_ep *_ep, gfp_t gfp_flags)
 {
 	struct gr_request *req;
 
-	req = kzalloc(sizeof(*req), gfp_flags);
+	req = kzalloc_obj(*req, gfp_flags);
 	if (!req)
 		return NULL;
 
@@ -2127,7 +2127,7 @@ static int gr_probe(struct platform_device *pdev)
 	int retval;
 	u32 status;
 
-	dev = devm_kzalloc(&pdev->dev, sizeof(*dev), GFP_KERNEL);
+	dev = devm_kzalloc_obj(&pdev->dev, *dev);
 	if (!dev)
 		return -ENOMEM;
 	dev->dev = &pdev->dev;

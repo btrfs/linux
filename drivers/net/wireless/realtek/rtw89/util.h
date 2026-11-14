@@ -6,6 +6,13 @@
 
 #include "core.h"
 
+#define RTW89_KEY_PN_0 GENMASK_ULL(7, 0)
+#define RTW89_KEY_PN_1 GENMASK_ULL(15, 8)
+#define RTW89_KEY_PN_2 GENMASK_ULL(23, 16)
+#define RTW89_KEY_PN_3 GENMASK_ULL(31, 24)
+#define RTW89_KEY_PN_4 GENMASK_ULL(39, 32)
+#define RTW89_KEY_PN_5 GENMASK_ULL(47, 40)
+
 #define rtw89_iterate_vifs_bh(rtwdev, iterator, data)                          \
 	ieee80211_iterate_active_interfaces_atomic((rtwdev)->hw,               \
 			IEEE80211_IFACE_ITER_NORMAL, iterator, data)
@@ -13,6 +20,10 @@
 /* call this function with wiphy mutex is held */
 #define rtw89_for_each_rtwvif(rtwdev, rtwvif)				       \
 	list_for_each_entry(rtwvif, &(rtwdev)->rtwvifs_list, list)
+
+/* call this function with wiphy mutex is held */
+#define rtw89_for_each_active_rtwvif(rtwdev, rtwvif) \
+	list_for_each_entry(rtwvif, &(rtwdev)->hal.entity_mgnt.active_list, mgnt_entry)
 
 /* Before adding rtwvif to list, we need to check if it already exist, beacase
  * in some case such as SER L2 happen during WoWLAN flow, calling reconfig
@@ -71,6 +82,16 @@ static inline void ether_addr_copy_mask(u8 *dst, const u8 *src, u8 mask)
 		if (mask & BIT(i))
 			dst[i] = src[i];
 	}
+}
+
+static inline void ccmp_hdr2pn(s64 *pn, const u8 *hdr)
+{
+	*pn = u64_encode_bits(hdr[0], RTW89_KEY_PN_0) |
+	      u64_encode_bits(hdr[1], RTW89_KEY_PN_1) |
+	      u64_encode_bits(hdr[4], RTW89_KEY_PN_2) |
+	      u64_encode_bits(hdr[5], RTW89_KEY_PN_3) |
+	      u64_encode_bits(hdr[6], RTW89_KEY_PN_4) |
+	      u64_encode_bits(hdr[7], RTW89_KEY_PN_5);
 }
 
 s32 rtw89_linear_to_db_quarter(u64 val);

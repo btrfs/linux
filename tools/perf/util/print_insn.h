@@ -4,11 +4,15 @@
 
 #include <stddef.h>
 #include <stdio.h>
+#include <sys/types.h>
 
-struct perf_sample;
-struct thread;
+#include <linux/types.h>
+
+struct addr_location;
 struct machine;
 struct perf_insn;
+struct perf_sample;
+struct thread;
 
 #define PRINT_INSN_IMM_HEX		(1<<0)
 

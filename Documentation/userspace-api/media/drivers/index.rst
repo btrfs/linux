@@ -30,8 +30,10 @@ For more details see the file COPYING in the source distribution of Linux.
 	camera-sensor
 	ccs
 	cx2341x-uapi
+	dcmipp
 	dw100
 	imx-uapi
+	mali-c55
 	max2175
 	npcm-video
 	omap3isp-uapi

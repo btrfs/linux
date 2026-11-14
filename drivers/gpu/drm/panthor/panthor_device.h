@@ -14,6 +14,7 @@
 #include <linux/spinlock.h>
 
 #include <drm/drm_device.h>
+#include <drm/drm_gem.h>
 #include <drm/drm_mm.h>
 #include <drm/gpu_scheduler.h>
 #include <drm/panthor_drm.h>
@@ -24,12 +25,25 @@ struct panthor_device;
 struct panthor_gpu;
 struct panthor_group_pool;
 struct panthor_heap_pool;
+struct panthor_hw;
 struct panthor_job;
 struct panthor_mmu;
 struct panthor_fw;
 struct panthor_perfcnt;
+struct panthor_pwr;
 struct panthor_vm;
 struct panthor_vm_pool;
+
+/**
+ * struct panthor_soc_data - Panthor SoC Data
+ */
+struct panthor_soc_data {
+	/** @asn_hash_enable: True if GPU_L2_CONFIG_ASN_HASH_ENABLE must be set. */
+	bool asn_hash_enable;
+
+	/** @asn_hash: ASN_HASH values when asn_hash_enable is true. */
+	u32 asn_hash[3];
+};
 
 /**
  * enum panthor_device_pm_state - PM state
@@ -48,6 +62,17 @@ enum panthor_device_pm_state {
 	PANTHOR_DEVICE_PM_STATE_SUSPENDING,
 };
 
+enum panthor_irq_state {
+	/** @PANTHOR_IRQ_STATE_ACTIVE: IRQ is active and ready to process events. */
+	PANTHOR_IRQ_STATE_ACTIVE = 0,
+	/** @PANTHOR_IRQ_STATE_PROCESSING: IRQ is currently processing events. */
+	PANTHOR_IRQ_STATE_PROCESSING,
+	/** @PANTHOR_IRQ_STATE_SUSPENDED: IRQ is suspended. */
+	PANTHOR_IRQ_STATE_SUSPENDED,
+	/** @PANTHOR_IRQ_STATE_SUSPENDING: IRQ is being suspended. */
+	PANTHOR_IRQ_STATE_SUSPENDING,
+};
+
 /**
  * struct panthor_irq - IRQ data
  *
@@ -57,14 +82,31 @@ struct panthor_irq {
 	/** @ptdev: Panthor device */
 	struct panthor_device *ptdev;
 
+	/** @iomem: CPU mapping of IRQ base address */
+	void __iomem *iomem;
+
 	/** @irq: IRQ number. */
 	int irq;
 
-	/** @mask: Current mask being applied to xxx_INT_MASK. */
+	/** @mask: Values to write to xxx_INT_MASK if active. */
 	u32 mask;
 
-	/** @suspended: Set to true when the IRQ is suspended. */
-	atomic_t suspended;
+	/**
+	 * @lock: protects modifications to _INT_MASK, @mask and @state.
+	 *
+	 * In paths where _INT_MASK is updated based on a state
+	 * transition/check, it's crucial for the state update/check to be
+	 * inside the locked section, otherwise it introduces a race window
+	 * leading to potential _INT_MASK inconsistencies.
+	 */
+	spinlock_t lock;
+
+	/**
+	 * @state: one of &enum panthor_irq_state reflecting the current state.
+	 *
+	 * Must be accessed with lock held.
+	 */
+	enum panthor_irq_state state;
 };
 
 /**
@@ -93,6 +135,9 @@ struct panthor_device {
 	/** @base: Base drm_device. */
 	struct drm_device base;
 
+	/** @soc_data: Optional SoC data. */
+	const struct panthor_soc_data *soc_data;
+
 	/** @phys_addr: Physical address of the iomem region. */
 	phys_addr_t phys_addr;
 
@@ -120,6 +165,15 @@ struct panthor_device {
 	/** @csif_info: Command stream interface information. */
 	struct drm_panthor_csif_info csif_info;
 
+	/** @mmu_info: MMU info */
+	struct drm_panthor_mmu_info mmu_info;
+
+	/** @hw: GPU-specific data. */
+	struct panthor_hw *hw;
+
+	/** @pwr: Power control management data. */
+	struct panthor_pwr *pwr;
+
 	/** @gpu: GPU management data. */
 	struct panthor_gpu *gpu;
 
@@ -134,6 +188,75 @@ struct panthor_device {
 
 	/** @devfreq: Device frequency scaling management data. */
 	struct panthor_devfreq *devfreq;
+
+	/** @reclaim: Reclaim related stuff */
+	struct {
+		/** @reclaim.shrinker: Shrinker instance */
+		struct shrinker *shrinker;
+
+		/**
+		 * @reclaim.unused: BOs with unused pages
+		 *
+		 * Basically all buffers that got mmapped, vmapped or GPU mapped and
+		 * then unmapped. There should be no contention on these buffers,
+		 * making them ideal to reclaim.
+		 */
+		struct drm_gem_lru unused;
+
+		/**
+		 * @reclaim.mmapped: mmap()-ed buffers
+		 *
+		 * Those are relatively easy to reclaim since we don't need user
+		 * agreement, we can simply teardown the mapping and let it fault on
+		 * the next access.
+		 */
+		struct drm_gem_lru mmapped;
+
+		/**
+		 * @reclaim.gpu_mapped_shared: shared BO LRU list
+		 *
+		 * That's the most tricky BO type to reclaim, because it involves
+		 * tearing down all mappings in all VMs where this BO is mapped,
+		 * which increases the risk of contention and thus decreases the
+		 * likeliness of success.
+		 */
+		struct drm_gem_lru gpu_mapped_shared;
+
+		/**
+		 * @reclaim.vms: VM LRU list
+		 *
+		 * VMs that have reclaimable BOs only mapped to a single VM are placed
+		 * in this LRU. Reclaiming such BOs implies waiting for VM idleness
+		 * (no in-flight GPU jobs targeting this VM), meaning we can't reclaim
+		 * those if we're in a context where we can't block/sleep.
+		 */
+		struct list_head vms;
+
+		/**
+		 * @reclaim.gpu_mapped_count: Global counter of pages that are GPU mapped
+		 *
+		 * Allows us to get the number of reclaimable pages without walking
+		 * the vms and gpu_mapped_shared LRUs.
+		 */
+		long gpu_mapped_count;
+
+		/**
+		 * @reclaim.retry_count: Number of times we ran the shrinker without being
+		 * able to reclaim stuff
+		 *
+		 * Used to stop scanning GEMs when too many attempts were made
+		 * without progress.
+		 */
+		atomic_t retry_count;
+
+#ifdef CONFIG_DEBUG_FS
+		/**
+		 * @reclaim.nr_pages_reclaimed_on_last_scan: Number of pages reclaimed on the last
+		 * shrinker scan
+		 */
+		unsigned long nr_pages_reclaimed_on_last_scan;
+#endif
+	} reclaim;
 
 	/** @unplug: Device unplug related fields. */
 	struct {
@@ -199,9 +322,6 @@ struct panthor_device {
 
 	/** @profile_mask: User-set profiling flags for job accounting. */
 	u32 profile_mask;
-
-	/** @current_frequency: Device clock frequency at present. Set by DVFS*/
-	unsigned long current_frequency;
 
 	/** @fast_rate: Maximum device clock frequency. Set by DVFS */
 	unsigned long fast_rate;
@@ -375,155 +495,205 @@ panthor_exception_is_fault(u32 exception_code)
 const char *panthor_exception_name(struct panthor_device *ptdev,
 				   u32 exception_code);
 
-/**
- * PANTHOR_IRQ_HANDLER() - Define interrupt handlers and the interrupt
- * registration function.
- *
- * The boiler-plate to gracefully deal with shared interrupts is
- * auto-generated. All you have to do is call PANTHOR_IRQ_HANDLER()
- * just after the actual handler. The handler prototype is:
- *
- * void (*handler)(struct panthor_device *, u32 status);
- */
-#define PANTHOR_IRQ_HANDLER(__name, __reg_prefix, __handler)					\
-static irqreturn_t panthor_ ## __name ## _irq_raw_handler(int irq, void *data)			\
-{												\
-	struct panthor_irq *pirq = data;							\
-	struct panthor_device *ptdev = pirq->ptdev;						\
-												\
-	if (atomic_read(&pirq->suspended))							\
-		return IRQ_NONE;								\
-	if (!gpu_read(ptdev, __reg_prefix ## _INT_STAT))					\
-		return IRQ_NONE;								\
-												\
-	gpu_write(ptdev, __reg_prefix ## _INT_MASK, 0);						\
-	return IRQ_WAKE_THREAD;									\
-}												\
-												\
-static irqreturn_t panthor_ ## __name ## _irq_threaded_handler(int irq, void *data)		\
-{												\
-	struct panthor_irq *pirq = data;							\
-	struct panthor_device *ptdev = pirq->ptdev;						\
-	irqreturn_t ret = IRQ_NONE;								\
-												\
-	while (true) {										\
-		u32 status = gpu_read(ptdev, __reg_prefix ## _INT_RAWSTAT) & pirq->mask;	\
-												\
-		if (!status)									\
-			break;									\
-												\
-		__handler(ptdev, status);							\
-		ret = IRQ_HANDLED;								\
-	}											\
-												\
-	if (!atomic_read(&pirq->suspended))							\
-		gpu_write(ptdev, __reg_prefix ## _INT_MASK, pirq->mask);			\
-												\
-	return ret;										\
-}												\
-												\
-static inline void panthor_ ## __name ## _irq_suspend(struct panthor_irq *pirq)			\
-{												\
-	pirq->mask = 0;										\
-	gpu_write(pirq->ptdev, __reg_prefix ## _INT_MASK, 0);					\
-	synchronize_irq(pirq->irq);								\
-	atomic_set(&pirq->suspended, true);							\
-}												\
-												\
-static inline void panthor_ ## __name ## _irq_resume(struct panthor_irq *pirq, u32 mask)	\
-{												\
-	atomic_set(&pirq->suspended, false);							\
-	pirq->mask = mask;									\
-	gpu_write(pirq->ptdev, __reg_prefix ## _INT_CLEAR, mask);				\
-	gpu_write(pirq->ptdev, __reg_prefix ## _INT_MASK, mask);				\
-}												\
-												\
-static int panthor_request_ ## __name ## _irq(struct panthor_device *ptdev,			\
-					      struct panthor_irq *pirq,				\
-					      int irq, u32 mask)				\
-{												\
-	pirq->ptdev = ptdev;									\
-	pirq->irq = irq;									\
-	panthor_ ## __name ## _irq_resume(pirq, mask);						\
-												\
-	return devm_request_threaded_irq(ptdev->base.dev, irq,					\
-					 panthor_ ## __name ## _irq_raw_handler,		\
-					 panthor_ ## __name ## _irq_threaded_handler,		\
-					 IRQF_SHARED, KBUILD_MODNAME "-" # __name,		\
-					 pirq);							\
-}
-
-extern struct workqueue_struct *panthor_cleanup_wq;
-
-static inline void gpu_write(struct panthor_device *ptdev, u32 reg, u32 data)
+static inline void gpu_write(void __iomem *iomem, u32 reg, u32 data)
 {
-	writel(data, ptdev->iomem + reg);
+	writel(data, iomem + reg);
 }
 
-static inline u32 gpu_read(struct panthor_device *ptdev, u32 reg)
+static inline u32 gpu_read(void __iomem *iomem, u32 reg)
 {
-	return readl(ptdev->iomem + reg);
+	return readl(iomem + reg);
 }
 
-static inline u32 gpu_read_relaxed(struct panthor_device *ptdev, u32 reg)
+static inline u32 gpu_read_relaxed(void __iomem *iomem, u32 reg)
 {
-	return readl_relaxed(ptdev->iomem + reg);
+	return readl_relaxed(iomem + reg);
 }
 
-static inline void gpu_write64(struct panthor_device *ptdev, u32 reg, u64 data)
+static inline void gpu_write64(void __iomem *iomem, u32 reg, u64 data)
 {
-	gpu_write(ptdev, reg, lower_32_bits(data));
-	gpu_write(ptdev, reg + 4, upper_32_bits(data));
+	gpu_write(iomem, reg, lower_32_bits(data));
+	gpu_write(iomem, reg + 4, upper_32_bits(data));
 }
 
-static inline u64 gpu_read64(struct panthor_device *ptdev, u32 reg)
+static inline u64 gpu_read64(void __iomem *iomem, u32 reg)
 {
-	return (gpu_read(ptdev, reg) | ((u64)gpu_read(ptdev, reg + 4) << 32));
+	return (gpu_read(iomem, reg) | ((u64)gpu_read(iomem, reg + 4) << 32));
 }
 
-static inline u64 gpu_read64_relaxed(struct panthor_device *ptdev, u32 reg)
+static inline u64 gpu_read64_relaxed(void __iomem *iomem, u32 reg)
 {
-	return (gpu_read_relaxed(ptdev, reg) |
-		((u64)gpu_read_relaxed(ptdev, reg + 4) << 32));
+	return (gpu_read_relaxed(iomem, reg) |
+		((u64)gpu_read_relaxed(iomem, reg + 4) << 32));
 }
 
-static inline u64 gpu_read64_counter(struct panthor_device *ptdev, u32 reg)
+static inline u64 gpu_read64_counter(void __iomem *iomem, u32 reg)
 {
 	u32 lo, hi1, hi2;
 	do {
-		hi1 = gpu_read(ptdev, reg + 4);
-		lo = gpu_read(ptdev, reg);
-		hi2 = gpu_read(ptdev, reg + 4);
+		hi1 = gpu_read(iomem, reg + 4);
+		lo = gpu_read(iomem, reg);
+		hi2 = gpu_read(iomem, reg + 4);
 	} while (hi1 != hi2);
 	return lo | ((u64)hi2 << 32);
 }
 
-#define gpu_read_poll_timeout(dev, reg, val, cond, delay_us, timeout_us)	\
+#define gpu_read_poll_timeout(iomem, reg, val, cond, delay_us, timeout_us)	\
 	read_poll_timeout(gpu_read, val, cond, delay_us, timeout_us, false,	\
-			  dev, reg)
+			  iomem, reg)
 
-#define gpu_read_poll_timeout_atomic(dev, reg, val, cond, delay_us,		\
+#define gpu_read_poll_timeout_atomic(iomem, reg, val, cond, delay_us,		\
 				     timeout_us)				\
 	read_poll_timeout_atomic(gpu_read, val, cond, delay_us, timeout_us,	\
-				 false, dev, reg)
+				 false, iomem, reg)
 
-#define gpu_read64_poll_timeout(dev, reg, val, cond, delay_us, timeout_us)	\
+#define gpu_read64_poll_timeout(iomem, reg, val, cond, delay_us, timeout_us)	\
 	read_poll_timeout(gpu_read64, val, cond, delay_us, timeout_us, false,	\
-			  dev, reg)
+			  iomem, reg)
 
-#define gpu_read64_poll_timeout_atomic(dev, reg, val, cond, delay_us,		\
+#define gpu_read64_poll_timeout_atomic(iomem, reg, val, cond, delay_us,		\
 				       timeout_us)				\
 	read_poll_timeout_atomic(gpu_read64, val, cond, delay_us, timeout_us,	\
-				 false, dev, reg)
+				 false, iomem, reg)
 
-#define gpu_read_relaxed_poll_timeout_atomic(dev, reg, val, cond, delay_us,	\
+#define gpu_read_relaxed_poll_timeout_atomic(iomem, reg, val, cond, delay_us,	\
 					     timeout_us)			\
 	read_poll_timeout_atomic(gpu_read_relaxed, val, cond, delay_us,		\
-				 timeout_us, false, dev, reg)
+				 timeout_us, false, iomem, reg)
 
-#define gpu_read64_relaxed_poll_timeout(dev, reg, val, cond, delay_us,		\
+#define gpu_read64_relaxed_poll_timeout(iomem, reg, val, cond, delay_us,	\
 					timeout_us)				\
 	read_poll_timeout(gpu_read64_relaxed, val, cond, delay_us, timeout_us,	\
-			  false, dev, reg)
+			  false, iomem, reg)
+
+#define INT_RAWSTAT 0x0
+#define INT_CLEAR   0x4
+#define INT_MASK    0x8
+#define INT_STAT    0xc
+
+static inline irqreturn_t panthor_irq_default_raw_handler(int irq, void *data)
+{
+	struct panthor_irq *pirq = data;
+
+	guard(spinlock_irqsave)(&pirq->lock);
+	if (pirq->state != PANTHOR_IRQ_STATE_ACTIVE)
+		return IRQ_NONE;
+
+	if (!gpu_read(pirq->iomem, INT_STAT))
+		return IRQ_NONE;
+
+	pirq->state = PANTHOR_IRQ_STATE_PROCESSING;
+	gpu_write(pirq->iomem, INT_MASK, 0);
+	return IRQ_WAKE_THREAD;
+}
+
+static __always_inline irqreturn_t
+panthor_irq_default_threaded_handler(void *data,
+				     void (*slow_handler)(struct panthor_irq *, u32))
+{
+	struct panthor_irq *pirq = data;
+	irqreturn_t ret = IRQ_NONE;
+
+	while (true) {
+		/* It's safe to access pirq->mask without the lock held here. If a new
+		 * event gets added to the mask and the corresponding IRQ is pending,
+		 * we'll process it right away instead of adding an extra raw -> threaded
+		 * round trip. If an event is removed and the status bit is set, it will
+		 * be ignored, just like it would have been if the mask had been adjusted
+		 * right before the HW event kicks in. TLDR; it's all expected races we're
+		 * covered for.
+		 */
+		u32 status = gpu_read(pirq->iomem, INT_RAWSTAT) & pirq->mask;
+
+		if (!status)
+			break;
+
+		slow_handler(pirq, status);
+		ret = IRQ_HANDLED;
+	}
+
+	scoped_guard(spinlock_irqsave, &pirq->lock) {
+		if (pirq->state == PANTHOR_IRQ_STATE_PROCESSING) {
+			pirq->state = PANTHOR_IRQ_STATE_ACTIVE;
+			gpu_write(pirq->iomem, INT_MASK, pirq->mask);
+		}
+	}
+
+	return ret;
+}
+
+static inline void panthor_irq_suspend(struct panthor_irq *pirq)
+{
+	scoped_guard(spinlock_irqsave, &pirq->lock) {
+		pirq->state = PANTHOR_IRQ_STATE_SUSPENDING;
+		gpu_write(pirq->iomem, INT_MASK, 0);
+	}
+	synchronize_irq(pirq->irq);
+	scoped_guard(spinlock_irqsave, &pirq->lock)
+		pirq->state = PANTHOR_IRQ_STATE_SUSPENDED;
+}
+
+static inline void panthor_irq_resume(struct panthor_irq *pirq)
+{
+	guard(spinlock_irqsave)(&pirq->lock);
+	pirq->state = PANTHOR_IRQ_STATE_ACTIVE;
+	gpu_write(pirq->iomem, INT_CLEAR, pirq->mask);
+	gpu_write(pirq->iomem, INT_MASK, pirq->mask);
+}
+
+static inline void panthor_irq_enable_events(struct panthor_irq *pirq, u32 mask)
+{
+	guard(spinlock_irqsave)(&pirq->lock);
+	pirq->mask |= mask;
+
+	/* The only situation where we need to write the new mask is if the IRQ is active.
+	 * If it's being processed, the mask will be restored for us in _irq_threaded_handler()
+	 * on the PROCESSING -> ACTIVE transition.
+	 * If the IRQ is suspended/suspending, the mask is restored at resume time.
+	 */
+	if (pirq->state == PANTHOR_IRQ_STATE_ACTIVE)
+		gpu_write(pirq->iomem, INT_MASK, pirq->mask);
+}
+
+static inline void panthor_irq_disable_events(struct panthor_irq *pirq, u32 mask)
+{
+	guard(spinlock_irqsave)(&pirq->lock);
+	pirq->mask &= ~mask;
+
+	/* The only situation where we need to write the new mask is if the IRQ is active.
+	 * If it's being processed, the mask will be restored for us in _irq_threaded_handler()
+	 * on the PROCESSING -> ACTIVE transition.
+	 * If the IRQ is suspended/suspending, the mask is restored at resume time.
+	 */
+	if (pirq->state == PANTHOR_IRQ_STATE_ACTIVE)
+		gpu_write(pirq->iomem, INT_MASK, pirq->mask);
+}
+
+static inline int
+panthor_irq_request(struct panthor_device *ptdev, struct panthor_irq *pirq,
+		    int irq, void __iomem *iomem, const char *name,
+		    irqreturn_t (*threaded_handler)(int, void *data))
+{
+	const char *full_name;
+
+	pirq->ptdev = ptdev;
+	pirq->irq = irq;
+	pirq->mask = 0;
+	pirq->iomem = iomem;
+	spin_lock_init(&pirq->lock);
+	pirq->state = PANTHOR_IRQ_STATE_SUSPENDED;
+
+	full_name = devm_kasprintf(ptdev->base.dev, GFP_KERNEL, KBUILD_MODNAME "-%s", name);
+	if (!full_name)
+		return -ENOMEM;
+
+	gpu_write(pirq->iomem, INT_MASK, 0);
+	return devm_request_threaded_irq(ptdev->base.dev, irq,
+					 panthor_irq_default_raw_handler,
+					 threaded_handler,
+					 IRQF_SHARED, full_name, pirq);
+}
+
+extern struct workqueue_struct *panthor_cleanup_wq;
 
 #endif

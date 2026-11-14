@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (c) 2021, Stephan Gerhold <stephan@gerhold.net> */
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/rpmsg.h>
@@ -120,7 +119,7 @@ static int rpmsg_wwan_ctrl_probe(struct rpmsg_device *rpdev)
 	if (!parent)
 		return -ENODEV;
 
-	rpwwan = devm_kzalloc(&rpdev->dev, sizeof(*rpwwan), GFP_KERNEL);
+	rpwwan = devm_kzalloc_obj(&rpdev->dev, *rpwwan);
 	if (!rpwwan)
 		return -ENOMEM;
 

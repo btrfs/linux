@@ -164,7 +164,7 @@ static ssize_t pem_perf_cpumask_show(struct device *dev,
 {
 	struct pem_pmu *pmu = dev_get_drvdata(dev);
 
-	return cpumap_print_to_pagebuf(true, buf, cpumask_of(pmu->cpu));
+	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(cpumask_of(pmu->cpu)));
 }
 
 static struct device_attribute pem_perf_cpumask_attr =
@@ -319,7 +319,7 @@ static int pem_perf_probe(struct platform_device *pdev)
 	char *name;
 	int ret;
 
-	pem_pmu = devm_kzalloc(&pdev->dev, sizeof(*pem_pmu), GFP_KERNEL);
+	pem_pmu = devm_kzalloc_obj(&pdev->dev, *pem_pmu);
 	if (!pem_pmu)
 		return -ENOMEM;
 

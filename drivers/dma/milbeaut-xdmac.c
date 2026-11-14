@@ -192,7 +192,7 @@ milbeaut_xdmac_prep_memcpy(struct dma_chan *chan, dma_addr_t dst,
 	struct virt_dma_chan *vc = to_virt_chan(chan);
 	struct milbeaut_xdmac_desc *md;
 
-	md = kzalloc(sizeof(*md), GFP_NOWAIT);
+	md = kzalloc_obj(*md, GFP_NOWAIT);
 	if (!md)
 		return NULL;
 
@@ -318,8 +318,7 @@ static int milbeaut_xdmac_probe(struct platform_device *pdev)
 	if (nr_chans < 0)
 		return nr_chans;
 
-	mdev = devm_kzalloc(dev, struct_size(mdev, channels, nr_chans),
-			    GFP_KERNEL);
+	mdev = devm_kzalloc_flex(dev, *mdev, channels, nr_chans);
 	if (!mdev)
 		return -ENOMEM;
 

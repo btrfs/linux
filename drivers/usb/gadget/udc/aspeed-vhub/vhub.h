@@ -388,6 +388,7 @@ struct ast_vhub {
 	spinlock_t			lock;
 	struct work_struct		wake_work;
 	struct clk			*clk;
+	struct reset_control		*rst;
 
 	/* EP0 DMA buffers allocated in one chunk */
 	void				*ep0_bufs;
@@ -546,6 +547,7 @@ void ast_vhub_hub_suspend(struct ast_vhub *vhub);
 void ast_vhub_hub_resume(struct ast_vhub *vhub);
 void ast_vhub_hub_reset(struct ast_vhub *vhub);
 void ast_vhub_hub_wake_all(struct ast_vhub *vhub);
+void ast_vhub_wake_work(struct work_struct *work);
 
 /* dev.c */
 int ast_vhub_init_dev(struct ast_vhub *vhub, unsigned int idx);

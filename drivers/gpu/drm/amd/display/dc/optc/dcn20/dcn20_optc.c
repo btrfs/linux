@@ -63,15 +63,10 @@ bool optc2_enable_crtc(struct timing_generator *optc)
 	REG_UPDATE(CONTROL,
 			VTG0_ENABLE, 1);
 
-	REG_SEQ_START();
-
 	/* Enable CRTC */
 	REG_UPDATE_2(OTG_CONTROL,
 			OTG_DISABLE_POINT_CNTL, 3,
 			OTG_MASTER_EN, 1);
-
-	REG_SEQ_SUBMIT();
-	REG_SEQ_WAIT_DONE();
 
 	return true;
 }
@@ -181,6 +176,7 @@ void optc2_set_odm_bypass(struct timing_generator *optc,
 void optc2_set_odm_combine(struct timing_generator *optc, int *opp_id, int opp_cnt,
 		int segment_width, int last_segment_width)
 {
+	(void)last_segment_width;
 	struct optc *optc1 = DCN10TG_FROM_TG(optc);
 	uint32_t memory_mask;
 
@@ -261,6 +257,7 @@ static void optc2_align_vblanks(
 	uint8_t master_clock_divider,
 	uint8_t slave_clock_divider)
 {
+	(void)slave_clock_divider;
 	/* accessing slave OTG registers */
 	struct optc *optc1 = DCN10TG_FROM_TG(optc_slave);
 
@@ -303,8 +300,8 @@ static void optc2_align_vblanks(
 	L = div_u64(L, master_h_total);
 	L = div_u64(L, slave_pixel_clock_100Hz);
 	XY = div_u64(L, p);
-	Y = master_v_active - XY - 1;
-	X = div_u64(((XY + 1) * p - L) * master_h_total, p * master_clock_divider);
+	Y = (uint32_t)(master_v_active - XY - 1);
+	X = (uint32_t)div_u64(((XY + 1) * p - L) * master_h_total, p * master_clock_divider);
 
 	/*
 	 * set master OTG to unlock when V/H
@@ -452,6 +449,13 @@ void optc2_lock_doublebuffer_disable(struct timing_generator *optc)
 void optc2_setup_manual_trigger(struct timing_generator *optc)
 {
 	struct optc *optc1 = DCN10TG_FROM_TG(optc);
+	uint32_t v_total, v_total_max;
+
+	REG_GET(OTG_V_TOTAL_MAX, OTG_V_TOTAL_MAX, &v_total_max);
+	if (!v_total_max) {
+		REG_GET(OTG_V_TOTAL, OTG_V_TOTAL, &v_total);
+		optc->funcs->set_vtotal_min_max(optc, v_total, v_total);
+	}
 
 	/* Set the min/max selectors unconditionally so that
 	 * DMCUB fw may change OTG timings when necessary

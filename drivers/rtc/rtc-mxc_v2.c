@@ -8,7 +8,6 @@
 #include <linux/clk.h>
 #include <linux/io.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/pm_wakeirq.h>
 #include <linux/rtc.h>
@@ -281,7 +280,7 @@ static int mxc_rtc_probe(struct platform_device *pdev)
 	void __iomem *ioaddr;
 	int ret = 0;
 
-	pdata = devm_kzalloc(&pdev->dev, sizeof(*pdata), GFP_KERNEL);
+	pdata = devm_kzalloc_obj(&pdev->dev, *pdata);
 	if (!pdata)
 		return -ENOMEM;
 

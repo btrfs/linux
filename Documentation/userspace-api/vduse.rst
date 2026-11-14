@@ -11,11 +11,10 @@ to make the device emulation more secure, the emulated vDPA device's
 control path is handled in the kernel and only the data path is
 implemented in the userspace.
 
-Note that only virtio block device is supported by VDUSE framework now,
-which can reduce security risks when the userspace process that implements
-the data path is run by an unprivileged user. The support for other device
-types can be added after the security issue of corresponding device driver
-is clarified or fixed in the future.
+Note that virtio block, network, and filesystem device types are supported
+by the VDUSE framework. Other device types may be added after the security
+implications of the corresponding device driver are clarified or fixed in
+the future.
 
 Create/Destroy VDUSE devices
 ----------------------------
@@ -135,7 +134,8 @@ module as follows:
 		return 0;
 	}
 
-There are now three types of messages introduced by VDUSE framework:
+The following control message types may be delivered via read(2) on
+/dev/vduse/$NAME:
 
 - VDUSE_GET_VQ_STATE: Get the state for virtqueue, userspace should return
   avail index for split virtqueue or the device/driver ring wrap counters and
@@ -150,6 +150,15 @@ There are now three types of messages introduced by VDUSE framework:
 - VDUSE_UPDATE_IOTLB: Notify userspace to update the memory mapping for specified
   IOVA range, userspace should firstly remove the old mapping, then setup the new
   mapping via the VDUSE_IOTLB_GET_FD ioctl.
+
+- VDUSE_SET_VQ_GROUP_ASID: Notify userspace to change the address space of a
+  virtqueue group (API version 1).
+
+- VDUSE_SET_VQ_READY: Notify userspace that a virtqueue should become ready or
+  not ready (when VDUSE_F_QUEUE_READY is negotiated).
+
+- VDUSE_SUSPEND: Notify userspace that the device is being suspended (when
+  VDUSE_F_SUSPEND is negotiated).
 
 After DRIVER_OK status bit is set via the VDUSE_SET_STATUS message, userspace is
 able to start the dataplane processing as follows:
@@ -227,7 +236,60 @@ able to start the dataplane processing as follows:
    described by the descriptors in the descriptor table should be also mapped into
    userspace via the VDUSE_IOTLB_GET_FD ioctl before accessing.
 
-5. Inject an interrupt for specific virtqueue with the VDUSE_INJECT_VQ_IRQ ioctl
+5. Inject an interrupt for specific virtqueue with the VDUSE_VQ_INJECT_IRQ ioctl
    after the used ring is filled.
+
+Enabling ASID (API version 1)
+------------------------------
+
+VDUSE supports per-address-space identifiers (ASIDs) starting with API
+version 1. Set it up with ioctl(VDUSE_SET_API_VERSION) on `/dev/vduse/control`
+and pass `VDUSE_API_VERSION_1` before creating a new VDUSE instance with
+ioctl(VDUSE_CREATE_DEV).
+
+Afterwards, ioctl(VDUSE_VQ_SETUP) takes a virtqueue group index in
+struct vduse_vq_config::group.  The driver can change the address space
+of any virtqueue group by using the VDUSE_SET_VQ_GROUP_ASID message type,
+and the VDUSE instance needs to reply with VDUSE_REQ_RESULT_OK if it was
+possible to change it.
+
+Similarly, you can use ioctl(VDUSE_IOTLB_GET_FD2) to obtain the file descriptor
+describing an IOVA region of a specific ASID. Example usage:
+
+.. code-block:: c
+
+	static void *iova_to_va(int dev_fd, uint32_t asid, uint64_t iova,
+	                        uint64_t *len)
+	{
+		int fd;
+		void *addr;
+		size_t size;
+		struct vduse_iotlb_entry_v2 entry = { 0 };
+
+		entry.v1.start = iova;
+		entry.v1.last = iova;
+		entry.asid = asid;
+
+		fd = ioctl(dev_fd, VDUSE_IOTLB_GET_FD2, &entry);
+		if (fd < 0)
+			return NULL;
+
+		size = entry.v1.last - entry.v1.start + 1;
+		*len = entry.v1.last - iova + 1;
+		addr = mmap(0, size, perm_to_prot(entry.v1.perm), MAP_SHARED,
+			    fd, entry.v1.offset);
+		close(fd);
+		if (addr == MAP_FAILED)
+			return NULL;
+
+		/*
+		 * Using some data structures such as linked list to store
+		 * the iotlb mapping. The munmap(2) should be called for the
+		 * cached mapping when the corresponding VDUSE_UPDATE_IOTLB
+		 * message is received or the device is reset.
+		 */
+
+		return addr + iova - entry.v1.start;
+	}
 
 For more details on the uAPI, please see include/uapi/linux/vduse.h.

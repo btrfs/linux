@@ -100,7 +100,6 @@ struct zynqmp_pctrl_group {
 
 static struct pinctrl_desc zynqmp_desc;
 static u32 family_code;
-static u32 sub_family_code;
 
 static int zynqmp_pctrl_get_groups_count(struct pinctrl_dev *pctldev)
 {
@@ -605,7 +604,7 @@ static int zynqmp_pinctrl_prepare_func_groups(struct device *dev, u32 fid,
 				return -ENOMEM;
 
 			for (pin = 0; pin < groups[resp[i]].npins; pin++) {
-				if (family_code == ZYNQMP_FAMILY_CODE)
+				if (family_code == PM_ZYNQMP_FAMILY_CODE)
 					__set_bit(groups[resp[i]].pins[pin], used_pins);
 				else
 					__set_bit((u8)groups[resp[i]].pins[pin] - 1, used_pins);
@@ -614,8 +613,8 @@ static int zynqmp_pinctrl_prepare_func_groups(struct device *dev, u32 fid,
 	}
 done:
 	npins = bitmap_weight(used_pins, zynqmp_desc.npins);
-	fgroups = devm_kcalloc(dev, size_add(func->ngroups, npins),
-			       sizeof(*fgroups), GFP_KERNEL);
+	fgroups = devm_kzalloc_objs(dev, *fgroups,
+				    size_add(func->ngroups, npins));
 	if (!fgroups)
 		return -ENOMEM;
 
@@ -791,7 +790,7 @@ static int zynqmp_pinctrl_prepare_function_info(struct device *dev,
 	if (ret)
 		return ret;
 
-	funcs = devm_kcalloc(dev, pctrl->nfuncs, sizeof(*funcs), GFP_KERNEL);
+	funcs = devm_kzalloc_objs(dev, *funcs, pctrl->nfuncs);
 	if (!funcs)
 		return -ENOMEM;
 
@@ -805,7 +804,7 @@ static int zynqmp_pinctrl_prepare_function_info(struct device *dev,
 		pctrl->ngroups += funcs[i].ngroups;
 	}
 
-	groups = devm_kcalloc(dev, pctrl->ngroups, sizeof(*groups), GFP_KERNEL);
+	groups = devm_kzalloc_objs(dev, *groups, pctrl->ngroups);
 	if (!groups)
 		return -ENOMEM;
 
@@ -867,7 +866,7 @@ static int zynqmp_pinctrl_prepare_pin_desc(struct device *dev,
 	if (ret)
 		return ret;
 
-	pins = devm_kcalloc(dev, *npins, sizeof(*pins), GFP_KERNEL);
+	pins = devm_kzalloc_objs(dev, *pins, *npins);
 	if (!pins)
 		return -ENOMEM;
 
@@ -919,7 +918,7 @@ static int versal_pinctrl_prepare_pin_desc(struct device *dev,
 	if (ret)
 		return ret;
 
-	pins = devm_kcalloc(dev, *npins, sizeof(*pins), GFP_KERNEL);
+	pins = devm_kzalloc_objs(dev, *pins, *npins);
 	if (!pins)
 		return -ENOMEM;
 
@@ -954,15 +953,15 @@ static int zynqmp_pinctrl_probe(struct platform_device *pdev)
 	struct zynqmp_pinctrl *pctrl;
 	int ret;
 
-	pctrl = devm_kzalloc(&pdev->dev, sizeof(*pctrl), GFP_KERNEL);
+	pctrl = devm_kzalloc_obj(&pdev->dev, *pctrl);
 	if (!pctrl)
 		return -ENOMEM;
 
-	ret = zynqmp_pm_get_family_info(&family_code, &sub_family_code);
+	ret = zynqmp_pm_get_family_info(&family_code);
 	if (ret < 0)
 		return ret;
 
-	if (family_code == ZYNQMP_FAMILY_CODE) {
+	if (family_code == PM_ZYNQMP_FAMILY_CODE) {
 		ret = zynqmp_pinctrl_prepare_pin_desc(&pdev->dev, &zynqmp_desc.pins,
 						      &zynqmp_desc.npins);
 	} else {

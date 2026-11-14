@@ -382,7 +382,7 @@ static int ltc2991_i2c_probe(struct i2c_client *client)
 	struct device *hwmon_dev;
 	struct ltc2991_state *st;
 
-	st = devm_kzalloc(&client->dev, sizeof(*st), GFP_KERNEL);
+	st = devm_kzalloc_obj(&client->dev, *st);
 	if (!st)
 		return -ENOMEM;
 
@@ -409,8 +409,8 @@ static const struct of_device_id ltc2991_of_match[] = {
 MODULE_DEVICE_TABLE(of, ltc2991_of_match);
 
 static const struct i2c_device_id ltc2991_i2c_id[] = {
-	{ "ltc2991" },
-	{}
+	{ .name = "ltc2991" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ltc2991_i2c_id);
 

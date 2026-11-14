@@ -27,13 +27,8 @@ DEFINE_SPINLOCK(mq_lock);
  * and not CONFIG_IPC_NS.
  */
 struct ipc_namespace init_ipc_ns = {
-	.ns.__ns_ref = REFCOUNT_INIT(1),
+	.ns = NS_COMMON_INIT(init_ipc_ns),
 	.user_ns = &init_user_ns,
-	.ns.inum = ns_init_inum(&init_ipc_ns),
-#ifdef CONFIG_IPC_NS
-	.ns.ops = &ipcns_operations,
-#endif
-	.ns.ns_type = ns_common_type(&init_ipc_ns),
 };
 
 struct msg_msgseg {
@@ -63,7 +58,8 @@ static struct msg_msg *alloc_msg(size_t len)
 	size_t alen;
 
 	alen = min(len, DATALEN_MSG);
-	msg = kmem_buckets_alloc(msg_buckets, sizeof(*msg) + alen, GFP_KERNEL);
+	msg = kmem_buckets_alloc(msg_buckets, sizeof(*msg) + alen,
+				 GFP_KERNEL_ACCOUNT);
 	if (msg == NULL)
 		return NULL;
 

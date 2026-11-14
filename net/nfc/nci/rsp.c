@@ -50,10 +50,26 @@ static u8 nci_core_init_rsp_packet_v1(struct nci_dev *ndev,
 	const struct nci_core_init_rsp_1 *rsp_1 = (void *)skb->data;
 	const struct nci_core_init_rsp_2 *rsp_2;
 
+	/* Ensure that the status field can be accessed. */
+	if (skb_headlen(skb) < 1)
+		return NCI_STATUS_SYNTAX_ERROR;
+
 	pr_debug("status 0x%x\n", rsp_1->status);
 
 	if (rsp_1->status != NCI_STATUS_OK)
 		return rsp_1->status;
+
+	/* Success response must contain the full fixed-size header */
+	if (skb_headlen(skb) < sizeof(*rsp_1))
+		return NCI_STATUS_SYNTAX_ERROR;
+
+	/* Ensure the variable-length rf_interfaces array and trailing
+	 * rsp_2 structure are fully contained within the skb.
+	 */
+	if (skb_headlen(skb) < sizeof(*rsp_1) +
+			       rsp_1->num_supported_rf_interfaces +
+			       sizeof(*rsp_2))
+		return NCI_STATUS_SYNTAX_ERROR;
 
 	ndev->nfcc_features = __le32_to_cpu(rsp_1->nfcc_features);
 	ndev->num_supported_rf_interfaces = rsp_1->num_supported_rf_interfaces;
@@ -87,14 +103,24 @@ static u8 nci_core_init_rsp_packet_v2(struct nci_dev *ndev,
 				      const struct sk_buff *skb)
 {
 	const struct nci_core_init_rsp_nci_ver2 *rsp = (void *)skb->data;
-	const u8 *supported_rf_interface = rsp->supported_rf_interfaces;
+	const u8 *supported_rf_interface;
 	u8 rf_interface_idx = 0;
 	u8 rf_extension_cnt = 0;
+
+	/* Ensure that the status field can be accessed. */
+	if (skb_headlen(skb) < 1)
+		return NCI_STATUS_SYNTAX_ERROR;
 
 	pr_debug("status %x\n", rsp->status);
 
 	if (rsp->status != NCI_STATUS_OK)
 		return rsp->status;
+
+	/* Success response must contain the full fixed-size header */
+	if (skb_headlen(skb) < sizeof(*rsp))
+		return NCI_STATUS_SYNTAX_ERROR;
+
+	supported_rf_interface = rsp->supported_rf_interfaces;
 
 	ndev->nfcc_features = __le32_to_cpu(rsp->nfcc_features);
 	ndev->num_supported_rf_interfaces = rsp->num_supported_rf_interfaces;
@@ -104,12 +130,21 @@ static u8 nci_core_init_rsp_packet_v2(struct nci_dev *ndev,
 		    NCI_MAX_SUPPORTED_RF_INTERFACES);
 
 	while (rf_interface_idx < ndev->num_supported_rf_interfaces) {
-		ndev->supported_rf_interfaces[rf_interface_idx++] = *supported_rf_interface++;
+		/* Each entry: [rf_interface_type (1B)] [ext_count (1B)] [ext...] */
+		if (supported_rf_interface + 2 > skb_tail_pointer(skb))
+			break;
+		ndev->supported_rf_interfaces[rf_interface_idx] = *supported_rf_interface++;
 
-		/* skip rf extension parameters */
 		rf_extension_cnt = *supported_rf_interface++;
+		if (supported_rf_interface + rf_extension_cnt > skb_tail_pointer(skb))
+			break;
+
+		/* Only count the entry after full validation */
+		rf_interface_idx++;
 		supported_rf_interface += rf_extension_cnt;
 	}
+
+	ndev->num_supported_rf_interfaces = rf_interface_idx;
 
 	ndev->max_logical_connections = rsp->max_logical_connections;
 	ndev->max_routing_table_size =
@@ -195,9 +230,8 @@ static void nci_rf_disc_rsp_packet(struct nci_dev *ndev,
 
 		conn_info = ndev->rf_conn_info;
 		if (!conn_info) {
-			conn_info = devm_kzalloc(&ndev->nfc_dev->dev,
-						 sizeof(struct nci_conn_info),
-						 GFP_KERNEL);
+			conn_info = devm_kzalloc_obj(&ndev->nfc_dev->dev,
+						     struct nci_conn_info);
 			if (!conn_info) {
 				status = NCI_STATUS_REJECTED;
 				goto exit;
@@ -279,16 +313,14 @@ static void nci_core_conn_create_rsp_packet(struct nci_dev *ndev,
 	if (status == NCI_STATUS_OK) {
 		rsp = (struct nci_core_conn_create_rsp *)skb->data;
 
-		conn_info = devm_kzalloc(&ndev->nfc_dev->dev,
-					 sizeof(*conn_info), GFP_KERNEL);
+		conn_info = devm_kzalloc_obj(&ndev->nfc_dev->dev, *conn_info);
 		if (!conn_info) {
 			status = NCI_STATUS_REJECTED;
 			goto exit;
 		}
 
-		conn_info->dest_params = devm_kzalloc(&ndev->nfc_dev->dev,
-						sizeof(struct dest_spec_params),
-						GFP_KERNEL);
+		conn_info->dest_params = devm_kzalloc_obj(&ndev->nfc_dev->dev,
+							  struct dest_spec_params);
 		if (!conn_info->dest_params) {
 			status = NCI_STATUS_REJECTED;
 			goto free_conn_info;
@@ -336,6 +368,7 @@ static void nci_core_conn_close_rsp_packet(struct nci_dev *ndev,
 			list_del(&conn_info->list);
 			if (conn_info == ndev->rf_conn_info)
 				ndev->rf_conn_info = NULL;
+			devm_kfree(&ndev->nfc_dev->dev, conn_info->dest_params);
 			devm_kfree(&ndev->nfc_dev->dev, conn_info);
 		}
 	}

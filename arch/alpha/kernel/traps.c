@@ -81,7 +81,7 @@ dik_show_code(unsigned int *pc)
 	printk("Code:");
 	for (i = -6; i < 2; i++) {
 		unsigned int insn;
-		if (__get_user(insn, (unsigned int __user *)pc + i))
+		if (get_kernel_nofault(insn, pc + i))
 			break;
 		printk("%c%08x%c", i ? ' ' : '<', insn, i ? ' ' : '>');
 	}
@@ -166,12 +166,12 @@ static long dummy_emul(void) { return 0; }
 long (*alpha_fp_emul_imprecise)(struct pt_regs *regs, unsigned long writemask)
   = (void *)dummy_emul;
 EXPORT_SYMBOL_GPL(alpha_fp_emul_imprecise);
-long (*alpha_fp_emul) (unsigned long pc)
+long (*alpha_fp_emul) (unsigned long pc, unsigned long summary)
   = (void *)dummy_emul;
 EXPORT_SYMBOL_GPL(alpha_fp_emul);
 #else
 long alpha_fp_emul_imprecise(struct pt_regs *regs, unsigned long writemask);
-long alpha_fp_emul (unsigned long pc);
+long alpha_fp_emul (unsigned long pc, unsigned long summary);
 #endif
 
 asmlinkage void
@@ -185,7 +185,7 @@ do_entArith(unsigned long summary, unsigned long write_mask,
 		   emulate the instruction.  If the processor supports
 		   precise exceptions, we don't have to search.  */
 		if (!amask(AMASK_PRECISE_TRAP))
-			si_code = alpha_fp_emul(regs->pc - 4);
+			si_code = alpha_fp_emul(regs->pc - 4, summary);
 		else
 			si_code = alpha_fp_emul_imprecise(regs, write_mask);
 		if (si_code == 0)
@@ -917,7 +917,9 @@ void
 trap_init(void)
 {
 	/* Tell PAL-code what global pointer we want in the kernel.  */
-	register unsigned long gptr __asm__("$29");
+	unsigned long gptr;
+
+	__asm__ __volatile__("mov $29, %0" : "=r" (gptr));
 	wrkgp(gptr);
 
 	wrent(entArith, 1);

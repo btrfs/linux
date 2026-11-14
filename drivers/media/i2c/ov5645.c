@@ -848,6 +848,7 @@ static int ov5645_enum_frame_size(struct v4l2_subdev *subdev,
 }
 
 static int ov5645_set_format(struct v4l2_subdev *sd,
+			     const struct v4l2_subdev_client_info *ci,
 			     struct v4l2_subdev_state *sd_state,
 			     struct v4l2_subdev_format *format)
 {
@@ -905,12 +906,13 @@ static int ov5645_init_state(struct v4l2_subdev *subdev,
 		},
 	};
 
-	ov5645_set_format(subdev, sd_state, &fmt);
+	ov5645_set_format(subdev, NULL, sd_state, &fmt);
 
 	return 0;
 }
 
 static int ov5645_get_selection(struct v4l2_subdev *sd,
+			   const struct v4l2_subdev_client_info *ci,
 			   struct v4l2_subdev_state *sd_state,
 			   struct v4l2_subdev_selection *sel)
 {
@@ -1016,7 +1018,7 @@ static int ov5645_probe(struct i2c_client *client)
 	u32 xclk_freq;
 	int ret;
 
-	ov5645 = devm_kzalloc(dev, sizeof(struct ov5645), GFP_KERNEL);
+	ov5645 = devm_kzalloc_obj(dev, struct ov5645);
 	if (!ov5645)
 		return -ENOMEM;
 
@@ -1219,8 +1221,8 @@ static void ov5645_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ov5645_id[] = {
-	{ "ov5645" },
-	{}
+	{ .name = "ov5645" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ov5645_id);
 

@@ -174,7 +174,7 @@ static int sd2405al_probe(struct i2c_client *client)
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C))
 		return -ENODEV;
 
-	sd2405al = devm_kzalloc(&client->dev, sizeof(*sd2405al), GFP_KERNEL);
+	sd2405al = devm_kzalloc_obj(&client->dev, *sd2405al);
 	if (!sd2405al)
 		return -ENOMEM;
 
@@ -202,7 +202,7 @@ static int sd2405al_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id sd2405al_id[] = {
-	{ "sd2405al" },
+	{ .name = "sd2405al" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(i2c, sd2405al_id);

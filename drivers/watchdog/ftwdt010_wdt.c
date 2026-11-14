@@ -14,7 +14,6 @@
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/watchdog.h>
@@ -141,7 +140,7 @@ static int ftwdt010_wdt_probe(struct platform_device *pdev)
 	int irq;
 	int ret;
 
-	gwdt = devm_kzalloc(dev, sizeof(*gwdt), GFP_KERNEL);
+	gwdt = devm_kzalloc_obj(dev, *gwdt);
 	if (!gwdt)
 		return -ENOMEM;
 

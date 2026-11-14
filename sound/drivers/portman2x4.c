@@ -88,7 +88,7 @@ static int portman_create(struct snd_card *card,
 
 	*rchip = NULL;
 
-	pm = kzalloc(sizeof(struct portman), GFP_KERNEL);
+	pm = kzalloc_obj(struct portman);
 	if (pm == NULL) 
 		return -ENOMEM;
 
@@ -696,6 +696,12 @@ static int snd_portman_probe(struct platform_device *pdev)
 
 	p = platform_get_drvdata(pdev);
 	platform_set_drvdata(pdev, NULL);
+
+	if (dev < 0) {
+		dev_warn(&pdev->dev,
+			 "Invalid card index %d, using default 0\n", dev);
+		dev = 0;
+	}
 
 	if (dev >= SNDRV_CARDS)
 		return -ENODEV;

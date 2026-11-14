@@ -11,7 +11,6 @@
 #include <linux/gpio/consumer.h>
 #include <linux/kernel.h>
 #include <linux/minmax.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -281,7 +280,7 @@ static int mt6370_bl_probe(struct platform_device *pdev)
 	struct mt6370_priv *priv;
 	int ret;
 
-	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&pdev->dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

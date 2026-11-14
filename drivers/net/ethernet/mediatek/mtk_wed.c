@@ -257,7 +257,7 @@ mtk_wdma_rx_reset(struct mtk_wed_device *dev)
 	wdma_w32(dev, MTK_WDMA_RESET_IDX, 0);
 
 	for (i = 0; i < ARRAY_SIZE(dev->rx_wdma); i++) {
-		if (dev->rx_wdma[i].desc)
+		if (!dev->rx_wdma[i].desc)
 			continue;
 
 		wdma_w32(dev,
@@ -535,8 +535,7 @@ mtk_wed_amsdu_buffer_alloc(struct mtk_wed_device *dev)
 	if (!mtk_wed_is_v3_or_greater(hw))
 		return 0;
 
-	wed_amsdu = devm_kcalloc(hw->dev, MTK_WED_AMSDU_NPAGES,
-				 sizeof(*wed_amsdu), GFP_KERNEL);
+	wed_amsdu = devm_kzalloc_objs(hw->dev, *wed_amsdu, MTK_WED_AMSDU_NPAGES);
 	if (!wed_amsdu)
 		return -ENOMEM;
 
@@ -656,7 +655,7 @@ mtk_wed_tx_buffer_alloc(struct mtk_wed_device *dev)
 	}
 	n_pages = dev->tx_buf_ring.size / MTK_WED_BUF_PER_PAGE;
 
-	page_list = kcalloc(n_pages, sizeof(*page_list), GFP_KERNEL);
+	page_list = kzalloc_objs(*page_list, n_pages);
 	if (!page_list)
 		return -ENOMEM;
 
@@ -780,7 +779,7 @@ mtk_wed_hwrro_buffer_alloc(struct mtk_wed_device *dev)
 	if (!dev->wlan.hw_rro)
 		return 0;
 
-	page_list = kcalloc(n_pages, sizeof(*page_list), GFP_KERNEL);
+	page_list = kzalloc_objs(*page_list, n_pages);
 	if (!page_list)
 		return -ENOMEM;
 
@@ -949,6 +948,14 @@ mtk_wed_free_ring(struct mtk_wed_device *dev, struct mtk_wed_ring *ring)
 static void
 mtk_wed_free_rx_rings(struct mtk_wed_device *dev)
 {
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(dev->rx_ring); i++)
+		mtk_wed_free_ring(dev, &dev->rx_ring[i]);
+
+	for (i = 0; i < ARRAY_SIZE(dev->tx_wdma); i++)
+		mtk_wed_free_ring(dev, &dev->tx_wdma[i]);
+
 	mtk_wed_free_rx_buffer(dev);
 	mtk_wed_free_ring(dev, &dev->rro.ring);
 }
@@ -1938,7 +1945,7 @@ mtk_wed_wdma_tx_ring_setup(struct mtk_wed_device *dev, int idx, int size,
 	wdma_w32(dev, MTK_WDMA_RING_TX(idx) + MTK_WED_RING_OFS_CPU_IDX, 0);
 	wdma_w32(dev, MTK_WDMA_RING_TX(idx) + MTK_WED_RING_OFS_DMA_IDX, 0);
 
-	if (reset)
+	if (!mtk_wed_is_v3_or_greater(dev->hw) && reset)
 		mtk_wed_ring_reset(wdma, MTK_WED_WDMA_RING_SIZE, true);
 
 	if (!idx)  {
@@ -2070,6 +2077,11 @@ mtk_wed_dma_enable(struct mtk_wed_device *dev)
 			MTK_WED_WPDMA_GLO_CFG_RX_DDONE2_WR);
 		wdma_set(dev, MTK_WDMA_GLO_CFG, MTK_WDMA_GLO_CFG_TX_DMA_EN);
 	}
+
+	if (mtk_wed_is_v2(dev->hw))
+		wdma_m32(dev, MTK_WDMA_GLO_CFG,
+			 MTK_WDMA_GLO_CFG_RESV_BUFF,
+			 FIELD_PREP(MTK_WDMA_GLO_CFG_RESV_BUFF, 0x80));
 
 	wed_set(dev, MTK_WED_GLO_CFG,
 		MTK_WED_GLO_CFG_TX_DMA_EN |
@@ -2332,7 +2344,20 @@ mtk_wed_start(struct mtk_wed_device *dev, u32 irq_mask)
 
 	for (i = 0; i < ARRAY_SIZE(dev->rx_wdma); i++)
 		if (!dev->rx_wdma[i].desc)
-			mtk_wed_wdma_rx_ring_setup(dev, i, 16, false);
+			if (mtk_wed_wdma_rx_ring_setup(dev, i, 16, false)) {
+				dev_err(dev->hw->dev, "wdma rx ring %d setup failed\n", i);
+				return;
+			}
+
+	/*
+	 * non-DBDC MT7986 allocates only rx_ring[1] and tx_wdma[1] during setup
+	 * but tx_wdma[0] is also needed for WED to function.
+	 */
+	if (mtk_wed_is_v2(dev->hw) && !dev->rx_ring[0].desc)
+		if (mtk_wed_wdma_tx_ring_setup(dev, 0, MTK_WED_WDMA_RING_SIZE, !!dev->tx_wdma[0].desc)) {
+			dev_err(dev->hw->dev, "wdma tx ring 0 setup failed\n");
+			return;
+		}
 
 	if (dev->wlan.hw_rro) {
 		for (i = 0; i < MTK_WED_RX_PAGE_QUEUES; i++) {
@@ -2718,7 +2743,7 @@ mtk_wed_setup_tc_block(struct mtk_wed_hw *hw, struct net_device *dev,
 			return 0;
 		}
 
-		priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+		priv = kzalloc_obj(*priv);
 		if (!priv)
 			return -ENOMEM;
 
@@ -2822,7 +2847,7 @@ void mtk_wed_add_hw(struct device_node *np, struct mtk_eth *eth,
 	if (WARN_ON(hw_list[index]))
 		goto unlock;
 
-	hw = kzalloc(sizeof(*hw), GFP_KERNEL);
+	hw = kzalloc_obj(*hw);
 	if (!hw)
 		goto unlock;
 

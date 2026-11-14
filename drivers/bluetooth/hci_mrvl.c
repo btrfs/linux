@@ -64,7 +64,7 @@ static int mrvl_open(struct hci_uart *hu)
 	if (!hci_uart_has_flow_control(hu))
 		return -EOPNOTSUPP;
 
-	mrvl = kzalloc(sizeof(*mrvl), GFP_KERNEL);
+	mrvl = kzalloc_obj(*mrvl);
 	if (!mrvl)
 		return -ENOMEM;
 
@@ -307,9 +307,8 @@ static int mrvl_load_firmware(struct hci_dev *hdev, const char *name)
 		err = wait_on_bit_timeout(&mrvl->flags, STATE_FW_REQ_PENDING,
 					  TASK_INTERRUPTIBLE,
 					  msecs_to_jiffies(2000));
-		if (err == 1) {
+		if (err == -EINTR) {
 			bt_dev_err(hdev, "Firmware load interrupted");
-			err = -EINTR;
 			break;
 		} else if (err) {
 			bt_dev_err(hdev, "Firmware request timeout");
@@ -464,7 +463,7 @@ static int mrvl_serdev_probe(struct serdev_device *serdev)
 	struct mrvl_serdev *mrvldev;
 	const struct hci_uart_proto *mrvl_proto = device_get_match_data(&serdev->dev);
 
-	mrvldev = devm_kzalloc(&serdev->dev, sizeof(*mrvldev), GFP_KERNEL);
+	mrvldev = devm_kzalloc_obj(&serdev->dev, *mrvldev);
 	if (!mrvldev)
 		return -ENOMEM;
 

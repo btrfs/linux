@@ -9,7 +9,6 @@
 #include <linux/io.h>
 #include <linux/ktime.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 
 #include <linux/w1.h>
@@ -95,8 +94,7 @@ static int mxc_w1_probe(struct platform_device *pdev)
 	unsigned int clkdiv;
 	int err;
 
-	mdev = devm_kzalloc(&pdev->dev, sizeof(struct mxc_w1_device),
-			    GFP_KERNEL);
+	mdev = devm_kzalloc_obj(&pdev->dev, struct mxc_w1_device);
 	if (!mdev)
 		return -ENOMEM;
 

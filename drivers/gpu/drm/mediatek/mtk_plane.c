@@ -11,12 +11,13 @@
 #include <drm/drm_fourcc.h>
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_gem_atomic_helper.h>
+#include <drm/drm_gem_dma_helper.h>
+#include <drm/drm_print.h>
 #include <linux/align.h>
 
 #include "mtk_crtc.h"
 #include "mtk_ddp_comp.h"
 #include "mtk_drm_drv.h"
-#include "mtk_gem.h"
 #include "mtk_plane.h"
 
 static const u64 modifiers[] = {
@@ -24,26 +25,21 @@ static const u64 modifiers[] = {
 	DRM_FORMAT_MOD_INVALID,
 };
 
-static void mtk_plane_reset(struct drm_plane *plane)
+static struct drm_plane_state *mtk_plane_create_state(struct drm_plane *plane)
 {
 	struct mtk_plane_state *state;
 
-	if (plane->state) {
-		__drm_atomic_helper_plane_destroy_state(plane->state);
+	state = kzalloc_obj(*state);
+	if (!state)
+		return ERR_PTR(-ENOMEM);
 
-		state = to_mtk_plane_state(plane->state);
-		memset(state, 0, sizeof(*state));
-	} else {
-		state = kzalloc(sizeof(*state), GFP_KERNEL);
-		if (!state)
-			return;
-	}
-
-	__drm_atomic_helper_plane_reset(plane, &state->base);
+	__drm_atomic_helper_plane_state_init(&state->base, plane);
 
 	state->base.plane = plane;
 	state->pending.format = DRM_FORMAT_RGB565;
 	state->pending.modifier = DRM_FORMAT_MOD_LINEAR;
+
+	return &state->base;
 }
 
 static struct drm_plane_state *mtk_plane_duplicate_state(struct drm_plane *plane)
@@ -51,7 +47,7 @@ static struct drm_plane_state *mtk_plane_duplicate_state(struct drm_plane *plane
 	struct mtk_plane_state *old_state = to_mtk_plane_state(plane->state);
 	struct mtk_plane_state *state;
 
-	state = kmalloc(sizeof(*state), GFP_KERNEL);
+	state = kmalloc_obj(*state);
 	if (!state)
 		return NULL;
 
@@ -79,7 +75,7 @@ static void mtk_plane_destroy_state(struct drm_plane *plane,
 }
 
 static int mtk_plane_atomic_async_check(struct drm_plane *plane,
-					struct drm_atomic_state *state, bool flip)
+					struct drm_atomic_commit *state, bool flip)
 {
 	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state,
 										 plane);
@@ -100,7 +96,8 @@ static int mtk_plane_atomic_async_check(struct drm_plane *plane,
 	if (ret)
 		return ret;
 
-	crtc_state = drm_atomic_get_existing_crtc_state(state, new_plane_state->crtc);
+	crtc_state = drm_atomic_get_new_crtc_state(state,
+						   new_plane_state->crtc);
 
 	return drm_atomic_helper_check_plane_state(plane->state, crtc_state,
 						   DRM_PLANE_NO_SCALING,
@@ -112,8 +109,8 @@ static void mtk_plane_update_new_state(struct drm_plane_state *new_state,
 				       struct mtk_plane_state *mtk_plane_state)
 {
 	struct drm_framebuffer *fb = new_state->fb;
+	struct drm_gem_dma_object *dma_obj;
 	struct drm_gem_object *gem;
-	struct mtk_gem_obj *mtk_gem;
 	unsigned int pitch, format;
 	u64 modifier;
 	dma_addr_t addr;
@@ -122,8 +119,8 @@ static void mtk_plane_update_new_state(struct drm_plane_state *new_state,
 	int offset;
 
 	gem = fb->obj[0];
-	mtk_gem = to_mtk_gem_obj(gem);
-	addr = mtk_gem->dma_addr;
+	dma_obj = to_drm_gem_dma_obj(gem);
+	addr = dma_obj->dma_addr;
 	pitch = fb->pitches[0];
 	format = fb->format->format;
 	modifier = fb->modifier;
@@ -191,7 +188,7 @@ static void mtk_plane_update_new_state(struct drm_plane_state *new_state,
 }
 
 static void mtk_plane_atomic_async_update(struct drm_plane *plane,
-					  struct drm_atomic_state *state)
+					  struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *new_state = drm_atomic_get_new_plane_state(state,
 									   plane);
@@ -219,14 +216,14 @@ static const struct drm_plane_funcs mtk_plane_funcs = {
 	.update_plane = drm_atomic_helper_update_plane,
 	.disable_plane = drm_atomic_helper_disable_plane,
 	.destroy = drm_plane_cleanup,
-	.reset = mtk_plane_reset,
+	.atomic_create_state = mtk_plane_create_state,
 	.atomic_duplicate_state = mtk_plane_duplicate_state,
 	.atomic_destroy_state = mtk_plane_destroy_state,
 	.format_mod_supported = mtk_plane_format_mod_supported,
 };
 
 static int mtk_plane_atomic_check(struct drm_plane *plane,
-				  struct drm_atomic_state *state)
+				  struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state,
 										 plane);
@@ -258,7 +255,7 @@ static int mtk_plane_atomic_check(struct drm_plane *plane,
 }
 
 static void mtk_plane_atomic_disable(struct drm_plane *plane,
-				     struct drm_atomic_state *state)
+				     struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *new_state = drm_atomic_get_new_plane_state(state,
 									   plane);
@@ -275,7 +272,7 @@ static void mtk_plane_atomic_disable(struct drm_plane *plane,
 }
 
 static void mtk_plane_atomic_update(struct drm_plane *plane,
-				    struct drm_atomic_state *state)
+				    struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *new_state = drm_atomic_get_new_plane_state(state,
 									   plane);

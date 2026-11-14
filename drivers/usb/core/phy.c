@@ -30,7 +30,7 @@ static int usb_phy_roothub_add_phy_by_name(struct device *dev, const char *name,
 	if (IS_ERR(phy))
 		return PTR_ERR(phy);
 
-	roothub_entry = devm_kzalloc(dev, sizeof(*roothub_entry), GFP_KERNEL);
+	roothub_entry = devm_kzalloc_obj(dev, *roothub_entry);
 	if (!roothub_entry)
 		return -ENOMEM;
 
@@ -57,7 +57,7 @@ static int usb_phy_roothub_add_phy(struct device *dev, int index,
 			return PTR_ERR(phy);
 	}
 
-	roothub_entry = devm_kzalloc(dev, sizeof(*roothub_entry), GFP_KERNEL);
+	roothub_entry = devm_kzalloc_obj(dev, *roothub_entry);
 	if (!roothub_entry)
 		return -ENOMEM;
 
@@ -83,7 +83,7 @@ struct usb_phy_roothub *usb_phy_roothub_alloc(struct device *dev)
 	if (num_phys <= 0)
 		return NULL;
 
-	phy_roothub = devm_kzalloc(dev, sizeof(*phy_roothub), GFP_KERNEL);
+	phy_roothub = devm_kzalloc_obj(dev, *phy_roothub);
 	if (!phy_roothub)
 		return ERR_PTR(-ENOMEM);
 
@@ -114,7 +114,7 @@ EXPORT_SYMBOL_GPL(usb_phy_roothub_alloc);
 struct usb_phy_roothub *usb_phy_roothub_alloc_usb3_phy(struct device *dev)
 {
 	struct usb_phy_roothub *phy_roothub;
-	int num_phys;
+	int num_phys, usb2_phy_index;
 
 	if (!IS_ENABLED(CONFIG_GENERIC_PHY))
 		return NULL;
@@ -124,7 +124,17 @@ struct usb_phy_roothub *usb_phy_roothub_alloc_usb3_phy(struct device *dev)
 	if (num_phys <= 0)
 		return NULL;
 
-	phy_roothub = devm_kzalloc(dev, sizeof(*phy_roothub), GFP_KERNEL);
+	/*
+	 * If 'usb2-phy' is not present, usb_phy_roothub_alloc() added
+	 * all PHYs to the primary HCD's phy_roothub already, so skip
+	 * adding 'usb3-phy' here to avoid double use of that.
+	 */
+	usb2_phy_index = of_property_match_string(dev->of_node, "phy-names",
+						  "usb2-phy");
+	if (usb2_phy_index < 0)
+		return NULL;
+
+	phy_roothub = devm_kzalloc_obj(dev, *phy_roothub);
 	if (!phy_roothub)
 		return ERR_PTR(-ENOMEM);
 
@@ -200,16 +210,10 @@ int usb_phy_roothub_set_mode(struct usb_phy_roothub *phy_roothub,
 	list_for_each_entry(roothub_entry, head, list) {
 		err = phy_set_mode(roothub_entry->phy, mode);
 		if (err)
-			goto err_out;
+			return err;
 	}
 
 	return 0;
-
-err_out:
-	list_for_each_entry_continue_reverse(roothub_entry, head, list)
-		phy_power_off(roothub_entry->phy);
-
-	return err;
 }
 EXPORT_SYMBOL_GPL(usb_phy_roothub_set_mode);
 

@@ -383,7 +383,7 @@ static int isp1704_charger_probe(struct platform_device *pdev)
 	int			ret = -ENODEV;
 	struct power_supply_config psy_cfg = {};
 
-	isp = devm_kzalloc(&pdev->dev, sizeof(*isp), GFP_KERNEL);
+	isp = devm_kzalloc_obj(&pdev->dev, *isp);
 	if (!isp)
 		return -ENOMEM;
 
@@ -482,6 +482,7 @@ static void isp1704_charger_remove(struct platform_device *pdev)
 	struct isp1704_charger *isp = platform_get_drvdata(pdev);
 
 	usb_unregister_notifier(isp->phy, &isp->nb);
+	cancel_work_sync(&isp->work);
 	power_supply_unregister(isp->psy);
 	isp1704_charger_set_power(isp, 0);
 }

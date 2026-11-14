@@ -34,6 +34,10 @@
 #define EFI_ALLOC_LIMIT		ULONG_MAX
 #endif
 
+struct edid_info;
+struct screen_info;
+struct sysfb_display_info;
+
 extern bool efi_no5lvl;
 extern bool efi_nochunk;
 extern bool efi_nokaslr;
@@ -220,8 +224,8 @@ typedef void (__efiapi *efi_event_notify_t)(efi_event_t, void *);
  * efi_set_event_at() - add event to events array
  *
  * @events:	array of UEFI events
- * @ids:	index where to put the event in the array
- * @event:	event to add to the aray
+ * @idx:	index where to put the event in the array
+ * @event:	event to add to the array
  *
  * boottime->wait_for_event() takes an array of events as input.
  * Provide a helper to set it up correctly for mixed mode.
@@ -575,6 +579,32 @@ union efi_graphics_output_protocol {
 		u32 set_mode;
 		u32 blt;
 		u32 mode;
+	} mixed_mode;
+};
+
+typedef union efi_edid_discovered_protocol efi_edid_discovered_protocol_t;
+
+union efi_edid_discovered_protocol {
+	struct {
+		u32 size_of_edid;
+		u8 *edid;
+	};
+	struct {
+		u32 size_of_edid;
+		u32 edid;
+	} mixed_mode;
+};
+
+typedef union efi_edid_active_protocol efi_edid_active_protocol_t;
+
+union efi_edid_active_protocol {
+	struct {
+		u32 size_of_edid;
+		u8 *edid;
+	};
+	struct {
+		u32 size_of_edid;
+		u32 edid;
 	} mixed_mode;
 };
 
@@ -1042,17 +1072,21 @@ efi_status_t efi_random_alloc(unsigned long size, unsigned long align,
 			      int memory_type, unsigned long alloc_min,
 			      unsigned long alloc_max);
 
+void efi_bli_set_variables(const efi_loaded_image_t *image);
+
 efi_status_t efi_random_get_seed(void);
 
 efi_status_t check_platform_features(void);
 
 void *get_efi_config_table(efi_guid_t guid);
 
-/* NOTE: These functions do not print a trailing newline after the string */
 void efi_char16_puts(efi_char16_t *);
-void efi_puts(const char *str);
+
+int efi_vsnprintf(efi_char16_t *buf, size_t size, const char *fmt, va_list ap,
+		  bool crlf);
 
 __printf(1, 2) int efi_printk(char const *fmt, ...);
+__printf(3, 4) int efi_snprintf(efi_char16_t *buf, size_t size, const char *fmt, ...);
 
 void efi_free(unsigned long size, unsigned long addr);
 DEFINE_FREE(efi_pool, void *, if (_T) efi_bs_call(free_pool, _T));
@@ -1074,18 +1108,11 @@ efi_status_t efi_allocate_pages_aligned(unsigned long size, unsigned long *addr,
 efi_status_t efi_low_alloc_above(unsigned long size, unsigned long align,
 				 unsigned long *addr, unsigned long min);
 
-efi_status_t efi_relocate_kernel(unsigned long *image_addr,
-				 unsigned long image_size,
-				 unsigned long alloc_size,
-				 unsigned long preferred_addr,
-				 unsigned long alignment,
-				 unsigned long min_addr);
-
 efi_status_t efi_parse_options(char const *cmdline);
 
 void efi_parse_option_graphics(char *option);
 
-efi_status_t efi_setup_gop(struct screen_info *si);
+efi_status_t efi_setup_graphics(struct screen_info *si, struct edid_info *edid);
 
 efi_status_t handle_cmdline_files(efi_loaded_image_t *image,
 				  const efi_char16_t *optstr,
@@ -1146,9 +1173,9 @@ efi_enable_reset_attack_mitigation(void) { }
 
 void efi_retrieve_eventlog(void);
 
-struct screen_info *alloc_screen_info(void);
-struct screen_info *__alloc_screen_info(void);
-void free_screen_info(struct screen_info *si);
+struct sysfb_display_info *alloc_primary_display(void);
+struct sysfb_display_info *__alloc_primary_display(void);
+void free_primary_display(struct sysfb_display_info *dpy);
 
 void efi_cache_sync_image(unsigned long image_base,
 			  unsigned long alloc_size);

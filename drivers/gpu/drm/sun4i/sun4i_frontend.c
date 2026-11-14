@@ -19,6 +19,7 @@
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_gem_dma_helper.h>
 #include <drm/drm_plane.h>
+#include <drm/drm_print.h>
 
 #include "sun4i_drv.h"
 #include "sun4i_frontend.h"
@@ -562,7 +563,7 @@ static int sun4i_frontend_bind(struct device *dev, struct device *master,
 	struct sun4i_drv *drv = drm->dev_private;
 	void __iomem *regs;
 
-	frontend = devm_kzalloc(dev, sizeof(*frontend), GFP_KERNEL);
+	frontend = devm_kzalloc_obj(dev, *frontend);
 	if (!frontend)
 		return -ENOMEM;
 

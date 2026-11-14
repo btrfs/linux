@@ -1410,13 +1410,11 @@ static int sh_eth_ring_init(struct net_device *ndev)
 		mdp->rx_buf_sz += NET_IP_ALIGN;
 
 	/* Allocate RX and TX skb rings */
-	mdp->rx_skbuff = kcalloc(mdp->num_rx_ring, sizeof(*mdp->rx_skbuff),
-				 GFP_KERNEL);
+	mdp->rx_skbuff = kzalloc_objs(*mdp->rx_skbuff, mdp->num_rx_ring);
 	if (!mdp->rx_skbuff)
 		return -ENOMEM;
 
-	mdp->tx_skbuff = kcalloc(mdp->num_tx_ring, sizeof(*mdp->tx_skbuff),
-				 GFP_KERNEL);
+	mdp->tx_skbuff = kzalloc_objs(*mdp->tx_skbuff, mdp->num_tx_ring);
 	if (!mdp->tx_skbuff)
 		goto ring_free;
 
@@ -3101,7 +3099,7 @@ static int sh_mdio_init(struct sh_eth_private *mdp,
 	struct device_node *pn;
 
 	/* create bit control struct for PHY */
-	bitbang = devm_kzalloc(dev, sizeof(struct bb_info), GFP_KERNEL);
+	bitbang = devm_kzalloc_obj(dev, struct bb_info);
 	if (!bitbang)
 		return -ENOMEM;
 
@@ -3210,7 +3208,7 @@ static struct sh_eth_plat_data *sh_eth_parse_dt(struct device *dev)
 	phy_interface_t interface;
 	int ret;
 
-	pdata = devm_kzalloc(dev, sizeof(*pdata), GFP_KERNEL);
+	pdata = devm_kzalloc_obj(dev, *pdata);
 	if (!pdata)
 		return NULL;
 

@@ -1669,6 +1669,10 @@ static bool usb3_std_req_get_status(struct renesas_usb3 *usb3,
 		break;
 	case USB_RECIP_ENDPOINT:
 		num = le16_to_cpu(ctrl->wIndex) & USB_ENDPOINT_NUMBER_MASK;
+		if (num >= usb3->num_usb3_eps) {
+			stall = true;
+			break;
+		}
 		usb3_ep = usb3_get_ep(usb3, num);
 		if (usb3_ep->halt)
 			status |= 1 << USB_ENDPOINT_HALT;
@@ -1781,7 +1785,8 @@ static bool usb3_std_req_feature_endpoint(struct renesas_usb3 *usb3,
 	struct renesas_usb3_ep *usb3_ep;
 	struct renesas_usb3_request *usb3_req;
 
-	if (le16_to_cpu(ctrl->wValue) != USB_ENDPOINT_HALT)
+	if ((le16_to_cpu(ctrl->wValue) != USB_ENDPOINT_HALT) ||
+	    (num >= usb3->num_usb3_eps))
 		return true;	/* stall */
 
 	usb3_ep = usb3_get_ep(usb3, num);
@@ -2265,7 +2270,7 @@ static struct usb_request *__renesas_usb3_ep_alloc_request(gfp_t gfp_flags)
 {
 	struct renesas_usb3_request *usb3_req;
 
-	usb3_req = kzalloc(sizeof(struct renesas_usb3_request), gfp_flags);
+	usb3_req = kzalloc_obj(struct renesas_usb3_request, gfp_flags);
 	if (!usb3_req)
 		return NULL;
 
@@ -2684,9 +2689,7 @@ static int renesas_usb3_init_ep(struct renesas_usb3 *usb3, struct device *dev,
 	if (usb3->num_usb3_eps > USB3_MAX_NUM_PIPES(usb3))
 		usb3->num_usb3_eps = USB3_MAX_NUM_PIPES(usb3);
 
-	usb3->usb3_ep = devm_kcalloc(dev,
-				     usb3->num_usb3_eps, sizeof(*usb3_ep),
-				     GFP_KERNEL);
+	usb3->usb3_ep = devm_kzalloc_objs(dev, *usb3_ep, usb3->num_usb3_eps);
 	if (!usb3->usb3_ep)
 		return -ENOMEM;
 
@@ -2844,7 +2847,7 @@ static int renesas_usb3_probe(struct platform_device *pdev)
 	if (irq < 0)
 		return irq;
 
-	usb3 = devm_kzalloc(&pdev->dev, sizeof(*usb3), GFP_KERNEL);
+	usb3 = devm_kzalloc_obj(&pdev->dev, *usb3);
 	if (!usb3)
 		return -ENOMEM;
 

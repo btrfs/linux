@@ -27,8 +27,7 @@ static const struct snd_kcontrol_new card_controls[] = {
 static int
 avs_rt274_clock_control(struct snd_soc_dapm_widget *w, struct snd_kcontrol *control, int event)
 {
-	struct snd_soc_dapm_context *dapm = w->dapm;
-	struct snd_soc_card *card = dapm->card;
+	struct snd_soc_card *card = snd_soc_dapm_to_card(w->dapm);
 	struct snd_soc_dai *codec_dai;
 	int ret;
 
@@ -93,6 +92,7 @@ static int avs_rt274_codec_init(struct snd_soc_pcm_runtime *runtime)
 	struct snd_soc_jack_pin *pins;
 	struct snd_soc_jack *jack;
 	struct snd_soc_card *card = runtime->card;
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(card);
 	int num_pins, ret;
 
 	jack = snd_soc_card_get_drvdata(card);
@@ -117,7 +117,7 @@ static int avs_rt274_codec_init(struct snd_soc_pcm_runtime *runtime)
 		return ret;
 	}
 
-	card->dapm.idle_bias = false;
+	snd_soc_dapm_set_idle_bias(dapm, false);
 
 	return 0;
 }
@@ -153,15 +153,15 @@ static int avs_create_dai_link(struct device *dev, int ssp_port, int tdm_slot,
 	struct snd_soc_dai_link_component *platform;
 	struct snd_soc_dai_link *dl;
 
-	dl = devm_kzalloc(dev, sizeof(*dl), GFP_KERNEL);
-	platform = devm_kzalloc(dev, sizeof(*platform), GFP_KERNEL);
+	dl = devm_kzalloc_obj(dev, *dl);
+	platform = devm_kzalloc_obj(dev, *platform);
 	if (!dl || !platform)
 		return -ENOMEM;
 
 	dl->name = devm_kasprintf(dev, GFP_KERNEL,
 				  AVS_STRING_FMT("SSP", "-Codec", ssp_port, tdm_slot));
-	dl->cpus = devm_kzalloc(dev, sizeof(*dl->cpus), GFP_KERNEL);
-	dl->codecs = devm_kzalloc(dev, sizeof(*dl->codecs), GFP_KERNEL);
+	dl->cpus = devm_kzalloc_obj(dev, *dl->cpus);
+	dl->codecs = devm_kzalloc_obj(dev, *dl->codecs);
 	if (!dl->name || !dl->cpus || !dl->codecs)
 		return -ENOMEM;
 
@@ -228,8 +228,8 @@ static int avs_rt274_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	jack = devm_kzalloc(dev, sizeof(*jack), GFP_KERNEL);
-	card = devm_kzalloc(dev, sizeof(*card), GFP_KERNEL);
+	jack = devm_kzalloc_obj(dev, *jack);
+	card = devm_kzalloc_obj(dev, *card);
 	if (!jack || !card)
 		return -ENOMEM;
 
@@ -261,7 +261,7 @@ static const struct platform_device_id avs_rt274_driver_ids[] = {
 	{
 		.name = "avs_rt274",
 	},
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, avs_rt274_driver_ids);
 

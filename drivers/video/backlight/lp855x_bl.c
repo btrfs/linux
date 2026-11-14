@@ -346,7 +346,7 @@ static int lp855x_parse_dt(struct lp855x *lp)
 		struct device_node *child;
 		int i = 0;
 
-		rom = devm_kcalloc(dev, rom_length, sizeof(*rom), GFP_KERNEL);
+		rom = devm_kzalloc_objs(dev, *rom, rom_length);
 		if (!rom)
 			return -ENOMEM;
 
@@ -403,7 +403,7 @@ static int lp855x_probe(struct i2c_client *cl)
 	if (!i2c_check_functionality(cl->adapter, I2C_FUNC_SMBUS_I2C_BLOCK))
 		return -EIO;
 
-	lp = devm_kzalloc(dev, sizeof(struct lp855x), GFP_KERNEL);
+	lp = devm_kzalloc_obj(dev, struct lp855x);
 	if (!lp)
 		return -ENOMEM;
 
@@ -440,7 +440,7 @@ static int lp855x_probe(struct i2c_client *cl)
 	}
 
 	if (!lp->pdata) {
-		lp->pdata = devm_kzalloc(dev, sizeof(*lp->pdata), GFP_KERNEL);
+		lp->pdata = devm_kzalloc_obj(dev, *lp->pdata);
 		if (!lp->pdata)
 			return -ENOMEM;
 
@@ -570,13 +570,13 @@ static const struct of_device_id lp855x_dt_ids[] __maybe_unused = {
 MODULE_DEVICE_TABLE(of, lp855x_dt_ids);
 
 static const struct i2c_device_id lp855x_ids[] = {
-	{"lp8550", LP8550},
-	{"lp8551", LP8551},
-	{"lp8552", LP8552},
-	{"lp8553", LP8553},
-	{"lp8555", LP8555},
-	{"lp8556", LP8556},
-	{"lp8557", LP8557},
+	{ .name = "lp8550", .driver_data = LP8550 },
+	{ .name = "lp8551", .driver_data = LP8551 },
+	{ .name = "lp8552", .driver_data = LP8552 },
+	{ .name = "lp8553", .driver_data = LP8553 },
+	{ .name = "lp8555", .driver_data = LP8555 },
+	{ .name = "lp8556", .driver_data = LP8556 },
+	{ .name = "lp8557", .driver_data = LP8557 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, lp855x_ids);

@@ -100,7 +100,6 @@ static void memstick_device_remove(struct device *dev)
 
 	if (dev->driver && drv->remove) {
 		drv->remove(card);
-		card->dev.driver = NULL;
 	}
 
 	put_device(dev);
@@ -370,9 +369,7 @@ int memstick_set_rw_addr(struct memstick_dev *card)
 {
 	card->next_request = h_memstick_set_rw_addr;
 	memstick_new_req(card->host);
-	if (!wait_for_completion_timeout(&card->mrq_complete,
-			msecs_to_jiffies(500)))
-		card->current_mrq.error = -ETIMEDOUT;
+	wait_for_completion(&card->mrq_complete);
 
 	return card->current_mrq.error;
 }
@@ -380,8 +377,7 @@ EXPORT_SYMBOL(memstick_set_rw_addr);
 
 static struct memstick_dev *memstick_alloc_card(struct memstick_host *host)
 {
-	struct memstick_dev *card = kzalloc(sizeof(struct memstick_dev),
-					    GFP_KERNEL);
+	struct memstick_dev *card = kzalloc_obj(struct memstick_dev);
 	struct memstick_dev *old_card = host->card;
 	struct ms_id_register id_reg;
 
@@ -406,9 +402,7 @@ static struct memstick_dev *memstick_alloc_card(struct memstick_host *host)
 
 		card->next_request = h_memstick_read_dev_id;
 		memstick_new_req(host);
-		if (!wait_for_completion_timeout(&card->mrq_complete,
-				msecs_to_jiffies(500)))
-			card->current_mrq.error = -ETIMEDOUT;
+		wait_for_completion(&card->mrq_complete);
 
 		if (card->current_mrq.error)
 			goto err_out;

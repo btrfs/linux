@@ -8,6 +8,7 @@
 #include <linux/bitfield.h>
 #include <linux/bitops.h>
 #include <linux/cpu.h>
+#include <linux/cpumask.h>
 #include <linux/interrupt.h>
 #include <linux/irqchip.h>
 #include <linux/irqchip/chained_irq.h>
@@ -171,6 +172,15 @@ static void aplic_idc_set_delivery(struct aplic_idc *idc, bool en)
 	writel(de, idc->regs + APLIC_IDC_IDELIVERY);
 }
 
+void aplic_direct_restore_states(struct aplic_priv *priv)
+{
+	struct aplic_direct *direct = container_of(priv, struct aplic_direct, priv);
+	int cpu;
+
+	for_each_cpu(cpu, &direct->lmask)
+		aplic_idc_set_delivery(per_cpu_ptr(&aplic_idcs, cpu), true);
+}
+
 static int aplic_direct_dying_cpu(unsigned int cpu)
 {
 	if (aplic_direct_parent_irq)
@@ -229,7 +239,7 @@ int aplic_direct_setup(struct device *dev, void __iomem *regs)
 	unsigned long hartid;
 	u32 v, hwirq;
 
-	direct = devm_kzalloc(dev, sizeof(*direct), GFP_KERNEL);
+	direct = devm_kzalloc_obj(dev, *direct);
 	if (!direct)
 		return -ENOMEM;
 	priv = &direct->priv;

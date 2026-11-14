@@ -10,7 +10,6 @@
  */
 
 #include <linux/err.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/interrupt.h>
 #include <linux/mfd/core.h>
@@ -58,7 +57,7 @@ static int rt5033_i2c_probe(struct i2c_client *i2c)
 	unsigned int dev_id, chip_rev;
 	int ret;
 
-	rt5033 = devm_kzalloc(&i2c->dev, sizeof(*rt5033), GFP_KERNEL);
+	rt5033 = devm_kzalloc_obj(&i2c->dev, *rt5033);
 	if (!rt5033)
 		return -ENOMEM;
 

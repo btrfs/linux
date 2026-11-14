@@ -105,7 +105,7 @@ static const struct regmap_config dlpc_regmap_config = {
 };
 
 static void dlpc_atomic_enable(struct drm_bridge *bridge,
-			       struct drm_atomic_state *state)
+			       struct drm_atomic_commit *state)
 {
 	struct dlpc *dlpc = bridge_to_dlpc(bridge);
 	struct device *dev = dlpc->dev;
@@ -170,7 +170,7 @@ static void dlpc_atomic_enable(struct drm_bridge *bridge,
 }
 
 static void dlpc_atomic_pre_enable(struct drm_bridge *bridge,
-				   struct drm_atomic_state *state)
+				   struct drm_atomic_commit *state)
 {
 	struct dlpc *dlpc = bridge_to_dlpc(bridge);
 	int ret;
@@ -193,7 +193,7 @@ static void dlpc_atomic_pre_enable(struct drm_bridge *bridge,
 }
 
 static void dlpc_atomic_post_disable(struct drm_bridge *bridge,
-				     struct drm_atomic_state *state)
+				     struct drm_atomic_commit *state)
 {
 	struct dlpc *dlpc = bridge_to_dlpc(bridge);
 
@@ -221,8 +221,7 @@ dlpc_atomic_get_input_bus_fmts(struct drm_bridge *bridge,
 
 	*num_input_fmts = 0;
 
-	input_fmts = kcalloc(MAX_INPUT_SEL_FORMATS, sizeof(*input_fmts),
-			     GFP_KERNEL);
+	input_fmts = kzalloc_objs(*input_fmts, MAX_INPUT_SEL_FORMATS);
 	if (!input_fmts)
 		return NULL;
 
@@ -254,7 +253,7 @@ static const struct drm_bridge_funcs dlpc_bridge_funcs = {
 	.atomic_duplicate_state		= drm_atomic_helper_bridge_duplicate_state,
 	.atomic_destroy_state		= drm_atomic_helper_bridge_destroy_state,
 	.atomic_get_input_bus_fmts	= dlpc_atomic_get_input_bus_fmts,
-	.atomic_reset			= drm_atomic_helper_bridge_reset,
+	.atomic_create_state			= drm_atomic_helper_bridge_create_state,
 	.atomic_pre_enable		= dlpc_atomic_pre_enable,
 	.atomic_enable			= dlpc_atomic_enable,
 	.atomic_post_disable		= dlpc_atomic_post_disable,
@@ -389,7 +388,7 @@ static void dlpc3433_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id dlpc3433_id[] = {
-	{ "ti,dlpc3433" },
+	{ .name = "ti,dlpc3433" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(i2c, dlpc3433_id);

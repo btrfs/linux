@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright(c) 2021-2025 Intel Corporation
+ * Copyright(c) 2021-2026 Intel Corporation
  */
 #ifndef __iwl_fw_uefi__
 #define __iwl_fw_uefi__
@@ -13,7 +13,10 @@
 #define IWL_UEFI_STEP_NAME		L"UefiCnvCommonSTEP"
 #define IWL_UEFI_UATS_NAME		L"CnvUefiWlanUATS"
 #define IWL_UEFI_WRDS_NAME		L"UefiCnvWlanWRDS"
+#define IWL_UEFI_GLUI_NAME		L"UefiCnvCommonGLUI"
 #define IWL_UEFI_EWRD_NAME		L"UefiCnvWlanEWRD"
+#define IWL_UEFI_WSSS_NAME		L"UefiCnvWlanWSSS"
+#define IWL_UEFI_EWSS_NAME		L"UefiCnvWlanEWSS"
 #define IWL_UEFI_WGDS_NAME		L"UefiCnvWlanWGDS"
 #define IWL_UEFI_PPAG_NAME		L"UefiCnvWlanPPAG"
 #define IWL_UEFI_WTAS_NAME		L"UefiCnvWlanWTAS"
@@ -25,16 +28,12 @@
 #define IWL_UEFI_PUNCTURING_NAME	L"UefiCnvWlanPuncturing"
 #define IWL_UEFI_DSBR_NAME		L"UefiCnvCommonDSBR"
 #define IWL_UEFI_WPFC_NAME		L"WPFC"
+#define IWL_UEFI_UNEB_NAME		L"CnvUefiWlanUNEB"
 
 
 #define IWL_SGOM_MAP_SIZE		339
 #define IWL_UATS_MAP_SIZE		339
 
-#define IWL_UEFI_WRDS_REVISION		2
-#define IWL_UEFI_EWRD_REVISION		2
-#define IWL_UEFI_WGDS_REVISION		3
-#define IWL_UEFI_MIN_PPAG_REV		1
-#define IWL_UEFI_MAX_PPAG_REV		4
 #define IWL_UEFI_MIN_WTAS_REVISION	1
 #define IWL_UEFI_MAX_WTAS_REVISION	2
 #define IWL_UEFI_SPLC_REVISION		0
@@ -44,6 +43,7 @@
 #define IWL_UEFI_DSM_REVISION		4
 #define IWL_UEFI_PUNCTURING_REVISION	0
 #define IWL_UEFI_DSBR_REVISION		1
+#define IWL_UEFI_GLUI_REVISION		0
 
 struct pnvm_sku_package {
 	u8 rev;
@@ -58,10 +58,18 @@ struct uefi_cnv_wlan_sgom_data {
 	u8 offset_map[IWL_SGOM_MAP_SIZE - 1];
 } __packed;
 
+struct uefi_cnv_var_glui {
+	u8 revision;
+	u8 guid_lock_status;
+} __packed;
+
 struct uefi_cnv_wlan_uats_data {
 	u8 revision;
-	u8 offset_map[IWL_UATS_MAP_SIZE - 1];
+	u8 mcc_to_ap_type_map[IWL_UATS_MAP_SIZE - 1];
 } __packed;
+
+/* UNEB's layout is identical to UATS's */
+#define uefi_cnv_wlan_uneb_data uefi_cnv_wlan_uats_data
 
 struct uefi_cnv_common_step_data {
 	u8 revision;
@@ -72,68 +80,135 @@ struct uefi_cnv_common_step_data {
 	u8 radio2;
 } __packed;
 
-/*
- * struct uefi_sar_profile - a SAR profile as defined in UEFI
- *
- * @chains: a per-chain table of SAR values
- */
-struct uefi_sar_profile {
-	struct iwl_sar_profile_chain chains[BIOS_SAR_MAX_CHAINS_PER_PROFILE];
-} __packed;
+#define UEFI_PPAG_SUB_BANDS_NUM_REV4	11
+#define UEFI_PPAG_SUB_BANDS_NUM_REV5	12
+#define UEFI_PPAG_NUM_CHAINS		2
 
-/*
+#define UEFI_SAR_SUB_BANDS_NUM_REV2	11
+#define UEFI_SAR_SUB_BANDS_NUM_REV3	12
+
+#define UEFI_SAR_MAX_CHAINS_PER_PROFILE	4
+
+#define UEFI_GEO_NUM_BANDS_REV3		3
+#define UEFI_GEO_NUM_BANDS_REV4		4
+
+/**
  * struct uefi_cnv_var_wrds - WRDS table as defined in UEFI
  *
  * @revision: the revision of the table
  * @mode: is WRDS enbaled/disabled
- * @sar_profile: sar profile #1
+ * @vals: values for sar profile #1 as an array:
+ *	vals[chain * num_of_subbands + subband] will return the right value.
+ *	num_of_subbands depends on the revision. For revision 3, it is
+ *	%UEFI_SAR_SUB_BANDS_NUM_REV3, for earlier revision, it is
+ *	%UEFI_SAR_SUB_BANDS_NUM_REV2.
+ *	The max number of chains is currently 2
  */
 struct uefi_cnv_var_wrds {
 	u8 revision;
 	u32 mode;
-	struct uefi_sar_profile sar_profile;
+	u8 vals[];
 } __packed;
 
-/*
+#define UEFI_SAR_PROFILE_SIZE_REV2			\
+	(sizeof(u8) * UEFI_SAR_MAX_CHAINS_PER_PROFILE *	\
+	 UEFI_SAR_SUB_BANDS_NUM_REV2)
+
+#define UEFI_SAR_PROFILE_SIZE_REV3			\
+	(sizeof(u8) * UEFI_SAR_MAX_CHAINS_PER_PROFILE *	\
+	 UEFI_SAR_SUB_BANDS_NUM_REV3)
+
+#define UEFI_SAR_WRDS_TABLE_SIZE_REV2			\
+	(offsetof(struct uefi_cnv_var_wrds, vals) +	\
+	 UEFI_SAR_PROFILE_SIZE_REV2)
+
+#define UEFI_SAR_WRDS_TABLE_SIZE_REV3			\
+	(offsetof(struct uefi_cnv_var_wrds, vals) +	\
+	 UEFI_SAR_PROFILE_SIZE_REV3)
+
+/**
  * struct uefi_cnv_var_ewrd - EWRD table as defined in UEFI
  * @revision: the revision of the table
  * @mode: is WRDS enbaled/disabled
  * @num_profiles: how many additional profiles we have in this table (0-3)
- * @sar_profiles: the additional SAR profiles (#2-#4)
+ * @vals: the additional SAR profiles (#2-#4) as an array of SAR profiles.
+ *	A SAR profile is defined the &struct uefi_cnv_var_wrds::vals. The size
+ *	of each profile depends on the number of subbands which depends on the
+ *	revision. This is explained in &struct uefi_cnv_var_wrds.
  */
 struct uefi_cnv_var_ewrd {
 	u8 revision;
 	u32 mode;
 	u32 num_profiles;
-	struct uefi_sar_profile sar_profiles[BIOS_SAR_MAX_PROFILE_NUM - 1];
+	u8 vals[];
 } __packed;
 
-/*
+#define UEFI_SAR_EWRD_TABLE_SIZE_REV2				\
+	(offsetof(struct uefi_cnv_var_ewrd, vals) +		\
+	 UEFI_SAR_PROFILE_SIZE_REV2 * (BIOS_SAR_MAX_PROFILE_NUM - 1))
+
+#define UEFI_SAR_EWRD_TABLE_SIZE_REV3				\
+	(offsetof(struct uefi_cnv_var_ewrd, vals) +		\
+	 UEFI_SAR_PROFILE_SIZE_REV3 * (BIOS_SAR_MAX_PROFILE_NUM - 1))
+
+/**
  * struct uefi_cnv_var_wgds - WGDS table as defined in UEFI
  * @revision: the revision of the table
  * @num_profiles: the number of geo profiles we have in the table.
  *	The first 3 are mandatory, and can have up to 8.
- * @geo_profiles: a per-profile table of the offsets to add to SAR values.
+ * @vals: a per-profile table of the offsets to add to SAR values. This is an
+ *	array of profiles, each profile is an array of
+ *	&struct iwl_geo_profile_band, one for each subband.
+ *	There are %UEFI_GEO_NUM_BANDS_REV3 or %UEFI_GEO_NUM_BANDS_REV4 subbands
+ *	depending on the revision.
  */
 struct uefi_cnv_var_wgds {
 	u8 revision;
 	u8 num_profiles;
-	struct iwl_geo_profile geo_profiles[BIOS_GEO_MAX_PROFILE_NUM];
+	u8 vals[];
 } __packed;
 
-/*
+/* struct iwl_geo_profile_band is 3 bytes-long, but since it is not packed,
+ * we can't use sizeof()
+ */
+#define UEFI_WGDS_PROFILE_SIZE_REV3 (sizeof(u8) * 3 * UEFI_GEO_NUM_BANDS_REV3)
+
+#define UEFI_WGDS_PROFILE_SIZE_REV4 (sizeof(u8) * 3 * UEFI_GEO_NUM_BANDS_REV4)
+
+#define UEFI_WGDS_TABLE_SIZE_REV3				\
+	(offsetof(struct uefi_cnv_var_wgds, vals) +		\
+	 UEFI_WGDS_PROFILE_SIZE_REV3 * BIOS_GEO_MAX_PROFILE_NUM)
+
+#define UEFI_WGDS_TABLE_SIZE_REV4				\
+	(offsetof(struct uefi_cnv_var_wgds, vals) +		\
+	 UEFI_WGDS_PROFILE_SIZE_REV4 * BIOS_GEO_MAX_PROFILE_NUM)
+
+/**
  * struct uefi_cnv_var_ppag - PPAG table as defined in UEFI
  * @revision: the revision of the table
  * @ppag_modes: values from &enum iwl_ppag_flags
- * @ppag_chains: the PPAG values per chain and band
+ * @vals: the PPAG values per chain and band as an array.
+ *	vals[chain * num_of_subbands + subband] will return the right value.
+ *	num_of_subbands depends on the revision. For revision 5, it is
+ *	%UEFI_PPAG_SUB_BANDS_NUM_REV5, for earlier revision it is
+ *	%UEFI_PPAG_SUB_BANDS_NUM_REV4.
+ *	the max number of chains is currently 2
  */
 struct uefi_cnv_var_ppag {
 	u8 revision;
 	u32 ppag_modes;
-	struct iwl_ppag_chain ppag_chains[IWL_NUM_CHAIN_LIMITS];
+	s8 vals[];
 } __packed;
 
-/* struct uefi_cnv_var_wtas - WTAS tabled as defined in UEFI
+#define UEFI_PPAG_DATA_SIZE_V4				\
+	(offsetof(struct uefi_cnv_var_ppag, vals) +	\
+	sizeof(s8) * UEFI_PPAG_NUM_CHAINS * UEFI_PPAG_SUB_BANDS_NUM_REV4)
+#define UEFI_PPAG_DATA_SIZE_V5				\
+	(offsetof(struct uefi_cnv_var_ppag, vals) +	\
+	sizeof(s8) * UEFI_PPAG_NUM_CHAINS * UEFI_PPAG_SUB_BANDS_NUM_REV5)
+
+/**
+ * struct uefi_cnv_var_wtas - WTAS tabled as defined in UEFI
  * @revision: the revision of the table
  * @tas_selection: different options of TAS enablement.
  * @black_list_size: the number of defined entried in the black list
@@ -146,7 +221,8 @@ struct uefi_cnv_var_wtas {
 	u16 black_list[IWL_WTAS_BLACK_LIST_MAX];
 } __packed;
 
-/* struct uefi_cnv_var_splc - SPLC tabled as defined in UEFI
+/**
+ * struct uefi_cnv_var_splc - SPLC tabled as defined in UEFI
  * @revision: the revision of the table
  * @default_pwr_limit: The default maximum power per device
  */
@@ -155,7 +231,8 @@ struct uefi_cnv_var_splc {
 	u32 default_pwr_limit;
 } __packed;
 
-/* struct uefi_cnv_var_wrdd - WRDD table as defined in UEFI
+/**
+ * struct uefi_cnv_var_wrdd - WRDD table as defined in UEFI
  * @revision: the revision of the table
  * @mcc: country identifier as defined in ISO/IEC 3166-1 Alpha 2 code
  */
@@ -164,7 +241,8 @@ struct uefi_cnv_var_wrdd {
 	u32 mcc;
 } __packed;
 
-/* struct uefi_cnv_var_eckv - ECKV table as defined in UEFI
+/**
+ * struct uefi_cnv_var_eckv - ECKV table as defined in UEFI
  * @revision: the revision of the table
  * @ext_clock_valid: indicates if external 32KHz clock is valid
  */
@@ -175,7 +253,8 @@ struct uefi_cnv_var_eckv {
 
 #define UEFI_MAX_DSM_FUNCS 32
 
-/* struct uefi_cnv_var_general_cfg - DSM-like table as defined in UEFI
+/**
+ * struct uefi_cnv_var_general_cfg - DSM-like table as defined in UEFI
  * @revision: the revision of the table
  * @functions: payload of the different DSM functions
  */
@@ -185,7 +264,9 @@ struct uefi_cnv_var_general_cfg {
 } __packed;
 
 #define IWL_UEFI_WBEM_REV0_MASK (BIT(0) | BIT(1))
-/* struct uefi_cnv_wlan_wbem_data - Bandwidth enablement per MCC as defined
+
+/**
+ * struct uefi_cnv_wlan_wbem_data - Bandwidth enablement per MCC as defined
  *	in UEFI
  * @revision: the revision of the table
  * @wbem_320mhz_per_mcc: enablement of 320MHz bandwidth per MCC
@@ -203,8 +284,6 @@ enum iwl_uefi_cnv_puncturing_flags {
 	IWL_UEFI_CNV_PUNCTURING_CANADA_EN_MSK	= BIT(1),
 };
 
-#define IWL_UEFI_PUNCTURING_REV0_MASK (IWL_UEFI_CNV_PUNCTURING_USA_EN_MSK | \
-				       IWL_UEFI_CNV_PUNCTURING_CANADA_EN_MSK)
 /**
  * struct uefi_cnv_var_puncturing_data - controlling channel
  *	puncturing for few countries.
@@ -260,6 +339,8 @@ int iwl_uefi_handle_tlv_mem_desc(struct iwl_trans *trans, const u8 *data,
 				 u32 tlv_len, struct iwl_pnvm_image *pnvm_data);
 int iwl_uefi_get_wrds_table(struct iwl_fw_runtime *fwrt);
 int iwl_uefi_get_ewrd_table(struct iwl_fw_runtime *fwrt);
+int iwl_uefi_get_wsss_table(struct iwl_fw_runtime *fwrt);
+int iwl_uefi_get_ewss_table(struct iwl_fw_runtime *fwrt);
 int iwl_uefi_get_wgds_table(struct iwl_fw_runtime *fwrt);
 int iwl_uefi_get_ppag_table(struct iwl_fw_runtime *fwrt);
 int iwl_uefi_get_tas_table(struct iwl_fw_runtime *fwrt,
@@ -274,9 +355,12 @@ int iwl_uefi_get_dsm(struct iwl_fw_runtime *fwrt, enum iwl_dsm_funcs func,
 void iwl_uefi_get_sgom_table(struct iwl_trans *trans, struct iwl_fw_runtime *fwrt);
 void iwl_uefi_get_uats_table(struct iwl_trans *trans,
 			     struct iwl_fw_runtime *fwrt);
+void iwl_uefi_get_uneb_table(struct iwl_trans *trans,
+			     struct iwl_fw_runtime *fwrt);
 int iwl_uefi_get_puncturing(struct iwl_fw_runtime *fwrt);
 int iwl_uefi_get_dsbr(struct iwl_fw_runtime *fwrt, u32 *value);
 int iwl_uefi_get_phy_filters(struct iwl_fw_runtime *fwrt);
+void iwl_uefi_get_guid_lock_status(struct iwl_fw_runtime *fwrt);
 #else /* CONFIG_EFI */
 static inline void *iwl_uefi_get_pnvm(struct iwl_trans *trans, size_t *len)
 {
@@ -315,6 +399,16 @@ static inline int iwl_uefi_get_wrds_table(struct iwl_fw_runtime *fwrt)
 }
 
 static inline int iwl_uefi_get_ewrd_table(struct iwl_fw_runtime *fwrt)
+{
+	return -ENOENT;
+}
+
+static inline int iwl_uefi_get_wsss_table(struct iwl_fw_runtime *fwrt)
+{
+	return -ENOENT;
+}
+
+static inline int iwl_uefi_get_ewss_table(struct iwl_fw_runtime *fwrt)
 {
 	return -ENOENT;
 }
@@ -373,6 +467,11 @@ iwl_uefi_get_uats_table(struct iwl_trans *trans, struct iwl_fw_runtime *fwrt)
 {
 }
 
+static inline void
+iwl_uefi_get_uneb_table(struct iwl_trans *trans, struct iwl_fw_runtime *fwrt)
+{
+}
+
 static inline
 int iwl_uefi_get_puncturing(struct iwl_fw_runtime *fwrt)
 {
@@ -388,6 +487,10 @@ int iwl_uefi_get_dsbr(struct iwl_fw_runtime *fwrt, u32 *value)
 static inline int iwl_uefi_get_phy_filters(struct iwl_fw_runtime *fwrt)
 {
 	return -ENOENT;
+}
+
+static inline void iwl_uefi_get_guid_lock_status(struct iwl_fw_runtime *fwrt)
+{
 }
 #endif /* CONFIG_EFI */
 #endif /* __iwl_fw_uefi__ */

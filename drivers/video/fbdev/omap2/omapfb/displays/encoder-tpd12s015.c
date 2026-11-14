@@ -9,7 +9,6 @@
 #include <linux/completion.h>
 #include <linux/delay.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/slab.h>
 #include <linux/platform_device.h>
 #include <linux/gpio/consumer.h>
@@ -221,7 +220,7 @@ static int tpd_probe(struct platform_device *pdev)
 	int r;
 	struct gpio_desc *gpio;
 
-	ddata = devm_kzalloc(&pdev->dev, sizeof(*ddata), GFP_KERNEL);
+	ddata = devm_kzalloc_obj(&pdev->dev, *ddata);
 	if (!ddata)
 		return -ENOMEM;
 

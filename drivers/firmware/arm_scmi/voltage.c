@@ -66,7 +66,6 @@ struct scmi_resp_voltage_level_set_complete {
 };
 
 struct voltage_info {
-	unsigned int version;
 	unsigned int num_domains;
 	struct scmi_voltage_info *domains;
 };
@@ -243,7 +242,7 @@ static int scmi_voltage_descriptors_get(const struct scmi_protocol_handle *ph,
 		 * If supported overwrite short name with the extended one;
 		 * on error just carry on and use already provided short name.
 		 */
-		if (PROTOCOL_REV_MAJOR(vinfo->version) >= 0x2) {
+		if (PROTOCOL_REV_MAJOR(ph->version) >= 0x2) {
 			if (SUPPORTS_EXTENDED_NAMES(attributes))
 				ph->hops->extended_name_get(ph,
 							VOLTAGE_DOMAIN_NAME_GET,
@@ -405,29 +404,22 @@ static const struct scmi_voltage_proto_ops voltage_proto_ops = {
 static int scmi_voltage_protocol_init(const struct scmi_protocol_handle *ph)
 {
 	int ret;
-	u32 version;
 	struct voltage_info *vinfo;
 
-	ret = ph->xops->version_get(ph, &version);
-	if (ret)
-		return ret;
-
 	dev_dbg(ph->dev, "Voltage Version %d.%d\n",
-		PROTOCOL_REV_MAJOR(version), PROTOCOL_REV_MINOR(version));
+		PROTOCOL_REV_MAJOR(ph->version), PROTOCOL_REV_MINOR(ph->version));
 
-	vinfo = devm_kzalloc(ph->dev, sizeof(*vinfo), GFP_KERNEL);
+	vinfo = devm_kzalloc_obj(ph->dev, *vinfo);
 	if (!vinfo)
 		return -ENOMEM;
-	vinfo->version = version;
 
 	ret = scmi_protocol_attributes_get(ph, vinfo);
 	if (ret)
 		return ret;
 
 	if (vinfo->num_domains) {
-		vinfo->domains = devm_kcalloc(ph->dev, vinfo->num_domains,
-					      sizeof(*vinfo->domains),
-					      GFP_KERNEL);
+		vinfo->domains = devm_kzalloc_objs(ph->dev, *vinfo->domains,
+						   vinfo->num_domains);
 		if (!vinfo->domains)
 			return -ENOMEM;
 		ret = scmi_voltage_descriptors_get(ph, vinfo);
@@ -437,7 +429,7 @@ static int scmi_voltage_protocol_init(const struct scmi_protocol_handle *ph)
 		dev_warn(ph->dev, "No Voltage domains found.\n");
 	}
 
-	return ph->set_priv(ph, vinfo, version);
+	return ph->set_priv(ph, vinfo);
 }
 
 static const struct scmi_protocol scmi_voltage = {

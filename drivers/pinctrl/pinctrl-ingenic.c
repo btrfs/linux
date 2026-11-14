@@ -12,7 +12,6 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -4334,7 +4333,8 @@ static int ingenic_pinconf_group_get(struct pinctrl_dev *pctldev,
 		unsigned int group, unsigned long *config)
 {
 	const unsigned int *pins;
-	unsigned int i, npins, old = 0;
+	unsigned int i, npins;
+	unsigned long old = 0;
 	int ret;
 
 	ret = pinctrl_generic_get_group_pins(pctldev, group, &pins, &npins);
@@ -4424,7 +4424,7 @@ static int __init ingenic_gpio_probe(struct ingenic_pinctrl *jzpc,
 		return err;
 	}
 
-	jzgc = devm_kzalloc(dev, sizeof(*jzgc), GFP_KERNEL);
+	jzgc = devm_kzalloc_obj(dev, *jzgc);
 	if (!jzgc)
 		return -ENOMEM;
 
@@ -4467,8 +4467,7 @@ static int __init ingenic_gpio_probe(struct ingenic_pinctrl *jzpc,
 	gpio_irq_chip_set_chip(girq, &ingenic_gpio_irqchip);
 	girq->parent_handler = ingenic_gpio_irq_handler;
 	girq->num_parents = 1;
-	girq->parents = devm_kcalloc(dev, 1, sizeof(*girq->parents),
-				     GFP_KERNEL);
+	girq->parents = devm_kzalloc_objs(dev, *girq->parents, 1);
 	if (!girq->parents)
 		return -ENOMEM;
 
@@ -4501,7 +4500,7 @@ static int __init ingenic_pinctrl_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	jzpc = devm_kzalloc(dev, sizeof(*jzpc), GFP_KERNEL);
+	jzpc = devm_kzalloc_obj(dev, *jzpc);
 	if (!jzpc)
 		return -ENOMEM;
 
@@ -4526,7 +4525,7 @@ static int __init ingenic_pinctrl_probe(struct platform_device *pdev)
 	jzpc->dev = dev;
 	jzpc->info = chip_info;
 
-	pctl_desc = devm_kzalloc(&pdev->dev, sizeof(*pctl_desc), GFP_KERNEL);
+	pctl_desc = devm_kzalloc_obj(&pdev->dev, *pctl_desc);
 	if (!pctl_desc)
 		return -ENOMEM;
 
@@ -4537,8 +4536,9 @@ static int __init ingenic_pinctrl_probe(struct platform_device *pdev)
 	pctl_desc->pmxops = &ingenic_pmxops;
 	pctl_desc->confops = &ingenic_confops;
 	pctl_desc->npins = chip_info->num_chips * PINS_PER_GPIO_CHIP;
-	pctl_desc->pins = jzpc->pdesc = devm_kcalloc(&pdev->dev,
-			pctl_desc->npins, sizeof(*jzpc->pdesc), GFP_KERNEL);
+	pctl_desc->pins = jzpc->pdesc = devm_kzalloc_objs(&pdev->dev,
+							  *jzpc->pdesc,
+							  pctl_desc->npins);
 	if (!jzpc->pdesc)
 		return -ENOMEM;
 

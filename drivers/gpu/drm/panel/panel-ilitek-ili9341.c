@@ -19,7 +19,6 @@
 #include <linux/bitops.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/property.h>
 #include <linux/regulator/consumer.h>
@@ -495,8 +494,7 @@ static int ili9341_dpi_probe(struct spi_device *spi, struct gpio_desc *dc,
 	if (IS_ERR(ili))
 		return PTR_ERR(ili);
 
-	ili->dbi = devm_kzalloc(dev, sizeof(struct mipi_dbi),
-				GFP_KERNEL);
+	ili->dbi = devm_kzalloc_obj(dev, struct mipi_dbi);
 	if (!ili->dbi)
 		return -ENOMEM;
 

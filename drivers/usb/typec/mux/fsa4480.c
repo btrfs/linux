@@ -259,7 +259,7 @@ static int fsa4480_probe(struct i2c_client *client)
 	int val = 0;
 	int ret;
 
-	fsa = devm_kzalloc(dev, sizeof(*fsa), GFP_KERNEL);
+	fsa = devm_kzalloc_obj(dev, *fsa);
 	if (!fsa)
 		return -ENOMEM;
 
@@ -336,7 +336,7 @@ static void fsa4480_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id fsa4480_table[] = {
-	{ "fsa4480" },
+	{ .name = "fsa4480" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, fsa4480_table);

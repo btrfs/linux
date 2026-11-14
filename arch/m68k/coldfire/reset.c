@@ -16,7 +16,7 @@
 #include <asm/mcfsim.h>
 
 /*
- *	There are 2 common methods amongst the ColdFure parts for reseting
+ *	There are 2 common methods amongst the ColdFire parts for resetting
  *	the CPU. But there are couple of exceptions, the 5272 and the 547x
  *	have something completely special to them, and we let their specific
  *	subarch code handle them.
@@ -27,7 +27,7 @@ static void mcf_cpu_reset(void)
 {
 	local_irq_disable();
 	/* Set watchdog to soft reset, and enabled */
-	__raw_writeb(0xc0, MCFSIM_SYPCR);
+	mcf_write8(0xc0, MCFSIM_SYPCR);
 	for (;;)
 		/* wait for watchdog to timeout */;
 }
@@ -37,7 +37,7 @@ static void mcf_cpu_reset(void)
 static void mcf_cpu_reset(void)
 {
 	local_irq_disable();
-	__raw_writeb(MCF_RCR_SWRESET, MCF_RCR);
+	mcf_write8(MCF_RCR_SWRESET, MCF_RCR);
 }
 #endif
 

@@ -11,6 +11,7 @@
 #include <linux/io.h>
 #include <linux/io-64-nonatomic-lo-hi.h>
 #include <linux/iopoll.h>
+#include <linux/device-id/hda.h>
 #include <linux/pci.h>
 #include <linux/pm_runtime.h>
 #include <linux/timecounter.h>
@@ -95,7 +96,8 @@ struct hdac_device {
 	bool lazy_cache:1;	/* don't wake up for writes */
 	bool caps_overwriting:1; /* caps overwrite being in process */
 	bool cache_coef:1;	/* cache COEF read/write too */
-	unsigned int registered:1; /* codec was registered */
+	bool registered;	/* codec was registered */
+	bool unsol_disabled;	/* unsol events blocked; protected by bus->reg_lock */
 };
 
 /* device/driver type used for matching */
@@ -122,6 +124,7 @@ int snd_hdac_device_init(struct hdac_device *dev, struct hdac_bus *bus,
 			 const char *name, unsigned int addr);
 void snd_hdac_device_exit(struct hdac_device *dev);
 int snd_hdac_device_register(struct hdac_device *codec);
+void snd_hdac_device_disable_unsol(struct hdac_device *codec);
 void snd_hdac_device_unregister(struct hdac_device *codec);
 int snd_hdac_device_set_chip_name(struct hdac_device *codec, const char *name);
 int snd_hdac_codec_modalias(const struct hdac_device *hdac, char *buf, size_t size);
@@ -178,9 +181,9 @@ static inline int snd_hdac_read_parm(struct hdac_device *codec, hda_nid_t nid,
 
 #ifdef CONFIG_PM
 int snd_hdac_power_up(struct hdac_device *codec);
-int snd_hdac_power_down(struct hdac_device *codec);
+void snd_hdac_power_down(struct hdac_device *codec);
 int snd_hdac_power_up_pm(struct hdac_device *codec);
-int snd_hdac_power_down_pm(struct hdac_device *codec);
+void snd_hdac_power_down_pm(struct hdac_device *codec);
 int snd_hdac_keep_power_up(struct hdac_device *codec);
 
 /* call this at entering into suspend/resume callbacks in codec driver */
@@ -206,9 +209,9 @@ static inline bool snd_hdac_is_power_on(struct hdac_device *codec)
 }
 #else
 static inline int snd_hdac_power_up(struct hdac_device *codec) { return 0; }
-static inline int snd_hdac_power_down(struct hdac_device *codec) { return 0; }
+static inline void snd_hdac_power_down(struct hdac_device *codec) {}
 static inline int snd_hdac_power_up_pm(struct hdac_device *codec) { return 0; }
-static inline int snd_hdac_power_down_pm(struct hdac_device *codec) { return 0; }
+static inline void snd_hdac_power_down_pm(struct hdac_device *codec) {}
 static inline int snd_hdac_keep_power_up(struct hdac_device *codec) { return 0; }
 static inline void snd_hdac_enter_pm(struct hdac_device *codec) {}
 static inline void snd_hdac_leave_pm(struct hdac_device *codec) {}
@@ -380,6 +383,9 @@ struct hdac_bus {
 
 	/* factor used to derive STRIPE control value */
 	unsigned int sdo_limit;
+
+	/* address offset between host and hadc */
+	dma_addr_t addr_offset;
 };
 
 int snd_hdac_bus_init(struct hdac_bus *bus, struct device *dev,

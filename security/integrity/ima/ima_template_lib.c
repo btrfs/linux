@@ -363,7 +363,8 @@ int ima_eventdigest_init(struct ima_event_data *event_data,
 		goto out;
 	}
 
-	if ((const char *)event_data->filename == boot_aggregate_name) {
+	if ((const char *)event_data->filename == boot_aggregate_name ||
+	    (const char *)event_data->filename == boot_aggregate_late_name) {
 		if (ima_tpm_chip) {
 			hash.hdr.algo = HASH_ALGO_SHA1;
 			result = ima_calc_boot_aggregate(hash_hdr);
@@ -391,7 +392,7 @@ int ima_eventdigest_init(struct ima_event_data *event_data,
 	if (result) {
 		integrity_audit_msg(AUDIT_INTEGRITY_DATA, inode,
 				    event_data->filename, "collect_data",
-				    "failed", result, 0);
+				    "failed", result, 0, result);
 		return result;
 	}
 	cur_digest = hash_hdr->digest;

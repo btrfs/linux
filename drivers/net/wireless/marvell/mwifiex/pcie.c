@@ -382,7 +382,7 @@ static int mwifiex_pcie_probe(struct pci_dev *pdev,
 	pr_debug("info: vendor=0x%4.04X device=0x%4.04X rev=%d\n",
 		 pdev->vendor, pdev->device, pdev->revision);
 
-	card = devm_kzalloc(&pdev->dev, sizeof(*card), GFP_KERNEL);
+	card = devm_kzalloc_obj(&pdev->dev, *card);
 	if (!card)
 		return -ENOMEM;
 
@@ -3068,7 +3068,7 @@ static int mwifiex_pcie_request_irq(struct mwifiex_adapter *adapter)
 					    ret);
 				for (j = 0; j < i; j++)
 					free_irq(card->msix_entries[j].vector,
-						 &card->msix_ctx[i]);
+						 &card->msix_ctx[j]);
 				pci_disable_msix(pdev);
 			} else {
 				mwifiex_dbg(adapter, MSG, "MSIx enabled!");

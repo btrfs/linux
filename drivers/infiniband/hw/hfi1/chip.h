@@ -660,7 +660,7 @@ static inline u32 chip_rcv_array_count(struct hfi1_devdata *dd)
 }
 
 u8 encode_rcv_header_entry_size(u8 size);
-int hfi1_validate_rcvhdrcnt(struct hfi1_devdata *dd, uint thecnt);
+int hfi1_validate_rcvhdrcnt(struct pci_dev *pdev, uint thecnt);
 void set_hdrq_regs(struct hfi1_devdata *dd, u8 ctxt, u8 entsize, u16 hdrcnt);
 
 u64 create_pbc(struct hfi1_pportdata *ppd, u64 flags, int srate_mbs, u32 vl,
@@ -1392,8 +1392,6 @@ int hfi1_set_ctxt_pkey(struct hfi1_devdata *dd, struct hfi1_ctxtdata *ctxt,
 		       u16 pkey);
 int hfi1_clear_ctxt_pkey(struct hfi1_devdata *dd, struct hfi1_ctxtdata *ctxt);
 void hfi1_read_link_quality(struct hfi1_devdata *dd, u8 *link_quality);
-void hfi1_init_vnic_rsm(struct hfi1_devdata *dd);
-void hfi1_deinit_vnic_rsm(struct hfi1_devdata *dd);
 
 irqreturn_t general_interrupt(int irq, void *data);
 irqreturn_t sdma_interrupt(int irq, void *data);
