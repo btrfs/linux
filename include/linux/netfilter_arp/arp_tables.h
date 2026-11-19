@@ -53,27 +53,7 @@ int arpt_register_table(struct net *net, const struct xt_table *table,
 			const struct arpt_replace *repl,
 			const struct nf_hook_ops *ops);
 void arpt_unregister_table(struct net *net, const char *name);
-void arpt_unregister_table_pre_exit(struct net *net, const char *name);
 extern unsigned int arpt_do_table(void *priv, struct sk_buff *skb,
 				  const struct nf_hook_state *state);
 
-#ifdef CONFIG_NETFILTER_XTABLES_COMPAT
-#include <net/compat.h>
-
-struct compat_arpt_entry {
-	struct arpt_arp arp;
-	__u16 target_offset;
-	__u16 next_offset;
-	compat_uint_t comefrom;
-	struct compat_xt_counters counters;
-	unsigned char elems[];
-};
-
-static inline struct xt_entry_target *
-compat_arpt_get_target(struct compat_arpt_entry *e)
-{
-	return (void *)e + e->target_offset;
-}
-
-#endif /* CONFIG_COMPAT */
 #endif /* _ARPTABLES_H */

@@ -324,8 +324,6 @@ static int rx6110_probe(struct rx6110_data *rx6110, struct device *dev)
 	if (err)
 		return err;
 
-	rx6110->rtc->max_user_freq = 1;
-
 	return 0;
 }
 
@@ -353,7 +351,7 @@ static int rx6110_spi_probe(struct spi_device *spi)
 		dev_warn(&spi->dev, "driving device in an unsupported mode");
 	}
 
-	rx6110 = devm_kzalloc(&spi->dev, sizeof(*rx6110), GFP_KERNEL);
+	rx6110 = devm_kzalloc_obj(&spi->dev, *rx6110);
 	if (!rx6110)
 		return -ENOMEM;
 
@@ -429,7 +427,7 @@ static int rx6110_i2c_probe(struct i2c_client *client)
 		return -EIO;
 	}
 
-	rx6110 = devm_kzalloc(&client->dev, sizeof(*rx6110), GFP_KERNEL);
+	rx6110 = devm_kzalloc_obj(&client->dev, *rx6110);
 	if (!rx6110)
 		return -ENOMEM;
 
@@ -451,7 +449,7 @@ static const struct acpi_device_id rx6110_i2c_acpi_match[] = {
 MODULE_DEVICE_TABLE(acpi, rx6110_i2c_acpi_match);
 
 static const struct i2c_device_id rx6110_i2c_id[] = {
-	{ "rx6110" },
+	{ .name = "rx6110" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rx6110_i2c_id);

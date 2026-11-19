@@ -82,8 +82,8 @@ MODULE_ALIAS_SCSI_DEVICE(TYPE_WORM);
 	 CDC_CD_R|CDC_CD_RW|CDC_DVD|CDC_DVD_R|CDC_DVD_RAM|CDC_GENERIC_PACKET| \
 	 CDC_MRW|CDC_MRW_W|CDC_RAM)
 
-static int sr_probe(struct device *);
-static int sr_remove(struct device *);
+static int sr_probe(struct scsi_device *);
+static void sr_remove(struct scsi_device *);
 static blk_status_t sr_init_command(struct scsi_cmnd *SCpnt);
 static int sr_done(struct scsi_cmnd *);
 static int sr_runtime_suspend(struct device *dev);
@@ -93,10 +93,10 @@ static const struct dev_pm_ops sr_pm_ops = {
 };
 
 static struct scsi_driver sr_template = {
+	.probe = sr_probe,
+	.remove = sr_remove,
 	.gendrv = {
 		.name   	= "sr",
-		.probe		= sr_probe,
-		.remove		= sr_remove,
 		.pm		= &sr_pm_ops,
 	},
 	.init_command		= sr_init_command,
@@ -253,7 +253,8 @@ do_tur:
 	 * (ASC 0x3a).
 	 */
 	cd->media_present = scsi_status_is_good(ret) ||
-		(scsi_sense_valid(&sshdr) && sshdr.asc != 0x3a);
+		(scsi_sense_valid(&sshdr) &&
+		 scsi_sense_asc(&sshdr) != ASC_MEDIUM_NOT_PRESENT);
 
 	if (last_present != cd->media_present)
 		cd->device->changed = 1;
@@ -395,7 +396,7 @@ static blk_status_t sr_init_command(struct scsi_cmnd *SCpnt)
 
 	switch (req_op(rq)) {
 	case REQ_OP_WRITE:
-		if (!cd->writeable)
+		if (get_disk_ro(cd->disk))
 			goto out;
 		SCpnt->cmnd[0] = WRITE_10;
 		cd->cdi.media_written = 1;
@@ -616,9 +617,9 @@ static void sr_release(struct cdrom_device_info *cdi)
 {
 }
 
-static int sr_probe(struct device *dev)
+static int sr_probe(struct scsi_device *sdev)
 {
-	struct scsi_device *sdev = to_scsi_device(dev);
+	struct device *dev = &sdev->sdev_gendev;
 	struct gendisk *disk;
 	struct scsi_cd *cd;
 	int minor, error;
@@ -629,7 +630,7 @@ static int sr_probe(struct device *dev)
 		goto fail;
 
 	error = -ENOMEM;
-	cd = kzalloc(sizeof(*cd), GFP_KERNEL);
+	cd = kzalloc_obj(*cd);
 	if (!cd)
 		goto fail;
 
@@ -681,6 +682,7 @@ static int sr_probe(struct device *dev)
 	error = -ENOMEM;
 	if (get_capabilities(cd))
 		goto fail_minor;
+	cdrom_probe_write_features(&cd->cdi);
 	sr_vendor_init(cd);
 
 	set_capacity(disk, cd->capacity);
@@ -899,14 +901,6 @@ static int get_capabilities(struct scsi_cd *cd)
 	/*else    I don't think it can close its tray
 		cd->cdi.mask |= CDC_CLOSE_TRAY; */
 
-	/*
-	 * if DVD-RAM, MRW-W or CD-RW, we are randomly writable
-	 */
-	if ((cd->cdi.mask & (CDC_DVD_RAM | CDC_MRW_W | CDC_RAM | CDC_CD_RW)) !=
-			(CDC_DVD_RAM | CDC_MRW_W | CDC_RAM | CDC_CD_RW)) {
-		cd->writeable = 1;
-	}
-
 	kfree(buffer);
 	return 0;
 }
@@ -982,16 +976,15 @@ out_put_request:
 	return ret;
 }
 
-static int sr_remove(struct device *dev)
+static void sr_remove(struct scsi_device *sdev)
 {
+	struct device *dev = &sdev->sdev_gendev;
 	struct scsi_cd *cd = dev_get_drvdata(dev);
 
 	scsi_autopm_get_device(cd->device);
 
 	del_gendisk(cd->disk);
 	put_disk(cd->disk);
-
-	return 0;
 }
 
 static int __init init_sr(void)
@@ -1001,7 +994,7 @@ static int __init init_sr(void)
 	rc = register_blkdev(SCSI_CDROM_MAJOR, "sr");
 	if (rc)
 		return rc;
-	rc = scsi_register_driver(&sr_template.gendrv);
+	rc = scsi_register_driver(&sr_template);
 	if (rc)
 		unregister_blkdev(SCSI_CDROM_MAJOR, "sr");
 
@@ -1010,7 +1003,7 @@ static int __init init_sr(void)
 
 static void __exit exit_sr(void)
 {
-	scsi_unregister_driver(&sr_template.gendrv);
+	scsi_unregister_driver(&sr_template);
 	unregister_blkdev(SCSI_CDROM_MAJOR, "sr");
 }
 

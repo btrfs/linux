@@ -609,8 +609,9 @@ static int graph_parse_node_multi(struct simple_util_priv *priv,
 	    dai_link->num_cpus > 1 && dai_link->num_codecs > 1 &&
 	    dai_link->num_cpus != dai_link->num_codecs) {
 
-		dai_link->ch_maps = devm_kcalloc(dev, nm_max,
-					sizeof(struct snd_soc_dai_link_ch_map), GFP_KERNEL);
+		dai_link->ch_maps = devm_kzalloc_objs(dev,
+						      struct snd_soc_dai_link_ch_map,
+						      nm_max);
 		if (!dai_link->ch_maps)
 			goto multi_err;
 	}
@@ -969,7 +970,8 @@ int audio_graph2_link_c2c(struct simple_util_priv *priv,
 	struct snd_soc_dai_link *dai_link = simple_priv_to_link(priv, li->link);
 	struct device_node *port0 = lnk;
 	struct device_node *ports __free(device_node) = port_to_ports(port0);
-	struct device_node *port1 __free(device_node) = of_graph_get_next_port(ports, port0);
+	struct device_node *port1 __free(device_node) =
+		of_graph_get_next_port(ports, of_node_get(port0));
 	u32 val = 0;
 	int ret = -EINVAL;
 
@@ -1003,7 +1005,7 @@ int audio_graph2_link_c2c(struct simple_util_priv *priv,
 		struct device *dev = simple_priv_to_dev(priv);
 		struct snd_soc_pcm_stream *c2c_conf;
 
-		c2c_conf = devm_kzalloc(dev, sizeof(*c2c_conf), GFP_KERNEL);
+		c2c_conf = devm_kzalloc_obj(dev, *c2c_conf);
 		if (!c2c_conf) {
 			/*
 			 * Clang doesn't allow to use "goto end" before calling __free(),
@@ -1303,44 +1305,49 @@ int audio_graph2_parse_of(struct simple_util_priv *priv, struct device *dev,
 			  struct graph2_custom_hooks *hooks)
 {
 	struct snd_soc_card *card = simple_priv_to_card(priv);
-	int ret;
+	int ret = -ENOMEM;
 
-	struct link_info *li __free(kfree) = kzalloc(sizeof(*li), GFP_KERNEL);
+	struct link_info *li __free(kfree) = kzalloc_obj(*li);
 	if (!li)
-		return -ENOMEM;
+		goto end;
 
 	card->probe	= graph_util_card_probe;
+	card->remove	= graph_util_card_remove;
 	card->owner	= THIS_MODULE;
 	card->dev	= dev;
 
 	if ((hooks) && (hooks)->hook_pre) {
 		ret = (hooks)->hook_pre(priv);
 		if (ret < 0)
-			goto err;
+			goto end;
 	}
 
 	ret = graph_for_each_link(priv, hooks, li, graph_count);
 	if (!li->link)
 		ret = -EINVAL;
 	if (ret < 0)
-		goto err;
+		goto end;
 
 	ret = simple_util_init_priv(priv, li);
 	if (ret < 0)
-		goto err;
+		goto end;
 
 	priv->pa_gpio = devm_gpiod_get_optional(dev, "pa", GPIOD_OUT_LOW);
 	if (IS_ERR(priv->pa_gpio)) {
 		ret = PTR_ERR(priv->pa_gpio);
 		dev_err(dev, "failed to get amplifier gpio: %d\n", ret);
-		goto err;
+		goto end;
 	}
 
-	ret = simple_util_parse_widgets(card, NULL);
+	ret = simple_util_parse_widgets(priv, NULL);
 	if (ret < 0)
-		goto err;
+		goto end;
 
-	ret = simple_util_parse_routing(card, NULL);
+	ret = simple_util_parse_routing(priv, NULL);
+	if (ret < 0)
+		goto end;
+
+	ret = simple_util_parse_aux_devs(priv, NULL);
 	if (ret < 0)
 		goto err;
 
@@ -1349,6 +1356,7 @@ int audio_graph2_parse_of(struct simple_util_priv *priv, struct device *dev,
 	if (ret < 0)
 		goto err;
 
+	/* Card name should be set after graph_for_each_link() */
 	ret = simple_util_parse_card_name(priv, NULL);
 	if (ret < 0)
 		goto err;
@@ -1363,15 +1371,13 @@ int audio_graph2_parse_of(struct simple_util_priv *priv, struct device *dev,
 
 	simple_util_debug_info(priv);
 
-	ret = snd_soc_of_parse_aux_devs(card, "aux-devs");
-	if (ret < 0)
-		goto err;
-
 	ret = devm_snd_soc_register_card(dev, card);
 err:
-	if (ret < 0)
-		dev_err_probe(dev, ret, "parse error\n");
-
+	if (ret < 0) {
+		simple_util_clean_reference(priv);
+		return dev_err_probe(dev, ret, "parse error\n");
+	}
+end:
 	return graph_ret(priv, ret);
 }
 EXPORT_SYMBOL_GPL(audio_graph2_parse_of);
@@ -1382,7 +1388,7 @@ static int graph_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 
 	/* Allocate the private data and the DAI link array */
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

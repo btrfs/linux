@@ -216,7 +216,10 @@ static void eni_vdpa_set_status(struct vdpa_device *vdpa, u8 status)
 
 	if (status & VIRTIO_CONFIG_S_DRIVER_OK &&
 	    !(s & VIRTIO_CONFIG_S_DRIVER_OK)) {
-		eni_vdpa_request_irq(eni_vdpa);
+		if (eni_vdpa_request_irq(eni_vdpa)) {
+			WARN_ON(1);
+			return;
+		}
 	}
 
 	vp_legacy_set_status(ldev, status);
@@ -500,9 +503,8 @@ static int eni_vdpa_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	eni_vdpa->vdpa.vmap.dma_dev = &pdev->dev;
 	eni_vdpa->queues = eni_vdpa_get_num_queues(eni_vdpa);
 
-	eni_vdpa->vring = devm_kcalloc(&pdev->dev, eni_vdpa->queues,
-				      sizeof(*eni_vdpa->vring),
-				      GFP_KERNEL);
+	eni_vdpa->vring = devm_kzalloc_objs(&pdev->dev, *eni_vdpa->vring,
+					    eni_vdpa->queues);
 	if (!eni_vdpa->vring) {
 		ret = -ENOMEM;
 		ENI_ERR(pdev, "failed to allocate virtqueues\n");
@@ -545,6 +547,7 @@ static struct pci_device_id eni_pci_ids[] = {
 			 VIRTIO_ID_NET) },
 	{ 0 },
 };
+MODULE_DEVICE_TABLE(pci, eni_pci_ids);
 
 static struct pci_driver eni_vdpa_driver = {
 	.name		= "alibaba-eni-vdpa",

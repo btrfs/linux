@@ -18,12 +18,14 @@ struct ovl_config {
 	int xino;
 	bool metacopy;
 	bool userxattr;
-	bool ovl_volatile;
+	int fsync_mode;
 };
 
 struct ovl_sb {
 	struct super_block *sb;
 	dev_t pseudo_dev;
+	/* Idmap of the first lower layer on this fs */
+	const struct mnt_idmap *lower_idmap;
 	/* Unusable (conflicting) uuid */
 	bool bad_uuid;
 	/* Used as a lower layer (but maybe also as upper) */
@@ -105,7 +107,7 @@ static inline struct vfsmount *ovl_upper_mnt(struct ovl_fs *ofs)
 	return ofs->layers[0].mnt;
 }
 
-static inline struct mnt_idmap *ovl_upper_mnt_idmap(struct ovl_fs *ofs)
+static inline const struct mnt_idmap *ovl_upper_mnt_idmap(struct ovl_fs *ofs)
 {
 	return mnt_idmap(ovl_upper_mnt(ofs));
 }
@@ -118,11 +120,6 @@ static inline struct ovl_fs *OVL_FS(struct super_block *sb)
 		WARN_ON_ONCE(sb->s_type != &ovl_fs_type);
 
 	return (struct ovl_fs *)sb->s_fs_info;
-}
-
-static inline bool ovl_should_sync(struct ovl_fs *ofs)
-{
-	return !ofs->config.ovl_volatile;
 }
 
 static inline unsigned int ovl_numlower(struct ovl_entry *oe)

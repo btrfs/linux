@@ -36,10 +36,10 @@ struct request_sock_ops {
 				      struct sk_buff *skb,
 				      enum sk_rst_reason reason);
 	void		(*destructor)(struct request_sock *req);
-	void		(*syn_ack_timeout)(const struct request_sock *req);
 };
 
 struct saved_syn {
+	struct rcu_head rcu;
 	u32 mac_hdrlen;
 	u32 network_hdrlen;
 	u32 tcp_hdrlen;
@@ -69,7 +69,7 @@ struct request_sock {
 	struct timer_list		rsk_timer;
 	const struct request_sock_ops	*rsk_ops;
 	struct sock			*sk;
-	struct saved_syn		*saved_syn;
+	struct saved_syn __rcu		*saved_syn;
 	u32				secid;
 	u32				peer_secid;
 	u32				timeout;
@@ -124,14 +124,7 @@ static inline struct sock *skb_steal_sock(struct sk_buff *skb,
 	return sk;
 }
 
-static inline void __reqsk_free(struct request_sock *req)
-{
-	req->rsk_ops->destructor(req);
-	if (req->rsk_listener)
-		sock_put(req->rsk_listener);
-	kfree(req->saved_syn);
-	kmem_cache_free(req->rsk_ops->slab, req);
-}
+void __reqsk_free(struct request_sock *req);
 
 static inline void reqsk_free(struct request_sock *req)
 {
@@ -196,8 +189,6 @@ struct request_sock_queue {
 					     * if TFO is enabled.
 					     */
 };
-
-void reqsk_queue_alloc(struct request_sock_queue *queue);
 
 void reqsk_fastopen_remove(struct sock *sk, struct request_sock *req,
 			   bool reset);

@@ -276,8 +276,10 @@ static void blogic_create_addlccbs(struct blogic_adapter *adapter,
   Lock should already have been acquired by the caller.
 */
 
-static struct blogic_ccb *blogic_alloc_ccb(struct blogic_adapter *adapter)
+static struct blogic_ccb *blogic_alloc_ccb(struct Scsi_Host *host)
+	__must_hold(&host->host_lock)
 {
+	struct blogic_adapter *adapter = (void *)host->hostdata;
 	static unsigned long serial;
 	struct blogic_ccb *ccb;
 	ccb = adapter->free_ccbs;
@@ -307,7 +309,9 @@ static struct blogic_ccb *blogic_alloc_ccb(struct blogic_adapter *adapter)
   caller.
 */
 
-static void blogic_dealloc_ccb(struct blogic_ccb *ccb, int dma_unmap)
+static void blogic_dealloc_ccb(struct Scsi_Host *host, struct blogic_ccb *ccb,
+			       int dma_unmap)
+	__must_hold(&host->host_lock)
 {
 	struct blogic_adapter *adapter = ccb->adapter;
 
@@ -920,7 +924,8 @@ static int __init blogic_init_fp_probeinfo(struct blogic_adapter *adapter)
   a particular probe order.
 */
 
-static void __init blogic_init_probeinfo_list(struct blogic_adapter *adapter)
+static noinline_for_stack void __init
+blogic_init_probeinfo_list(struct blogic_adapter *adapter)
 {
 	/*
 	   If a PCI BIOS is present, interrogate it for MultiMaster and
@@ -1631,8 +1636,8 @@ common:
 	/*
 	   Initialize the Host Adapter Full Model Name from the Model Name.
 	 */
-	strcpy(adapter->full_model, "BusLogic ");
-	strcat(adapter->full_model, adapter->model);
+	scnprintf(adapter->full_model, sizeof(adapter->full_model),
+		  "BusLogic %s", adapter->model);
 	/*
 	   Select an appropriate value for the Tagged Queue Depth either from a
 	   BusLogic Driver Options specification, or based on whether this Host
@@ -1690,7 +1695,8 @@ common:
   blogic_reportconfig reports the configuration of Host Adapter.
 */
 
-static bool __init blogic_reportconfig(struct blogic_adapter *adapter)
+static noinline_for_stack bool __init
+blogic_reportconfig(struct blogic_adapter *adapter)
 {
 	unsigned short alltgt_mask = (1 << adapter->maxdev) - 1;
 	unsigned short sync_ok, fast_ok;
@@ -2212,15 +2218,14 @@ static int __init blogic_init(void)
 	if (blogic_probe_options.noprobe)
 		return -ENODEV;
 	blogic_probeinfo_list =
-	    kcalloc(BLOGIC_MAX_ADAPTERS, sizeof(struct blogic_probeinfo),
-			    GFP_KERNEL);
+	    kzalloc_objs(struct blogic_probeinfo, BLOGIC_MAX_ADAPTERS);
 	if (blogic_probeinfo_list == NULL) {
 		blogic_err("BusLogic: Unable to allocate Probe Info List\n",
 				NULL);
 		return -ENOMEM;
 	}
 
-	adapter = kzalloc(sizeof(struct blogic_adapter), GFP_KERNEL);
+	adapter = kzalloc_obj(struct blogic_adapter);
 	if (adapter == NULL) {
 		kfree(blogic_probeinfo_list);
 		blogic_err("BusLogic: Unable to allocate Prototype Host Adapter\n", NULL);
@@ -2595,8 +2600,11 @@ static void blogic_scan_inbox(struct blogic_adapter *adapter)
   should already have been acquired by the caller.
 */
 
-static void blogic_process_ccbs(struct blogic_adapter *adapter)
+static void blogic_process_ccbs(struct Scsi_Host *host)
+	__must_hold(&host->host_lock)
 {
+	struct blogic_adapter *adapter = (void *)host->hostdata;
+
 	if (adapter->processing_ccbs)
 		return;
 	adapter->processing_ccbs = true;
@@ -2620,7 +2628,7 @@ static void blogic_process_ccbs(struct blogic_adapter *adapter)
 			/*
 			   Place CCB back on the Host Adapter's free list.
 			 */
-			blogic_dealloc_ccb(ccb, 1);
+			blogic_dealloc_ccb(host, ccb, 1);
 #if 0			/* this needs to be redone different for new EH */
 			/*
 			   Bus Device Reset CCBs have the command field
@@ -2649,7 +2657,7 @@ static void blogic_process_ccbs(struct blogic_adapter *adapter)
 				if (ccb->status == BLOGIC_CCB_RESET &&
 						ccb->tgt_id == tgt_id) {
 					command = ccb->command;
-					blogic_dealloc_ccb(ccb, 1);
+					blogic_dealloc_ccb(host, ccb, 1);
 					adapter->active_cmds[tgt_id]--;
 					command->result = DID_RESET << 16;
 					scsi_done(command);
@@ -2720,7 +2728,7 @@ static void blogic_process_ccbs(struct blogic_adapter *adapter)
 			/*
 			   Place CCB back on the Host Adapter's free list.
 			 */
-			blogic_dealloc_ccb(ccb, 1);
+			blogic_dealloc_ccb(host, ccb, 1);
 			/*
 			   Call the SCSI Command Completion Routine.
 			 */
@@ -2739,11 +2747,12 @@ static void blogic_process_ccbs(struct blogic_adapter *adapter)
 static irqreturn_t blogic_inthandler(int irq_ch, void *devid)
 {
 	struct blogic_adapter *adapter = (struct blogic_adapter *) devid;
+	struct Scsi_Host *host = adapter->scsi_host;
 	unsigned long processor_flag;
 	/*
 	   Acquire exclusive access to Host Adapter.
 	 */
-	spin_lock_irqsave(adapter->scsi_host->host_lock, processor_flag);
+	spin_lock_irqsave(&host->host_lock, processor_flag);
 	/*
 	   Handle Interrupts appropriately for each Host Adapter type.
 	 */
@@ -2793,25 +2802,25 @@ static irqreturn_t blogic_inthandler(int irq_ch, void *devid)
 	   Process any completed CCBs.
 	 */
 	if (adapter->firstccb != NULL)
-		blogic_process_ccbs(adapter);
+		blogic_process_ccbs(host);
 	/*
 	   Reset the Host Adapter if requested.
 	 */
 	if (adapter->adapter_extreset) {
 		blogic_warn("Resetting %s due to External SCSI Bus Reset\n", adapter, adapter->full_model);
 		blogic_inc_count(&adapter->ext_resets);
-		blogic_resetadapter(adapter, false);
+		blogic_resetadapter(host, false);
 		adapter->adapter_extreset = false;
 	} else if (adapter->adapter_intern_err) {
 		blogic_warn("Resetting %s due to Host Adapter Internal Error\n", adapter, adapter->full_model);
 		blogic_inc_count(&adapter->adapter_intern_errors);
-		blogic_resetadapter(adapter, true);
+		blogic_resetadapter(host, true);
 		adapter->adapter_intern_err = false;
 	}
 	/*
 	   Release exclusive access to Host Adapter.
 	 */
-	spin_unlock_irqrestore(adapter->scsi_host->host_lock, processor_flag);
+	spin_unlock_irqrestore(&host->host_lock, processor_flag);
 	return IRQ_HANDLED;
 }
 
@@ -2822,9 +2831,11 @@ static irqreturn_t blogic_inthandler(int irq_ch, void *devid)
   already have been acquired by the caller.
 */
 
-static bool blogic_write_outbox(struct blogic_adapter *adapter,
+static bool blogic_write_outbox(struct Scsi_Host *host,
 		enum blogic_action action, struct blogic_ccb *ccb)
+	__must_hold(&host->host_lock)
 {
+	struct blogic_adapter *adapter = (void *)host->hostdata;
 	struct blogic_outbox *next_outbox;
 
 	next_outbox = adapter->next_outbox;
@@ -2858,17 +2869,16 @@ static int blogic_hostreset(struct scsi_cmnd *SCpnt)
 {
 	struct blogic_adapter *adapter =
 		(struct blogic_adapter *) SCpnt->device->host->hostdata;
-
+	struct Scsi_Host *shost = adapter->scsi_host;
 	unsigned int id = SCpnt->device->id;
 	struct blogic_tgt_stats *stats = &adapter->tgt_stats[id];
 	int rc;
 
-	spin_lock_irq(SCpnt->device->host->host_lock);
-
+	spin_lock_irq(&shost->host_lock);
 	blogic_inc_count(&stats->adapter_reset_req);
+	rc = blogic_resetadapter(shost, false);
+	spin_unlock_irq(&shost->host_lock);
 
-	rc = blogic_resetadapter(adapter, false);
-	spin_unlock_irq(SCpnt->device->host->host_lock);
 	return rc;
 }
 
@@ -2877,11 +2887,12 @@ static int blogic_hostreset(struct scsi_cmnd *SCpnt)
   Outgoing Mailbox for execution by the associated Host Adapter.
 */
 
-static int blogic_qcmd_lck(struct scsi_cmnd *command)
+static enum scsi_qc_status blogic_qcmd_lck(struct Scsi_Host *shost, struct scsi_cmnd *command)
+	__must_hold(&shost->host_lock)
 {
 	void (*comp_cb)(struct scsi_cmnd *) = scsi_done;
 	struct blogic_adapter *adapter =
-		(struct blogic_adapter *) command->device->host->hostdata;
+		(struct blogic_adapter *) shost->hostdata;
 	struct blogic_tgt_flags *tgt_flags =
 		&adapter->tgt_flags[command->device->id];
 	struct blogic_tgt_stats *tgt_stats = adapter->tgt_stats;
@@ -2912,12 +2923,12 @@ static int blogic_qcmd_lck(struct scsi_cmnd *command)
 	   probably hung so signal an error as a Host Adapter Hard Reset
 	   should be initiated soon.
 	 */
-	ccb = blogic_alloc_ccb(adapter);
+	ccb = blogic_alloc_ccb(shost);
 	if (ccb == NULL) {
-		spin_unlock_irq(adapter->scsi_host->host_lock);
+		spin_unlock_irq(&shost->host_lock);
 		blogic_delay(1);
-		spin_lock_irq(adapter->scsi_host->host_lock);
-		ccb = blogic_alloc_ccb(adapter);
+		spin_lock_irq(&shost->host_lock);
+		ccb = blogic_alloc_ccb(shost);
 		if (ccb == NULL) {
 			command->result = DID_ERROR << 16;
 			comp_cb(command);
@@ -3045,7 +3056,7 @@ static int blogic_qcmd_lck(struct scsi_cmnd *command)
 	if (dma_mapping_error(&adapter->pci_device->dev, sense_buf)) {
 		blogic_err("DMA mapping for sense data buffer failed\n",
 				adapter);
-		blogic_dealloc_ccb(ccb, 0);
+		blogic_dealloc_ccb(shost, ccb, 0);
 		return SCSI_MLQUEUE_HOST_BUSY;
 	}
 	ccb->sensedata = sense_buf;
@@ -3060,15 +3071,15 @@ static int blogic_qcmd_lck(struct scsi_cmnd *command)
 		   so signal an error as a Host Adapter Hard Reset should
 		   be initiated soon.
 		 */
-		if (!blogic_write_outbox(adapter, BLOGIC_MBOX_START, ccb)) {
-			spin_unlock_irq(adapter->scsi_host->host_lock);
+		if (!blogic_write_outbox(shost, BLOGIC_MBOX_START, ccb)) {
+			spin_unlock_irq(&shost->host_lock);
 			blogic_warn("Unable to write Outgoing Mailbox - Pausing for 1 second\n", adapter);
 			blogic_delay(1);
-			spin_lock_irq(adapter->scsi_host->host_lock);
-			if (!blogic_write_outbox(adapter, BLOGIC_MBOX_START,
+			spin_lock_irq(&shost->host_lock);
+			if (!blogic_write_outbox(shost, BLOGIC_MBOX_START,
 						ccb)) {
 				blogic_warn("Still unable to write Outgoing Mailbox - Host Adapter Dead?\n", adapter);
-				blogic_dealloc_ccb(ccb, 1);
+				blogic_dealloc_ccb(shost, ccb, 1);
 				command->result = DID_ERROR << 16;
 				scsi_done(command);
 			}
@@ -3088,12 +3099,20 @@ static int blogic_qcmd_lck(struct scsi_cmnd *command)
 		   pending.
 		 */
 		if (ccb->status == BLOGIC_CCB_COMPLETE)
-			blogic_process_ccbs(adapter);
+			blogic_process_ccbs(shost);
 	}
 	return 0;
 }
 
-static DEF_SCSI_QCMD(blogic_qcmd)
+static enum scsi_qc_status blogic_qcmd(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
+{
+	enum scsi_qc_status rc;
+
+	spin_lock_irq(&shost->host_lock);
+	rc = blogic_qcmd_lck(shost, cmd);
+	spin_unlock_irq(&shost->host_lock);
+	return rc;
+}
 
 #if 0
 /*
@@ -3102,9 +3121,8 @@ static DEF_SCSI_QCMD(blogic_qcmd)
 
 static int blogic_abort(struct scsi_cmnd *command)
 {
-	struct blogic_adapter *adapter =
-		(struct blogic_adapter *) command->device->host->hostdata;
-
+	struct Scsi_Host *const shost = command->device->host;
+	struct blogic_adapter *adapter = (void *) shost->hostdata;
 	int tgt_id = command->device->id;
 	struct blogic_ccb *ccb;
 	blogic_inc_count(&adapter->tgt_stats[tgt_id].aborts_request);
@@ -3143,7 +3161,7 @@ static int blogic_abort(struct scsi_cmnd *command)
 				adapter->fw_ver[0] < '5') {
 			blogic_warn("Unable to Abort CCB #%ld to Target %d - Abort Tag Not Supported\n", adapter, ccb->serial, tgt_id);
 			return FAILURE;
-		} else if (blogic_write_outbox(adapter, BLOGIC_MBOX_ABORT,
+		} else if (blogic_write_outbox(shost, BLOGIC_MBOX_ABORT,
 					ccb)) {
 			blogic_warn("Aborting CCB #%ld to Target %d\n",
 					adapter, ccb->serial, tgt_id);
@@ -3168,7 +3186,7 @@ static int blogic_abort(struct scsi_cmnd *command)
 		   may still be pending.
 		 */
 		if (ccb->status == BLOGIC_CCB_COMPLETE)
-			blogic_process_ccbs(adapter);
+			blogic_process_ccbs(shost);
 		return SUCCESS;
 	}
 	return SUCCESS;
@@ -3180,8 +3198,10 @@ static int blogic_abort(struct scsi_cmnd *command)
   currently executing SCSI Commands as having been Reset.
 */
 
-static int blogic_resetadapter(struct blogic_adapter *adapter, bool hard_reset)
+static int blogic_resetadapter(struct Scsi_Host *host, bool hard_reset)
+	__must_hold(&host->host_lock)
 {
+	struct blogic_adapter *adapter = (void *)host->hostdata;
 	struct blogic_ccb *ccb;
 	int tgt_id;
 
@@ -3202,7 +3222,7 @@ static int blogic_resetadapter(struct blogic_adapter *adapter, bool hard_reset)
 
 	for (ccb = adapter->all_ccbs; ccb != NULL; ccb = ccb->next_all)
 		if (ccb->status == BLOGIC_CCB_ACTIVE)
-			blogic_dealloc_ccb(ccb, 1);
+			blogic_dealloc_ccb(host, ccb, 1);
 	/*
 	 * Wait a few seconds between the Host Adapter Hard Reset which
 	 * initiates a SCSI Bus Reset and issuing any SCSI Commands.  Some
@@ -3211,9 +3231,9 @@ static int blogic_resetadapter(struct blogic_adapter *adapter, bool hard_reset)
 	 */
 
 	if (hard_reset) {
-		spin_unlock_irq(adapter->scsi_host->host_lock);
+		spin_unlock_irq(&host->host_lock);
 		blogic_delay(adapter->bus_settle_time);
-		spin_lock_irq(adapter->scsi_host->host_lock);
+		spin_lock_irq(&host->host_lock);
 	}
 
 	for (tgt_id = 0; tgt_id < adapter->maxdev; tgt_id++) {

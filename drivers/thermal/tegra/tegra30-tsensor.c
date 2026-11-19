@@ -539,7 +539,7 @@ static int tegra_tsensor_probe(struct platform_device *pdev)
 	unsigned int i;
 	int err, irq;
 
-	ts = devm_kzalloc(&pdev->dev, sizeof(*ts), GFP_KERNEL);
+	ts = devm_kzalloc_obj(&pdev->dev, *ts);
 	if (!ts)
 		return -ENOMEM;
 
@@ -602,8 +602,7 @@ static int tegra_tsensor_probe(struct platform_device *pdev)
 					tegra_tsensor_isr, IRQF_ONESHOT,
 					"tegra_tsensor", ts);
 	if (err)
-		return dev_err_probe(&pdev->dev, err,
-				     "failed to request interrupt\n");
+		return err;
 
 	return 0;
 }

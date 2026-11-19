@@ -180,7 +180,7 @@ static struct device *__nd_btt_create(struct nd_region *nd_region,
 	struct nd_btt *nd_btt;
 	struct device *dev;
 
-	nd_btt = kzalloc(sizeof(*nd_btt), GFP_KERNEL);
+	nd_btt = kzalloc_obj(*nd_btt);
 	if (!nd_btt)
 		return NULL;
 
@@ -348,7 +348,7 @@ int nd_btt_probe(struct device *dev, struct nd_namespace_common *ndns)
 		btt_dev = __nd_btt_create(nd_region, 0, NULL, ndns);
 	if (!btt_dev)
 		return -ENOMEM;
-	btt_sb = devm_kzalloc(dev, sizeof(*btt_sb), GFP_KERNEL);
+	btt_sb = devm_kzalloc_obj(dev, *btt_sb);
 	rc = __nd_btt_probe(to_nd_btt(btt_dev), ndns, btt_sb);
 	dev_dbg(dev, "btt: %s\n", rc == 0 ? dev_name(btt_dev) : "<none>");
 	if (rc < 0) {

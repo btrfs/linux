@@ -1,14 +1,15 @@
 #!/bin/bash
-# perf record tests (exclusive)
 # SPDX-License-Identifier: GPL-2.0
+# perf record tests
 
 set -e
 
 shelldir=$(dirname "$0")
-# shellcheck source=lib/waiting.sh
+. "${shelldir}"/lib/perf_record.sh
+
+
 . "${shelldir}"/lib/waiting.sh
 
-# shellcheck source=lib/perf_has_symbol.sh
 . "${shelldir}"/lib/perf_has_symbol.sh
 
 testsym="test_loop"
@@ -36,9 +37,10 @@ default_fd_limit=$(ulimit -Sn)
 min_fd_limit=$(($(getconf _NPROCESSORS_ONLN) * 16))
 
 cleanup() {
-  rm -f "${perfdata}"
-  rm -f "${perfdata}".old
+  rm -rf "${perfdata}"
+  rm -rf "${perfdata}".old
   rm -f "${script_output}"
+  perf_record_cleanup
 
   trap - EXIT TERM INT
 }
@@ -50,22 +52,20 @@ trap_cleanup() {
 }
 trap trap_cleanup EXIT TERM INT
 
+check_per_thread() {
+  perf report -i "${perfdata}" -q | grep -q "${testsym}"
+}
+
 test_per_thread() {
   echo "Basic --per-thread mode test"
-  if ! perf record -o /dev/null --quiet ${testprog} 2> /dev/null
-  then
+  local ret=0
+  perf_record_with_retry "${perfdata}" "check_per_thread" "perf test -w thloop" \
+    --per-thread || ret=$?
+  if [ $ret -eq 2 ]; then
     echo "Per-thread record [Skipped event not supported]"
     return
-  fi
-  if ! perf record --per-thread -o "${perfdata}" ${testprog} 2> /dev/null
-  then
-    echo "Per-thread record [Failed record]"
-    err=1
-    return
-  fi
-  if ! perf report -i "${perfdata}" -q | grep -q "${testsym}"
-  then
-    echo "Per-thread record [Failed missing output]"
+  elif [ $ret -eq 1 ]; then
+    echo "Per-thread record [Failed record or missing output]"
     err=1
     return
   fi
@@ -96,6 +96,10 @@ test_per_thread() {
   echo "Basic --per-thread mode test [Success]"
 }
 
+check_register_capture() {
+  perf script -F ip,sym,iregs -i "${perfdata}" 2>/dev/null | grep -q "DI:"
+}
+
 test_register_capture() {
   echo "Register capture test"
   if ! perf list pmu | grep -q 'br_inst_retired.near_call'
@@ -108,11 +112,12 @@ test_register_capture() {
     echo "Register capture test [Skipped missing registers]"
     return
   fi
-  if ! perf record -o - --intr-regs=di,r8,dx,cx -e br_inst_retired.near_call \
-    -c 1000 --per-thread ${testprog} 2> /dev/null \
-    | perf script -F ip,sym,iregs -i - 2> /dev/null \
-    | grep -q "DI:"
-  then
+
+  local ret=0
+  perf_record_with_retry "${perfdata}" "check_register_capture" "perf test -w thloop" \
+    --intr-regs=di,r8,dx,cx -e br_inst_retired.near_call -c 1000 --per-thread || ret=$?
+
+  if [ $ret -ne 0 ]; then
     echo "Register capture test [Failed missing output]"
     err=1
     return
@@ -120,63 +125,319 @@ test_register_capture() {
   echo "Register capture test [Success]"
 }
 
-test_system_wide() {
-  echo "Basic --system-wide mode test"
-  if ! perf record -aB --synth=no -o "${perfdata}" ${testprog} 2> /dev/null
+check_system_wide() {
+  perf report -i "${perfdata}" -q | grep -q "${testsym}"
+}
+
+check_ext_reg_capture() {
+  local script_field="$1"
+  local ext_reg="$2"
+
+  perf script -F ip,sym,"${script_field}" -i "${perfdata}" 2>/dev/null | \
+  grep -q -i "${ext_reg}:"
+}
+
+get_x86_extended_regs() {
+  local advertised_ext_regs="$1"
+  local ext_regs=""
+
+  if echo "${advertised_ext_regs}" | grep -q -i R16
   then
-    echo "System-wide record [Skipped not supported]"
+    ext_regs="${ext_regs} R16"
+  fi
+  if echo "${advertised_ext_regs}" | grep -q -i R31
+  then
+    ext_regs="${ext_regs} R31"
+  fi
+  if echo "${advertised_ext_regs}" | grep -q -i SSP
+  then
+    ext_regs="${ext_regs} SSP"
+  fi
+
+  echo "${ext_regs}" | xargs
+}
+
+validate_extd_regs_sampling() {
+  local regs_opt="$1"
+  local extd_regs="$2"
+  local script_field="$3"
+  local ret=0
+  local reg
+
+  for reg in ${extd_regs}
+  do
+    perf_record_with_retry "${perfdata}" \
+      "check_ext_reg_capture ${script_field} ${reg}" "perf test -w thloop" \
+      -e br_inst_retired.near_call ${regs_opt}=${reg} -c 1000 \
+      --per-thread || ret=$?
+
+    if [ $ret -ne 0 ]
+    then
+      echo "Extended register capture test [Failed record ${regs_opt}=${reg}]"
+      return 1
+    fi
+  done
+
+  return 0
+}
+
+test_extd_register_capture() {
+  local arch
+  local intr_regs
+  local user_regs
+  local intr_ext_regs
+  local user_ext_regs
+  local tested=0
+
+  echo "Extended register capture test"
+  if ! perf list pmu | grep -q 'br_inst_retired.near_call'
+  then
+    echo "Extended register capture test [Skipped missing event]"
     return
   fi
-  if ! perf report -i "${perfdata}" -q | grep -q "${testsym}"
+
+  intr_regs=$(perf record --intr-regs=\? 2>&1 || true)
+  user_regs=$(perf record --user-regs=\? 2>&1 || true)
+
+  intr_ext_regs=""
+  user_ext_regs=""
+
+  arch=$(uname -m)
+  case ${arch} in
+  x86_64|i386)
+    intr_ext_regs=$(get_x86_extended_regs "${intr_regs}")
+    user_ext_regs=$(get_x86_extended_regs "${user_regs}")
+    ;;
+  *)
+    echo "Extended register capture test [Skipped non-x86 platform]"
+    return
+    ;;
+  esac
+
+  if [ -z "${intr_ext_regs}" ]
   then
+    echo "Extended register capture test [Skipped missing intr extended registers]"
+  elif ! validate_extd_regs_sampling "--intr-regs" "${intr_ext_regs}" "iregs"
+  then
+    echo "Extended register capture test [Failed intr extended register sampling]"
+    err=1
+    return
+  else
+    tested=1
+  fi
+
+  if [ -z "${user_ext_regs}" ]
+  then
+    echo "Extended register capture test [Skipped missing user extended registers]"
+  elif ! validate_extd_regs_sampling "--user-regs" "${user_ext_regs}" "uregs"
+  then
+    echo "Extended register capture test [Failed user extended register sampling]"
+    err=1
+    return
+  else
+    tested=1
+  fi
+
+  if [ ${tested} -eq 0 ]
+  then
+    echo "Extended register capture test [Skipped missing extended registers]"
+    return
+  fi
+
+  echo "Extended register capture test [Success]"
+}
+
+extract_x86_advertised_simd_classes() {
+  local regs_output="$1"
+
+  echo "${regs_output}" \
+    | grep -oE '(ZMM|YMM|XMM|OPMASK)[0-9]+-[0-9]+' \
+    | sed -E 's/[0-9]+-[0-9]+$//' \
+    | tr '[:upper:]' '[:lower:]' \
+    | sort -u
+}
+
+ordered_x86_simd_classes() {
+  local advertised_classes="$1"
+  local simd_classes=""
+
+  if echo "${advertised_classes}" | grep -qw zmm
+  then
+    simd_classes="${simd_classes} zmm"
+  fi
+  if echo "${advertised_classes}" | grep -qw ymm
+  then
+    simd_classes="${simd_classes} ymm"
+  fi
+  if echo "${advertised_classes}" | grep -qw xmm
+  then
+    simd_classes="${simd_classes} xmm"
+  fi
+  if echo "${advertised_classes}" | grep -qw opmask
+  then
+    simd_classes="${simd_classes} opmask"
+  fi
+
+  echo "${simd_classes}" | xargs
+}
+
+check_simd_reg_capture() {
+  local script_field="$1"
+  local simd_reg="$2"
+
+  perf script -F ip,sym,"${script_field}" -i "${perfdata}" 2>/dev/null | \
+  grep -q -i "${simd_reg}\["
+}
+
+validate_simd_regs_sampling() {
+  local regs_opt="$1"
+  local simd_classes="$2"
+  local script_field="$3"
+  local simd_class
+  local ret=0
+
+  for simd_class in ${simd_classes}
+  do
+    perf_record_with_retry "${perfdata}" \
+      "check_simd_reg_capture ${script_field} ${simd_class}" "perf test -w thloop" \
+      -e br_inst_retired.near_call ${regs_opt}=${simd_class} -c 1000 \
+      --per-thread || ret=$?
+
+    if [ $ret -ne 0 ]
+    then
+      echo "SIMD register capture test [Failed record ${regs_opt}=${simd_class}]"
+      return 1
+    fi
+  done
+
+  return 0
+}
+
+test_simd_register_capture() {
+  local arch
+  local intr_regs
+  local user_regs
+  local simd_classes
+  local user_simd_classes
+  local advertised_intr_classes
+  local advertised_user_classes
+  local tested=0
+
+  echo "SIMD register capture test"
+  if ! perf list pmu | grep -q 'br_inst_retired.near_call'
+  then
+    echo "SIMD register capture test [Skipped missing event]"
+    return
+  fi
+
+  intr_regs=$(perf record --intr-regs=\? 2>&1 || true)
+  user_regs=$(perf record --user-regs=\? 2>&1 || true)
+
+  simd_classes=""
+  user_simd_classes=""
+
+  arch=$(uname -m)
+  case ${arch} in
+  x86_64|i386)
+    advertised_intr_classes=$(extract_x86_advertised_simd_classes "${intr_regs}")
+    advertised_user_classes=$(extract_x86_advertised_simd_classes "${user_regs}")
+
+    simd_classes=$(ordered_x86_simd_classes "${advertised_intr_classes}")
+    user_simd_classes=$(ordered_x86_simd_classes "${advertised_user_classes}")
+    ;;
+  *)
+    echo "SIMD register capture test [Skipped non-x86 platform]"
+    return
+    ;;
+  esac
+
+  if [ -z "${simd_classes}" ]
+  then
+    echo "SIMD register capture test [Skipped missing intr SIMD registers]"
+  elif ! validate_simd_regs_sampling "--intr-regs" "${simd_classes}" "iregs"
+  then
+    echo "SIMD register capture test [Failed intr SIMD register sampling]"
+    err=1
+    return
+  else
+    tested=1
+  fi
+
+  if [ -z "${user_simd_classes}" ]
+  then
+    echo "SIMD register capture test [Skipped missing user SIMD registers]"
+  elif ! validate_simd_regs_sampling "--user-regs" "${user_simd_classes}" "uregs"
+  then
+    echo "SIMD register capture test [Failed user SIMD register sampling]"
+    err=1
+    return
+  else
+    tested=1
+  fi
+
+  if [ ${tested} -eq 0 ]
+  then
+    echo "SIMD register capture test [Skipped missing SIMD registers]"
+    return
+  fi
+
+  echo "SIMD register capture test [Success]"
+}
+
+test_system_wide() {
+  echo "Basic --system-wide mode test"
+  local ret=0
+  perf_record_with_retry "${perfdata}" "check_system_wide" "perf test -w thloop" \
+    -aB --synth=no || ret=$?
+  if [ $ret -eq 2 ]; then
+    echo "System-wide record [Skipped not supported]"
+    return
+  elif [ $ret -eq 1 ]; then
     echo "System-wide record [Failed missing output]"
     err=1
     return
   fi
-  if ! perf record -aB --synth=no -e cpu-clock,cs --threads=cpu \
-    -o "${perfdata}" ${testprog} 2> /dev/null
-  then
-    echo "System-wide record [Failed record --threads option]"
-    err=1
-    return
-  fi
-  if ! perf report -i "${perfdata}" -q | grep -q "${testsym}"
-  then
-    echo "System-wide record [Failed --threads missing output]"
+
+  ret=0
+  perf_record_with_retry "${perfdata}" "check_system_wide" "perf test -w thloop" \
+    -aB --synth=no -e cpu-clock,cs --threads=cpu || ret=$?
+  if [ $ret -ne 0 ]; then
+    echo "System-wide record [Failed record --threads option or missing output]"
     err=1
     return
   fi
   echo "Basic --system-wide mode test [Success]"
 }
 
+check_workload() {
+  perf report -i "${perfdata}" -q | grep -q "${testsym}"
+}
+
 test_workload() {
   echo "Basic target workload test"
-  if ! perf record -o "${perfdata}" ${testprog} 2> /dev/null
-  then
-    echo "Workload record [Failed record]"
+  local ret=0
+  perf_record_with_retry "${perfdata}" "check_workload" "perf test -w thloop" || ret=$?
+  if [ $ret -ne 0 ]; then
+    echo "Workload record [Failed record or missing output]"
     err=1
     return
   fi
-  if ! perf report -i "${perfdata}" -q | grep -q "${testsym}"
-  then
-    echo "Workload record [Failed missing output]"
-    err=1
-    return
-  fi
-  if ! perf record -e cpu-clock,cs --threads=package \
-    -o "${perfdata}" ${testprog} 2> /dev/null
-  then
-    echo "Workload record [Failed record --threads option]"
-    err=1
-    return
-  fi
-  if ! perf report -i "${perfdata}" -q | grep -q "${testsym}"
-  then
-    echo "Workload record [Failed --threads missing output]"
+
+  ret=0
+  perf_record_with_retry "${perfdata}" "check_workload" "perf test -w thloop" \
+    -e cpu-clock,cs --threads=package || ret=$?
+  if [ $ret -ne 0 ]; then
+    echo "Workload record [Failed record --threads option or missing output]"
     err=1
     return
   fi
   echo "Basic target workload test [Success]"
+}
+
+check_branch_counter() {
+  perf report -i "${perfdata}" -D -q 2>/dev/null | grep -q "$br_cntr_output" && \
+  perf script -i "${perfdata}" -F +brstackinsn,+brcntr 2>/dev/null | \
+    grep -q "$br_cntr_script_output"
 }
 
 test_branch_counter() {
@@ -190,67 +451,60 @@ test_branch_counter() {
       return
     fi
   done
-  if ! perf record -o "${perfdata}" -e "{branches:p,instructions}" -j any,counter ${testprog} 2> /dev/null
-  then
-    echo "Branch counter record test [Failed record]"
-    err=1
-    return
-  fi
-  if ! perf report -i "${perfdata}" -D -q | grep -q "$br_cntr_output"
-  then
-    echo "Branch counter report test [Failed missing output]"
-    err=1
-    return
-  fi
-  if ! perf script -i "${perfdata}" -F +brstackinsn,+brcntr | grep -q "$br_cntr_script_output"
-  then
-    echo " Branch counter script test [Failed missing output]"
+  local ret=0
+  perf_record_with_retry "${perfdata}" "check_branch_counter" "perf test -w thloop" \
+    -e "{branches:p,instructions}" -j any,counter || ret=$?
+  if [ $ret -ne 0 ]; then
+    echo "Branch counter test [Failed record or missing output]"
     err=1
     return
   fi
   echo "Branch counter test [Success]"
 }
 
+check_cgroup() {
+  perf report -i "${perfdata}" -D 2>/dev/null | grep -q "CGROUP" && \
+  perf script -i "${perfdata}" -F cgroup 2>/dev/null | grep -q -v "unknown"
+}
+
 test_cgroup() {
   echo "Cgroup sampling test"
-  if ! perf record -aB --synth=cgroup --all-cgroups -o "${perfdata}" ${testprog} 2> /dev/null
-  then
+  local ret=0
+  perf_record_with_retry "${perfdata}" "check_cgroup" "perf test -w thloop" \
+    -aB --synth=cgroup --all-cgroups || ret=$?
+  if [ $ret -eq 2 ]; then
     echo "Cgroup sampling [Skipped not supported]"
     return
-  fi
-  if ! perf report -i "${perfdata}" -D | grep -q "CGROUP"
-  then
+  elif [ $ret -eq 1 ]; then
     echo "Cgroup sampling [Failed missing output]"
-    err=1
-    return
-  fi
-  if ! perf script -i "${perfdata}" -F cgroup | grep -q -v "unknown"
-  then
-    echo "Cgroup sampling [Failed cannot resolve cgroup names]"
     err=1
     return
   fi
   echo "Cgroup sampling test [Success]"
 }
 
+check_uid() {
+  perf report -i "${perfdata}" -q | grep -q "${testsym}"
+}
+
 test_uid() {
   echo "Uid sampling test"
-  if ! perf record -aB --synth=no --uid "$(id -u)" -o "${perfdata}" ${testprog} \
-    > "${script_output}" 2>&1
-  then
-    if grep -q "libbpf.*EPERM" "${script_output}"
+  local ret=0
+  perf_record_with_retry "${perfdata}" "check_uid" "perf test -w thloop" \
+    -aB --synth=no --uid "$(id -u)" || ret=$?
+  if [ $ret -eq 2 ]; then
+    local logfile="${PERF_RECORD_LOGS[${#PERF_RECORD_LOGS[@]}-1]}"
+    if grep -q -E "libbpf.*EPERM|Access to performance monitoring" "$logfile" || \
+       grep -q -E "Permission denied|Failure to open any events" "$logfile"
     then
       echo "Uid sampling [Skipped permissions]"
       return
     else
       echo "Uid sampling [Failed to record]"
       err=1
-      # cat "${script_output}"
       return
     fi
-  fi
-  if ! perf report -i "${perfdata}" -q | grep -q "${testsym}"
-  then
+  elif [ $ret -eq 1 ]; then
     echo "Uid sampling [Failed missing output]"
     err=1
     return
@@ -260,14 +514,28 @@ test_uid() {
 
 test_leader_sampling() {
   echo "Basic leader sampling test"
-  if ! perf record -o "${perfdata}" -e "{cycles,cycles}:Su" -- \
+  events="{cycles,cycles}:Su"
+  [ "$(uname -m)" = "s390x" ] && {
+    [ ! -d /sys/devices/cpum_sf ] && {
+      echo "No CPUMF [Skipped record]"
+      return
+    }
+    events="{cpum_sf/SF_CYCLES_BASIC/,cycles}:Su"
+    perf record -o "${perfdata}" -e "$events" -- perf test -w brstack 2> /dev/null
+    # Perf grouping might be unsupported, depends on version.
+    [ "$?" -ne 0 ] && {
+      echo "Grouping not support [Skipped record]"
+      return
+    }
+  }
+  if ! perf record -o "${perfdata}" -e "$events" -- \
     perf test -w brstack 2> /dev/null
   then
     echo "Leader sampling [Failed record]"
     err=1
     return
   fi
-  perf script -i "${perfdata}" | grep brstack > $script_output
+  perf script -i "${perfdata}" -F period,ip,sym | grep brstack > $script_output
   # Check if the two instruction counts are equal in each record.
   # However, the throttling code doesn't consider event grouping. During throttling, only the
   # leader is stopped, causing the slave's counts significantly higher. To temporarily solve this,
@@ -279,12 +547,15 @@ test_leader_sampling() {
   tolerance_rate=0.8
   while IFS= read -r line
   do
-    cycles=$(echo $line | awk '{for(i=1;i<=NF;i++) if($i=="cycles:") print $(i-1)}')
-    if [ $(($index%2)) -ne 0 ] && [ ${cycles}x != ${prev_cycles}x ]
+    cycles=$(echo $line | awk '{ print $1 }')
+    if [ $(($index%2)) -ne 0 ]
     then
-      invalid_counts=$(($invalid_counts+1))
-    else
-      valid_counts=$(($valid_counts+1))
+      if (( $(bc <<< "scale=4; r = ${cycles} / ${prev_cycles}; r >= 0.99 && r <= 1.01") ))
+      then
+        valid_counts=$(($valid_counts+1))
+      else
+        invalid_counts=$(($invalid_counts+1))
+      fi
     fi
     index=$(($index+1))
     prev_cycles=$cycles
@@ -388,6 +659,48 @@ test_callgraph() {
   echo "Callgraph test [Success]"
 }
 
+test_acr_sampling() {
+  events="{instructions/period=40000,acr_mask=0x2/u,cycles/period=20000,acr_mask=0x3/u}"
+  pebs_events="{instructions/period=40000,acr_mask=0x2/pu,cycles/period=20000,acr_mask=0x3/u}"
+  echo "Auto counter reload (ACR) sampling test"
+  if ! perf record -o "${perfdata}" -e "${events}" ${testprog} 2> /dev/null
+  then
+    echo "Auto counter reload sampling [Skipped not supported]"
+    return
+  fi
+  if ! perf script -i "${perfdata}" -F event | grep -q "instructions"
+  then
+    echo "Auto counter reload sampling [Failed missing instructions event]"
+    err=1
+    return
+  fi
+  if perf script -i "${perfdata}" -F event | grep -q "cycles"
+  then
+    echo "Auto counter reload sampling [Failed cycles event shouldn't be sampled]"
+    err=1
+    return
+  fi
+  if ! perf record -o "${perfdata}" -e "${pebs_events}" ${testprog} 2> /dev/null
+  then
+    echo "Auto counter reload PEBS sampling [Skipped not supported]"
+    echo "Auto counter reload sampling [Success]"
+    return
+  fi
+  if ! perf script -i "${perfdata}" -F event | grep -q "instructions"
+  then
+    echo "Auto counter reload PEBS sampling [Failed missing instructions event]"
+    err=1
+    return
+  fi
+  if perf script -i "${perfdata}" -F event | grep -q "cycles"
+  then
+    echo "Auto counter reload PEBS sampling [Failed cycles event shouldn't be sampled]"
+    err=1
+    return
+  fi
+  echo "Auto counter reload sampling [Success]"
+}
+
 test_ratio_to_prev() {
   echo "ratio-to-prev test"
   if ! perf record -o /dev/null -e "{instructions, cycles/period=100000,ratio-to-prev=0.5/}" \
@@ -434,6 +747,8 @@ fi
 
 test_per_thread
 test_register_capture
+test_extd_register_capture
+test_simd_register_capture
 test_system_wide
 test_workload
 test_branch_counter
@@ -443,6 +758,7 @@ test_leader_sampling
 test_topdown_leader_sampling
 test_precise_max
 test_callgraph
+test_acr_sampling
 test_ratio_to_prev
 
 # restore the default value

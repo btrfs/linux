@@ -129,19 +129,26 @@ static const struct vm_operations_struct usb_stream_hwdep_vm_ops = {
 static int usb_stream_hwdep_open(struct snd_hwdep *hw, struct file *file)
 {
 	struct us122l	*us122l = hw->private_data;
-	struct usb_interface *iface;
+	struct usb_interface *iface, *iface0 = NULL;
 
 	if (hw->used >= 2)
 		return -EBUSY;
 
+	if (us122l->is_us144) {
+		iface0 = usb_ifnum_to_if(us122l->dev, 0);
+		if (!iface0)
+			return -ENODEV;
+	}
+
+	iface = usb_ifnum_to_if(us122l->dev, 1);
+	if (!iface)
+		return -ENODEV;
+
 	if (!us122l->first)
 		us122l->first = file;
 
-	if (us122l->is_us144) {
-		iface = usb_ifnum_to_if(us122l->dev, 0);
-		usb_autopm_get_interface(iface);
-	}
-	iface = usb_ifnum_to_if(us122l->dev, 1);
+	if (iface0)
+		usb_autopm_get_interface(iface0);
 	usb_autopm_get_interface(iface);
 	return 0;
 }
@@ -153,10 +160,12 @@ static int usb_stream_hwdep_release(struct snd_hwdep *hw, struct file *file)
 
 	if (us122l->is_us144) {
 		iface = usb_ifnum_to_if(us122l->dev, 0);
-		usb_autopm_put_interface(iface);
+		if (iface)
+			usb_autopm_put_interface(iface);
 	}
 	iface = usb_ifnum_to_if(us122l->dev, 1);
-	usb_autopm_put_interface(iface);
+	if (iface)
+		usb_autopm_put_interface(iface);
 	if (us122l->first == file)
 		us122l->first = NULL;
 	guard(mutex)(&us122l->mutex);
@@ -179,9 +188,14 @@ static int usb_stream_hwdep_mmap(struct snd_hwdep *hw,
 	offset = area->vm_pgoff << PAGE_SHIFT;
 	guard(mutex)(&us122l->mutex);
 	s = us122l->sk.s;
+	if (!s)
+		return -ENODEV;
 	read = offset < s->read_size;
-	if (read && area->vm_flags & VM_WRITE)
-		return -EPERM;
+	if (read) {
+		if (area->vm_flags & VM_WRITE)
+			return -EPERM;
+		vm_flags_clear(area, VM_MAYWRITE);
+	}
 	/* if userspace tries to mmap beyond end of our buffer, fail */
 	if (size > PAGE_ALIGN(read ? s->read_size : s->write_size)) {
 		dev_warn(hw->card->dev, "%s: size %lu > %u\n", __func__,
@@ -190,7 +204,7 @@ static int usb_stream_hwdep_mmap(struct snd_hwdep *hw,
 	}
 
 	area->vm_ops = &usb_stream_hwdep_vm_ops;
-	vm_flags_set(area, VM_DONTDUMP);
+	vm_flags_set(area, VM_MIXEDMAP | VM_DONTDUMP);
 	if (!read)
 		vm_flags_set(area, VM_DONTEXPAND);
 	area->vm_private_data = us122l;
@@ -520,8 +534,6 @@ static int us122l_usb_probe(struct usb_interface *intf,
 		return err;
 	}
 
-	usb_get_intf(usb_ifnum_to_if(device, 0));
-	usb_get_dev(device);
 	*cardp = card;
 	return 0;
 }
@@ -542,11 +554,9 @@ static int snd_us122l_probe(struct usb_interface *intf,
 	if (intf->cur_altsetting->desc.bInterfaceNumber != 1)
 		return 0;
 
-	err = us122l_usb_probe(usb_get_intf(intf), id, &card);
-	if (err < 0) {
-		usb_put_intf(intf);
+	err = us122l_usb_probe(intf, id, &card);
+	if (err < 0)
 		return err;
-	}
 
 	usb_set_intfdata(intf, card);
 	return 0;
@@ -573,10 +583,6 @@ static void snd_us122l_disconnect(struct usb_interface *intf)
 	list_for_each(p, &us122l->midi_list) {
 		snd_usbmidi_disconnect(p);
 	}
-
-	usb_put_intf(usb_ifnum_to_if(us122l->dev, 0));
-	usb_put_intf(usb_ifnum_to_if(us122l->dev, 1));
-	usb_put_dev(us122l->dev);
 
 	snd_card_free_when_closed(card);
 }

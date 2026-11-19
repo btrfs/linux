@@ -394,7 +394,7 @@ static int imx6ul_tsc_probe(struct platform_device *pdev)
 	u32 average_samples;
 	u32 de_glitch;
 
-	tsc = devm_kzalloc(&pdev->dev, sizeof(*tsc), GFP_KERNEL);
+	tsc = devm_kzalloc_obj(&pdev->dev, *tsc);
 	if (!tsc)
 		return -ENOMEM;
 
@@ -551,12 +551,10 @@ static int imx6ul_tsc_suspend(struct device *dev)
 	struct imx6ul_tsc *tsc = platform_get_drvdata(pdev);
 	struct input_dev *input_dev = tsc->input;
 
-	mutex_lock(&input_dev->mutex);
+	guard(mutex)(&input_dev->mutex);
 
 	if (input_device_enabled(input_dev))
 		imx6ul_tsc_stop(tsc);
-
-	mutex_unlock(&input_dev->mutex);
 
 	return 0;
 }
@@ -566,16 +564,17 @@ static int imx6ul_tsc_resume(struct device *dev)
 	struct platform_device *pdev = to_platform_device(dev);
 	struct imx6ul_tsc *tsc = platform_get_drvdata(pdev);
 	struct input_dev *input_dev = tsc->input;
-	int retval = 0;
+	int error;
 
-	mutex_lock(&input_dev->mutex);
+	guard(mutex)(&input_dev->mutex);
 
-	if (input_device_enabled(input_dev))
-		retval = imx6ul_tsc_start(tsc);
+	if (input_device_enabled(input_dev)) {
+		error = imx6ul_tsc_start(tsc);
+		if (error)
+			return error;
+	}
 
-	mutex_unlock(&input_dev->mutex);
-
-	return retval;
+	return 0;
 }
 
 static DEFINE_SIMPLE_DEV_PM_OPS(imx6ul_tsc_pm_ops,

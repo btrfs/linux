@@ -155,7 +155,7 @@ static void rzv2m_pinctrl_set_pfc_mode(struct rzv2m_pinctrl *pctrl,
 	/* Unmask input/output */
 	rzv2m_writel_we(pctrl->base + EN_MSK(port), pin, 0);
 	rzv2m_writel_we(pctrl->base + DI_MSK(port), pin, 0);
-};
+}
 
 static int rzv2m_pinctrl_set_mux(struct pinctrl_dev *pctldev,
 				 unsigned int func_selector,
@@ -186,7 +186,7 @@ static int rzv2m_pinctrl_set_mux(struct pinctrl_dev *pctldev,
 	}
 
 	return 0;
-};
+}
 
 static int rzv2m_map_add_config(struct pinctrl_map *map,
 				const char *group_or_pin,
@@ -292,10 +292,9 @@ static int rzv2m_dt_subnode_to_map(struct pinctrl_dev *pctldev,
 		goto done;
 	}
 
-	pins = devm_kcalloc(pctrl->dev, num_pinmux, sizeof(*pins), GFP_KERNEL);
-	psel_val = devm_kcalloc(pctrl->dev, num_pinmux, sizeof(*psel_val),
-				GFP_KERNEL);
-	pin_fn = devm_kzalloc(pctrl->dev, sizeof(*pin_fn), GFP_KERNEL);
+	pins = devm_kzalloc_objs(pctrl->dev, *pins, num_pinmux);
+	psel_val = devm_kzalloc_objs(pctrl->dev, *psel_val, num_pinmux);
+	pin_fn = devm_kzalloc_obj(pctrl->dev, *pin_fn);
 	if (!pins || !psel_val || !pin_fn) {
 		ret = -ENOMEM;
 		goto done;
@@ -551,7 +550,7 @@ static int rzv2m_pinctrl_pinconf_get(struct pinctrl_dev *pctldev,
 	*config = pinconf_to_config_packed(param, arg);
 
 	return 0;
-};
+}
 
 static int rzv2m_pinctrl_pinconf_set(struct pinctrl_dev *pctldev,
 				     unsigned int _pin,
@@ -661,7 +660,7 @@ static int rzv2m_pinctrl_pinconf_set(struct pinctrl_dev *pctldev,
 		}
 
 		default:
-			return -EOPNOTSUPP;
+			return -ENOTSUPP;
 		}
 	}
 
@@ -689,14 +688,15 @@ static int rzv2m_pinctrl_pinconf_group_set(struct pinctrl_dev *pctldev,
 	}
 
 	return 0;
-};
+}
 
 static int rzv2m_pinctrl_pinconf_group_get(struct pinctrl_dev *pctldev,
 					   unsigned int group,
 					   unsigned long *config)
 {
+	unsigned long prev_config = 0;
 	const unsigned int *pins;
-	unsigned int i, npins, prev_config = 0;
+	unsigned int i, npins;
 	int ret;
 
 	ret = pinctrl_generic_get_group_pins(pctldev, group, &pins, &npins);
@@ -710,13 +710,13 @@ static int rzv2m_pinctrl_pinconf_group_get(struct pinctrl_dev *pctldev,
 
 		/* Check config matches previous pins */
 		if (i && prev_config != *config)
-			return -EOPNOTSUPP;
+			return -ENOTSUPP;
 
 		prev_config = *config;
 	}
 
 	return 0;
-};
+}
 
 static const struct pinctrl_ops rzv2m_pinctrl_pctlops = {
 	.get_groups_count = pinctrl_generic_get_group_count,
@@ -995,12 +995,11 @@ static int rzv2m_pinctrl_register(struct rzv2m_pinctrl *pctrl)
 	pctrl->desc.confops = &rzv2m_pinctrl_confops;
 	pctrl->desc.owner = THIS_MODULE;
 
-	pins = devm_kcalloc(pctrl->dev, pctrl->desc.npins, sizeof(*pins), GFP_KERNEL);
+	pins = devm_kzalloc_objs(pctrl->dev, *pins, pctrl->desc.npins);
 	if (!pins)
 		return -ENOMEM;
 
-	pin_data = devm_kcalloc(pctrl->dev, pctrl->desc.npins,
-				sizeof(*pin_data), GFP_KERNEL);
+	pin_data = devm_kzalloc_objs(pctrl->dev, *pin_data, pctrl->desc.npins);
 	if (!pin_data)
 		return -ENOMEM;
 
@@ -1053,7 +1052,7 @@ static int rzv2m_pinctrl_probe(struct platform_device *pdev)
 	struct clk *clk;
 	int ret;
 
-	pctrl = devm_kzalloc(&pdev->dev, sizeof(*pctrl), GFP_KERNEL);
+	pctrl = devm_kzalloc_obj(&pdev->dev, *pctrl);
 	if (!pctrl)
 		return -ENOMEM;
 

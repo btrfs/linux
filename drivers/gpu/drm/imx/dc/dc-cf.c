@@ -7,7 +7,6 @@
 #include <linux/bits.h>
 #include <linux/component.h>
 #include <linux/ioport.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -91,7 +90,7 @@ static int dc_cf_bind(struct device *dev, struct device *master, void *data)
 	struct dc_cf *cf;
 	int id;
 
-	cf = devm_kzalloc(dev, sizeof(*cf), GFP_KERNEL);
+	cf = devm_kzalloc_obj(dev, *cf);
 	if (!cf)
 		return -ENOMEM;
 

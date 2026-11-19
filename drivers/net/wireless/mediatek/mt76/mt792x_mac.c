@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: ISC
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 /* Copyright (C) 2023 MediaTek Inc. */
 
 #include <linux/module.h>
@@ -165,14 +165,16 @@ mt792x_mac_rssi_iter(void *priv, u8 *mac, struct ieee80211_vif *vif)
 	struct mt76_rx_status *status = (struct mt76_rx_status *)skb->cb;
 	struct mt792x_vif *mvif = (struct mt792x_vif *)vif->drv_priv;
 	struct ieee80211_hdr *hdr = mt76_skb_get_hdr(skb);
+	int signal;
 
-	if (status->signal > 0)
+	signal = mt76_rx_signal(status->chains, status->chain_signal);
+	if (signal > 0 || signal <= -128)
 		return;
 
 	if (!ether_addr_equal(vif->addr, hdr->addr1))
 		return;
 
-	ewma_rssi_add(&mvif->bss_conf.rssi, -status->signal);
+	ewma_rssi_add(&mvif->bss_conf.rssi, -signal);
 }
 
 void mt792x_mac_assoc_rssi(struct mt792x_dev *dev, struct sk_buff *skb)
@@ -278,6 +280,9 @@ void mt792x_reset(struct mt76_dev *mdev)
 	if (pm->suspended)
 		return;
 
+	if (test_bit(MT76_REMOVED, &mdev->phy.state))
+		return;
+
 	queue_work(dev->mt76.wq, &dev->reset_work);
 }
 EXPORT_SYMBOL_GPL(mt792x_reset);
@@ -375,7 +380,7 @@ void mt792x_pm_power_save_work(struct work_struct *work)
 	}
 
 	if (!mt792x_mcu_fw_pmctrl(dev)) {
-		cancel_delayed_work_sync(&mphy->mac_work);
+		cancel_delayed_work(&mphy->mac_work);
 		return;
 	}
 out:

@@ -281,6 +281,7 @@ static int dcbnl_getpfccfg(struct net_device *netdev, struct nlmsghdr *nlh,
 		if (!getall && !data[i])
 			continue;
 
+		value = 0;
 		netdev->dcbnl_ops->getpfccfg(netdev, i - DCB_PFC_UP_ATTR_0,
 		                             &value);
 		ret = nla_put_u8(skb, i, value);
@@ -1021,8 +1022,7 @@ static int dcbnl_build_peer_app(struct net_device *netdev, struct sk_buff* skb,
 	 */
 	err = ops->peer_getappinfo(netdev, &info, &app_count);
 	if (!err && app_count) {
-		table = kmalloc_array(app_count, sizeof(struct dcb_app),
-				      GFP_KERNEL);
+		table = kmalloc_objs(struct dcb_app, app_count);
 		if (!table)
 			return -ENOMEM;
 
@@ -1396,6 +1396,7 @@ static int dcbnl_cee_fill(struct sk_buff *skb, struct net_device *netdev)
 			goto nla_put_failure;
 
 		for (i = DCB_PFC_UP_ATTR_0; i <= DCB_PFC_UP_ATTR_7; i++) {
+			value = 0;
 			ops->getpfccfg(netdev, i - DCB_PFC_UP_ATTR_0, &value);
 			if (nla_put_u8(skb, i, value))
 				goto nla_put_failure;
@@ -1579,6 +1580,15 @@ static int dcbnl_ieee_set(struct net_device *netdev, struct nlmsghdr *nlh,
 
 	if (ieee[DCB_ATTR_IEEE_ETS] && ops->ieee_setets) {
 		struct ieee_ets *ets = nla_data(ieee[DCB_ATTR_IEEE_ETS]);
+
+		/* IEEE 802.1Qaz: BW allocation applies only to ETS TCs */
+		for (int i = 0; i < IEEE_8021QAZ_MAX_TCS; i++) {
+			if (ets->tc_tsa[i] != IEEE_8021QAZ_TSA_ETS &&
+			    ets->tc_tx_bw[i]) {
+				err = -EINVAL;
+				goto err;
+			}
+		}
 		err = ops->ieee_setets(netdev, ets);
 		if (err)
 			goto err;
@@ -2004,7 +2014,7 @@ static int dcb_app_add(struct list_head *list, const struct dcb_app *app,
 {
 	struct dcb_app_type *entry;
 
-	entry = kmalloc(sizeof(*entry), GFP_ATOMIC);
+	entry = kmalloc_obj(*entry, GFP_ATOMIC);
 	if (!entry)
 		return -ENOMEM;
 

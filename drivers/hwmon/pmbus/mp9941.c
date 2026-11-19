@@ -281,7 +281,7 @@ static int mp9941_probe(struct i2c_client *client)
 {
 	struct mp9941_data *data;
 
-	data = devm_kzalloc(&client->dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(&client->dev, *data);
 	if (!data)
 		return -ENOMEM;
 
@@ -291,7 +291,7 @@ static int mp9941_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id mp9941_id[] = {
-	{ "mp9941" },
+	{ .name = "mp9941" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mp9941_id);

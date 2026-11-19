@@ -600,7 +600,7 @@ static int ov2722_s_power(struct v4l2_subdev *sd, int on)
 }
 
 /* TODO: remove it. */
-static int startup(struct v4l2_subdev *sd)
+static int ov2722_startup(struct v4l2_subdev *sd)
 {
 	struct ov2722_device *dev = to_ov2722_sensor(sd);
 	struct i2c_client *client = v4l2_get_subdevdata(sd);
@@ -623,6 +623,7 @@ static int startup(struct v4l2_subdev *sd)
 }
 
 static int ov2722_set_fmt(struct v4l2_subdev *sd,
+			  const struct v4l2_subdev_client_info *ci,
 			  struct v4l2_subdev_state *sd_state,
 			  struct v4l2_subdev_format *format)
 {
@@ -662,7 +663,7 @@ static int ov2722_set_fmt(struct v4l2_subdev *sd,
 	dev->pixels_per_line = dev->res->pixels_per_line;
 	dev->lines_per_frame = dev->res->lines_per_frame;
 
-	ret = startup(sd);
+	ret = ov2722_startup(sd);
 	if (ret) {
 		int i = 0;
 
@@ -677,7 +678,7 @@ static int ov2722_set_fmt(struct v4l2_subdev *sd,
 				dev_err(&client->dev, "power up failed, continue\n");
 				continue;
 			}
-			ret = startup(sd);
+			ret = ov2722_startup(sd);
 			if (ret) {
 				dev_err(&client->dev, " startup FAILED!\n");
 			} else {
@@ -952,7 +953,7 @@ static int ov2722_probe(struct i2c_client *client)
 	void *ovpdev;
 	int ret;
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev)
 		return -ENOMEM;
 
@@ -995,8 +996,8 @@ out_free:
 }
 
 static const struct acpi_device_id ov2722_acpi_match[] = {
-	{ "INT33FB" },
-	{},
+	{ .id = "INT33FB" },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, ov2722_acpi_match);
 

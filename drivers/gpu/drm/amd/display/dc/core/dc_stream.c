@@ -24,6 +24,7 @@
  */
 
 #include "dm_services.h"
+#include "dm_helpers.h"
 #include "basics/dc_common.h"
 #include "dc.h"
 #include "core_types.h"
@@ -33,6 +34,7 @@
 #include "dc_dmub_srv.h"
 #include "dc_state_priv.h"
 #include "dc_stream_priv.h"
+#include "dce/dmub_hw_lock_mgr.h"
 
 #define DC_LOGGER dc->ctx->logger
 #ifndef MIN
@@ -42,11 +44,19 @@
 #define MAX(x, y) ((x > y) ? x : y)
 #endif
 
+#include "dc_fpu.h"
+
+#if !defined(DC_RUN_WITH_PREEMPTION_ENABLED)
+#define DC_RUN_WITH_PREEMPTION_ENABLED(code) code
+#endif // !DC_RUN_WITH_PREEMPTION_ENABLED
+
+
 /*******************************************************************************
  * Private functions
  ******************************************************************************/
 void update_stream_signal(struct dc_stream_state *stream, struct dc_sink *sink)
 {
+	unsigned int pix_clk;
 	if (sink->sink_signal == SIGNAL_TYPE_NONE)
 		stream->signal = stream->link->connector_signal;
 	else
@@ -59,6 +69,42 @@ void update_stream_signal(struct dc_stream_state *stream, struct dc_sink *sink)
 			stream->signal = SIGNAL_TYPE_DVI_DUAL_LINK;
 		else
 			stream->signal = SIGNAL_TYPE_DVI_SINGLE_LINK;
+	}
+	if (dc_is_hdmi_frl_signal(stream->signal)) {
+		pix_clk = stream->timing.pix_clk_100hz / 10;
+		if (stream->timing.pixel_encoding == PIXEL_ENCODING_YCBCR420)
+			pix_clk /= 2;
+
+		// YCbCr422 to use assume 12-bit interface always, clock stays the same
+		if (stream->timing.pixel_encoding != PIXEL_ENCODING_YCBCR422) {
+			switch (stream->timing.display_color_depth) {
+			case COLOR_DEPTH_666:
+			case COLOR_DEPTH_888:
+				break;
+			case COLOR_DEPTH_101010:
+				pix_clk = pix_clk * 10 / 8;
+				break;
+			case COLOR_DEPTH_121212:
+				pix_clk = pix_clk * 12 / 8;
+				break;
+			default:
+				break;
+			}
+		}
+		if (pix_clk != 0 && pix_clk < HDMI2_TMDS_MAX_PIXEL_CLOCK)
+			stream->signal = SIGNAL_TYPE_HDMI_TYPE_A;
+		if (stream->timing.pixel_encoding == PIXEL_ENCODING_YCBCR420 &&
+				stream->timing.h_addressable > 4096)
+			stream->signal = SIGNAL_TYPE_HDMI_FRL;
+		if (stream->timing.rid != 0)
+			stream->signal = SIGNAL_TYPE_HDMI_FRL;
+
+		if (stream->link->frl_flags.force_frl_always ||
+				stream->link->frl_flags.force_frl_max
+				|| stream->link->frl_flags.force_frl_dsc
+				|| (stream->link->frl_flags.force_frl_rate != 0 &&
+					stream->link->frl_flags.force_frl_rate != 0xF))
+			stream->signal = SIGNAL_TYPE_HDMI_FRL;
 	}
 }
 
@@ -160,30 +206,32 @@ void dc_stream_release(struct dc_stream_state *stream)
 		kref_put(&stream->refcount, dc_stream_free);
 	}
 }
+EXPORT_IF_KUNIT(dc_stream_release);
 
 struct dc_stream_state *dc_create_stream_for_sink(
 		struct dc_sink *sink)
 {
-	struct dc_stream_state *stream;
+	struct dc_stream_state *stream = NULL;
 
 	if (sink == NULL)
-		return NULL;
+		goto fail;
 
-	stream = kzalloc(sizeof(struct dc_stream_state), GFP_KERNEL);
+	DC_RUN_WITH_PREEMPTION_ENABLED(stream = kzalloc_obj(struct dc_stream_state, GFP_ATOMIC));
+
 	if (stream == NULL)
-		goto alloc_fail;
+		goto fail;
 
 	if (dc_stream_construct(stream, sink) == false)
-		goto construct_fail;
+		goto fail;
 
 	kref_init(&stream->refcount);
 
 	return stream;
 
-construct_fail:
-	kfree(stream);
+fail:
+	if (stream)
+		kfree(stream);
 
-alloc_fail:
 	return NULL;
 }
 
@@ -224,13 +272,46 @@ struct dc_stream_status *dc_stream_get_status(
 	return dc_state_get_stream_status(dc->current_state, stream);
 }
 
+const struct dc_stream_status *dc_stream_get_status_const(
+	const struct dc_stream_state *stream)
+{
+	struct dc *dc = stream->ctx->dc;
+	return dc_state_get_stream_status(dc->current_state, stream);
+}
+
+struct dc_link *dc_stream_get_link(
+	const struct dc_stream_state *stream)
+{
+	return stream->link;
+}
+
+static void update_cursor_info_to_dmu(struct dc *dc, struct pipe_ctx *pipe_ctx)
+{
+	unsigned int panel_inst;
+
+	if (!dc->ctx->dmub_srv || !dc_dmub_should_update_cursor_data(pipe_ctx))
+		return;
+
+	if (!dc_get_edp_link_panel_inst(dc, pipe_ctx->stream->link, &panel_inst))
+		panel_inst = 0;
+
+	dc_send_update_cursor_info_to_dmu(pipe_ctx->stream->ctx, pipe_ctx->pipe_idx,
+			pipe_ctx->plane_res.hubp, pipe_ctx->plane_res.dpp,
+			(uint8_t)pipe_ctx->stream_res.tg->inst, (uint8_t)panel_inst);
+}
+
 void program_cursor_attributes(
 	struct dc *dc,
 	struct dc_stream_state *stream)
 {
-	int i;
+	uint8_t i;
 	struct resource_context *res_ctx;
 	struct pipe_ctx *pipe_to_program = NULL;
+	bool enable_cursor_offload = dc_dmub_srv_is_cursor_offload_enabled(dc);
+	bool unlock_dmub = false;
+	struct dpp *dpp[MAX_PIPES];
+	struct hubp *hubp[MAX_PIPES];
+	uint8_t pipe_count = 0;
 
 	if (!stream)
 		return;
@@ -245,22 +326,60 @@ void program_cursor_attributes(
 
 		if (!pipe_to_program) {
 			pipe_to_program = pipe_ctx;
-			dc->hwss.cursor_lock(dc, pipe_to_program, true);
-			if (pipe_to_program->next_odm_pipe)
-				dc->hwss.cursor_lock(dc, pipe_to_program->next_odm_pipe, true);
+
+			if (enable_cursor_offload && dc->hwss.begin_cursor_offload_update) {
+				struct pipe_ctx *top_pipe = resource_get_otg_master(pipe_ctx);
+
+				if (top_pipe) {
+					pipe_count =
+						hwss_build_cursor_offload_pipe_list(pipe_ctx, dpp, hubp);
+
+					dc->hwss.begin_cursor_offload_update(dc->ctx->dmub_srv->dmub,
+						dpp, hubp, pipe_count, top_pipe->pipe_idx);
+				}
+			} else {
+				if (dc->hwss.dmub_hw_control_lock && pipe_ctx->stream &&
+				    should_use_dmub_inbox0_lock_for_link(dc, pipe_ctx->stream->link)) {
+					dc->hwss.dmub_hw_control_lock(dc, dc->current_state, true);
+					unlock_dmub = true;
+				}
+
+				dc->hwss.cursor_lock(dc, pipe_to_program, true);
+				if (pipe_to_program->next_odm_pipe)
+					dc->hwss.cursor_lock(dc, pipe_to_program->next_odm_pipe, true);
+			}
 		}
 
 		dc->hwss.set_cursor_attribute(pipe_ctx);
-		if (dc->ctx->dmub_srv)
-			dc_send_update_cursor_info_to_dmu(pipe_ctx, i);
+		update_cursor_info_to_dmu(dc, pipe_ctx);
 		if (dc->hwss.set_cursor_sdr_white_level)
 			dc->hwss.set_cursor_sdr_white_level(pipe_ctx);
+		if (enable_cursor_offload && dc->hwss.update_cursor_offload_pipe) {
+			struct pipe_ctx *top_pipe = resource_get_otg_master(pipe_ctx);
+
+			if (top_pipe)
+				dc->hwss.update_cursor_offload_pipe(dc->ctx->dmub_srv->dmub,
+					top_pipe->pipe_idx, pipe_ctx->pipe_idx,
+					pipe_ctx->plane_res.dpp, pipe_ctx->plane_res.hubp);
+		}
 	}
 
 	if (pipe_to_program) {
-		dc->hwss.cursor_lock(dc, pipe_to_program, false);
-		if (pipe_to_program->next_odm_pipe)
-			dc->hwss.cursor_lock(dc, pipe_to_program->next_odm_pipe, false);
+		if (enable_cursor_offload && dc->hwss.commit_cursor_offload_update) {
+			struct pipe_ctx *top_pipe = resource_get_otg_master(pipe_to_program);
+
+			if (top_pipe) {
+				dc->hwss.commit_cursor_offload_update(dc->ctx->dmub_srv->dmub,
+					dpp, hubp, pipe_count, top_pipe->pipe_idx);
+			}
+		} else {
+			dc->hwss.cursor_lock(dc, pipe_to_program, false);
+			if (pipe_to_program->next_odm_pipe)
+				dc->hwss.cursor_lock(dc, pipe_to_program->next_odm_pipe, false);
+
+			if (unlock_dmub)
+				dc->hwss.dmub_hw_control_lock(dc, dc->current_state, false);
+		}
 	}
 }
 
@@ -333,6 +452,7 @@ bool dc_stream_program_cursor_attributes(
 {
 	struct dc  *dc;
 	bool reset_idle_optimizations = false;
+	bool should_release_dmub_hw_control_lock = false;
 
 	if (!stream)
 		return false;
@@ -341,6 +461,13 @@ bool dc_stream_program_cursor_attributes(
 
 	if (dc_stream_set_cursor_attributes(stream, attributes)) {
 		dc_z10_restore(dc);
+		if (dc->hwss.dmub_hw_control_lock) {
+			if (dc_state_is_alt_in_use(dc, dc->current_state) &&
+			    !dc_dmub_srv_is_cursor_offload_enabled(dc)) {
+				dc->hwss.dmub_hw_control_lock(dc, dc->current_state, true);
+				should_release_dmub_hw_control_lock = true;
+			}
+		}
 		/* disable idle optimizations while updating cursor */
 		if (dc->idle_optimizations_allowed) {
 			dc_allow_idle_optimizations(dc, false);
@@ -353,6 +480,10 @@ bool dc_stream_program_cursor_attributes(
 		if (reset_idle_optimizations && !dc->debug.disable_dmub_reallow_idle)
 			dc_allow_idle_optimizations(dc, true);
 
+		if (dc->hwss.dmub_hw_control_lock) {
+			if (should_release_dmub_hw_control_lock)
+				dc->hwss.dmub_hw_control_lock(dc, dc->current_state, false);
+		}
 		return true;
 	}
 
@@ -363,9 +494,14 @@ void program_cursor_position(
 	struct dc *dc,
 	struct dc_stream_state *stream)
 {
-	int i;
+	uint8_t i;
 	struct resource_context *res_ctx;
 	struct pipe_ctx *pipe_to_program = NULL;
+	bool enable_cursor_offload = dc_dmub_srv_is_cursor_offload_enabled(dc);
+	bool unlock_dmub = false;
+	struct dpp *dpp[MAX_PIPES];
+	struct hubp *hubp[MAX_PIPES];
+	uint8_t pipe_count = 0;
 
 	if (!stream)
 		return;
@@ -384,16 +520,56 @@ void program_cursor_position(
 
 		if (!pipe_to_program) {
 			pipe_to_program = pipe_ctx;
-			dc->hwss.cursor_lock(dc, pipe_to_program, true);
+
+			if (enable_cursor_offload && dc->hwss.begin_cursor_offload_update) {
+				struct pipe_ctx *top_pipe = resource_get_otg_master(pipe_ctx);
+
+				if (top_pipe) {
+					pipe_count =
+						hwss_build_cursor_offload_pipe_list(pipe_ctx, dpp, hubp);
+
+					dc->hwss.begin_cursor_offload_update(dc->ctx->dmub_srv->dmub,
+						dpp, hubp, pipe_count, top_pipe->pipe_idx);
+				}
+			} else {
+				if (dc->hwss.dmub_hw_control_lock && pipe_ctx->stream &&
+				    should_use_dmub_inbox0_lock_for_link(dc, pipe_ctx->stream->link)) {
+					dc->hwss.dmub_hw_control_lock(dc, dc->current_state, true);
+					unlock_dmub = true;
+				}
+
+				dc->hwss.cursor_lock(dc, pipe_to_program, true);
+			}
 		}
 
-		dc->hwss.set_cursor_position(pipe_ctx);
-		if (dc->ctx->dmub_srv)
-			dc_send_update_cursor_info_to_dmu(pipe_ctx, i);
+		hwss_program_cursor_position(dc, pipe_ctx);
+		if (enable_cursor_offload && dc->hwss.update_cursor_offload_pipe) {
+			struct pipe_ctx *top_pipe = resource_get_otg_master(pipe_ctx);
+
+			if (top_pipe)
+				dc->hwss.update_cursor_offload_pipe(dc->ctx->dmub_srv->dmub,
+					top_pipe->pipe_idx, pipe_ctx->pipe_idx,
+					pipe_ctx->plane_res.dpp, pipe_ctx->plane_res.hubp);
+		}
+
+		update_cursor_info_to_dmu(dc, pipe_ctx);
 	}
 
-	if (pipe_to_program)
-		dc->hwss.cursor_lock(dc, pipe_to_program, false);
+	if (pipe_to_program) {
+		if (enable_cursor_offload && dc->hwss.commit_cursor_offload_update) {
+			struct pipe_ctx *top_pipe = resource_get_otg_master(pipe_to_program);
+
+			if (top_pipe) {
+				dc->hwss.commit_cursor_offload_update(dc->ctx->dmub_srv->dmub,
+					dpp, hubp, pipe_count, top_pipe->pipe_idx);
+			}
+		} else {
+			dc->hwss.cursor_lock(dc, pipe_to_program, false);
+
+			if (unlock_dmub)
+				dc->hwss.dmub_hw_control_lock(dc, dc->current_state, false);
+		}
+	}
 }
 
 bool dc_stream_set_cursor_position(
@@ -423,6 +599,7 @@ bool dc_stream_program_cursor_position(
 	struct dc *dc;
 	bool reset_idle_optimizations = false;
 	const struct dc_cursor_position *old_position;
+	bool should_release_dmub_hw_control_lock = false;
 
 	if (!stream)
 		return false;
@@ -433,6 +610,13 @@ bool dc_stream_program_cursor_position(
 	if (dc_stream_set_cursor_position(stream, position)) {
 		dc_z10_restore(dc);
 
+		if (dc->hwss.dmub_hw_control_lock) {
+			if (dc_state_is_alt_in_use(dc, dc->current_state) &&
+			    !dc_dmub_srv_is_cursor_offload_enabled(dc)) {
+				dc->hwss.dmub_hw_control_lock(dc, dc->current_state, true);
+				should_release_dmub_hw_control_lock = true;
+			}
+		}
 		/* disable idle optimizations if enabling cursor */
 		if (dc->idle_optimizations_allowed &&
 		    (!old_position->enable || dc->debug.exit_idle_opt_for_cursor_updates) &&
@@ -449,7 +633,7 @@ bool dc_stream_program_cursor_position(
 		/* apply/update visual confirm */
 		if (dc->debug.visual_confirm == VISUAL_CONFIRM_HW_CURSOR) {
 			/* update software state */
-			int i;
+			unsigned int i;
 
 			for (i = 0; i < dc->res_pool->pipe_count; i++) {
 				struct pipe_ctx *pipe_ctx = &dc->current_state->res_ctx.pipe_ctx[i];
@@ -466,6 +650,27 @@ bool dc_stream_program_cursor_position(
 			}
 		}
 
+		if (stream->drr_trigger_mode == DRR_TRIGGER_ON_FLIP_AND_CURSOR) {
+			/* apply manual trigger */
+			unsigned int i;
+
+			for (i = 0; i < dc->res_pool->pipe_count; i++) {
+				struct pipe_ctx *pipe_ctx = &dc->current_state->res_ctx.pipe_ctx[i];
+
+				/* trigger event on first pipe with current stream */
+				if (stream == pipe_ctx->stream &&
+				pipe_ctx->stream_res.tg->funcs->program_manual_trigger) {
+					pipe_ctx->stream_res.tg->funcs->program_manual_trigger(
+					pipe_ctx->stream_res.tg);
+					break;
+				}
+			}
+		}
+
+		if (dc->hwss.dmub_hw_control_lock) {
+			if (should_release_dmub_hw_control_lock)
+				dc->hwss.dmub_hw_control_lock(dc, dc->current_state, false);
+		}
 		return true;
 	}
 
@@ -477,7 +682,7 @@ bool dc_stream_add_writeback(struct dc *dc,
 		struct dc_writeback_info *wb_info)
 {
 	bool isDrc = false;
-	int i = 0;
+	unsigned int i = 0;
 	struct dwbc *dwb;
 
 	if (stream == NULL) {
@@ -520,7 +725,7 @@ bool dc_stream_add_writeback(struct dc *dc,
 
 	if (dc->hwss.enable_writeback) {
 		struct dc_stream_status *stream_status = dc_stream_get_status(stream);
-		struct dwbc *dwb = dc->res_pool->dwbc[wb_info->dwb_pipe_inst];
+		dwb = dc->res_pool->dwbc[wb_info->dwb_pipe_inst];
 		if (stream_status)
 			dwb->otg_inst = stream_status->primary_otg_inst;
 	}
@@ -532,7 +737,7 @@ bool dc_stream_add_writeback(struct dc *dc,
 
 	/* enable writeback */
 	if (dc->hwss.enable_writeback) {
-		struct dwbc *dwb = dc->res_pool->dwbc[wb_info->dwb_pipe_inst];
+		dwb = dc->res_pool->dwbc[wb_info->dwb_pipe_inst];
 
 		if (dwb->funcs->is_enabled(dwb)) {
 			/* writeback pipe already enabled, only need to update */
@@ -603,20 +808,17 @@ bool dc_stream_remove_writeback(struct dc *dc,
 		return false;
 	}
 
-	/* remove writeback info for disabled writeback pipes from stream */
+	/* remove writeback info for the requested writeback pipe from stream */
 	for (i = 0, j = 0; i < stream->num_wb_info; i++) {
-		if (stream->writeback_info[i].wb_enabled) {
+		/* drop every entry that targets the pipe being removed */
+		if (stream->writeback_info[i].dwb_pipe_inst == dwb_pipe_inst)
+			continue;
 
-			if (stream->writeback_info[i].dwb_pipe_inst == dwb_pipe_inst)
-				stream->writeback_info[i].wb_enabled = false;
-
-			/* trim the array */
-			if (j < i) {
-				memcpy(&stream->writeback_info[j], &stream->writeback_info[i],
-						sizeof(struct dc_writeback_info));
-				j++;
-			}
-		}
+		/* keep this entry, compacting it down when earlier entries were removed */
+		if (j != i)
+			memcpy(&stream->writeback_info[j], &stream->writeback_info[i],
+					sizeof(struct dc_writeback_info));
+		j++;
 	}
 	stream->num_wb_info = j;
 
@@ -860,77 +1062,12 @@ void dc_stream_log(const struct dc *dc, const struct dc_stream_state *stream)
 			stream->sink->sink_signal != SIGNAL_TYPE_NONE) {
 
 			DC_LOG_DC(
-					"\tdispname: %s signal: %x\n",
+					"\tsignal: %x dispname: %s manufacturer_id: 0x%x product_id: 0x%x\n",
+					stream->signal,
 					stream->sink->edid_caps.display_name,
-					stream->signal);
+					stream->sink->edid_caps.manufacturer_id,
+					stream->sink->edid_caps.product_id);
 		}
-	}
-}
-
-/*
-*	dc_stream_get_3dlut()
-*	Requirements:
-*	1. Is stream already owns an RMCM instance, return it.
-*	2. If it doesn't and we don't need to allocate, return NULL.
-*	3. If there's a free RMCM instance, assign to stream and return it.
-*	4. If no free RMCM instances, return NULL.
-*/
-
-struct dc_rmcm_3dlut *dc_stream_get_3dlut_for_stream(
-	const struct dc *dc,
-	const struct dc_stream_state *stream,
-	bool allocate_one)
-{
-	unsigned int num_rmcm = dc->caps.color.mpc.num_rmcm_3dluts;
-
-	// see if one is allocated for this stream
-	for (int i = 0; i < num_rmcm; i++) {
-		if (dc->res_pool->rmcm_3dlut[i].isInUse &&
-			dc->res_pool->rmcm_3dlut[i].stream == stream)
-			return &dc->res_pool->rmcm_3dlut[i];
-	}
-
-	//case: not found one, and dont need to allocate
-	if (!allocate_one)
-		return NULL;
-
-	//see if there is an unused 3dlut, allocate
-	for (int i = 0; i < num_rmcm; i++) {
-		if (!dc->res_pool->rmcm_3dlut[i].isInUse) {
-			dc->res_pool->rmcm_3dlut[i].isInUse = true;
-			dc->res_pool->rmcm_3dlut[i].stream = stream;
-			return &dc->res_pool->rmcm_3dlut[i];
-		}
-	}
-
-	//dont have a 3dlut
-	return NULL;
-}
-
-
-void dc_stream_release_3dlut_for_stream(
-	const struct dc *dc,
-	const struct dc_stream_state *stream)
-{
-	struct dc_rmcm_3dlut *rmcm_3dlut =
-		dc_stream_get_3dlut_for_stream(dc, stream, false);
-
-	if (rmcm_3dlut) {
-		rmcm_3dlut->isInUse = false;
-		rmcm_3dlut->stream  = NULL;
-		rmcm_3dlut->protection_bits = 0;
-	}
-}
-
-
-void dc_stream_init_rmcm_3dlut(struct dc *dc)
-{
-	unsigned int num_rmcm = dc->caps.color.mpc.num_rmcm_3dluts;
-
-	for (int i = 0; i < num_rmcm; i++) {
-		dc->res_pool->rmcm_3dlut[i].isInUse = false;
-		dc->res_pool->rmcm_3dlut[i].stream = NULL;
-		dc->res_pool->rmcm_3dlut[i].protection_bits = 0;
 	}
 }
 
@@ -956,14 +1093,18 @@ static int dc_stream_get_brightness_millinits_linear_interpolation (struct dc_st
 								     int refresh_hz)
 {
 	long long slope = 0;
+	long long y_intercept = 0;
+	long long brightness_millinits = 0;
+
 	if (stream->lumin_data.refresh_rate_hz[index2] != stream->lumin_data.refresh_rate_hz[index1]) {
 		slope = (stream->lumin_data.luminance_millinits[index2] - stream->lumin_data.luminance_millinits[index1]) /
 			    (stream->lumin_data.refresh_rate_hz[index2] - stream->lumin_data.refresh_rate_hz[index1]);
 	}
 
-	int y_intercept = stream->lumin_data.luminance_millinits[index2] - slope * stream->lumin_data.refresh_rate_hz[index2];
+	y_intercept = stream->lumin_data.luminance_millinits[index2] - slope * stream->lumin_data.refresh_rate_hz[index2];
+	brightness_millinits = y_intercept + (long long)refresh_hz * slope;
 
-	return (y_intercept + refresh_hz * slope);
+	return (int)brightness_millinits;
 }
 
 /*
@@ -975,14 +1116,18 @@ static int dc_stream_get_refresh_hz_linear_interpolation (struct dc_stream_state
 							   int brightness_millinits)
 {
 	long long slope = 1;
+	long long y_intercept = 0;
+	long long refresh_hz = 0;
+
 	if (stream->lumin_data.refresh_rate_hz[index2] != stream->lumin_data.refresh_rate_hz[index1]) {
 		slope = (stream->lumin_data.luminance_millinits[index2] - stream->lumin_data.luminance_millinits[index1]) /
 				(stream->lumin_data.refresh_rate_hz[index2] - stream->lumin_data.refresh_rate_hz[index1]);
 	}
 
-	int y_intercept = stream->lumin_data.luminance_millinits[index2] - slope * stream->lumin_data.refresh_rate_hz[index2];
+	y_intercept = stream->lumin_data.luminance_millinits[index2] - slope * stream->lumin_data.refresh_rate_hz[index2];
+	refresh_hz = div64_s64((brightness_millinits - y_intercept), slope);
 
-	return ((int)div64_s64((brightness_millinits - y_intercept), slope));
+	return (int)refresh_hz;
 }
 
 /*

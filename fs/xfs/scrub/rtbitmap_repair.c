@@ -3,7 +3,7 @@
  * Copyright (C) 2020-2023 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -36,6 +36,24 @@
 
 /* rt bitmap content repairs */
 
+/*
+ * Reserve enough blocks to write out a completely new bitmap file, plus twice
+ * as many blocks as we would need if we can only allocate one block per data
+ * fork mapping.  This should cover the preallocation of the temporary file and
+ * exchanging the extent mappings.
+ *
+ * We cannot use xfs_exchmaps_estimate because we have not yet constructed the
+ * replacement bitmap and therefore do not know how many extents it will use.
+ * By the time we do, we will have a dirty transaction (which we cannot drop
+ * because we cannot drop the rtbitmap ILOCK) and cannot ask for more
+ * reservation.
+ */
+static inline unsigned long long
+xrep_rtbitmap_calc_blocks(struct xfs_mount *mp, unsigned long long blocks)
+{
+	return blocks + (xfs_bmbt_calc_size(mp, blocks) * 2);
+}
+
 /* Set up to repair the realtime bitmap for this group. */
 int
 xrep_setup_rtbitmap(
@@ -43,7 +61,6 @@ xrep_setup_rtbitmap(
 	struct xchk_rtbitmap	*rtb)
 {
 	struct xfs_mount	*mp = sc->mp;
-	char			*descr;
 	unsigned long long	blocks = mp->m_sb.sb_rbmblocks;
 	int			error;
 
@@ -52,26 +69,12 @@ xrep_setup_rtbitmap(
 		return error;
 
 	/* Create an xfile to hold our reconstructed bitmap. */
-	descr = xchk_xfile_rtgroup_descr(sc, "bitmap file");
-	error = xfile_create(descr, blocks * mp->m_sb.sb_blocksize, &sc->xfile);
-	kfree(descr);
+	error = xfile_create("realtime bitmap file",
+			blocks * mp->m_sb.sb_blocksize, &sc->xfile);
 	if (error)
 		return error;
 
-	/*
-	 * Reserve enough blocks to write out a completely new bitmap file,
-	 * plus twice as many blocks as we would need if we can only allocate
-	 * one block per data fork mapping.  This should cover the
-	 * preallocation of the temporary file and exchanging the extent
-	 * mappings.
-	 *
-	 * We cannot use xfs_exchmaps_estimate because we have not yet
-	 * constructed the replacement bitmap and therefore do not know how
-	 * many extents it will use.  By the time we do, we will have a dirty
-	 * transaction (which we cannot drop because we cannot drop the
-	 * rtbitmap ILOCK) and cannot ask for more reservation.
-	 */
-	blocks += xfs_bmbt_calc_size(mp, blocks) * 2;
+	blocks = xrep_rtbitmap_calc_blocks(mp, mp->m_sb.sb_rbmblocks);
 	if (blocks > UINT_MAX)
 		return -EOPNOTSUPP;
 
@@ -273,7 +276,7 @@ xrep_rtbitmap_mark_free(
 		xrep_wordoff_t	rem;
 		xrep_wordcnt_t	wordcnt;
 
-		wordcnt = min_t(xrep_wordcnt_t, nextwordoff - wordoff,
+		wordcnt = min_t(xrep_wordoff_t, nextwordoff - wordoff,
 				bufwsize);
 
 		/*
@@ -336,7 +339,7 @@ xrep_rtbitmap_find_freespace(
 	/* Prepare a buffer of ones so that we can accelerate bulk setting. */
 	memset(rtb->words, 0xFF, mp->m_sb.sb_blocksize);
 
-	xrep_rtgroup_btcur_init(sc, &sc->sr);
+	xrep_rtgroup_btcur_init(sc);
 	error = xfs_rmap_query_all(sc->sr.rmap_cur, xrep_rtbitmap_walk_rtrmap,
 			rtb);
 	if (error)
@@ -354,7 +357,7 @@ xrep_rtbitmap_find_freespace(
 	}
 
 out:
-	xchk_rtgroup_btcur_free(&sc->sr);
+	xchk_rtgroup_btcur_free(sc);
 	return error;
 }
 
@@ -380,21 +383,8 @@ xrep_rtbitmap_prep_buf(
 	if (error)
 		return error;
 
-	if (xfs_has_rtgroups(sc->mp)) {
-		struct xfs_rtbuf_blkinfo	*hdr = bp->b_addr;
-
-		hdr->rt_magic = cpu_to_be32(XFS_RTBITMAP_MAGIC);
-		hdr->rt_owner = cpu_to_be64(sc->ip->i_ino);
-		hdr->rt_blkno = cpu_to_be64(xfs_buf_daddr(bp));
-		hdr->rt_lsn = 0;
-		uuid_copy(&hdr->rt_uuid, &sc->mp->m_sb.sb_meta_uuid);
-		bp->b_ops = &xfs_rtbitmap_buf_ops;
-	} else {
-		bp->b_ops = &xfs_rtbuf_ops;
-	}
-
+	xfs_rtfile_initialize_buf(sc->sr.rtg, XFS_RTGI_BITMAP, bp, sc->tp);
 	rtb->prep_wordoff += mp->m_blockwsize;
-	xfs_trans_buf_set_type(sc->tp, bp, XFS_BLFT_RTBITMAP_BUF);
 	return 0;
 }
 
@@ -514,7 +504,7 @@ xrep_rtbitmap(
 	struct xchk_rtbitmap	*rtb = sc->buf;
 	struct xfs_mount	*mp = sc->mp;
 	struct xfs_group	*xg = rtg_group(sc->sr.rtg);
-	unsigned long long	blocks = 0;
+	unsigned long long	blocks;
 	unsigned int		busy_gen;
 	int			error;
 
@@ -534,15 +524,20 @@ xrep_rtbitmap(
 	 * figure out if we need to adjust the block reservation in the
 	 * transaction.
 	 */
-	blocks = xfs_bmbt_calc_size(mp, rtb->rbmblocks);
+	blocks = xrep_rtbitmap_calc_blocks(mp, rtb->rbmblocks);
 	if (blocks > UINT_MAX)
 		return -EOPNOTSUPP;
 	if (blocks > rtb->resblks) {
-		error = xfs_trans_reserve_more(sc->tp, blocks, 0);
+		uint64_t	delta = blocks - rtb->resblks;
+
+		if (delta > UINT_MAX)
+			return -EOPNOTSUPP;
+
+		error = xfs_trans_reserve_more(sc->tp, delta, 0);
 		if (error)
 			return error;
 
-		rtb->resblks += blocks;
+		rtb->resblks += delta;
 	}
 
 	/* Fix inode core and forks. */

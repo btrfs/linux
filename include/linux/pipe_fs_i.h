@@ -4,15 +4,16 @@
 
 #define PIPE_DEF_BUFFERS	16
 
-#define PIPE_BUF_FLAG_LRU	0x01	/* page is on the LRU */
 #define PIPE_BUF_FLAG_ATOMIC	0x02	/* was atomically mapped */
-#define PIPE_BUF_FLAG_GIFT	0x04	/* page is a gift */
 #define PIPE_BUF_FLAG_PACKET	0x08	/* read() as a packet */
 #define PIPE_BUF_FLAG_CAN_MERGE	0x10	/* can merge buffers */
 #define PIPE_BUF_FLAG_WHOLE	0x20	/* read() must return entire buffer or error */
 #ifdef CONFIG_WATCH_QUEUE
 #define PIPE_BUF_FLAG_LOSS	0x40	/* Message loss happened after this buffer */
 #endif
+
+#define PIPE_PREALLOC_MAX	8	/* max pages in prealloc pool */
+#define PIPE_PREALLOC_KEEP	2	/* keep at least this many after trim */
 
 /**
  *	struct pipe_buffer - a linux kernel pipe buffer
@@ -44,11 +45,11 @@ typedef unsigned int pipe_index_t;
 typedef unsigned short pipe_index_t;
 #endif
 
-/*
- * We have to declare this outside 'struct pipe_inode_info',
- * but then we can't use 'union pipe_index' for an anonymous
- * union, so we end up having to duplicate this declaration
- * below. Annoying.
+/**
+ *	struct pipe_index - pipe indeces
+ *	@head: The point of buffer production
+ *	@tail: The point of buffer consumption
+ *	@head_tail: unsigned long union of @head and @tail
  */
 union pipe_index {
 	unsigned long head_tail;
@@ -59,24 +60,37 @@ union pipe_index {
 };
 
 /**
+ *	struct anon_pipe_prealloc - per-pipe page preallocation pool
+ *	@pages: array of cached pages (pool)
+ *	@count: number of pages currently in the pool
+ *
+ * Each pipe keeps a small bounded pool of preallocated pages to reduce
+ * allocation overhead during writes. The pool is bounded at PIPE_PREALLOC_MAX
+ * and trimmed down to PIPE_PREALLOC_KEEP after a write completes.
+ */
+struct anon_pipe_prealloc {
+	struct page *pages[PIPE_PREALLOC_MAX];
+
+	unsigned int __data_racy count;
+};
+
+/**
  *	struct pipe_inode_info - a linux kernel pipe
  *	@mutex: mutex protecting the whole thing
  *	@rd_wait: reader wait point in case of empty pipe
  *	@wr_wait: writer wait point in case of full pipe
- *	@head: The point of buffer production
- *	@tail: The point of buffer consumption
- *	@head_tail: unsigned long union of @head and @tail
+ *	@pipe_index: the pipe indeces
  *	@note_loss: The next read() should insert a data-lost message
  *	@max_usage: The maximum number of slots that may be used in the ring
  *	@ring_size: total number of buffers (should be a power of 2)
  *	@nr_accounted: The amount this pipe accounts for in user->pipe_bufs
- *	@tmp_page: cached released page
+ *	@prealloc: per-pipe page preallocation pool
  *	@readers: number of current readers of this pipe
  *	@writers: number of current writers of this pipe
  *	@files: number of struct file referring this pipe (protected by ->i_lock)
  *	@r_counter: reader counter
  *	@w_counter: writer counter
- *	@poll_usage: is this pipe used for epoll, which has crazy wakeups?
+ *	@pseudo_edgetrigger: has an EPOLLET consumer, enable per-write wakeups
  *	@fasync_readers: reader side fasync
  *	@fasync_writers: writer side fasync
  *	@bufs: the circular array of pipe buffers
@@ -87,14 +101,7 @@ struct pipe_inode_info {
 	struct mutex mutex;
 	wait_queue_head_t rd_wait, wr_wait;
 
-	/* This has to match the 'union pipe_index' above */
-	union {
-		unsigned long head_tail;
-		struct {
-			pipe_index_t head;
-			pipe_index_t tail;
-		};
-	};
+	union pipe_index;
 
 	unsigned int max_usage;
 	unsigned int ring_size;
@@ -104,11 +111,11 @@ struct pipe_inode_info {
 	unsigned int files;
 	unsigned int r_counter;
 	unsigned int w_counter;
-	bool poll_usage;
+	bool pseudo_edgetrigger;
 #ifdef CONFIG_WATCH_QUEUE
 	bool note_loss;
 #endif
-	struct page *tmp_page[2];
+	struct anon_pipe_prealloc prealloc;
 	struct fasync_struct *fasync_readers;
 	struct fasync_struct *fasync_writers;
 	struct pipe_buffer *bufs;
@@ -118,16 +125,6 @@ struct pipe_inode_info {
 #endif
 };
 
-/*
- * Note on the nesting of these functions:
- *
- * ->confirm()
- *	->try_steal()
- *
- * That is, ->try_steal() must be called on a confirmed buffer.  See below for
- * the meaning of each operation.  Also see the kerneldoc in fs/pipe.c for the
- * pipe and generic variants of these hooks.
- */
 struct pipe_buf_operations {
 	/*
 	 * ->confirm() verifies that the data in the pipe buffer is there
@@ -143,16 +140,6 @@ struct pipe_buf_operations {
 	 * consumed by a reader, ->release() is called.
 	 */
 	void (*release)(struct pipe_inode_info *, struct pipe_buffer *);
-
-	/*
-	 * Attempt to take ownership of the pipe buffer and its contents.
-	 * ->try_steal() returns %true for success, in which case the contents
-	 * of the pipe (the buf->page) is locked and now completely owned by the
-	 * caller. The page may then be transferred to a different mapping, the
-	 * most often used case is insertion into different file address space
-	 * cache.
-	 */
-	bool (*try_steal)(struct pipe_inode_info *, struct pipe_buffer *);
 
 	/*
 	 * Get a reference to the pipe buffer.
@@ -295,19 +282,6 @@ static inline int pipe_buf_confirm(struct pipe_inode_info *pipe,
 	return buf->ops->confirm(pipe, buf);
 }
 
-/**
- * pipe_buf_try_steal - attempt to take ownership of a pipe_buffer
- * @pipe:	the pipe that the buffer belongs to
- * @buf:	the buffer to attempt to steal
- */
-static inline bool pipe_buf_try_steal(struct pipe_inode_info *pipe,
-		struct pipe_buffer *buf)
-{
-	if (!buf->ops->try_steal)
-		return false;
-	return buf->ops->try_steal(pipe, buf);
-}
-
 /* Differs from PIPE_BUF in that PIPE_SIZE is the length of the actual
    memory allocation, whereas PIPE_BUF makes atomicity guarantees.  */
 #define PIPE_SIZE		PAGE_SIZE
@@ -326,10 +300,7 @@ void free_pipe_info(struct pipe_inode_info *);
 
 /* Generic pipe buffer ops functions */
 bool generic_pipe_buf_get(struct pipe_inode_info *, struct pipe_buffer *);
-bool generic_pipe_buf_try_steal(struct pipe_inode_info *, struct pipe_buffer *);
 void generic_pipe_buf_release(struct pipe_inode_info *, struct pipe_buffer *);
-
-extern const struct pipe_buf_operations nosteal_pipe_buf_ops;
 
 unsigned long account_pipe_buffers(struct user_struct *user,
 				   unsigned long old, unsigned long new);

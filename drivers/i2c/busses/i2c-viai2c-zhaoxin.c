@@ -305,10 +305,9 @@ static int zxi2c_probe(struct platform_device *pdev)
 	error = devm_request_irq(&pdev->dev, i2c->irq, zxi2c_isr,
 				 IRQF_SHARED, pdev->name, i2c);
 	if (error)
-		return dev_err_probe(&pdev->dev, error,
-				"failed to request irq %i\n", i2c->irq);
+		return error;
 
-	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&pdev->dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 	i2c->pltfm_priv = priv;
@@ -346,7 +345,7 @@ static const struct dev_pm_ops zxi2c_pm = {
 };
 
 static const struct acpi_device_id zxi2c_acpi_match[] = {
-	{"IIC1D17", 0 },
+	{ .id = "IIC1D17" },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, zxi2c_acpi_match);

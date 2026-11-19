@@ -108,10 +108,8 @@ static int a37xx_mbox_startup(struct mbox_chan *chan)
 
 	ret = devm_request_irq(mbox->dev, mbox->irq, a37xx_mbox_irq_handler, 0,
 			       DRIVER_NAME, chan);
-	if (ret < 0) {
-		dev_err(mbox->dev, "Cannot request irq\n");
+	if (ret < 0)
 		return ret;
-	}
 
 	/* enable IRQ generation */
 	reg = readl(mbox->base + RWTM_HOST_INT_MASK);
@@ -146,12 +144,12 @@ static int armada_37xx_mbox_probe(struct platform_device *pdev)
 	struct mbox_chan *chans;
 	int ret;
 
-	mbox = devm_kzalloc(&pdev->dev, sizeof(*mbox), GFP_KERNEL);
+	mbox = devm_kzalloc_obj(&pdev->dev, *mbox);
 	if (!mbox)
 		return -ENOMEM;
 
 	/* Allocated one channel */
-	chans = devm_kzalloc(&pdev->dev, sizeof(*chans), GFP_KERNEL);
+	chans = devm_kzalloc_obj(&pdev->dev, *chans);
 	if (!chans)
 		return -ENOMEM;
 

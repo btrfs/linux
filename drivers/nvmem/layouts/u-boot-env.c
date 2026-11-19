@@ -6,6 +6,7 @@
 #include <linux/crc32.h>
 #include <linux/etherdevice.h>
 #include <linux/export.h>
+#include <linux/hex.h>
 #include <linux/if_ether.h>
 #include <linux/nvmem-consumer.h>
 #include <linux/nvmem-provider.h>
@@ -36,9 +37,6 @@ static int u_boot_env_read_post_process_ethaddr(void *context, const char *id, i
 						unsigned int offset, void *buf, size_t bytes)
 {
 	u8 mac[ETH_ALEN];
-
-	if (bytes != MAC_ADDR_STR_LEN)
-		return -EINVAL;
 
 	if (!mac_pton(buf, mac))
 		return -EINVAL;
@@ -74,7 +72,7 @@ static int u_boot_env_parse_cells(struct device *dev, struct nvmem_device *nvmem
 		info.offset = data_offset + value - data;
 		info.bytes = strlen(value);
 		info.np = of_get_child_by_name(dev->of_node, info.name);
-		if (!strcmp(var, "ethaddr")) {
+		if (!strcmp(var, "ethaddr") && info.bytes == MAC_ADDR_STR_LEN) {
 			info.raw_len = strlen(value);
 			info.bytes = ETH_ALEN;
 			info.read_post_process = u_boot_env_read_post_process_ethaddr;
@@ -99,10 +97,12 @@ int u_boot_env_parse(struct device *dev, struct nvmem_device *nvmem,
 	uint32_t crc32;
 	uint32_t calc;
 	uint8_t *buf;
+	u32 env_size;
 	int bytes;
 	int err;
 
-	dev_size = nvmem_dev_size(nvmem);
+	dev_size = device_property_read_u32(dev, "env-size", &env_size) ?
+		nvmem_dev_size(nvmem) : (size_t)env_size;
 
 	buf = kzalloc(dev_size, GFP_KERNEL);
 	if (!buf) {

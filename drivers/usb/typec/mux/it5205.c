@@ -178,7 +178,7 @@ static int it5205_probe(struct i2c_client *client)
 	u32 val, chipid = 0;
 	int i, ret;
 
-	it = devm_kzalloc(dev, sizeof(*it), GFP_KERNEL);
+	it = devm_kzalloc_obj(dev, *it);
 	if (!it)
 		return -ENOMEM;
 
@@ -250,7 +250,7 @@ static int it5205_probe(struct i2c_client *client)
 		if (ret) {
 			typec_mux_unregister(it->mux);
 			typec_switch_unregister(it->sw);
-			return dev_err_probe(dev, ret, "Failed to request irq\n");
+			return ret;
 		}
 	}
 
@@ -266,7 +266,7 @@ static void it5205_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id it5205_table[] = {
-	{ "it5205" },
+	{ .name = "it5205" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(i2c, it5205_table);

@@ -15,7 +15,6 @@
 #include <linux/input/matrix_keypad.h>
 #include <linux/interrupt.h>
 #include <linux/mfd/max7360.h>
-#include <linux/mod_devicetable.h>
 #include <linux/minmax.h>
 #include <linux/module.h>
 #include <linux/property.h>
@@ -235,7 +234,7 @@ static int max7360_keypad_probe(struct platform_device *pdev)
 	if (irq < 0)
 		return dev_err_probe(dev, irq, "Failed to get IRQ\n");
 
-	max7360_keypad = devm_kzalloc(dev, sizeof(*max7360_keypad), GFP_KERNEL);
+	max7360_keypad = devm_kzalloc_obj(dev, *max7360_keypad);
 	if (!max7360_keypad)
 		return -ENOMEM;
 

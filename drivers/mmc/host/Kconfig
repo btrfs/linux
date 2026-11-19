@@ -315,14 +315,14 @@ config MMC_SDHCI_ESDHC_MCF
 
 config MMC_SDHCI_ESDHC_IMX
 	tristate "SDHCI support for the Freescale eSDHC/uSDHC i.MX controller"
-	depends on ARCH_MXC || COMPILE_TEST
+	depends on ARCH_MXC || ARCH_S32 || COMPILE_TEST
 	depends on MMC_SDHCI_PLTFM
 	depends on OF
 	select MMC_SDHCI_IO_ACCESSORS
 	select MMC_CQHCI
 	help
 	  This selects the Freescale eSDHC/uSDHC controller support
-	  found on i.MX25, i.MX35 i.MX5x and i.MX6x.
+	  found on i.MX25, i.MX35, i.MX5x, i.MX6x, and S32G.
 
 	  If you have a controller with this interface, say Y or M here.
 
@@ -429,6 +429,20 @@ config MMC_SDHCI_BCM_KONA
 
 	  If you have a controller with this interface, say Y or M here.
 
+config MMC_SDHCI_BST
+	tristate "SDHCI support for Black Sesame Technologies BST C1200 controller"
+	depends on ARCH_BST || COMPILE_TEST
+	depends on MMC_SDHCI_PLTFM
+	depends on OF
+	help
+	  This selects the Secure Digital Host Controller Interface (SDHCI)
+	  for Black Sesame Technologies BST C1200 SoC. The controller is
+	  based on Synopsys DesignWare Cores Mobile Storage Controller but
+	  requires platform-specific workarounds for hardware limitations.
+
+	  If you have a controller with this interface, say Y or M here.
+	  If unsure, say N.
+
 config MMC_SDHCI_F_SDH30
 	tristate "SDHCI support for Fujitsu Semiconductor F_SDH30"
 	depends on MMC_SDHCI_PLTFM
@@ -504,6 +518,7 @@ config MMC_MESON_MX_SDIO
 	depends on ARCH_MESON || COMPILE_TEST
 	depends on COMMON_CLK
 	depends on OF_ADDRESS
+	select REGMAP_MMIO
 	help
 	  This selects support for the SD/MMC Host Controller on
 	  Amlogic Meson6, Meson8 and Meson8b SoCs.
@@ -902,37 +917,6 @@ config MMC_JZ4740
 	  If you have a board based on such a SoC and with a SD/MMC slot,
 	  say Y or M here.
 
-config MMC_VUB300
-	tristate "VUB300 USB to SDIO/SD/MMC Host Controller support"
-	depends on USB
-	help
-	  This selects support for Elan Digital Systems' VUB300 chip.
-
-	  The VUB300 is a USB-SDIO Host Controller Interface chip
-	  that enables the host computer to use SDIO/SD/MMC cards
-	  via a USB 2.0 or USB 1.1 host.
-
-	  The VUB300 chip will be found in both physically separate
-	  USB to SDIO/SD/MMC adapters and embedded on some motherboards.
-
-	  The VUB300 chip supports SD and MMC memory cards in addition
-	  to single and multifunction SDIO cards.
-
-	  Some SDIO cards will need a firmware file to be loaded and
-	  sent to VUB300 chip in order to achieve better data throughput.
-	  Download these "Offload Pseudocode" from Elan Digital Systems'
-	  web-site http://www.elandigitalsystems.com/support/downloads.php
-	  and put them in /lib/firmware. Note that without these additional
-	  firmware files the VUB300 chip will still function, but not at
-	  the best obtainable data rate.
-
-	  To compile this mmc host controller driver as a module,
-	  choose M here: the module will be called vub300.
-
-	  If you have a computer with an embedded VUB300 chip
-	  or if you intend connecting a USB adapter based on a
-	  VUB300 chip say Y or M here.
-
 config MMC_USHC
 	tristate "USB SD Host Controller (USHC) support"
 	depends on USB
@@ -1043,7 +1027,7 @@ config MMC_MTK
 
 config MMC_SDHCI_MICROCHIP_PIC32
 	tristate "Microchip PIC32MZDA SDHCI support"
-	depends on MMC_SDHCI && PIC32MZDA && MMC_SDHCI_PLTFM
+	depends on MMC_SDHCI && MMC_SDHCI_PLTFM && (PIC32MZDA || COMPILE_TEST)
 	help
 	  This selects the Secure Digital Host Controller Interface (SDHCI)
 	  for PIC32MZDA platform.

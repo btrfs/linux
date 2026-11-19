@@ -163,7 +163,7 @@ static void rk_crypto_pm_exit(struct rk_crypto_info *rkdev)
 
 static irqreturn_t rk_crypto_irq_handle(int irq, void *dev_id)
 {
-	struct rk_crypto_info *dev  = platform_get_drvdata(dev_id);
+	struct rk_crypto_info *dev = dev_id;
 	u32 interrupt_status;
 
 	interrupt_status = CRYPTO_READ(dev, RK_CRYPTO_INTSTS);
@@ -319,8 +319,7 @@ static int rk_crypto_probe(struct platform_device *pdev)
 	struct rk_crypto_info *crypto_info, *first;
 	int err = 0;
 
-	crypto_info = devm_kzalloc(&pdev->dev,
-				   sizeof(*crypto_info), GFP_KERNEL);
+	crypto_info = devm_kzalloc_obj(&pdev->dev, *crypto_info);
 	if (!crypto_info) {
 		err = -ENOMEM;
 		goto err_crypto;
@@ -363,12 +362,10 @@ static int rk_crypto_probe(struct platform_device *pdev)
 
 	err = devm_request_irq(&pdev->dev, crypto_info->irq,
 			       rk_crypto_irq_handle, IRQF_SHARED,
-			       "rk-crypto", pdev);
+			       "rk-crypto", crypto_info);
 
-	if (err) {
-		dev_err(&pdev->dev, "irq request failed.\n");
+	if (err)
 		goto err_crypto;
-	}
 
 	crypto_info->engine = crypto_engine_alloc_init(&pdev->dev, true);
 	if (!crypto_info->engine) {

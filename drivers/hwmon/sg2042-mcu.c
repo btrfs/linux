@@ -311,7 +311,7 @@ static int sg2042_mcu_i2c_probe(struct i2c_client *client)
 						I2C_FUNC_SMBUS_BLOCK_DATA))
 		return -ENODEV;
 
-	mcu = devm_kmalloc(dev, sizeof(*mcu), GFP_KERNEL);
+	mcu = devm_kmalloc_obj(dev, *mcu);
 	if (!mcu)
 		return -ENOMEM;
 
@@ -333,7 +333,7 @@ static int sg2042_mcu_i2c_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id sg2042_mcu_id[] = {
-	{ "sg2042-hwmon-mcu" },
+	{ .name = "sg2042-hwmon-mcu" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, sg2042_mcu_id);

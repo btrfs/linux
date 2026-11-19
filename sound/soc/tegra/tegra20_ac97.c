@@ -305,8 +305,7 @@ static int tegra20_ac97_platform_probe(struct platform_device *pdev)
 	void __iomem *regs;
 	int ret = 0;
 
-	ac97 = devm_kzalloc(&pdev->dev, sizeof(struct tegra20_ac97),
-			    GFP_KERNEL);
+	ac97 = devm_kzalloc_obj(&pdev->dev, struct tegra20_ac97);
 	if (!ac97) {
 		ret = -ENOMEM;
 		goto err;
@@ -441,6 +440,7 @@ static const struct of_device_id tegra20_ac97_of_match[] = {
 	{ .compatible = "nvidia,tegra20-ac97", },
 	{},
 };
+MODULE_DEVICE_TABLE(of, tegra20_ac97_of_match);
 
 static struct platform_driver tegra20_ac97_driver = {
 	.driver = {
@@ -456,4 +456,3 @@ MODULE_AUTHOR("Lucas Stach");
 MODULE_DESCRIPTION("Tegra20 AC97 ASoC driver");
 MODULE_LICENSE("GPL v2");
 MODULE_ALIAS("platform:" DRV_NAME);
-MODULE_DEVICE_TABLE(of, tegra20_ac97_of_match);

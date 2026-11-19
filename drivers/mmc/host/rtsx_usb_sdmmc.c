@@ -44,6 +44,7 @@ struct rtsx_usb_sdmmc {
 	bool			double_clk;
 	bool			host_removal;
 	bool			card_exist;
+	bool			suppress_cd;
 	bool			initial_mode;
 	bool			ddr_mode;
 
@@ -774,6 +775,7 @@ static int sdmmc_get_cd(struct mmc_host *mmc)
 	struct rtsx_ucr *ucr = host->ucr;
 	int err;
 	u16 val;
+	bool cd;
 
 	if (host->host_removal)
 		return -ENOMEDIUM;
@@ -791,8 +793,14 @@ static int sdmmc_get_cd(struct mmc_host *mmc)
 
 	/* get OCP status */
 	host->ocp_stat = (val >> 4) & 0x03;
+	cd = val & SD_CD;
 
-	if (val & SD_CD) {
+	if (!cd) {
+		WRITE_ONCE(host->suppress_cd, false);
+		goto no_card;
+	}
+
+	if (!READ_ONCE(host->suppress_cd)) {
 		host->card_exist = true;
 		return 1;
 	}
@@ -874,6 +882,8 @@ finish_detect_card:
 		 * detect card when fail to update card existence state and
 		 * speed up card removal when retry
 		 */
+		if (!mmc->card && cmd->error == -ETIMEDOUT)
+			WRITE_ONCE(host->suppress_cd, true);
 		sdmmc_get_cd(mmc);
 		dev_dbg(sdmmc_dev(host), "cmd->error = %d\n", cmd->error);
 	}
@@ -970,6 +980,11 @@ static int sd_power_on(struct rtsx_usb_sdmmc *host)
 	}
 	dev_dbg(sdmmc_dev(host), "%s\n", __func__);
 	rtsx_usb_init_cmd(ucr);
+	/* Start SD init at 3.3V, like the old rts5139 driver. */
+	rtsx_usb_add_cmd(ucr, WRITE_REG_CMD, SD_PAD_CTL,
+			 SD_IO_USING_1V8, SD_IO_USING_3V3);
+	rtsx_usb_add_cmd(ucr, WRITE_REG_CMD, LDO_POWER_CFG,
+			 TUNE_SD18_MASK, TUNE_SD18_3V3);
 	rtsx_usb_add_cmd(ucr, WRITE_REG_CMD, CARD_SELECT, 0x07, SD_MOD_SEL);
 	rtsx_usb_add_cmd(ucr, WRITE_REG_CMD, CARD_SHARE_MODE,
 			CARD_SHARE_MASK, CARD_SHARE_SD);
@@ -1359,6 +1374,7 @@ static void rtsx_usb_init_host(struct rtsx_usb_sdmmc *host)
 
 	host->power_mode = MMC_POWER_OFF;
 	host->ocp_stat = 0;
+	host->suppress_cd = false;
 }
 
 static int rtsx_usb_sdmmc_drv_probe(struct platform_device *pdev)

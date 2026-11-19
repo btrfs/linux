@@ -17,7 +17,6 @@
 #include <linux/i2c.h>
 #include <linux/init.h>
 #include <linux/iopoll.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/pm.h>
@@ -248,10 +247,9 @@ static int ltrf216a_get_lux(struct ltrf216a_data *data)
 		return ret;
 
 	greendata = ltrf216a_read_data(data, LTRF216A_ALS_DATA_0);
+	ltrf216a_set_power_state(data, false);
 	if (greendata < 0)
 		return greendata;
-
-	ltrf216a_set_power_state(data, false);
 
 	lux = greendata * data->info->lux_multiplier * LTRF216A_WIN_FAC;
 
@@ -551,8 +549,8 @@ static const struct ltr_chip_info ltrf216a_chip_info = {
 };
 
 static const struct i2c_device_id ltrf216a_id[] = {
-	{ "ltr308", .driver_data = (kernel_ulong_t)&ltr308_chip_info },
-	{ "ltrf216a", .driver_data = (kernel_ulong_t)&ltrf216a_chip_info },
+	{ .name = "ltr308", .driver_data = (kernel_ulong_t)&ltr308_chip_info },
+	{ .name = "ltrf216a", .driver_data = (kernel_ulong_t)&ltrf216a_chip_info },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ltrf216a_id);

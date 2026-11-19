@@ -746,7 +746,7 @@ static int snd_uart16550_create(struct snd_card *card,
 	int err;
 
 
-	uart = devm_kzalloc(card->dev, sizeof(*uart), GFP_KERNEL);
+	uart = devm_kzalloc_obj(card->dev, *uart);
 	if (!uart)
 		return -ENOMEM;
 	uart->adaptor = adaptor;
@@ -845,6 +845,12 @@ static int snd_serial_probe(struct platform_device *devptr)
 	struct snd_uart16550 *uart;
 	int err;
 	int dev = devptr->id;
+
+	if (dev < 0 || dev >= SNDRV_CARDS) {
+		dev_warn(&devptr->dev,
+			 "Invalid card index %d, using default 0\n", dev);
+		dev = 0;
+	}
 
 	switch (adaptor[dev]) {
 	case SNDRV_SERIAL_SOUNDCANVAS:

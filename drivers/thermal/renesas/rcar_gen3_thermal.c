@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- *  R-Car Gen3 THS thermal sensor driver
+ *  R-Car Gen3, Gen4 and RZ/G2 THS thermal sensor driver
  *  Based on rcar_thermal.c and work from Hien Dang and Khiem Nguyen.
  *
  * Copyright (C) 2016 Renesas Electronics Corporation.
@@ -518,7 +518,7 @@ static int rcar_gen3_thermal_probe(struct platform_device *pdev)
 	unsigned int i;
 	int ret;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -540,7 +540,7 @@ static int rcar_gen3_thermal_probe(struct platform_device *pdev)
 		if (!res)
 			break;
 
-		tsc = devm_kzalloc(dev, sizeof(*tsc), GFP_KERNEL);
+		tsc = devm_kzalloc_obj(dev, *tsc);
 		if (!tsc) {
 			ret = -ENOMEM;
 			goto error_unregister;
@@ -601,7 +601,7 @@ error_unregister:
 	return ret;
 }
 
-static int __maybe_unused rcar_gen3_thermal_resume(struct device *dev)
+static int rcar_gen3_thermal_resume(struct device *dev)
 {
 	struct rcar_gen3_thermal_priv *priv = dev_get_drvdata(dev);
 	unsigned int i;
@@ -615,13 +615,13 @@ static int __maybe_unused rcar_gen3_thermal_resume(struct device *dev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(rcar_gen3_thermal_pm_ops, NULL,
-			 rcar_gen3_thermal_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(rcar_gen3_thermal_pm_ops, NULL,
+				rcar_gen3_thermal_resume);
 
 static struct platform_driver rcar_gen3_thermal_driver = {
 	.driver	= {
 		.name	= "rcar_gen3_thermal",
-		.pm = &rcar_gen3_thermal_pm_ops,
+		.pm = pm_sleep_ptr(&rcar_gen3_thermal_pm_ops),
 		.of_match_table = rcar_gen3_thermal_dt_ids,
 	},
 	.probe		= rcar_gen3_thermal_probe,

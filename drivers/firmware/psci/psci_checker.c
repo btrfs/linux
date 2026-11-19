@@ -155,8 +155,7 @@ static int alloc_init_cpu_groups(cpumask_var_t **pcpu_groups)
 	if (!alloc_cpumask_var(&tmp, GFP_KERNEL))
 		return -ENOMEM;
 
-	cpu_groups = kcalloc(nb_available_cpus, sizeof(*cpu_groups),
-			     GFP_KERNEL);
+	cpu_groups = kzalloc_objs(*cpu_groups, nb_available_cpus);
 	if (!cpu_groups) {
 		free_cpumask_var(tmp);
 		return -ENOMEM;
@@ -187,7 +186,6 @@ static int hotplug_tests(void)
 {
 	int i, nb_cpu_group, err = -ENOMEM;
 	cpumask_var_t offlined_cpus, *cpu_groups;
-	char *page_buf;
 
 	if (!alloc_cpumask_var(&offlined_cpus, GFP_KERNEL))
 		return err;
@@ -195,10 +193,6 @@ static int hotplug_tests(void)
 	nb_cpu_group = alloc_init_cpu_groups(&cpu_groups);
 	if (nb_cpu_group < 0)
 		goto out_free_cpus;
-	page_buf = (char *)__get_free_page(GFP_KERNEL);
-	if (!page_buf)
-		goto out_free_cpu_groups;
-
 	/*
 	 * Of course the last CPU cannot be powered down and cpu_down() should
 	 * refuse doing that.
@@ -211,17 +205,11 @@ static int hotplug_tests(void)
 	 * off, the cpu group itself should shut down.
 	 */
 	for (i = 0; i < nb_cpu_group; ++i) {
-		ssize_t len = cpumap_print_to_pagebuf(true, page_buf,
-						      cpu_groups[i]);
-		/* Remove trailing newline. */
-		page_buf[len - 1] = '\0';
-		pr_info("Trying to turn off and on again group %d (CPUs %s)\n",
-			i, page_buf);
+		pr_info("Trying to turn off and on again group %d (CPUs %*pbl)\n",
+			i, cpumask_pr_args(cpu_groups[i]));
 		err += down_and_up_cpus(cpu_groups[i], offlined_cpus);
 	}
 
-	free_page((unsigned long)page_buf);
-out_free_cpu_groups:
 	free_cpu_groups(nb_cpu_group, &cpu_groups);
 out_free_cpus:
 	free_cpumask_var(offlined_cpus);
@@ -370,8 +358,7 @@ static int suspend_tests(void)
 	struct task_struct **threads;
 	int nb_threads = 0;
 
-	threads = kmalloc_array(nb_available_cpus, sizeof(*threads),
-				GFP_KERNEL);
+	threads = kmalloc_objs(*threads, nb_available_cpus);
 	if (!threads)
 		return -ENOMEM;
 

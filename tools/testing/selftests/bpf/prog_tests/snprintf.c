@@ -15,8 +15,8 @@
 #define EXP_SYM_OUT  "schedule schedule+0x0/"
 #define MIN_SYM_RET  sizeof(EXP_SYM_OUT)
 
-/* The third specifier, %p, is a hashed pointer which changes on every reboot */
-#define EXP_ADDR_OUT "0000000000000000 ffff00000add4e55 "
+/* The second specifier, %p, is a hashed pointer which changes on every reboot */
+#define EXP_ADDR_OUT "ffff00000add4e55 "
 #define EXP_ADDR_RET sizeof(EXP_ADDR_OUT "unknownhashedptr")
 
 #define EXP_STR_OUT  "str1         a  b c      d e longstr"
@@ -114,7 +114,8 @@ static void test_snprintf_negative(void)
 	ASSERT_ERR(load_single_snprintf("%--------"), "invalid specifier 5");
 	ASSERT_ERR(load_single_snprintf("%lc"), "invalid specifier 6");
 	ASSERT_ERR(load_single_snprintf("%llc"), "invalid specifier 7");
-	ASSERT_ERR(load_single_snprintf("\x80"), "non ascii character");
+	ASSERT_OK(load_single_snprintf("\x80"), "non ascii plain text");
+	ASSERT_ERR(load_single_snprintf("%\x80"), "non ascii in specifier");
 	ASSERT_ERR(load_single_snprintf("\x1"), "non printable character");
 	ASSERT_ERR(load_single_snprintf("%p%"), "invalid specifier 8");
 	ASSERT_ERR(load_single_snprintf("%s%"), "invalid specifier 9");

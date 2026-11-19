@@ -2367,7 +2367,7 @@ struct pvr2_hdw *pvr2_hdw_create(struct usb_interface *intf,
 		goto fail;
 	}
 
-	hdw = kzalloc(sizeof(*hdw),GFP_KERNEL);
+	hdw = kzalloc_obj(*hdw);
 	pvr2_trace(PVR2_TRACE_INIT,"pvr2_hdw_create: hdw=%p, type \"%s\"",
 		   hdw,hdw_desc->description);
 	pvr2_trace(PVR2_TRACE_INFO, "Hardware description: %s",
@@ -2424,8 +2424,7 @@ struct pvr2_hdw *pvr2_hdw_create(struct usb_interface *intf,
 
 	hdw->control_cnt = CTRLDEF_COUNT;
 	hdw->control_cnt += MPEGDEF_COUNT;
-	hdw->controls = kcalloc(hdw->control_cnt, sizeof(struct pvr2_ctrl),
-				GFP_KERNEL);
+	hdw->controls = kzalloc_objs(struct pvr2_ctrl, hdw->control_cnt);
 	if (!hdw->controls) goto fail;
 	hdw->hdw_desc = hdw_desc;
 	hdw->ir_scheme_active = hdw->hdw_desc->ir_scheme;
@@ -2450,9 +2449,8 @@ struct pvr2_hdw *pvr2_hdw_create(struct usb_interface *intf,
 	}
 
 	/* Define and configure additional controls from cx2341x module. */
-	hdw->mpeg_ctrl_info = kcalloc(MPEGDEF_COUNT,
-				      sizeof(*(hdw->mpeg_ctrl_info)),
-				      GFP_KERNEL);
+	hdw->mpeg_ctrl_info = kzalloc_objs(*(hdw->mpeg_ctrl_info),
+					   MPEGDEF_COUNT);
 	if (!hdw->mpeg_ctrl_info) goto fail;
 	for (idx = 0; idx < MPEGDEF_COUNT; idx++) {
 		cptr = hdw->controls + idx + CTRLDEF_COUNT;
@@ -2926,7 +2924,7 @@ static void pvr2_subdev_update(struct pvr2_hdw *hdw)
 		format.format.code = MEDIA_BUS_FMT_FIXED;
 		pvr2_trace(PVR2_TRACE_CHIPS, "subdev v4l2 set_size(%dx%d)",
 			   format.format.width, format.format.height);
-		v4l2_device_call_all(&hdw->v4l2_dev, 0, pad, set_fmt,
+		v4l2_device_call_all(&hdw->v4l2_dev, 0, pad, set_fmt, NULL,
 				     NULL, &format);
 	}
 
@@ -3622,7 +3620,7 @@ static int pvr2_send_request_ex(struct pvr2_hdw *hdw,
 		pvr2_trace(
 			PVR2_TRACE_ERROR_LEGS,
 			"Attempted to execute %d byte control-read transfer (limit=%d)",
-			write_len,PVR2_CTL_BUFFSIZE);
+			read_len, PVR2_CTL_BUFFSIZE);
 		return -EINVAL;
 	}
 	if ((!write_len) && (!read_len)) {
@@ -3671,7 +3669,9 @@ static int pvr2_send_request_ex(struct pvr2_hdw *hdw,
 			pvr2_trace(
 				PVR2_TRACE_ERROR_LEGS,
 				"Invalid write control endpoint");
-			return -EINVAL;
+			hdw->ctl_write_pend_flag = 0;
+			status = -EINVAL;
+			goto done;
 		}
 		status = usb_submit_urb(hdw->ctl_write_urb,GFP_KERNEL);
 		if (status < 0) {
@@ -3701,7 +3701,13 @@ status);
 			pvr2_trace(
 				PVR2_TRACE_ERROR_LEGS,
 				"Invalid read control endpoint");
-			return -EINVAL;
+			hdw->ctl_read_pend_flag = 0;
+			status = -EINVAL;
+			if (hdw->ctl_write_pend_flag) {
+				usb_unlink_urb(hdw->ctl_write_urb);
+				wait_for_completion(&hdw->ctl_done);
+			}
+			goto done;
 		}
 		status = usb_submit_urb(hdw->ctl_read_urb,GFP_KERNEL);
 		if (status < 0) {
@@ -3709,6 +3715,11 @@ status);
 				   "Failed to submit read-control URB status=%d",
 status);
 			hdw->ctl_read_pend_flag = 0;
+			if (hdw->ctl_write_pend_flag) {
+				usb_unlink_urb(hdw->ctl_write_urb);
+				while (hdw->ctl_write_pend_flag)
+					wait_for_completion(&hdw->ctl_done);
+			}
 			goto done;
 		}
 	}

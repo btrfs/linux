@@ -29,7 +29,6 @@
  */
 
 #include <linux/leds.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/property.h>
@@ -86,7 +85,7 @@ static int spi_byte_probe(struct spi_device *spi)
 		return -EINVAL;
 	}
 
-	led = devm_kzalloc(dev, sizeof(*led), GFP_KERNEL);
+	led = devm_kzalloc_obj(dev, *led);
 	if (!led)
 		return -ENOMEM;
 

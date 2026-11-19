@@ -120,12 +120,11 @@ int sun8i_ss_hash_init_tfm(struct crypto_ahash *tfm)
 	memcpy(algt->fbname, crypto_ahash_driver_name(op->fallback_tfm),
 	       CRYPTO_MAX_ALG_NAME);
 
-	err = pm_runtime_get_sync(op->ss->dev);
+	err = pm_runtime_resume_and_get(op->ss->dev);
 	if (err < 0)
 		goto error_pm;
 	return 0;
 error_pm:
-	pm_runtime_put_noidle(op->ss->dev);
 	crypto_free_ahash(op->fallback_tfm);
 	return err;
 }
@@ -502,6 +501,7 @@ int sun8i_ss_hash_run(struct crypto_engine *engine, void *breq)
 
 	algt = container_of(alg, struct sun8i_ss_alg_template, alg.hash.base);
 	ss = algt->ss;
+	j = 0;
 
 	digestsize = crypto_ahash_digestsize(tfm);
 	if (digestsize == SHA224_DIGEST_SIZE)
@@ -536,7 +536,6 @@ int sun8i_ss_hash_run(struct crypto_engine *engine, void *breq)
 		goto err_dma_result;
 	}
 
-	j = 0;
 	len = areq->nbytes;
 	sg = areq->src;
 	i = 0;

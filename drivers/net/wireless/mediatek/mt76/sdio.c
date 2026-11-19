@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: ISC
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 /* Copyright (C) 2020 MediaTek Inc.
  *
  * This file is written based on mt76/usb.c.
@@ -306,9 +306,7 @@ int mt76s_alloc_rx_queue(struct mt76_dev *dev, enum mt76_rxq_id qid)
 	struct mt76_queue *q = &dev->q_rx[qid];
 
 	spin_lock_init(&q->lock);
-	q->entry = devm_kcalloc(dev->dev,
-				MT76S_NUM_RX_ENTRIES, sizeof(*q->entry),
-				GFP_KERNEL);
+	q->entry = devm_kzalloc_objs(dev->dev, *q->entry, MT76S_NUM_RX_ENTRIES);
 	if (!q->entry)
 		return -ENOMEM;
 
@@ -324,14 +322,12 @@ static struct mt76_queue *mt76s_alloc_tx_queue(struct mt76_dev *dev)
 {
 	struct mt76_queue *q;
 
-	q = devm_kzalloc(dev->dev, sizeof(*q), GFP_KERNEL);
+	q = devm_kzalloc_obj(dev->dev, *q);
 	if (!q)
 		return ERR_PTR(-ENOMEM);
 
 	spin_lock_init(&q->lock);
-	q->entry = devm_kcalloc(dev->dev,
-				MT76S_NUM_TX_ENTRIES, sizeof(*q->entry),
-				GFP_KERNEL);
+	q->entry = devm_kzalloc_objs(dev->dev, *q->entry, MT76S_NUM_TX_ENTRIES);
 	if (!q->entry)
 		return ERR_PTR(-ENOMEM);
 
@@ -519,6 +515,10 @@ mt76s_tx_queue_skb(struct mt76_phy *phy, struct mt76_queue *q,
 		   enum mt76_txq_id qid, struct sk_buff *skb,
 		   struct mt76_wcid *wcid, struct ieee80211_sta *sta)
 {
+	struct ieee80211_tx_status status = {
+		.sta = sta,
+	};
+
 	struct mt76_tx_info tx_info = {
 		.skb = skb,
 	};
@@ -531,8 +531,13 @@ mt76s_tx_queue_skb(struct mt76_phy *phy, struct mt76_queue *q,
 
 	skb->prev = skb->next = NULL;
 	err = dev->drv->tx_prepare_skb(dev, NULL, qid, wcid, sta, &tx_info);
-	if (err < 0)
+	if (err < 0) {
+		status.skb = tx_info.skb;
+		spin_lock_bh(&dev->rx_lock);
+		ieee80211_tx_status_ext(dev->hw, &status);
+		spin_unlock_bh(&dev->rx_lock);
 		return err;
+	}
 
 	q->entry[q->head].skb = tx_info.skb;
 	q->entry[q->head].buf_sz = len;

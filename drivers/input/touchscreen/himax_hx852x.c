@@ -16,7 +16,6 @@
 #include <linux/input/touchscreen.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/regulator/consumer.h>
@@ -389,7 +388,7 @@ static int hx852x_probe(struct i2c_client *client)
 		return -ENXIO;
 	}
 
-	hx = devm_kzalloc(dev, sizeof(*hx), GFP_KERNEL);
+	hx = devm_kzalloc_obj(dev, *hx);
 	if (!hx)
 		return -ENOMEM;
 

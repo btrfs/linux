@@ -133,7 +133,7 @@ static int gsbi_probe(struct platform_device *pdev)
 	u32 mask, gsbi_num;
 	const struct crci_config *config = NULL;
 
-	gsbi = devm_kzalloc(&pdev->dev, sizeof(*gsbi), GFP_KERNEL);
+	gsbi = devm_kzalloc_obj(&pdev->dev, *gsbi);
 
 	if (!gsbi)
 		return -ENOMEM;
@@ -212,13 +212,6 @@ static int gsbi_probe(struct platform_device *pdev)
 	return of_platform_populate(node, NULL, NULL, &pdev->dev);
 }
 
-static void gsbi_remove(struct platform_device *pdev)
-{
-	struct gsbi_info *gsbi = platform_get_drvdata(pdev);
-
-	clk_disable_unprepare(gsbi->hclk);
-}
-
 static const struct of_device_id gsbi_dt_match[] = {
 	{ .compatible = "qcom,gsbi-v1.0.0", },
 	{ },
@@ -232,7 +225,6 @@ static struct platform_driver gsbi_driver = {
 		.of_match_table	= gsbi_dt_match,
 	},
 	.probe = gsbi_probe,
-	.remove = gsbi_remove,
 };
 
 module_platform_driver(gsbi_driver);

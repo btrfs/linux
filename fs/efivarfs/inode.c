@@ -74,8 +74,8 @@ static bool efivarfs_valid_name(const char *str, int len)
 	return uuid_is_valid(s);
 }
 
-static int efivarfs_create(struct mnt_idmap *idmap, struct inode *dir,
-			   struct dentry *dentry, umode_t mode, bool excl)
+static int efivarfs_create(const struct mnt_idmap *idmap, struct inode *dir,
+			   struct dentry *dentry, umode_t mode)
 {
 	struct inode *inode = NULL;
 	struct efivar_entry *var;
@@ -113,8 +113,7 @@ static int efivarfs_create(struct mnt_idmap *idmap, struct inode *dir,
 
 	inode->i_private = var;
 
-	d_instantiate(dentry, inode);
-	dget(dentry);
+	d_make_persistent(dentry, inode);
 
 	return 0;
 }
@@ -126,9 +125,7 @@ static int efivarfs_unlink(struct inode *dir, struct dentry *dentry)
 	if (efivar_entry_delete(var))
 		return -EINVAL;
 
-	drop_nlink(d_inode(dentry));
-	dput(dentry);
-	return 0;
+	return simple_unlink(dir, dentry);
 };
 
 const struct inode_operations efivarfs_dir_inode_operations = {
@@ -153,7 +150,7 @@ efivarfs_fileattr_get(struct dentry *dentry, struct file_kattr *fa)
 }
 
 static int
-efivarfs_fileattr_set(struct mnt_idmap *idmap,
+efivarfs_fileattr_set(const struct mnt_idmap *idmap,
 		      struct dentry *dentry, struct file_kattr *fa)
 {
 	unsigned int i_flags = 0;
@@ -173,7 +170,7 @@ efivarfs_fileattr_set(struct mnt_idmap *idmap,
 }
 
 /* copy of simple_setattr except that it doesn't do i_size updates */
-static int efivarfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+static int efivarfs_setattr(const struct mnt_idmap *idmap, struct dentry *dentry,
 		   struct iattr *iattr)
 {
 	struct inode *inode = d_inode(dentry);

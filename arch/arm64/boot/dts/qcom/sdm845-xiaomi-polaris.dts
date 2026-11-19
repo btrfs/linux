@@ -32,6 +32,7 @@
 /delete-node/ &mba_region;
 /delete-node/ &slpi_mem;
 /delete-node/ &spss_mem;
+/delete-node/ &xbl_mem;
 
 / {
 	model = "Xiaomi Mi MIX 2S";
@@ -63,6 +64,11 @@
 	};
 
 	reserved-memory {
+		xbl-mem@85d00000 {
+			reg = <0 0x85d00000 0 0x200000>;
+			no-map;
+		};
+
 		adsp_mem: memory@8c500000 {
 			reg = <0 0x8c500000 0 0x1e00000>;
 			no-map;
@@ -370,7 +376,8 @@
 };
 
 &cdsp_pas {
-	firmware-name = "qcom/sdm845/polaris/cdsp.mbn";
+	firmware-name = "qcom/sdm845/Xiaomi/polaris/cdsp.mbn";
+
 	status = "okay";
 };
 
@@ -392,11 +399,10 @@
 
 &gpu {
 	status = "okay";
+};
 
-	zap-shader {
-		memory-region = <&gpu_mem>;
-		firmware-name = "qcom/sdm845/polaris/a630_zap.mbn";
-	};
+&gpu_zap_shader {
+	firmware-name = "qcom/sdm845/Xiaomi/polaris/a630_zap.mbn";
 };
 
 &ibb {
@@ -409,9 +415,8 @@
 };
 
 &ipa {
-	qcom,gsi-loader = "self";
-	memory-region = <&ipa_fw_mem>;
-	firmware-name = "qcom/sdm845/polaris/ipa_fws.mbn";
+	firmware-name = "qcom/sdm845/Xiaomi/polaris/ipa_fws.mbn";
+
 	status = "okay";
 };
 
@@ -503,7 +508,9 @@
 };
 
 &mss_pil {
-	firmware-name = "qcom/sdm845/polaris/mba.mbn", "qcom/sdm845/polaris/modem.mbn";
+	firmware-name = "qcom/sdm845/Xiaomi/polaris/mba.mbn",
+			"qcom/sdm845/Xiaomi/polaris/modem.mbn";
+
 	status = "okay";
 };
 
@@ -624,7 +631,7 @@
 		compatible = "qcom,wcn3990-bt";
 
 		/* This path is relative to the qca/ subdir under lib/firmware. */
-		firmware-name = "polaris/crnv21.bin";
+		firmware-name = "Xiaomi/polaris/crnv21.bin";
 
 		vddio-supply = <&vreg_s4a_1p8>;
 		vddxo-supply = <&vreg_l7a_1p8>;
@@ -665,8 +672,8 @@
 };
 
 &usb_1_qmpphy {
-	vdda-pll-supply = <&vreg_l1a_0p875>;
-	vdda-phy-supply = <&vreg_l26a_1p2>;
+	vdda-pll-supply = <&vreg_l26a_1p2>;
+	vdda-phy-supply = <&vreg_l1a_0p875>;
 	status = "okay";
 };
 
@@ -684,7 +691,8 @@
 };
 
 &venus {
-	firmware-name = "qcom/sdm845/polaris/venus.mbn";
+	firmware-name = "qcom/sdm845/Xiaomi/polaris/venus.mbn";
+
 	status = "okay";
 };
 

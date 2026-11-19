@@ -6,7 +6,6 @@
  * Copyright (C) 2025 Chen Wang <unicorn_wang@outlook.com>
  */
 
-#include <linux/mod_devicetable.h>
 #include <linux/pci.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -48,6 +47,8 @@ static int sg2042_pcie_probe(struct platform_device *pdev)
 	bridge->child_ops = &sg2042_pcie_child_ops;
 
 	rc = pci_host_bridge_priv(bridge);
+	rc->quirk_broken_aspm_l0s = 1;
+	rc->quirk_broken_aspm_l1 = 1;
 	pcie = &rc->pcie;
 	pcie->dev = dev;
 
@@ -74,15 +75,12 @@ static int sg2042_pcie_probe(struct platform_device *pdev)
 static void sg2042_pcie_remove(struct platform_device *pdev)
 {
 	struct cdns_pcie *pcie = platform_get_drvdata(pdev);
-	struct device *dev = &pdev->dev;
 	struct cdns_pcie_rc *rc;
 
 	rc = container_of(pcie, struct cdns_pcie_rc, pcie);
 	cdns_pcie_host_disable(rc);
 
 	cdns_pcie_disable_phy(pcie);
-
-	pm_runtime_disable(dev);
 }
 
 static int sg2042_pcie_suspend_noirq(struct device *dev)

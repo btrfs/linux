@@ -1496,7 +1496,7 @@ static int palmas_dt_to_pdata(struct device *dev,
 		if (!match->init_data || !np)
 			continue;
 
-		rinit = devm_kzalloc(dev, sizeof(*rinit), GFP_KERNEL);
+		rinit = devm_kzalloc_obj(dev, *rinit);
 		if (!rinit)
 			return -ENOMEM;
 
@@ -1590,6 +1590,7 @@ static const struct of_device_id of_palmas_match_tbl[] = {
 	},
 	{ /* end */ }
 };
+MODULE_DEVICE_TABLE(of, of_palmas_match_tbl);
 
 static int palmas_regulators_probe(struct platform_device *pdev)
 {
@@ -1607,11 +1608,11 @@ static int palmas_regulators_probe(struct platform_device *pdev)
 	if (!driver_data)
 		return -ENODATA;
 
-	pdata = devm_kzalloc(&pdev->dev, sizeof(*pdata), GFP_KERNEL);
+	pdata = devm_kzalloc_obj(&pdev->dev, *pdata);
 	if (!pdata)
 		return -ENOMEM;
 
-	pmic = devm_kzalloc(&pdev->dev, sizeof(*pmic), GFP_KERNEL);
+	pmic = devm_kzalloc_obj(&pdev->dev, *pmic);
 	if (!pmic)
 		return -ENOMEM;
 
@@ -1684,4 +1685,3 @@ MODULE_AUTHOR("Graeme Gregory <gg@slimlogic.co.uk>");
 MODULE_DESCRIPTION("Palmas voltage regulator driver");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:palmas-pmic");
-MODULE_DEVICE_TABLE(of, of_palmas_match_tbl);

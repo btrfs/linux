@@ -31,6 +31,8 @@
 #include <linux/sched/signal.h>
 #include <linux/sched/mm.h>
 
+#include <drm/drm_print.h>
+
 #include "gem/i915_gem_context.h"
 #include "gt/intel_breadcrumbs.h"
 #include "gt/intel_context.h"
@@ -608,7 +610,6 @@ bool __i915_request_submit(struct i915_request *request)
 
 	RQ_TRACE(request, "\n");
 
-	GEM_BUG_ON(!irqs_disabled());
 	lockdep_assert_held(&engine->sched_engine->lock);
 
 	/*
@@ -717,7 +718,6 @@ void __i915_request_unsubmit(struct i915_request *request)
 	 */
 	RQ_TRACE(request, "\n");
 
-	GEM_BUG_ON(!irqs_disabled());
 	lockdep_assert_held(&engine->sched_engine->lock);
 
 	/*
@@ -1349,8 +1349,7 @@ __i915_request_await_external(struct i915_request *rq, struct dma_fence *fence)
 {
 	mark_external(rq);
 	return i915_sw_fence_await_dma_fence(&rq->submit, fence,
-					     i915_fence_context_timeout(rq->i915,
-									fence->context),
+					     i915_fence_context_timeout(fence->context),
 					     I915_FENCE_GFP);
 }
 

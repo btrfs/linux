@@ -7,6 +7,8 @@
 #include <linux/wait.h>
 #include <linux/sched.h>
 #include <linux/cpuhotplug.h>
+#include <linux/highmem.h>
+#include <linux/scatterlist.h>
 #include <linux/vmalloc.h>
 #include <linux/sysfs.h>
 
@@ -84,9 +86,14 @@ static const struct zcomp_ops *lookup_backend_ops(const char *comp)
 	return backends[i];
 }
 
-bool zcomp_available_algorithm(const char *comp)
+const char *zcomp_lookup_backend_name(const char *comp)
 {
-	return lookup_backend_ops(comp) != NULL;
+	const struct zcomp_ops *backend = lookup_backend_ops(comp);
+
+	if (backend)
+		return backend->name;
+
+	return NULL;
 }
 
 /* show available compressors */
@@ -153,17 +160,32 @@ int zcomp_compress(struct zcomp *comp, struct zcomp_strm *zstrm,
 }
 
 int zcomp_decompress(struct zcomp *comp, struct zcomp_strm *zstrm,
-		     const void *src, unsigned int src_len, void *dst)
+		     struct scatterlist *sg, unsigned int src_len, void *dst)
 {
 	struct zcomp_req req = {
-		.src = src,
 		.dst = dst,
 		.src_len = src_len,
 		.dst_len = PAGE_SIZE,
 	};
+	void *src = NULL;
+	int ret;
 
 	might_sleep();
-	return comp->ops->decompress(comp->params, &zstrm->ctx, &req);
+
+	if (sg_is_last(sg)) {
+		/* the object is contained within one page, read it in-place */
+		src = kmap_local_page(sg_page(sg));
+		req.src = src + sg->offset;
+	} else {
+		/* the object spans two pages, linearize it into local copy */
+		sg_copy_to_buffer(sg, 2, zstrm->local_copy, src_len);
+		req.src = zstrm->local_copy;
+	}
+
+	ret = comp->ops->decompress(comp->params, &zstrm->ctx, &req);
+	if (src)
+		kunmap_local(src);
+	return ret;
 }
 
 int zcomp_cpu_up_prepare(unsigned int cpu, struct hlist_node *node)
@@ -238,7 +260,7 @@ struct zcomp *zcomp_create(const char *alg, struct zcomp_params *params)
 	 */
 	BUILD_BUG_ON(ARRAY_SIZE(backends) <= 1);
 
-	comp = kzalloc(sizeof(struct zcomp), GFP_KERNEL);
+	comp = kzalloc_obj(struct zcomp);
 	if (!comp)
 		return ERR_PTR(-ENOMEM);
 

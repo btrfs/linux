@@ -105,7 +105,7 @@ static const struct snd_soc_dapm_route tfa989x_dapm_routes[] = {
 
 static int tfa989x_put_mode(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct tfa989x *tfa989x = snd_soc_component_get_drvdata(component);
 
 	gpiod_set_value_cansleep(tfa989x->rcv_gpiod, ucontrol->value.enumerated.item[0]);
@@ -329,7 +329,7 @@ static int tfa989x_i2c_probe(struct i2c_client *i2c)
 		return -ENODEV;
 	}
 
-	tfa989x = devm_kzalloc(dev, sizeof(*tfa989x), GFP_KERNEL);
+	tfa989x = devm_kzalloc_obj(dev, *tfa989x);
 	if (!tfa989x)
 		return -ENOMEM;
 

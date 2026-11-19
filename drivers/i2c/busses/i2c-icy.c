@@ -128,11 +128,11 @@ static int icy_probe(struct zorro_dev *z,
 		.swnode		= &icy_ltc2990_node,
 	};
 
-	i2c = devm_kzalloc(&z->dev, sizeof(*i2c), GFP_KERNEL);
+	i2c = devm_kzalloc_obj(&z->dev, *i2c);
 	if (!i2c)
 		return -ENOMEM;
 
-	algo_data = devm_kzalloc(&z->dev, sizeof(*algo_data), GFP_KERNEL);
+	algo_data = devm_kzalloc_obj(&z->dev, *algo_data);
 	if (!algo_data)
 		return -ENOMEM;
 
@@ -193,8 +193,8 @@ static void icy_remove(struct zorro_dev *z)
 }
 
 static const struct zorro_device_id icy_zorro_tbl[] = {
-	{ ZORRO_ID(VMC, 15, 0), },
-	{ 0 }
+	{ .id = ZORRO_ID(VMC, 15, 0) },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(zorro, icy_zorro_tbl);

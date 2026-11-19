@@ -55,14 +55,14 @@ static void __init __socfpga_periph_init(struct device_node *node,
 	struct socfpga_periph_clk *periph_clk;
 	const char *clk_name = node->name;
 	const char *parent_name[SOCFPGA_MAX_PARENTS];
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	int rc;
 	u32 fixed_div;
 	u32 div_reg[3];
 
 	of_property_read_u32(node, "reg", &reg);
 
-	periph_clk = kzalloc(sizeof(*periph_clk), GFP_KERNEL);
+	periph_clk = kzalloc_obj(*periph_clk);
 	if (WARN_ON(!periph_clk))
 		return;
 

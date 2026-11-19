@@ -300,6 +300,15 @@ struct rlc_firmware_header_v2_4 {
     uint32_t se3_tap_delays_ucode_offset_bytes;
 };
 
+/* version_major=2, version_minor=5 */
+struct rlc_firmware_header_v2_5 {
+	struct rlc_firmware_header_v2_2 v2_2;
+	uint32_t rlc_1_iram_ucode_size_bytes;
+	uint32_t rlc_1_iram_ucode_offset_bytes;
+	uint32_t rlc_1_dram_ucode_size_bytes;
+	uint32_t rlc_1_dram_ucode_offset_bytes;
+};
+
 /* version_major=1, version_minor=0 */
 struct sdma_firmware_header_v1_0 {
 	struct common_firmware_header header;
@@ -449,6 +458,7 @@ union amdgpu_firmware_header {
 	struct rlc_firmware_header_v2_2 rlc_v2_2;
 	struct rlc_firmware_header_v2_3 rlc_v2_3;
 	struct rlc_firmware_header_v2_4 rlc_v2_4;
+	struct rlc_firmware_header_v2_5 rlc_v2_5;
 	struct sdma_firmware_header_v1_0 sdma;
 	struct sdma_firmware_header_v1_1 sdma_v1_1;
 	struct sdma_firmware_header_v2_0 sdma_v2_0;
@@ -467,6 +477,7 @@ union amdgpu_firmware_header {
  */
 enum AMDGPU_UCODE_ID {
 	AMDGPU_UCODE_ID_CAP = 0,
+	AMDGPU_UCODE_ID_MP5,
 	AMDGPU_UCODE_ID_SDMA0,
 	AMDGPU_UCODE_ID_SDMA1,
 	AMDGPU_UCODE_ID_SDMA2,
@@ -492,6 +503,10 @@ enum AMDGPU_UCODE_ID {
 	AMDGPU_UCODE_ID_CP_RS64_MEC_P1_STACK,
 	AMDGPU_UCODE_ID_CP_RS64_MEC_P2_STACK,
 	AMDGPU_UCODE_ID_CP_RS64_MEC_P3_STACK,
+	AMDGPU_UCODE_ID_CP_RS64_MEC_P4_STACK,
+	AMDGPU_UCODE_ID_CP_RS64_MEC_P5_STACK,
+	AMDGPU_UCODE_ID_CP_RS64_MEC_P6_STACK,
+	AMDGPU_UCODE_ID_CP_RS64_MEC_P7_STACK,
 	AMDGPU_UCODE_ID_CP_MEC1,
 	AMDGPU_UCODE_ID_CP_MEC1_JT,
 	AMDGPU_UCODE_ID_CP_MEC2,
@@ -512,6 +527,8 @@ enum AMDGPU_UCODE_ID {
 	AMDGPU_UCODE_ID_RLC_RESTORE_LIST_SRM_MEM,
 	AMDGPU_UCODE_ID_RLC_IRAM,
 	AMDGPU_UCODE_ID_RLC_DRAM,
+	AMDGPU_UCODE_ID_RLC_IRAM_1,
+	AMDGPU_UCODE_ID_RLC_DRAM_1,
 	AMDGPU_UCODE_ID_RLC_P,
 	AMDGPU_UCODE_ID_RLC_V,
 	AMDGPU_UCODE_ID_RLC_G,

@@ -296,7 +296,7 @@ static void w83792d_print_debug(struct w83792d_data *data, struct device *dev);
 static void w83792d_init_client(struct i2c_client *client);
 
 static const struct i2c_device_id w83792d_id[] = {
-	{ "w83792d" },
+	{ .name = "w83792d" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, w83792d_id);
@@ -1358,7 +1358,7 @@ w83792d_probe(struct i2c_client *client)
 	struct device *dev = &client->dev;
 	int i, val1, err;
 
-	data = devm_kzalloc(dev, sizeof(struct w83792d_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct w83792d_data);
 	if (!data)
 		return -ENOMEM;
 

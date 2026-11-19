@@ -324,7 +324,7 @@ int core_enable_device_list_for_node(
 	struct se_dev_entry *orig, *new;
 	int ret = 0;
 
-	new = kzalloc(sizeof(*new), GFP_KERNEL);
+	new = kzalloc_obj(*new);
 	if (!new) {
 		pr_err("Unable to allocate se_dev_entry memory\n");
 		return -ENOMEM;
@@ -349,6 +349,19 @@ int core_enable_device_list_for_node(
 	new->attach_count++;
 
 	mutex_lock(&nacl->lun_entry_mutex);
+	/*
+	 * Do not attach a new dev entry to an se_lun that is being torn down.
+	 * lun_shutdown is set by core_tpg_remove_lun() before its
+	 * core_clear_lun_from_tpg() sweep; checking it here under the same
+	 * nacl->lun_entry_mutex the sweep takes guarantees that once the sweep
+	 * has passed this ACL no dev entry can be left dangling on the
+	 * se_lun->lun_deve_list that is about to be freed.
+	 */
+	if (lun->lun_shutdown) {
+		mutex_unlock(&nacl->lun_entry_mutex);
+		ret = -ENODEV;
+		goto free_stats;
+	}
 	orig = target_nacl_find_deve(nacl, mapped_lun);
 	if (orig && orig->se_lun) {
 		struct se_lun *orig_lun = orig->se_lun;
@@ -375,12 +388,12 @@ int core_enable_device_list_for_node(
 		new->se_lun_acl = lun_acl;
 		hlist_del_rcu(&orig->link);
 		hlist_add_head_rcu(&new->link, &nacl->lun_entry_hlist);
-		mutex_unlock(&nacl->lun_entry_mutex);
 
 		spin_lock(&lun->lun_deve_lock);
 		list_del(&orig->lun_link);
 		list_add_tail(&new->lun_link, &lun->lun_deve_list);
 		spin_unlock(&lun->lun_deve_lock);
+		mutex_unlock(&nacl->lun_entry_mutex);
 
 		kref_put(&orig->pr_kref, target_pr_kref_release);
 		wait_for_completion(&orig->pr_comp);
@@ -393,11 +406,10 @@ int core_enable_device_list_for_node(
 	new->se_lun = lun;
 	new->se_lun_acl = lun_acl;
 	hlist_add_head_rcu(&new->link, &nacl->lun_entry_hlist);
-	mutex_unlock(&nacl->lun_entry_mutex);
-
 	spin_lock(&lun->lun_deve_lock);
 	list_add_tail(&new->lun_link, &lun->lun_deve_list);
 	spin_unlock(&lun->lun_deve_lock);
+	mutex_unlock(&nacl->lun_entry_mutex);
 
 	target_luns_data_has_changed(nacl, new, true);
 	return 0;
@@ -591,7 +603,7 @@ struct se_lun_acl *core_dev_init_initiator_node_lun_acl(
 		*ret = -EOVERFLOW;
 		return NULL;
 	}
-	lacl = kzalloc(sizeof(struct se_lun_acl), GFP_KERNEL);
+	lacl = kzalloc_obj(struct se_lun_acl);
 	if (!lacl) {
 		pr_err("Unable to allocate memory for struct se_lun_acl.\n");
 		*ret = -ENOMEM;
@@ -726,7 +738,7 @@ struct se_device *target_alloc_device(struct se_hba *hba, const char *name)
 	if (!dev->stats)
 		goto free_device;
 
-	dev->queues = kcalloc(nr_cpu_ids, sizeof(*dev->queues), GFP_KERNEL);
+	dev->queues = kzalloc_objs(*dev->queues, nr_cpu_ids);
 	if (!dev->queues)
 		goto free_stats;
 
@@ -813,7 +825,9 @@ struct se_device *target_alloc_device(struct se_hba *hba, const char *name)
 				DA_UNMAP_ZEROES_DATA_DEFAULT;
 	dev->dev_attrib.max_write_same_len = DA_MAX_WRITE_SAME_LEN;
 	dev->dev_attrib.submit_type = TARGET_FABRIC_DEFAULT_SUBMIT;
+	dev->dev_attrib.complete_type = TARGET_FABRIC_DEFAULT_COMPL;
 
+	/* Skip allocating lun_stats since we can't export them. */
 	xcopy_lun = &dev->xcopy_lun;
 	rcu_assign_pointer(xcopy_lun->lun_se_dev, dev);
 	init_completion(&xcopy_lun->lun_shutdown_comp);
@@ -840,12 +854,29 @@ free_device:
 	return NULL;
 }
 
+void target_configure_write_atomic_from_bdev(struct se_dev_attrib *attrib,
+					     struct block_device *bdev)
+{
+	struct request_queue *q = bdev_get_queue(bdev);
+	int block_size = bdev_logical_block_size(bdev);
+
+	if (!bdev_can_atomic_write(bdev))
+		return;
+
+	attrib->atomic_max_len = queue_atomic_write_max_bytes(q) / block_size;
+	attrib->atomic_granularity = attrib->atomic_alignment =
+		queue_atomic_write_unit_min_bytes(q) / block_size;
+	attrib->atomic_max_with_boundary = 0;
+	attrib->atomic_max_boundary = 0;
+}
+EXPORT_SYMBOL_GPL(target_configure_write_atomic_from_bdev);
+
 /*
  * Check if the underlying struct block_device supports discard and if yes
  * configure the UNMAP parameters.
  */
-bool target_configure_unmap_from_queue(struct se_dev_attrib *attrib,
-				       struct block_device *bdev)
+bool target_configure_unmap_from_bdev(struct se_dev_attrib *attrib,
+				      struct block_device *bdev)
 {
 	int block_size = bdev_logical_block_size(bdev);
 
@@ -863,7 +894,7 @@ bool target_configure_unmap_from_queue(struct se_dev_attrib *attrib,
 		bdev_discard_alignment(bdev) / block_size;
 	return true;
 }
-EXPORT_SYMBOL(target_configure_unmap_from_queue);
+EXPORT_SYMBOL(target_configure_unmap_from_bdev);
 
 /*
  * Convert from blocksize advertised to the initiator to the 512 byte

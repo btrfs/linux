@@ -9,9 +9,9 @@
 #include <linux/regulator/driver.h>
 #include <linux/regulator/machine.h>
 #include <linux/regulator/of_regulator.h>
-#include <linux/mod_devicetable.h>
 
 /* Register */
+#define RTQ2208_REG_FSOUTB_CNTL			0x11
 #define RTQ2208_REG_GLOBAL_INT1			0x12
 #define RTQ2208_REG_FLT_RECORDBUCK_CB		0x18
 #define RTQ2208_REG_GLOBAL_INT1_MASK		0x1D
@@ -34,6 +34,7 @@
 #define RTQ2208_REG_HIDDEN1			0xFF
 
 /* Mask */
+#define RTQ2208_MTP_SEL_RO_MASK			BIT(7)
 #define RTQ2208_BUCK_NR_MTP_SEL_MASK		GENMASK(7, 0)
 #define RTQ2208_BUCK_EN_NR_MTP_SEL0_MASK	BIT(0)
 #define RTQ2208_BUCK_EN_NR_MTP_SEL1_MASK	BIT(1)
@@ -465,15 +466,18 @@ static int rtq2208_parse_regulator_dt_data(int n_regulator, const unsigned int *
 		struct rtq2208_regulator_desc *rdesc[RTQ2208_LDO_MAX], struct device *dev,
 		unsigned int ldo1_fixed, unsigned int ldo2_fixed)
 {
+	struct regmap *regmap = dev_get_regmap(dev, NULL);
 	int mtp_sel, i, idx;
 
 	/* get mtp_sel0 or mtp_sel1 */
-	mtp_sel = device_property_read_bool(dev, "richtek,mtp-sel-high");
+	mtp_sel = regmap_test_bits(regmap, RTQ2208_REG_FSOUTB_CNTL, RTQ2208_MTP_SEL_RO_MASK);
+	if (mtp_sel < 0)
+		return dev_err_probe(dev, mtp_sel, "Failed to init mtp_sel state\n");
 
 	for (i = 0; i < n_regulator; i++) {
 		idx = regulator_idx_table[i];
 
-		rdesc[i] = devm_kcalloc(dev, 1, sizeof(*rdesc[0]), GFP_KERNEL);
+		rdesc[i] = devm_kzalloc_objs(dev, *rdesc[0], 1);
 		if (!rdesc[i])
 			return -ENOMEM;
 
@@ -602,7 +606,7 @@ static int rtq2208_probe(struct i2c_client *i2c)
 		     buck_masks[RTQ2208_BUCK_NUM_IRQ_REGS] = {0x33, 0x33, 0x33, 0x33, 0x33};
 	unsigned int ldo1_fixed_uV, ldo2_fixed_uV;
 
-	rdev_map = devm_kzalloc(dev, sizeof(struct rtq2208_rdev_map), GFP_KERNEL);
+	rdev_map = devm_kzalloc_obj(dev, struct rtq2208_rdev_map);
 	if (!rdev_map)
 		return -ENOMEM;
 

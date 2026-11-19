@@ -53,7 +53,7 @@ static void da7219_aad_btn_det_work(struct work_struct *work)
 	struct da7219_aad_priv *da7219_aad =
 		container_of(work, struct da7219_aad_priv, btn_det_work);
 	struct snd_soc_component *component = da7219_aad->component;
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct da7219_priv *da7219 = snd_soc_component_get_drvdata(component);
 	u8 statusa, micbias_ctrl;
 	bool micbias_up = false;
@@ -109,7 +109,7 @@ static void da7219_aad_hptest_work(struct work_struct *work)
 	struct da7219_aad_priv *da7219_aad =
 		container_of(work, struct da7219_aad_priv, hptest_work);
 	struct snd_soc_component *component = da7219_aad->component;
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct da7219_priv *da7219 = snd_soc_component_get_drvdata(component);
 
 	__le16 tonegen_freq_hptest;
@@ -351,7 +351,7 @@ static irqreturn_t da7219_aad_irq_thread(int irq, void *data)
 {
 	struct da7219_aad_priv *da7219_aad = data;
 	struct snd_soc_component *component = da7219_aad->component;
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct da7219_priv *da7219 = snd_soc_component_get_drvdata(component);
 	u8 events[DA7219_AAD_IRQ_REG_MAX];
 	u8 statusa;
@@ -670,7 +670,7 @@ static struct da7219_aad_pdata *da7219_aad_fw_to_pdata(struct device *dev)
 	if (!aad_np)
 		return NULL;
 
-	aad_pdata = devm_kzalloc(dev, sizeof(*aad_pdata), GFP_KERNEL);
+	aad_pdata = devm_kzalloc_obj(dev, *aad_pdata);
 	if (!aad_pdata) {
 		fwnode_handle_put(aad_np);
 		return NULL;
@@ -924,11 +924,12 @@ static void da7219_aad_handle_gnd_switch_time(struct snd_soc_component *componen
  * Suspend/Resume
  */
 
+#ifdef CONFIG_PM
 void da7219_aad_suspend(struct snd_soc_component *component)
 {
 	struct da7219_priv *da7219 = snd_soc_component_get_drvdata(component);
 	struct da7219_aad_priv *da7219_aad = da7219->aad;
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	u8 micbias_ctrl;
 
 	disable_irq(da7219_aad->irq);
@@ -962,7 +963,7 @@ void da7219_aad_resume(struct snd_soc_component *component)
 {
 	struct da7219_priv *da7219 = snd_soc_component_get_drvdata(component);
 	struct da7219_aad_priv *da7219_aad = da7219->aad;
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 
 	if (da7219_aad->jack) {
 		/* Re-enable micbias if previously enabled for 4-pole jack */
@@ -981,7 +982,7 @@ void da7219_aad_resume(struct snd_soc_component *component)
 
 	enable_irq(da7219_aad->irq);
 }
-
+#endif
 
 /*
  * Init/Exit
@@ -1061,7 +1062,7 @@ int da7219_aad_probe(struct i2c_client *i2c)
 	struct device *dev = &i2c->dev;
 	struct da7219_aad_priv *da7219_aad;
 
-	da7219_aad = devm_kzalloc(dev, sizeof(*da7219_aad), GFP_KERNEL);
+	da7219_aad = devm_kzalloc_obj(dev, *da7219_aad);
 	if (!da7219_aad)
 		return -ENOMEM;
 

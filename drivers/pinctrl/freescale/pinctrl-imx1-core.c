@@ -244,8 +244,7 @@ static int imx1_dt_node_to_map(struct pinctrl_dev *pctldev,
 	for (i = 0; i < grp->npins; i++)
 		map_num++;
 
-	new_map = kmalloc_array(map_num, sizeof(struct pinctrl_map),
-				GFP_KERNEL);
+	new_map = kmalloc_objs(struct pinctrl_map, map_num);
 	if (!new_map)
 		return -ENOMEM;
 
@@ -485,10 +484,8 @@ static int imx1_pinctrl_parse_groups(struct device_node *np,
 	}
 
 	grp->npins = size / 12;
-	grp->pins = devm_kcalloc(info->dev,
-			grp->npins, sizeof(struct imx1_pin), GFP_KERNEL);
-	grp->pin_ids = devm_kcalloc(info->dev,
-			grp->npins, sizeof(unsigned int), GFP_KERNEL);
+	grp->pins = devm_kzalloc_objs(info->dev, struct imx1_pin, grp->npins);
+	grp->pin_ids = devm_kzalloc_objs(info->dev, unsigned int, grp->npins);
 
 	if (!grp->pins || !grp->pin_ids)
 		return -ENOMEM;
@@ -541,10 +538,31 @@ static int imx1_pinctrl_parse_functions(struct device_node *np,
 	return 0;
 }
 
+/*
+ * Check if the DT contains pins in the direct child nodes. This indicates the
+ * newer DT format to store pins. This function returns true if the first found
+ * fsl,pins property is in a child of np. Otherwise false is returned.
+ */
+static bool imx1_pinctrl_dt_is_flat_functions(struct device_node *np)
+{
+	for_each_child_of_node_scoped(np, function_np) {
+		if (of_property_present(function_np, "fsl,pins"))
+			return true;
+
+		for_each_child_of_node_scoped(function_np, pinctrl_np) {
+			if (of_property_present(pinctrl_np, "fsl,pins"))
+				return false;
+		}
+	}
+
+	return true;
+}
+
 static int imx1_pinctrl_parse_dt(struct platform_device *pdev,
 		struct imx1_pinctrl *pctl, struct imx1_pinctrl_soc_info *info)
 {
 	struct device_node *np = pdev->dev.of_node;
+	bool flat_funcs;
 	int ret;
 	u32 nfuncs = 0;
 	u32 ngroups = 0;
@@ -553,9 +571,15 @@ static int imx1_pinctrl_parse_dt(struct platform_device *pdev,
 	if (!np)
 		return -ENODEV;
 
-	for_each_child_of_node_scoped(np, child) {
-		++nfuncs;
-		ngroups += of_get_child_count(child);
+	flat_funcs = imx1_pinctrl_dt_is_flat_functions(np);
+	if (flat_funcs) {
+		nfuncs = 1;
+		ngroups = of_get_child_count(np);
+	} else {
+		for_each_child_of_node_scoped(np, child) {
+			++nfuncs;
+			ngroups += of_get_child_count(child);
+		}
 	}
 
 	if (!nfuncs) {
@@ -564,21 +588,25 @@ static int imx1_pinctrl_parse_dt(struct platform_device *pdev,
 	}
 
 	info->nfunctions = nfuncs;
-	info->functions = devm_kcalloc(&pdev->dev,
-			nfuncs, sizeof(struct imx1_pmx_func), GFP_KERNEL);
+	info->functions = devm_kzalloc_objs(&pdev->dev, struct imx1_pmx_func,
+					    nfuncs);
 
 	info->ngroups = ngroups;
-	info->groups = devm_kcalloc(&pdev->dev,
-			ngroups, sizeof(struct imx1_pin_group), GFP_KERNEL);
+	info->groups = devm_kzalloc_objs(&pdev->dev, struct imx1_pin_group,
+					 ngroups);
 
 
 	if (!info->functions || !info->groups)
 		return -ENOMEM;
 
-	for_each_child_of_node_scoped(np, child) {
-		ret = imx1_pinctrl_parse_functions(child, info, ifunc++);
-		if (ret == -ENOMEM)
-			return -ENOMEM;
+	if (flat_funcs) {
+		imx1_pinctrl_parse_functions(np, info, 0);
+	} else {
+		for_each_child_of_node_scoped(np, child) {
+			ret = imx1_pinctrl_parse_functions(child, info, ifunc++);
+			if (ret == -ENOMEM)
+				return -ENOMEM;
+		}
 	}
 
 	return 0;
@@ -599,7 +627,7 @@ int imx1_pinctrl_core_probe(struct platform_device *pdev,
 	info->dev = &pdev->dev;
 
 	/* Create state holders etc for this driver */
-	ipctl = devm_kzalloc(&pdev->dev, sizeof(*ipctl), GFP_KERNEL);
+	ipctl = devm_kzalloc_obj(&pdev->dev, *ipctl);
 	if (!ipctl)
 		return -ENOMEM;
 

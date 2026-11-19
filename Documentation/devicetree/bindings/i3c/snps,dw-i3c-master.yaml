@@ -12,9 +12,25 @@ maintainers:
 allOf:
   - $ref: i3c.yaml#
 
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: altr,agilex5-dw-i3c-master
+    then:
+      properties:
+        resets:
+          maxItems: 1
+
 properties:
   compatible:
-    const: snps,dw-i3c-master-1.00a
+    oneOf:
+      - const: snps,dw-i3c-master-1.00a
+      - items:
+          - enum:
+              - altr,agilex5-dw-i3c-master
+              - syna,sl2610-i3c
+          - const: snps,dw-i3c-master-1.00a
 
   reg:
     maxItems: 1
@@ -33,6 +49,9 @@ properties:
 
   interrupts:
     maxItems: 1
+
+  resets:
+    maxItems: 2
 
   power-domains:
     maxItems: 1

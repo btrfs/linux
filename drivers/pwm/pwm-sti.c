@@ -602,8 +602,7 @@ static int sti_pwm_probe(struct platform_device *pdev)
 			return dev_err_probe(dev, PTR_ERR(pc->cpt_clk),
 					     "failed to get PWM capture clock\n");
 
-		pc->ddata = devm_kcalloc(dev, cpt_num_devs,
-					 sizeof(*pc->ddata), GFP_KERNEL);
+		pc->ddata = devm_kzalloc_objs(dev, *pc->ddata, cpt_num_devs);
 		if (!pc->ddata)
 			return -ENOMEM;
 
@@ -625,7 +624,7 @@ static int sti_pwm_probe(struct platform_device *pdev)
 }
 
 static const struct of_device_id sti_pwm_of_match[] = {
-	{ .compatible = "st,sti-pwm", },
+	{ .compatible = "st,sti-pwm" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, sti_pwm_of_match);

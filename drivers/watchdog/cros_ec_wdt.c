@@ -7,7 +7,6 @@
 #include <linux/err.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_data/cros_ec_commands.h>
 #include <linux/platform_data/cros_ec_proto.h>
 #include <linux/platform_device.h>
@@ -125,7 +124,7 @@ static int cros_ec_wdt_probe(struct platform_device *pdev)
 	union cros_ec_wdt_data arg;
 	int ret = 0;
 
-	wdd = devm_kzalloc(&pdev->dev, sizeof(*wdd), GFP_KERNEL);
+	wdd = devm_kzalloc_obj(&pdev->dev, *wdd);
 	if (!wdd)
 		return -ENOMEM;
 
@@ -179,8 +178,8 @@ static int __maybe_unused cros_ec_wdt_resume(struct platform_device *pdev)
 }
 
 static const struct platform_device_id cros_ec_wdt_id[] = {
-	{ DRV_NAME, 0 },
-	{}
+	{ .name = DRV_NAME },
+	{ }
 };
 
 static struct platform_driver cros_ec_wdt_driver = {

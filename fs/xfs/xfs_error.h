@@ -8,8 +8,9 @@
 
 struct xfs_mount;
 
-void xfs_error_report(const char *tag, int level, struct xfs_mount *mp,
-		const char *filename, int linenum, xfs_failaddr_t failaddr);
+void xfs_error_report(const char *tag, int level, int error,
+		struct xfs_mount *mp, const char *filename,
+		int linenum, xfs_failaddr_t failaddr);
 void xfs_corruption_error(const char *tag, int level, struct xfs_mount *mp,
 		const void *buf, size_t bufsize, const char *filename,
 		int linenum, xfs_failaddr_t failaddr);
@@ -20,8 +21,8 @@ void xfs_verifier_error(struct xfs_buf *bp, int error, xfs_failaddr_t failaddr);
 void xfs_inode_verifier_error(struct xfs_inode *ip, int error, const char *name,
 		const void *buf, size_t bufsz, xfs_failaddr_t failaddr);
 
-#define	XFS_ERROR_REPORT(e, lvl, mp)	\
-	xfs_error_report(e, lvl, mp, __FILE__, __LINE__, __return_address)
+#define	XFS_ERROR_REPORT(e, lvl, error, mp)	\
+	xfs_error_report(e, lvl, error, mp, __FILE__, __LINE__, __return_address)
 #define	XFS_CORRUPTION_ERROR(e, lvl, mp, buf, bufsize)	\
 	xfs_corruption_error(e, lvl, mp, buf, bufsize, \
 			     __FILE__, __LINE__, __return_address)
@@ -40,28 +41,23 @@ bool xfs_errortag_test(struct xfs_mount *mp, const char *file, int line,
 		unsigned int error_tag);
 #define XFS_TEST_ERROR(mp, tag)		\
 	xfs_errortag_test((mp), __FILE__, __LINE__, (tag))
-bool xfs_errortag_enabled(struct xfs_mount *mp, unsigned int tag);
+void xfs_errortag_delay(struct xfs_mount *mp, const char *file, int line,
+		unsigned int error_tag);
 #define XFS_ERRORTAG_DELAY(mp, tag)		\
-	do { \
-		might_sleep(); \
-		if (!xfs_errortag_enabled((mp), (tag))) \
-			break; \
-		xfs_warn_ratelimited((mp), \
-"Injecting %ums delay at file %s, line %d, on filesystem \"%s\"", \
-				(mp)->m_errortag[(tag)], __FILE__, __LINE__, \
-				(mp)->m_super->s_id); \
-		mdelay((mp)->m_errortag[(tag)]); \
-	} while (0)
-
+	xfs_errortag_delay((mp), __FILE__, __LINE__, (tag))
 int xfs_errortag_add(struct xfs_mount *mp, unsigned int error_tag);
+int xfs_errortag_add_name(struct xfs_mount *mp, const char *tag_name);
+void xfs_errortag_copy(struct xfs_mount *dst_mp, struct xfs_mount *src_mp);
 int xfs_errortag_clearall(struct xfs_mount *mp);
 #else
 #define xfs_errortag_init(mp)			(0)
 #define xfs_errortag_del(mp)
 #define XFS_TEST_ERROR(mp, tag)			(false)
 #define XFS_ERRORTAG_DELAY(mp, tag)		((void)0)
-#define xfs_errortag_add(mp, tag)		(ENOSYS)
-#define xfs_errortag_clearall(mp)		(ENOSYS)
+#define xfs_errortag_add(mp, tag)		(-ENOSYS)
+#define xfs_errortag_copy(dst_mp, src_mp)	((void)0)
+#define xfs_errortag_add_name(mp, tag_name)	(-ENOSYS)
+#define xfs_errortag_clearall(mp)		(-ENOSYS)
 #endif /* DEBUG */
 
 /*

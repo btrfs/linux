@@ -21,7 +21,7 @@
 #include <linux/timer.h>
 #include <linux/completion.h>
 #include <linux/device.h>
-#include <linux/mod_devicetable.h>
+#include <linux/device-id/hv_vmbus.h>
 #include <linux/interrupt.h>
 #include <linux/reciprocal_div.h>
 #include <hyperv/hvhdk.h>
@@ -70,7 +70,8 @@
  */
 enum hv_gpadl_type {
 	HV_GPADL_BUFFER,
-	HV_GPADL_RING
+	HV_GPADL_RING,
+	HV_GPADL_BUFFER_DECRYPTED
 };
 
 /* Single-page buffer */
@@ -208,31 +209,63 @@ struct hv_ring_buffer_info {
 };
 
 
+/*
+ * The indices live in memory shared with the untrusted host, so check a
+ * snapshot of them before using it as an offset or to compute a byte count.
+ */
+static inline bool
+hv_ringbuffer_indices_invalid(const struct hv_ring_buffer_info *rbi,
+			      u32 read_loc, u32 write_loc)
+{
+	return read_loc >= rbi->ring_datasize ||
+	       write_loc >= rbi->ring_datasize;
+}
+
+/*
+ * Byte counts for a caller-supplied snapshot of the indices, so that the
+ * counts and the indices the caller goes on to use describe one state of the
+ * ring.
+ */
+static inline u32
+hv_ringbuffer_avail_write(const struct hv_ring_buffer_info *rbi,
+			  u32 read_loc, u32 write_loc)
+{
+	u32 dsize = rbi->ring_datasize;
+
+	return write_loc >= read_loc ? dsize - (write_loc - read_loc) :
+		read_loc - write_loc;
+}
+
+static inline u32
+hv_ringbuffer_avail_read(const struct hv_ring_buffer_info *rbi,
+			 u32 read_loc, u32 write_loc)
+{
+	return rbi->ring_datasize -
+		hv_ringbuffer_avail_write(rbi, read_loc, write_loc);
+}
+
 static inline u32 hv_get_bytes_to_read(const struct hv_ring_buffer_info *rbi)
 {
-	u32 read_loc, write_loc, dsize, read;
+	u32 read_loc, write_loc;
 
-	dsize = rbi->ring_datasize;
-	read_loc = rbi->ring_buffer->read_index;
+	read_loc = READ_ONCE(rbi->ring_buffer->read_index);
 	write_loc = READ_ONCE(rbi->ring_buffer->write_index);
+	if (unlikely(hv_ringbuffer_indices_invalid(rbi, read_loc, write_loc)))
+		return 0;
 
-	read = write_loc >= read_loc ? (write_loc - read_loc) :
-		(dsize - read_loc) + write_loc;
-
-	return read;
+	return hv_ringbuffer_avail_read(rbi, read_loc, write_loc);
 }
 
 static inline u32 hv_get_bytes_to_write(const struct hv_ring_buffer_info *rbi)
 {
-	u32 read_loc, write_loc, dsize, write;
+	u32 read_loc, write_loc;
 
-	dsize = rbi->ring_datasize;
 	read_loc = READ_ONCE(rbi->ring_buffer->read_index);
-	write_loc = rbi->ring_buffer->write_index;
+	write_loc = READ_ONCE(rbi->ring_buffer->write_index);
+	if (unlikely(hv_ringbuffer_indices_invalid(rbi, read_loc, write_loc)))
+		return 0;
 
-	write = write_loc >= read_loc ? dsize - (write_loc - read_loc) :
-		read_loc - write_loc;
-	return write;
+	return hv_ringbuffer_avail_write(rbi, read_loc, write_loc);
 }
 
 static inline u32 hv_get_avail_to_write_percent(
@@ -260,21 +293,22 @@ static inline u32 hv_get_avail_to_write_percent(
  * 5 . 2  (Windows Server 2019, RS5)
  * 5 . 3  (Windows Server 2022)
  *
- * The WS2008 and WIN7 versions are listed here for
- * completeness but are no longer supported in the
- * Linux kernel.
+ * The WS2008, WIN7, WIN8, and WIN8_1 versions are listed here for
+ * completeness but are no longer supported in the Linux kernel.
  */
 
-#define VERSION_WS2008  ((0 << 16) | (13))
-#define VERSION_WIN7    ((1 << 16) | (1))
-#define VERSION_WIN8    ((2 << 16) | (4))
-#define VERSION_WIN8_1    ((3 << 16) | (0))
-#define VERSION_WIN10 ((4 << 16) | (0))
-#define VERSION_WIN10_V4_1 ((4 << 16) | (1))
-#define VERSION_WIN10_V5 ((5 << 16) | (0))
-#define VERSION_WIN10_V5_1 ((5 << 16) | (1))
-#define VERSION_WIN10_V5_2 ((5 << 16) | (2))
-#define VERSION_WIN10_V5_3 ((5 << 16) | (3))
+#define VMBUS_MAKE_VERSION(MAJ, MIN)	((((u32)MAJ) << 16) | (MIN))
+#define VERSION_WS2008					VMBUS_MAKE_VERSION(0, 13)
+#define VERSION_WIN7					VMBUS_MAKE_VERSION(1, 1)
+#define VERSION_WIN8					VMBUS_MAKE_VERSION(2, 4)
+#define VERSION_WIN8_1					VMBUS_MAKE_VERSION(3, 0)
+#define VERSION_WIN10					VMBUS_MAKE_VERSION(4, 0)
+#define VERSION_WIN10_V4_1				VMBUS_MAKE_VERSION(4, 1)
+#define VERSION_WIN10_V5				VMBUS_MAKE_VERSION(5, 0)
+#define VERSION_WIN10_V5_1				VMBUS_MAKE_VERSION(5, 1)
+#define VERSION_WIN10_V5_2				VMBUS_MAKE_VERSION(5, 2)
+#define VERSION_WIN10_V5_3				VMBUS_MAKE_VERSION(5, 3)
+#define VERSION_WIN10_V6_0				VMBUS_MAKE_VERSION(6, 0)
 
 /* Make maximum size of pipe payload of 16K */
 #define MAX_PIPE_DATA_PAYLOAD		(sizeof(u8) * 16384)
@@ -335,14 +369,22 @@ struct vmbus_channel_offer {
 } __packed;
 
 /* Server Flags */
-#define VMBUS_CHANNEL_ENUMERATE_DEVICE_INTERFACE	1
-#define VMBUS_CHANNEL_SERVER_SUPPORTS_TRANSFER_PAGES	2
-#define VMBUS_CHANNEL_SERVER_SUPPORTS_GPADLS		4
-#define VMBUS_CHANNEL_NAMED_PIPE_MODE			0x10
-#define VMBUS_CHANNEL_LOOPBACK_OFFER			0x100
-#define VMBUS_CHANNEL_PARENT_OFFER			0x200
-#define VMBUS_CHANNEL_REQUEST_MONITORED_NOTIFICATION	0x400
-#define VMBUS_CHANNEL_TLNPI_PROVIDER_OFFER		0x2000
+#define VMBUS_CHANNEL_ENUMERATE_DEVICE_INTERFACE		0x0001
+/*
+ * This flag indicates that the channel is offered by the paravisor, and must
+ * use encrypted memory for the channel ring buffer.
+ */
+#define VMBUS_CHANNEL_CONFIDENTIAL_RING_BUFFER			0x0002
+/*
+ * This flag indicates that the channel is offered by the paravisor, and must
+ * use encrypted memory for GPA direct packets and additional GPADLs.
+ */
+#define VMBUS_CHANNEL_CONFIDENTIAL_EXTERNAL_MEMORY		0x0004
+#define VMBUS_CHANNEL_NAMED_PIPE_MODE					0x0010
+#define VMBUS_CHANNEL_LOOPBACK_OFFER					0x0100
+#define VMBUS_CHANNEL_PARENT_OFFER						0x0200
+#define VMBUS_CHANNEL_REQUEST_MONITORED_NOTIFICATION	0x0400
+#define VMBUS_CHANNEL_TLNPI_PROVIDER_OFFER				0x2000
 
 struct vmpacket_descriptor {
 	u16 type;
@@ -621,6 +663,12 @@ struct vmbus_channel_relid_released {
 	u32 child_relid;
 } __packed;
 
+/*
+ * Used by the paravisor only, means that the encrypted ring buffers and
+ * the encrypted external memory are supported
+ */
+#define VMBUS_FEATURE_FLAG_CONFIDENTIAL_CHANNELS	0x10
+
 struct vmbus_channel_initiate_contact {
 	struct vmbus_channel_message_header header;
 	u32 vmbus_version_requested;
@@ -630,7 +678,8 @@ struct vmbus_channel_initiate_contact {
 		struct {
 			u8	msg_sint;
 			u8	msg_vtl;
-			u8	reserved[6];
+			u8	reserved[2];
+			u32 feature_flags; /* VMBus version 6.0 */
 		};
 	};
 	u64 monitor_page1;
@@ -998,11 +1047,15 @@ struct vmbus_channel {
 	/* The max size of a packet on this channel */
 	u32 max_pkt_size;
 
-	/* function to mmap ring buffer memory to the channel's sysfs ring attribute */
-	int (*mmap_ring_buffer)(struct vmbus_channel *channel, struct vm_area_struct *vma);
+	/*  function to mmap ring buffer memory to the channel's sysfs ring attribute */
+	int (*mmap_prepare_ring_buffer)(struct vmbus_channel *channel, struct vm_area_desc *desc);
 
 	/* boolean to control visibility of sysfs for ring buffer */
 	bool ring_sysfs_visible;
+	/* The ring buffer is encrypted */
+	bool co_ring_buffer;
+	/* The external memory is encrypted */
+	bool co_external_memory;
 };
 
 #define lock_requestor(channel, flags)					\
@@ -1026,6 +1079,16 @@ u64 __vmbus_request_addr_match(struct vmbus_channel *channel, u64 trans_id,
 u64 vmbus_request_addr_match(struct vmbus_channel *channel, u64 trans_id,
 			     u64 rqst_addr);
 u64 vmbus_request_addr(struct vmbus_channel *channel, u64 trans_id);
+
+static inline bool is_co_ring_buffer(const struct vmbus_channel_offer_channel *o)
+{
+	return !!(o->offer.chn_flags & VMBUS_CHANNEL_CONFIDENTIAL_RING_BUFFER);
+}
+
+static inline bool is_co_external_memory(const struct vmbus_channel_offer_channel *o)
+{
+	return !!(o->offer.chn_flags & VMBUS_CHANNEL_CONFIDENTIAL_EXTERNAL_MEMORY);
+}
 
 static inline bool is_hvsock_offer(const struct vmbus_channel_offer_channel *o)
 {
@@ -1174,8 +1237,20 @@ extern int vmbus_establish_gpadl(struct vmbus_channel *channel,
 				      u32 size,
 				      struct vmbus_gpadl *gpadl);
 
+extern int vmbus_establish_gpadl_caller_decrypted(struct vmbus_channel *channel,
+						  void *kbuffer,
+						  u32 size,
+						  struct vmbus_gpadl *gpadl);
+
 extern int vmbus_teardown_gpadl(struct vmbus_channel *channel,
 				     struct vmbus_gpadl *gpadl);
+
+extern void *vmbus_alloc_buffer(struct vmbus_channel *channel,
+				u32 size,
+				struct page ***chunks_out,
+				u32 *chunk_cnt_out);
+
+extern void vmbus_free_buffer(void *addr, struct page **chunks, u32 chunk_cnt);
 
 void vmbus_reset_channel_cb(struct vmbus_channel *channel);
 
@@ -1241,11 +1316,6 @@ struct hv_device {
 	u16 device_id;
 
 	struct device device;
-	/*
-	 * Driver name to force a match.  Do not set directly, because core
-	 * frees it.  Use driver_set_override() to set or clear it.
-	 */
-	const char *driver_override;
 
 	struct vmbus_channel *channel;
 	struct kset	     *channels_kset;
@@ -1261,6 +1331,14 @@ struct hv_device {
 #define device_to_hv_device(d)	container_of_const(d, struct hv_device, device)
 #define drv_to_hv_drv(d)	container_of_const(d, struct hv_driver, driver)
 
+static inline u32 hv_build_logical_dev_id_prefix(struct hv_device *hdev)
+{
+	return ((u32)hdev->dev_instance.b[5] << 24) |
+	       ((u32)hdev->dev_instance.b[4] << 16) |
+	       ((u32)hdev->dev_instance.b[7] << 8) |
+	       (hdev->dev_instance.b[6] & 0xf8u);
+}
+
 static inline void hv_set_drvdata(struct hv_device *dev, void *data)
 {
 	dev_set_drvdata(&dev->device, data);
@@ -1272,6 +1350,12 @@ static inline void *hv_get_drvdata(struct hv_device *dev)
 }
 
 struct device *hv_get_vmbus_root_device(void);
+
+#if IS_ENABLED(CONFIG_HYPERV_VMBUS)
+bool hv_vmbus_exists(void);
+#else
+static inline bool hv_vmbus_exists(void) { return false; }
+#endif
 
 struct hv_ring_buffer_debug_info {
 	u32 current_interrupt_mask;
@@ -1302,6 +1386,9 @@ int vmbus_allocate_mmio(struct resource **new, struct hv_device *device_obj,
 			resource_size_t size, resource_size_t align,
 			bool fb_overlap_ok);
 void vmbus_free_mmio(resource_size_t start, resource_size_t size);
+
+void vmbus_initiate_unload(bool crash);
+void vmbus_set_skip_unload(bool skip);
 
 /*
  * GUID definitions of various offer types - services offered to the guest.

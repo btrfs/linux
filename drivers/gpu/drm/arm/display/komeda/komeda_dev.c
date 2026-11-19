@@ -188,7 +188,7 @@ struct komeda_dev *komeda_dev_create(struct device *dev)
 	if (!komeda_identify)
 		return ERR_PTR(-ENODEV);
 
-	mdev = devm_kzalloc(dev, sizeof(*mdev), GFP_KERNEL);
+	mdev = devm_kzalloc_obj(dev, *mdev);
 	if (!mdev)
 		return ERR_PTR(-ENOMEM);
 
@@ -313,7 +313,11 @@ void komeda_dev_destroy(struct komeda_dev *mdev)
 
 int komeda_dev_resume(struct komeda_dev *mdev)
 {
-	clk_prepare_enable(mdev->aclk);
+	int err;
+
+	err = clk_prepare_enable(mdev->aclk);
+	if (err)
+		return err;
 
 	mdev->funcs->enable_irq(mdev);
 

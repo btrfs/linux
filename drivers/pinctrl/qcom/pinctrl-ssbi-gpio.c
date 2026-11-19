@@ -53,7 +53,7 @@
 #define PM8XXX_GPIO_PHYSICAL_OFFSET	1
 
 /* custom pinconf parameters */
-#define PM8XXX_QCOM_DRIVE_STRENGH      (PIN_CONFIG_END + 1)
+#define PM8XXX_QCOM_DRIVE_STRENGTH     (PIN_CONFIG_END + 1)
 #define PM8XXX_QCOM_PULL_UP_STRENGTH   (PIN_CONFIG_END + 2)
 
 /**
@@ -97,13 +97,13 @@ struct pm8xxx_gpio {
 };
 
 static const struct pinconf_generic_params pm8xxx_gpio_bindings[] = {
-	{"qcom,drive-strength",		PM8XXX_QCOM_DRIVE_STRENGH,	0},
+	{"qcom,drive-strength",		PM8XXX_QCOM_DRIVE_STRENGTH,	0},
 	{"qcom,pull-up-strength",	PM8XXX_QCOM_PULL_UP_STRENGTH,	0},
 };
 
 #ifdef CONFIG_DEBUG_FS
 static const struct pin_config_item pm8xxx_conf_items[ARRAY_SIZE(pm8xxx_gpio_bindings)] = {
-	PCONFDUMP(PM8XXX_QCOM_DRIVE_STRENGH, "drive-strength", NULL, true),
+	PCONFDUMP(PM8XXX_QCOM_DRIVE_STRENGTH, "drive-strength", NULL, true),
 	PCONFDUMP(PM8XXX_QCOM_PULL_UP_STRENGTH,  "pull up strength", NULL, true),
 };
 #endif
@@ -291,7 +291,7 @@ static int pm8xxx_pin_config_get(struct pinctrl_dev *pctldev,
 	case PIN_CONFIG_POWER_SOURCE:
 		arg = pin->power_source;
 		break;
-	case PM8XXX_QCOM_DRIVE_STRENGH:
+	case PM8XXX_QCOM_DRIVE_STRENGTH:
 		arg = pin->output_strength;
 		break;
 	case PIN_CONFIG_DRIVE_PUSH_PULL:
@@ -373,7 +373,7 @@ static int pm8xxx_pin_config_set(struct pinctrl_dev *pctldev,
 			pin->power_source = arg;
 			banks |= BIT(0);
 			break;
-		case PM8XXX_QCOM_DRIVE_STRENGH:
+		case PM8XXX_QCOM_DRIVE_STRENGTH:
 			if (arg > PMIC_GPIO_STRENGTH_LOW) {
 				dev_err(pctrl->dev, "invalid drive strength\n");
 				return -EINVAL;
@@ -736,7 +736,7 @@ static int pm8xxx_gpio_probe(struct platform_device *pdev)
 	struct pm8xxx_gpio *pctrl;
 	int ret, i;
 
-	pctrl = devm_kzalloc(&pdev->dev, sizeof(*pctrl), GFP_KERNEL);
+	pctrl = devm_kzalloc_obj(&pdev->dev, *pctrl);
 	if (!pctrl)
 		return -ENOMEM;
 
@@ -752,17 +752,13 @@ static int pm8xxx_gpio_probe(struct platform_device *pdev)
 	pctrl->desc = pm8xxx_pinctrl_desc;
 	pctrl->desc.npins = pctrl->npins;
 
-	pins = devm_kcalloc(&pdev->dev,
-			    pctrl->desc.npins,
-			    sizeof(struct pinctrl_pin_desc),
-			    GFP_KERNEL);
+	pins = devm_kzalloc_objs(&pdev->dev, struct pinctrl_pin_desc,
+				 pctrl->desc.npins);
 	if (!pins)
 		return -ENOMEM;
 
-	pin_data = devm_kcalloc(&pdev->dev,
-				pctrl->desc.npins,
-				sizeof(struct pm8xxx_pin_data),
-				GFP_KERNEL);
+	pin_data = devm_kzalloc_objs(&pdev->dev, struct pm8xxx_pin_data,
+				     pctrl->desc.npins);
 	if (!pin_data)
 		return -ENOMEM;
 

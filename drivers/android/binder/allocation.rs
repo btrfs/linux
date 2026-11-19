@@ -20,6 +20,7 @@ use crate::{
     defs::*,
     node::{Node, NodeRef},
     process::Process,
+    trace::trace_transaction_failed_buffer_release,
     DArc,
 };
 
@@ -56,7 +57,6 @@ pub(crate) struct Allocation {
     pub(crate) process: Arc<Process>,
     allocation_info: Option<AllocationInfo>,
     free_on_drop: bool,
-    pub(crate) oneway_spam_detected: bool,
     #[allow(dead_code)]
     pub(crate) debug_id: usize,
 }
@@ -68,7 +68,6 @@ impl Allocation {
         offset: usize,
         size: usize,
         ptr: usize,
-        oneway_spam_detected: bool,
     ) -> Self {
         Self {
             process,
@@ -76,7 +75,6 @@ impl Allocation {
             size,
             ptr,
             debug_id,
-            oneway_spam_detected,
             allocation_info: None,
             free_on_drop: true,
         }
@@ -160,6 +158,14 @@ impl Allocation {
         self.get_or_init_info().target_node = Some(target_node);
     }
 
+    pub(crate) fn take_oneway_node(&mut self) -> Option<DArc<Node>> {
+        if let Some(info) = self.allocation_info.as_mut() {
+            info.oneway_node.take()
+        } else {
+            None
+        }
+    }
+
     /// Reserve enough space to push at least `num_fds` fds.
     pub(crate) fn info_add_fd_reserve(&mut self, num_fds: usize) -> Result {
         self.get_or_init_info()
@@ -203,11 +209,12 @@ impl Allocation {
         let num_close_on_free = files.iter().filter(|entry| entry.close_on_free).count();
         let mut close_on_free = KVec::with_capacity(num_close_on_free, GFP_KERNEL)?;
 
-        let mut reservations = KVec::with_capacity(files.len(), GFP_KERNEL)?;
+        let mut reservations = KVVec::with_capacity(files.len(), GFP_KERNEL)?;
         for file_info in files {
             let res = FileDescriptorReservation::get_unused_fd_flags(bindings::O_CLOEXEC)?;
             let fd = res.reserved_fd();
             self.write::<u32>(file_info.buffer_offset, &fd)?;
+            crate::trace::trace_transaction_fd_recv(self.debug_id, fd, file_info.buffer_offset);
 
             reservations.push(
                 Reservation {
@@ -253,31 +260,34 @@ impl Drop for Allocation {
 
             if let Some(offsets) = info.offsets.clone() {
                 let view = AllocationView::new(self, offsets.start);
-                for i in offsets.step_by(size_of::<usize>()) {
+                for i in offsets.step_by(size_of::<u64>()) {
                     if view.cleanup_object(i).is_err() {
-                        pr_warn!("Error cleaning up object at offset {}\n", i)
+                        pr_warn_ratelimited!("Error cleaning up object at offset {}\n", i)
                     }
                 }
             }
 
-            for &fd in &info.file_list.close_on_free {
-                let closer = match DeferredFdCloser::new(GFP_KERNEL) {
-                    Ok(closer) => closer,
-                    Err(kernel::alloc::AllocError) => {
-                        // Ignore allocation failures.
-                        break;
-                    }
-                };
+            if self.process.task == kernel::current!().group_leader() {
+                for &fd in &info.file_list.close_on_free {
+                    let closer = match DeferredFdCloser::new(GFP_KERNEL) {
+                        Ok(closer) => closer,
+                        Err(kernel::alloc::AllocError) => {
+                            // Ignore allocation failures.
+                            break;
+                        }
+                    };
 
-                // Here, we ignore errors. The operation can fail if the fd is not valid, or if the
-                // method is called from a kthread. However, this is always called from a syscall,
-                // so the latter case cannot happen, and we don't care about the first case.
-                let _ = closer.close_fd(fd);
+                    // Here, we ignore errors. The operation can fail if the fd is not valid, or if
+                    // the method is called from a kthread. However, this is always called from a
+                    // syscall, so the latter case cannot happen, and we don't care about the first
+                    // case.
+                    let _ = closer.close_fd(fd);
+                }
             }
 
             if info.clear_on_free {
                 if let Err(e) = self.fill_zero() {
-                    pr_warn!("Failed to clear data on free: {:?}", e);
+                    pr_warn_ratelimited!("Failed to clear data on free: {:?}\n", e);
                 }
             }
         }
@@ -313,6 +323,12 @@ impl core::ops::Deref for NewAllocation {
 impl core::ops::DerefMut for NewAllocation {
     fn deref_mut(&mut self) -> &mut Allocation {
         &mut self.0
+    }
+}
+
+impl Drop for NewAllocation {
+    fn drop(&mut self) {
+        trace_transaction_failed_buffer_release(self.debug_id);
     }
 }
 
@@ -375,8 +391,8 @@ impl<'a> AllocationView<'a> {
                 BINDER_TYPE_WEAK_BINDER
             };
             newobj.flags = obj.flags;
-            newobj.__bindgen_anon_1.binder = ptr as _;
-            newobj.cookie = cookie as _;
+            newobj.__bindgen_anon_1.binder = ptr as uapi::binder_uintptr_t;
+            newobj.cookie = cookie as uapi::binder_uintptr_t;
             self.write(offset, &newobj)?;
             // Increment the user ref count on the node. It will be decremented as part of the
             // destruction of the buffer, when we see a binder or weak-binder object.
@@ -411,7 +427,8 @@ impl<'a> AllocationView<'a> {
     }
 
     fn cleanup_object(&self, index_offset: usize) -> Result {
-        let offset = self.alloc.read(index_offset)?;
+        let offset = self.alloc.read::<u64>(index_offset)?;
+        let offset: usize = offset.try_into().map_err(|_| EINVAL)?;
         let header = self.read::<BinderObjectHeader>(offset)?;
         match header.type_ {
             BINDER_TYPE_WEAK_BINDER | BINDER_TYPE_BINDER => {
@@ -493,7 +510,7 @@ impl BinderObject {
     /// The closure should write the bytes for the object into the provided slice.
     pub(crate) fn read_from_inner<R>(reader: R) -> Result<BinderObject>
     where
-        R: FnOnce(&mut [u8; size_of::<BinderObject>()]) -> Result<()>,
+        R: FnOnce(&mut [u8; size_of::<BinderObject>()]) -> Result,
     {
         let mut obj = MaybeUninit::<BinderObject>::zeroed();
 
@@ -557,7 +574,7 @@ impl BinderObject {
 
 #[derive(Default)]
 struct FileList {
-    files_to_translate: KVec<FileEntry>,
+    files_to_translate: KVVec<FileEntry>,
     close_on_free: KVec<u32>,
 }
 
@@ -571,7 +588,7 @@ struct FileEntry {
 }
 
 pub(crate) struct TranslatedFds {
-    reservations: KVec<Reservation>,
+    reservations: KVVec<Reservation>,
     /// If commit is called, then these fds should be closed. (If commit is not called, then they
     /// shouldn't be closed.)
     close_on_free: FdsCloseOnFree,
@@ -585,7 +602,7 @@ struct Reservation {
 impl TranslatedFds {
     pub(crate) fn new() -> Self {
         Self {
-            reservations: KVec::new(),
+            reservations: KVVec::new(),
             close_on_free: FdsCloseOnFree(KVec::new()),
         }
     }

@@ -14,7 +14,6 @@
  *
  * Copyright (c) 2005 Eugene Surovegin <ebs@ebshome.net>
  */
-#include <linux/mod_devicetable.h>
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
 #include <asm/io.h>
@@ -90,8 +89,7 @@ static int tah_probe(struct platform_device *ofdev)
 	struct tah_instance *dev;
 	int err;
 
-	dev = devm_kzalloc(&ofdev->dev, sizeof(struct tah_instance),
-			   GFP_KERNEL);
+	dev = devm_kzalloc_obj(&ofdev->dev, struct tah_instance);
 	if (!dev)
 		return -ENOMEM;
 

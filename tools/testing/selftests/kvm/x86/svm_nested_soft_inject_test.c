@@ -76,19 +76,15 @@ static void l2_guest_code_nmi(void)
 	ud2();
 }
 
-static void l1_guest_code(struct svm_test_data *svm, uint64_t is_nmi, uint64_t idt_alt)
+static void l1_guest_code(struct svm_test_data *svm, u64 is_nmi, u64 idt_alt)
 {
-	#define L2_GUEST_STACK_SIZE 64
-	unsigned long l2_guest_stack[L2_GUEST_STACK_SIZE];
 	struct vmcb *vmcb = svm->vmcb;
 
 	if (is_nmi)
 		x2apic_enable();
 
 	/* Prepare for L2 execution. */
-	generic_svm_setup(svm,
-			  is_nmi ? l2_guest_code_nmi : l2_guest_code_int,
-			  &l2_guest_stack[L2_GUEST_STACK_SIZE]);
+	generic_svm_setup(svm, is_nmi ? l2_guest_code_nmi : l2_guest_code_int);
 
 	vmcb->control.intercept_exceptions |= BIT(PF_VECTOR) | BIT(UD_VECTOR);
 	vmcb->control.intercept |= BIT(INTERCEPT_NMI) | BIT(INTERCEPT_HLT);
@@ -103,7 +99,7 @@ static void l1_guest_code(struct svm_test_data *svm, uint64_t is_nmi, uint64_t i
 
 	run_guest(vmcb, svm->vmcb_gpa);
 	__GUEST_ASSERT(vmcb->control.exit_code == SVM_EXIT_VMMCALL,
-		       "Expected VMMCAL #VMEXIT, got '0x%x', info1 = '0x%lx, info2 = '0x%lx'",
+		       "Expected VMMCAL #VMEXIT, got '0x%lx', info1 = '0x%lx, info2 = '0x%lx'",
 		       vmcb->control.exit_code,
 		       vmcb->control.exit_info_1, vmcb->control.exit_info_2);
 
@@ -133,7 +129,7 @@ static void l1_guest_code(struct svm_test_data *svm, uint64_t is_nmi, uint64_t i
 
 	run_guest(vmcb, svm->vmcb_gpa);
 	__GUEST_ASSERT(vmcb->control.exit_code == SVM_EXIT_HLT,
-		       "Expected HLT #VMEXIT, got '0x%x', info1 = '0x%lx, info2 = '0x%lx'",
+		       "Expected HLT #VMEXIT, got '0x%lx', info1 = '0x%lx, info2 = '0x%lx'",
 		       vmcb->control.exit_code,
 		       vmcb->control.exit_info_1, vmcb->control.exit_info_2);
 
@@ -144,8 +140,8 @@ static void run_test(bool is_nmi)
 {
 	struct kvm_vcpu *vcpu;
 	struct kvm_vm *vm;
-	vm_vaddr_t svm_gva;
-	vm_vaddr_t idt_alt_vm;
+	gva_t svm_gva;
+	gva_t idt_alt_vm;
 	struct kvm_guest_debug debug;
 
 	pr_info("Running %s test\n", is_nmi ? "NMI" : "soft int");
@@ -161,14 +157,14 @@ static void run_test(bool is_nmi)
 	if (!is_nmi) {
 		void *idt, *idt_alt;
 
-		idt_alt_vm = vm_vaddr_alloc_page(vm);
+		idt_alt_vm = vm_alloc_page(vm);
 		idt_alt = addr_gva2hva(vm, idt_alt_vm);
 		idt = addr_gva2hva(vm, vm->arch.idt);
 		memcpy(idt_alt, idt, getpagesize());
 	} else {
 		idt_alt_vm = 0;
 	}
-	vcpu_args_set(vcpu, 3, svm_gva, (uint64_t)is_nmi, (uint64_t)idt_alt_vm);
+	vcpu_args_set(vcpu, 3, svm_gva, (u64)is_nmi, (u64)idt_alt_vm);
 
 	memset(&debug, 0, sizeof(debug));
 	vcpu_guest_debug_set(vcpu, &debug);

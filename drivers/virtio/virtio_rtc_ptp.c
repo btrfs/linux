@@ -139,7 +139,7 @@ static int viortc_ptp_getcrosststamp(struct ptp_clock_info *ptp,
 	if (ret)
 		return ret;
 
-	ktime_get_snapshot(&history_begin);
+	ktime_get_snapshot_id(xtstamp->clock_id, &history_begin);
 	if (history_begin.cs_id != cs_id)
 		return -EOPNOTSUPP;
 
@@ -309,7 +309,7 @@ struct viortc_ptp_clock *viortc_ptp_register(struct viortc_dev *viortc,
 	ssize_t len;
 	int ret;
 
-	vio_ptp = devm_kzalloc(parent_dev, sizeof(*vio_ptp), GFP_KERNEL);
+	vio_ptp = devm_kzalloc_obj(parent_dev, *vio_ptp);
 	if (!vio_ptp)
 		return ERR_PTR(-ENOMEM);
 

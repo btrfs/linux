@@ -22,7 +22,7 @@
  */
 #include "amdgpu_ids.h"
 
-#include <linux/idr.h>
+#include <linux/xarray.h>
 #include <linux/dma-fence-array.h>
 
 
@@ -35,10 +35,13 @@
  * PASIDs are global address space identifiers that can be shared
  * between the GPU, an IOMMU and the driver. VMs on different devices
  * may use the same PASID if they share the same address
- * space. Therefore PASIDs are allocated using a global IDA. VMs are
- * looked up from the PASID per amdgpu_device.
+ * space. Therefore PASIDs are allocated using IDR cyclic allocator
+ * (similar to kernel PID allocation) which naturally delays reuse.
+ * VMs are looked up from the PASID per amdgpu_device.
  */
-static DEFINE_IDA(amdgpu_pasid_ida);
+
+static DEFINE_XARRAY_FLAGS(amdgpu_pasid_xa, XA_FLAGS_LOCK_IRQ | XA_FLAGS_ALLOC1);
+static u32 amdgpu_pasid_xa_next;
 
 /* Helper to free pasid from a fence callback */
 struct amdgpu_pasid_cb {
@@ -48,40 +51,48 @@ struct amdgpu_pasid_cb {
 
 /**
  * amdgpu_pasid_alloc - Allocate a PASID
- * @bits: Maximum width of the PASID in bits, must be at least 1
+ * @bits: Number of PASID bits supported by the hardware
+ * @fpriv: DRM file private to associate with the PASID
  *
- * Allocates a PASID of the given width while keeping smaller PASIDs
- * available if possible.
+ * Uses the kernel's XArray cyclic allocator.
+ * Allocates sequentially with automatic wrap-around.
  *
- * Returns a positive integer on success. Returns %-EINVAL if bits==0.
- * Returns %-ENOSPC if no PASID was available. Returns %-ENOMEM on
- * memory allocation failure.
+ * Returns:
+ * Allocated PASID on success or a negative error code on failure.
  */
-int amdgpu_pasid_alloc(unsigned int bits)
+int amdgpu_pasid_alloc(unsigned int bits, struct amdgpu_fpriv *fpriv)
 {
-	int pasid = -EINVAL;
+	u32 pasid;
+	int r;
 
-	for (bits = min(bits, 31U); bits > 0; bits--) {
-		pasid = ida_alloc_range(&amdgpu_pasid_ida, 1U << (bits - 1),
-					(1U << bits) - 1, GFP_KERNEL);
-		if (pasid != -ENOSPC)
-			break;
-	}
+	if (bits == 0)
+		return -EINVAL;
 
-	if (pasid >= 0)
-		trace_amdgpu_pasid_allocated(pasid);
+	r = xa_alloc_cyclic_irq(&amdgpu_pasid_xa, &pasid, fpriv,
+				XA_LIMIT(1, (1U << bits) - 1),
+				&amdgpu_pasid_xa_next, GFP_KERNEL);
+	if (r < 0)
+		return r;
 
+	trace_amdgpu_pasid_allocated(pasid);
 	return pasid;
 }
 
 /**
  * amdgpu_pasid_free - Free a PASID
  * @pasid: PASID to free
+ *
+ * Called in IRQ context.
  */
 void amdgpu_pasid_free(u32 pasid)
 {
+	unsigned long flags;
+
 	trace_amdgpu_pasid_freed(pasid);
-	ida_free(&amdgpu_pasid_ida, pasid);
+
+	xa_lock_irqsave(&amdgpu_pasid_xa, flags);
+	__xa_erase(&amdgpu_pasid_xa, pasid);
+	xa_unlock_irqrestore(&amdgpu_pasid_xa, flags);
 }
 
 static void amdgpu_pasid_free_cb(struct dma_fence *fence,
@@ -93,6 +104,71 @@ static void amdgpu_pasid_free_cb(struct dma_fence *fence,
 	amdgpu_pasid_free(cb->pasid);
 	dma_fence_put(fence);
 	kfree(cb);
+}
+
+/**
+ * amdgpu_pasid_clear_owner - Clear the owner associated with a PASID
+ * @pasid: PASID whose owner should be cleared
+ *
+ * Replace the stored owner with NULL while keeping the PASID allocated.
+ *
+ * This is used by the delayed PASID free path so that future PASID
+ * lookups cannot resolve a stale DRM file-private object while the PASID
+ * is still waiting for outstanding fences before being released.
+ */
+static void amdgpu_pasid_clear_owner(u32 pasid)
+{
+	unsigned long flags;
+
+	if (!pasid)
+		return;
+
+	xa_lock_irqsave(&amdgpu_pasid_xa, flags);
+	__xa_store(&amdgpu_pasid_xa, pasid, NULL, GFP_ATOMIC);
+	xa_unlock_irqrestore(&amdgpu_pasid_xa, flags);
+}
+
+/**
+ * amdgpu_pasid_lock - acquire the global PASID xarray lock
+ * @flags: storage for interrupt state
+ *
+ * Acquire the global PASID xarray lock with interrupts disabled.
+ * The saved interrupt state must be passed to
+ * amdgpu_pasid_unlock().
+ */
+void amdgpu_pasid_lock(unsigned long *flags)
+{
+	xa_lock_irqsave(&amdgpu_pasid_xa, *flags);
+}
+
+/**
+ * amdgpu_pasid_unlock - release the global PASID xarray lock
+ * @flags: interrupt state returned by amdgpu_pasid_lock()
+ *
+ * Release the global PASID xarray lock and restore the previous
+ * interrupt state.
+ */
+void amdgpu_pasid_unlock(unsigned long flags)
+{
+	xa_unlock_irqrestore(&amdgpu_pasid_xa, flags);
+}
+
+/**
+ * amdgpu_pasid_get_fpriv_locked - get the DRM owner of a PASID
+ * @pasid: PASID to resolve
+ *
+ * The caller must hold the PASID XArray lock.
+ *
+ * Returns:
+ * Pointer to the owning DRM file private, or %NULL if the PASID has no
+ * current owner.
+ *
+ * The returned pointer is only valid while the PASID lock remains held
+ * and must not be retained after calling amdgpu_pasid_unlock().
+ */
+struct amdgpu_fpriv *amdgpu_pasid_get_fpriv_locked(u32 pasid)
+{
+	return xa_load(&amdgpu_pasid_xa, pasid);
 }
 
 /**
@@ -110,6 +186,8 @@ void amdgpu_pasid_free_delayed(struct dma_resv *resv,
 	struct dma_fence *fence;
 	int r;
 
+	amdgpu_pasid_clear_owner(pasid);
+
 	r = dma_resv_get_singleton(resv, DMA_RESV_USAGE_BOOKKEEP, &fence);
 	if (r)
 		goto fallback;
@@ -119,7 +197,7 @@ void amdgpu_pasid_free_delayed(struct dma_resv *resv,
 		return;
 	}
 
-	cb = kmalloc(sizeof(*cb), GFP_KERNEL);
+	cb = kmalloc_obj(*cb);
 	if (!cb) {
 		/* Last resort when we are OOM */
 		dma_fence_wait(fence, false);
@@ -150,12 +228,12 @@ fallback:
  */
 
 /**
- * amdgpu_vmid_had_gpu_reset - check if reset occured since last use
+ * amdgpu_vmid_had_gpu_reset - check if reset occurred since last use
  *
  * @adev: amdgpu_device pointer
  * @id: VMID structure
  *
- * Check if GPU reset occured since last use of the VMID.
+ * Check if GPU reset occurred since last use of the VMID.
  */
 bool amdgpu_vmid_had_gpu_reset(struct amdgpu_device *adev,
 			       struct amdgpu_vmid *id)
@@ -200,59 +278,35 @@ static int amdgpu_vmid_grab_idle(struct amdgpu_ring *ring,
 {
 	struct amdgpu_device *adev = ring->adev;
 	unsigned vmhub = ring->vm_hub;
-	struct amdgpu_vmid_mgr *id_mgr = &adev->vm_manager.id_mgr[vmhub];
-	struct dma_fence **fences;
-	unsigned i;
+	struct amdgpu_kq_vmid_mgr *id_mgr = &adev->vm_manager.id_mgr[vmhub];
 
+	/* If anybody is waiting for a VMID let everybody wait for fairness */
 	if (!dma_fence_is_signaled(ring->vmid_wait)) {
 		*fence = dma_fence_get(ring->vmid_wait);
 		return 0;
 	}
 
-	fences = kmalloc_array(id_mgr->num_ids, sizeof(void *), GFP_NOWAIT);
-	if (!fences)
-		return -ENOMEM;
-
 	/* Check if we have an idle VMID */
-	i = 0;
-	list_for_each_entry((*idle), &id_mgr->ids_lru, list) {
+	list_for_each_entry_reverse((*idle), &id_mgr->ids_lru, list) {
 		/* Don't use per engine and per process VMID at the same time */
 		struct amdgpu_ring *r = adev->vm_manager.concurrent_flush ?
 			NULL : ring;
 
-		fences[i] = amdgpu_sync_peek_fence(&(*idle)->active, r);
-		if (!fences[i])
-			break;
-		++i;
+		*fence = amdgpu_sync_peek_fence(&(*idle)->active, r);
+		if (!(*fence))
+			return 0;
 	}
 
-	/* If we can't find a idle VMID to use, wait till one becomes available */
-	if (&(*idle)->list == &id_mgr->ids_lru) {
-		u64 fence_context = adev->vm_manager.fence_context + ring->idx;
-		unsigned seqno = ++adev->vm_manager.seqno[ring->idx];
-		struct dma_fence_array *array;
-		unsigned j;
+	/*
+	 * If we can't find a idle VMID to use, wait on a fence from the least
+	 * recently used in the hope that it will be available soon.
+	 */
+	*idle = NULL;
+	dma_fence_put(ring->vmid_wait);
+	ring->vmid_wait = dma_fence_get(*fence);
 
-		*idle = NULL;
-		for (j = 0; j < i; ++j)
-			dma_fence_get(fences[j]);
-
-		array = dma_fence_array_create(i, fences, fence_context,
-					       seqno, true);
-		if (!array) {
-			for (j = 0; j < i; ++j)
-				dma_fence_put(fences[j]);
-			kfree(fences);
-			return -ENOMEM;
-		}
-
-		*fence = dma_fence_get(&array->base);
-		dma_fence_put(ring->vmid_wait);
-		ring->vmid_wait = &array->base;
-		return 0;
-	}
-	kfree(fences);
-
+	/* This is the reference we return */
+	dma_fence_get(*fence);
 	return 0;
 }
 
@@ -313,7 +367,7 @@ static int amdgpu_vmid_grab_reserved(struct amdgpu_vm *vm,
 	* user of the VMID.
 	*/
 	r = amdgpu_sync_fence(&(*id)->active, &job->base.s_fence->finished,
-			      GFP_NOWAIT);
+			      GFP_ATOMIC);
 	if (r)
 		return r;
 
@@ -339,7 +393,7 @@ static int amdgpu_vmid_grab_used(struct amdgpu_vm *vm,
 {
 	struct amdgpu_device *adev = ring->adev;
 	unsigned vmhub = ring->vm_hub;
-	struct amdgpu_vmid_mgr *id_mgr = &adev->vm_manager.id_mgr[vmhub];
+	struct amdgpu_kq_vmid_mgr *id_mgr = &adev->vm_manager.id_mgr[vmhub];
 	uint64_t fence_context = adev->fence_context + ring->idx;
 	uint64_t updates = amdgpu_vm_tlb_seq(vm);
 	int r;
@@ -373,7 +427,7 @@ static int amdgpu_vmid_grab_used(struct amdgpu_vm *vm,
 		 */
 		r = amdgpu_sync_fence(&(*id)->active,
 				      &job->base.s_fence->finished,
-				      GFP_NOWAIT);
+				      GFP_ATOMIC);
 		if (r)
 			return r;
 
@@ -400,7 +454,7 @@ int amdgpu_vmid_grab(struct amdgpu_vm *vm, struct amdgpu_ring *ring,
 {
 	struct amdgpu_device *adev = ring->adev;
 	unsigned vmhub = ring->vm_hub;
-	struct amdgpu_vmid_mgr *id_mgr = &adev->vm_manager.id_mgr[vmhub];
+	struct amdgpu_kq_vmid_mgr *id_mgr = &adev->vm_manager.id_mgr[vmhub];
 	struct amdgpu_vmid *idle = NULL;
 	struct amdgpu_vmid *id = NULL;
 	int r = 0;
@@ -426,7 +480,7 @@ int amdgpu_vmid_grab(struct amdgpu_vm *vm, struct amdgpu_ring *ring,
 			/* Remember this submission as user of the VMID */
 			r = amdgpu_sync_fence(&id->active,
 					      &job->base.s_fence->finished,
-					      GFP_NOWAIT);
+					      GFP_ATOMIC);
 			if (r)
 				goto error;
 
@@ -486,7 +540,7 @@ bool amdgpu_vmid_uses_reserved(struct amdgpu_vm *vm, unsigned int vmhub)
 int amdgpu_vmid_alloc_reserved(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 			       unsigned vmhub)
 {
-	struct amdgpu_vmid_mgr *id_mgr = &adev->vm_manager.id_mgr[vmhub];
+	struct amdgpu_kq_vmid_mgr *id_mgr = &adev->vm_manager.id_mgr[vmhub];
 	struct amdgpu_vmid *id;
 	int r = 0;
 
@@ -519,7 +573,7 @@ unlock:
 void amdgpu_vmid_free_reserved(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 			       unsigned vmhub)
 {
-	struct amdgpu_vmid_mgr *id_mgr = &adev->vm_manager.id_mgr[vmhub];
+	struct amdgpu_kq_vmid_mgr *id_mgr = &adev->vm_manager.id_mgr[vmhub];
 
 	mutex_lock(&id_mgr->lock);
 	if (vm->reserved_vmid[vmhub]) {
@@ -543,7 +597,7 @@ void amdgpu_vmid_free_reserved(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 void amdgpu_vmid_reset(struct amdgpu_device *adev, unsigned vmhub,
 		       unsigned vmid)
 {
-	struct amdgpu_vmid_mgr *id_mgr = &adev->vm_manager.id_mgr[vmhub];
+	struct amdgpu_kq_vmid_mgr *id_mgr = &adev->vm_manager.id_mgr[vmhub];
 	struct amdgpu_vmid *id = &id_mgr->ids[vmid];
 
 	mutex_lock(&id_mgr->lock);
@@ -569,12 +623,43 @@ void amdgpu_vmid_reset_all(struct amdgpu_device *adev)
 	unsigned i, j;
 
 	for (i = 0; i < AMDGPU_MAX_VMHUBS; ++i) {
-		struct amdgpu_vmid_mgr *id_mgr =
+		struct amdgpu_kq_vmid_mgr *id_mgr =
 			&adev->vm_manager.id_mgr[i];
-
-		for (j = 1; j < id_mgr->num_ids; ++j)
+		for_each_set_bit(j, id_mgr->vmid_mask, AMDGPU_NUM_VMID)
 			amdgpu_vmid_reset(adev, i, j);
 	}
+}
+
+void amdgpu_vmid_mgr_set_vmid_mask(struct amdgpu_device *adev,
+				   unsigned long vmid_mask, bool for_mmhub)
+{
+	unsigned int i;
+
+	BUILD_BUG_ON(AMDGPU_NUM_VMID > BITS_PER_LONG);
+
+	for (i = 0; i < AMDGPU_MAX_VMHUBS; i++) {
+		bool is_mmhub = AMDGPU_IS_MMHUB0(i) || AMDGPU_IS_MMHUB1(i);
+
+		if (is_mmhub == for_mmhub)
+			bitmap_copy(adev->vm_manager.id_mgr[i].vmid_mask,
+				    &vmid_mask, AMDGPU_NUM_VMID);
+	}
+}
+
+/**
+ * amdgpu_vmid_uq_mask_init - init the user queue VMID masks
+ *
+ * @adev: amdgpu_device pointer
+ *
+ * Sets vmid_uq_mask_gfxhub/mmhub to the pool of VMIDs at or above
+ * first_kfd_vmid, shared by KFD and MES user queues.
+ */
+static void amdgpu_vmid_uq_mask_init(struct amdgpu_device *adev)
+{
+	adev->vm_manager.vmid_uq_mask_gfxhub =
+		((1U << AMDGPU_NUM_VMID) - 1) &
+		~((1U << adev->vm_manager.first_kfd_vmid) - 1);
+	adev->vm_manager.vmid_uq_mask_mmhub = 0xFF00;
 }
 
 /**
@@ -588,26 +673,17 @@ void amdgpu_vmid_mgr_init(struct amdgpu_device *adev)
 {
 	unsigned i, j;
 
+	amdgpu_vmid_uq_mask_init(adev);
+
 	for (i = 0; i < AMDGPU_MAX_VMHUBS; ++i) {
-		struct amdgpu_vmid_mgr *id_mgr =
+		struct amdgpu_kq_vmid_mgr *id_mgr =
 			&adev->vm_manager.id_mgr[i];
 
 		mutex_init(&id_mgr->lock);
 		INIT_LIST_HEAD(&id_mgr->ids_lru);
 
-		/* for GC <10, SDMA uses MMHUB so use first_kfd_vmid for both GC and MM */
-		if (amdgpu_ip_version(adev, GC_HWIP, 0) < IP_VERSION(10, 0, 0))
-			/* manage only VMIDs not used by KFD */
-			id_mgr->num_ids = adev->vm_manager.first_kfd_vmid;
-		else if (AMDGPU_IS_MMHUB0(i) ||
-			 AMDGPU_IS_MMHUB1(i))
-			id_mgr->num_ids = 16;
-		else
-			/* manage only VMIDs not used by KFD */
-			id_mgr->num_ids = adev->vm_manager.first_kfd_vmid;
-
 		/* skip over VMID 0, since it is the system VM */
-		for (j = 1; j < id_mgr->num_ids; ++j) {
+		for_each_set_bit(j, id_mgr->vmid_mask, AMDGPU_NUM_VMID) {
 			amdgpu_vmid_reset(adev, i, j);
 			amdgpu_sync_create(&id_mgr->ids[j].active);
 			list_add_tail(&id_mgr->ids[j].list, &id_mgr->ids_lru);
@@ -627,10 +703,11 @@ void amdgpu_vmid_mgr_fini(struct amdgpu_device *adev)
 	unsigned i, j;
 
 	for (i = 0; i < AMDGPU_MAX_VMHUBS; ++i) {
-		struct amdgpu_vmid_mgr *id_mgr =
+		struct amdgpu_kq_vmid_mgr *id_mgr =
 			&adev->vm_manager.id_mgr[i];
 
 		mutex_destroy(&id_mgr->lock);
+
 		for (j = 0; j < AMDGPU_NUM_VMID; ++j) {
 			struct amdgpu_vmid *id = &id_mgr->ids[j];
 
@@ -639,4 +716,14 @@ void amdgpu_vmid_mgr_fini(struct amdgpu_device *adev)
 			dma_fence_put(id->pasid_mapping);
 		}
 	}
+}
+
+/**
+ * amdgpu_pasid_mgr_cleanup - cleanup PASID manager
+ *
+ * Cleanup the IDR allocator.
+ */
+void amdgpu_pasid_mgr_cleanup(void)
+{
+	xa_destroy(&amdgpu_pasid_xa);
 }
