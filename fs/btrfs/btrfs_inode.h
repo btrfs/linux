@@ -86,15 +86,23 @@ enum {
 	/* Set when there are no capabilities in XATTs for the inode. */
 	BTRFS_INODE_NO_CAP_XATTR,
 	/*
-	 * Set if an error happened when doing a COW write before submitting a
-	 * bio or during writeback. Used for both buffered writes and direct IO
-	 * writes. This is to signal a fast fsync that it has to wait for
-	 * ordered extents to complete and therefore not log extent maps that
-	 * point to unwritten extents (when an ordered extent completes and it
-	 * has the BTRFS_ORDERED_IOERR flag set, it drops extent maps in its
-	 * range).
+	 * Set when a COW write failed, before submitting a bio or during
+	 * writeback, or when a COW ordered extent was truncated. Used for both
+	 * buffered writes and direct IO writes.
+	 *
+	 * The extent maps of what was not written point to blocks that won't be
+	 * written until the ordered extent completes and
+	 * btrfs_finish_one_ordered() drops them. Completion runs in a work
+	 * queue, queued once the IO of the write is finished, and a fast fsync
+	 * does not wait for it, to reduce latency. If a fast fsync logged
+	 * those extent maps, replaying the log would put unwritten extents in
+	 * place of the file's data, so this tells it to wait for the ordered
+	 * extents to complete.
+	 *
+	 * It is set under the inode's ordered_tree_lock, before
+	 * BTRFS_ORDERED_IO_DONE is set.
 	 */
-	BTRFS_INODE_COW_WRITE_ERROR,
+	BTRFS_INODE_INCOMPLETE_COW_WRITE,
 	/*
 	 * Set by reflink while it holds the source's VFS inode lock shared.
 	 * Direct IO writes also take that lock shared; one that finds this bit
