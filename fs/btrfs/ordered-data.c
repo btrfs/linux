@@ -420,7 +420,13 @@ static bool can_finish_ordered_extent(struct btrfs_ordered_extent *ordered,
 	/*
 	 * All the IO of the ordered extent is finished, we need to queue
 	 * the finish_func to be executed.
+	 *
+	 * Order BTRFS_INODE_INCOMPLETE_COW_WRITE, if set above, before
+	 * BTRFS_ORDERED_IO_DONE, as a fast fsync tests the latter without
+	 * the ordered_tree_lock. Pairs with the test_and_clear_bit() in
+	 * btrfs_sync_file().
 	 */
+	smp_mb__before_atomic();
 	set_bit(BTRFS_ORDERED_IO_DONE, &ordered->flags);
 	cond_wake_up(&ordered->wait);
 	refcount_inc(&ordered->refs);

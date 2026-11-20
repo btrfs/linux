@@ -1519,8 +1519,8 @@ static inline bool skip_inode_logging(const struct btrfs_log_ctx *ctx)
 	 * If we are doing a fast fsync we can not bail out if the inode's
 	 * last_trans is <= then the last committed transaction, because we only
 	 * update the last_trans of the inode during ordered extent completion,
-	 * and for a fast fsync we don't wait for that, we only wait for the
-	 * writeback to complete.
+	 * and for a fast fsync we don't wait for that, we only wait for the IO
+	 * of the writes to complete.
 	 */
 	if (inode->last_trans <= btrfs_get_last_trans_committed(fs_info) &&
 	    (test_bit(BTRFS_INODE_NEEDS_FULL_SYNC, &inode->runtime_flags) ||
@@ -1528,6 +1528,41 @@ static inline bool skip_inode_logging(const struct btrfs_log_ctx *ctx)
 		return true;
 
 	return false;
+}
+
+/*
+ * Wait for the IO of the ordered extents collected for logging to be accounted,
+ * starting IO on the dirty folios of a buffered write that is not done yet.
+ *
+ * Waiting for writeback is not enough: the end IO handler clears writeback
+ * before it finishes the ordered extent, and a direct IO write has no
+ * writeback. A failed or truncated write sets BTRFS_INODE_INCOMPLETE_COW_WRITE
+ * before BTRFS_ORDERED_IO_DONE is set, see can_finish_ordered_extent().
+ *
+ * If starting IO fails, the rest of the ordered extent may never be submitted,
+ * so return the error instead of waiting.
+ */
+static int wait_ordered_io_done(struct btrfs_inode *inode,
+				struct list_head *ordered_extents)
+{
+	struct btrfs_ordered_extent *ordered;
+	int ret;
+
+	list_for_each_entry(ordered, ordered_extents, log_list) {
+		if (test_bit(BTRFS_ORDERED_IO_DONE, &ordered->flags))
+			continue;
+		if (!test_bit(BTRFS_ORDERED_DIRECT, &ordered->flags)) {
+			ret = btrfs_fdatawrite_range(inode, ordered->file_offset,
+						     ordered->file_offset +
+						     ordered->num_bytes - 1);
+			if (ret)
+				return ret;
+		}
+		wait_event(ordered->wait,
+			   test_bit(BTRFS_ORDERED_IO_DONE, &ordered->flags));
+	}
+
+	return 0;
 }
 
 /*
@@ -1633,11 +1668,11 @@ int btrfs_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 	 * IO of a lower priority task while holding a transaction open.
 	 *
 	 * For a full fsync we wait for the ordered extents to complete while
-	 * for a fast fsync we wait just for writeback to complete, and then
-	 * attach the ordered extents to the transaction so that a transaction
-	 * commit waits for their completion, to avoid data loss if we fsync,
-	 * the current transaction commits before the ordered extents complete
-	 * and a power failure happens right after that.
+	 * for a fast fsync we wait just for the IO of the writes to complete,
+	 * and then attach the ordered extents to the transaction so that a
+	 * transaction commit waits for their completion, to avoid data loss if
+	 * we fsync, the current transaction commits before the ordered extents
+	 * complete and a power failure happens right after that.
 	 *
 	 * For zoned filesystem, if a write IO uses a ZONE_APPEND command, the
 	 * logical address recorded in the ordered extent may change. We need
@@ -1657,13 +1692,21 @@ int btrfs_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 		if (ret)
 			goto out_release_extents;
 
+		ret = wait_ordered_io_done(inode, &ctx.ordered_extents);
+		if (ret)
+			goto out_release_extents;
+
 		/*
 		 * Check and clear BTRFS_INODE_INCOMPLETE_COW_WRITE now after
-		 * starting and waiting for writeback, because it may have been
-		 * set while we waited, and if a write failed or was truncated
-		 * we need to wait for ordered extents to complete so that any
-		 * extent maps that point to unwritten locations are dropped and
-		 * we don't log them.
+		 * waiting for the IO of the ordered extents, because it may
+		 * have been set while we waited, and if a write failed or was
+		 * truncated we need to wait for ordered extents to complete so
+		 * that any extent maps that point to unwritten locations are
+		 * dropped and we don't log them.
+		 *
+		 * test_and_clear_bit() is fully ordered, which pairs with the
+		 * barrier before BTRFS_ORDERED_IO_DONE is set in
+		 * can_finish_ordered_extent().
 		 */
 		if (test_and_clear_bit(BTRFS_INODE_INCOMPLETE_COW_WRITE, &inode->runtime_flags))
 			ret = btrfs_wait_ordered_range(inode, start, len);
