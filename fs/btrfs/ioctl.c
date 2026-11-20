@@ -532,6 +532,9 @@ static noinline int btrfs_ioctl_fitrim(struct btrfs_fs_info *fs_info,
 				dev_list) {
 		if (!device->bdev || !bdev_max_discard_sectors(device->bdev))
 			continue;
+		/* Trimming skips the target of a device replace. */
+		if (test_bit(BTRFS_DEV_STATE_REPLACE_TGT, &device->dev_state))
+			continue;
 		num_devices++;
 		minlen = min_t(u64, bdev_discard_granularity(device->bdev),
 				    minlen);
