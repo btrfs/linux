@@ -6,7 +6,6 @@
  */
 
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <media/v4l2-event.h>
@@ -1165,7 +1164,7 @@ static int hva_open(struct file *file)
 	struct hva_ctx *ctx;
 	int ret;
 
-	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	ctx = kzalloc_obj(*ctx);
 	if (!ctx) {
 		ret = -ENOMEM;
 		goto out;
@@ -1349,7 +1348,7 @@ static int hva_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	int ret;
 
-	hva = devm_kzalloc(dev, sizeof(*hva), GFP_KERNEL);
+	hva = devm_kzalloc_obj(dev, *hva);
 	if (!hva) {
 		ret = -ENOMEM;
 		goto err;

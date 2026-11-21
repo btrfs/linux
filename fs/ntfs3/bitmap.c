@@ -508,6 +508,8 @@ static int wnd_rescan(struct wnd_bitmap *wnd)
 	size_t wpos, wbit, iw, vbo;
 	struct buffer_head *bh = NULL;
 	CLST lcn, clen;
+	struct file_ra_state *ra;
+	struct address_space *mapping = sb->s_bdev->bd_mapping;
 
 	wnd->uptodated = 0;
 	wnd->extent_max = 0;
@@ -515,6 +517,13 @@ static int wnd_rescan(struct wnd_bitmap *wnd)
 	wnd->total_zeroes = 0;
 
 	vbo = 0;
+
+	/* Allocate in memory instead of stack. Not critical if failed. */
+	ra = kzalloc_obj(*ra, GFP_NOFS);
+	if (ra) {
+		file_ra_state_init(ra, mapping);
+		ra->ra_pages = (wnd->nbits / 8 + PAGE_SIZE - 1) >> PAGE_SHIFT;
+	}
 
 	for (iw = 0; iw < wnd->nwnd; iw++) {
 		if (iw + 1 == wnd->nwnd)
@@ -550,6 +559,13 @@ static int wnd_rescan(struct wnd_bitmap *wnd)
 
 			lbo = ((u64)lcn << cluster_bits) + off;
 			len = ((u64)clen << cluster_bits) - off;
+		}
+
+		if (ra) {
+			pgoff_t idx = lbo >> PAGE_SHIFT;
+			if (!ra_has_index(ra, idx))
+				page_cache_sync_readahead(mapping, ra, NULL,
+							  idx, 1);
 		}
 
 		bh = ntfs_bread(sb, lbo >> sb->s_blocksize_bits);
@@ -638,6 +654,7 @@ next_wnd:
 	}
 
 out:
+	kfree(ra);
 	return err;
 }
 
@@ -660,7 +677,7 @@ int wnd_init(struct wnd_bitmap *wnd, struct super_block *sb, size_t nbits)
 		wnd->bits_last = wbits;
 
 	wnd->free_bits =
-		kvmalloc_array(wnd->nwnd, sizeof(u16), GFP_KERNEL | __GFP_ZERO);
+		kvmalloc_objs(u16, wnd->nwnd, GFP_KERNEL | __GFP_ZERO);
 
 	if (!wnd->free_bits)
 		return -ENOMEM;
@@ -1325,7 +1342,7 @@ int wnd_extend(struct wnd_bitmap *wnd, size_t new_bits)
 		new_last = wbits;
 
 	if (new_wnd != wnd->nwnd) {
-		new_free = kmalloc_array(new_wnd, sizeof(u16), GFP_NOFS);
+		new_free = kmalloc_objs(u16, new_wnd, GFP_NOFS);
 		if (!new_free)
 			return -ENOMEM;
 

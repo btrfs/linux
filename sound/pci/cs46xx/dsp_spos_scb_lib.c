@@ -160,15 +160,15 @@ void cs46xx_dsp_remove_scb (struct snd_cs46xx *chip, struct dsp_scb_descriptor *
 {
 	struct dsp_spos_instance * ins = chip->dsp_spos_instance;
 
-	/* check integrety */
+	/* check integrity */
 	if (snd_BUG_ON(scb->index < 0 ||
 		       scb->index >= ins->nscb ||
 		       (ins->scbs + scb->index) != scb))
 		return;
 
 #if 0
-	/* can't remove a SCB with childs before 
-	   removing childs first  */
+	/* can't remove a SCB with children before
+	   removing children first  */
 	if (snd_BUG_ON(scb->sub_list_ptr != ins->the_null_scb ||
 		       scb->next_scb_ptr != ins->the_null_scb))
 		goto _end;
@@ -234,7 +234,7 @@ void cs46xx_dsp_proc_register_scb_desc (struct snd_cs46xx *chip,
 		entry = snd_info_create_card_entry(ins->snd_card, scb->scb_name,
 						   ins->proc_dsp_dir);
 		if (entry) {
-			scb_info = kmalloc(sizeof(struct proc_scb_info), GFP_KERNEL);
+			scb_info = kmalloc_obj(struct proc_scb_info);
 			if (!scb_info) {
 				snd_info_free_entry(entry);
 				entry = NULL;
@@ -274,7 +274,8 @@ _dsp_create_generic_scb (struct snd_cs46xx *chip, char * name, u32 * scb_data, u
 	dev_dbg(chip->card->dev, "dsp_spos: creating SCB <%s>\n", name);
 
 	scb = cs46xx_dsp_create_scb(chip,name,scb_data,dest);
-
+	if (!scb)
+		return NULL;
 
 	scb->sub_list_ptr = ins->the_null_scb;
 	scb->next_scb_ptr = ins->the_null_scb;
@@ -1656,7 +1657,7 @@ int  cs46xx_dsp_disable_spdif_out (struct snd_cs46xx *chip)
 		return -EBUSY;
 	}
 
-	/* check integrety */
+	/* check integrity */
 	if (snd_BUG_ON(!ins->asynch_tx_scb))
 		return -EINVAL;
 	if (snd_BUG_ON(!ins->spdif_pcm_input_scb))

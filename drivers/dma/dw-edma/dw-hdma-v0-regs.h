@@ -11,7 +11,8 @@
 
 #include <linux/dmaengine.h>
 
-#define HDMA_V0_MAX_NR_CH			8
+#define HDMA_V0_MAX_NR_CH			64
+#define HDMA_V0_CH_EN				BIT(0)
 #define HDMA_V0_LOCAL_ABORT_INT_EN		BIT(6)
 #define HDMA_V0_REMOTE_ABORT_INT_EN		BIT(5)
 #define HDMA_V0_LOCAL_STOP_INT_EN		BIT(4)
@@ -23,6 +24,7 @@
 #define HDMA_V0_CONSUMER_CYCLE_BIT		BIT(0)
 #define HDMA_V0_DOORBELL_START			BIT(0)
 #define HDMA_V0_CH_STATUS_MASK			GENMASK(1, 0)
+#define HDMA_V0_FUNC_NUM_PF_MASK		GENMASK(7, 0)
 
 struct dw_hdma_v0_ch_regs {
 	u32 ch_en;				/* 0x0000 */
@@ -83,16 +85,6 @@ struct dw_hdma_v0_ch_regs {
 		};
 	} msi_abort;
 	u32 msi_msgdata;			/* 0x00a8 */
-	u32 padding_2[21];			/* 0x00ac..0x00fc */
-} __packed;
-
-struct dw_hdma_v0_ch {
-	struct dw_hdma_v0_ch_regs wr;		/* 0x0000 */
-	struct dw_hdma_v0_ch_regs rd;		/* 0x0100 */
-} __packed;
-
-struct dw_hdma_v0_regs {
-	struct dw_hdma_v0_ch ch[HDMA_V0_MAX_NR_CH];	/* 0x0000..0x0fa8 */
 } __packed;
 
 struct dw_hdma_v0_lli {

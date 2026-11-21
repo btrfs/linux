@@ -494,8 +494,6 @@ struct ocfs2_super
 	struct rb_root	osb_rf_lock_tree;
 	struct ocfs2_refcount_tree *osb_ref_tree_lru;
 
-	struct mutex system_file_mutex;
-
 	/*
 	 * OCFS2 needs to schedule several different types of work which
 	 * require cluster locking, disk I/O, recovery waits, etc. Since these
@@ -503,6 +501,11 @@ struct ocfs2_super
 	 * workqueue and schedule on our own.
 	 */
 	struct workqueue_struct *ocfs2_wq;
+
+	/* deferred reclaim of fully freed suballocator block groups */
+	spinlock_t os_suballoc_reclaim_lock;
+	struct list_head os_suballoc_reclaim_list;
+	struct work_struct os_suballoc_reclaim_work;
 
 	/* sysfs directory per partition */
 	struct kset *osb_dev_kset;
@@ -588,6 +591,18 @@ static inline int ocfs2_supports_discontig_bg(struct ocfs2_super *osb)
 	if (osb->s_feature_incompat & OCFS2_FEATURE_INCOMPAT_DISCONTIG_BG)
 		return 1;
 	return 0;
+}
+
+/*
+ * A suballocator block group bitmap starts right after the group
+ * descriptor header, so a suballoc bit can never exceed this number
+ * of bits.  Derive it from ocfs2_group_bitmap_size() which also caps
+ * it at OCFS2_MAX_BG_BITMAP_SIZE when discontig_bg is enabled.
+ */
+static inline u32 ocfs2_suballoc_bits_per_block(struct super_block *sb)
+{
+	return ocfs2_group_bitmap_size(sb, 1,
+				       OCFS2_SB(sb)->s_feature_incompat) * 8;
 }
 
 static inline unsigned int ocfs2_link_max(struct ocfs2_super *osb)
@@ -678,6 +693,24 @@ static inline int ocfs2_is_soft_readonly(struct ocfs2_super *osb)
 	spin_unlock(&osb->osb_lock);
 
 	return ret;
+}
+
+static inline int ocfs2_is_readonly(struct ocfs2_super *osb)
+{
+	int ret;
+	spin_lock(&osb->osb_lock);
+	ret = osb->osb_flags & (OCFS2_OSB_SOFT_RO | OCFS2_OSB_HARD_RO);
+	spin_unlock(&osb->osb_lock);
+
+	return ret;
+}
+
+static inline int ocfs2_emergency_state(struct ocfs2_super *osb)
+{
+	if (ocfs2_is_readonly(osb))
+		return -EROFS;
+
+	return 0;
 }
 
 static inline int ocfs2_clusterinfo_valid(struct ocfs2_super *osb)

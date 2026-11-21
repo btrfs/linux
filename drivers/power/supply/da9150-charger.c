@@ -512,7 +512,7 @@ static int da9150_charger_probe(struct platform_device *pdev)
 	u8 reg;
 	int ret;
 
-	charger = devm_kzalloc(dev, sizeof(struct da9150_charger), GFP_KERNEL);
+	charger = devm_kzalloc_obj(dev, struct da9150_charger);
 	if (!charger)
 		return -ENOMEM;
 
@@ -644,3 +644,4 @@ module_platform_driver(da9150_charger_driver);
 MODULE_DESCRIPTION("Charger Driver for DA9150");
 MODULE_AUTHOR("Adam Thomson <Adam.Thomson.Opensource@diasemi.com>");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("IIO_CONSUMER");

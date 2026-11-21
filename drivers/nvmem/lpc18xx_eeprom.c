@@ -11,7 +11,6 @@
 #include <linux/err.h>
 #include <linux/io.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/nvmem-provider.h>
 #include <linux/platform_device.h>
 #include <linux/reset.h>
@@ -168,7 +167,7 @@ static int lpc18xx_eeprom_probe(struct platform_device *pdev)
 	struct resource *res;
 	int ret;
 
-	eeprom = devm_kzalloc(dev, sizeof(*eeprom), GFP_KERNEL);
+	eeprom = devm_kzalloc_obj(dev, *eeprom);
 	if (!eeprom)
 		return -ENOMEM;
 

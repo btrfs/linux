@@ -7,7 +7,6 @@
 #include <linux/bitops.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/phy/phy.h>
 #include <linux/phy/phy-mipi-dphy.h>
@@ -241,7 +240,7 @@ static int cdns_dphy_rx_probe(struct platform_device *pdev)
 	struct phy_provider *provider;
 	struct cdns_dphy_rx *dphy;
 
-	dphy = devm_kzalloc(dev, sizeof(*dphy), GFP_KERNEL);
+	dphy = devm_kzalloc_obj(dev, *dphy);
 	if (!dphy)
 		return -ENOMEM;
 

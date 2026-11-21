@@ -8,6 +8,8 @@
 
 #include "smbacl.h"
 
+#define KSMBD_DEFAULT_MAX_SESSIONS_PER_CONNECTION	64
+
 /*
  * Server state type
  */
@@ -44,10 +46,13 @@ struct ksmbd_server_config {
 	unsigned int		max_connections;
 	unsigned int		max_inflight_req;
 	unsigned int		max_ip_connections;
+	unsigned int		max_sessions_per_connection;
 
 	char			*conf[SERVER_CONF_WORK_GROUP + 1];
 	struct task_struct	*dh_task;
 	bool			bind_interfaces_only;
+	/* AAPL model string for Finder icon, e.g. "Xserve" */
+	char			aapl_model[32];
 };
 
 extern struct ksmbd_server_config server_conf;

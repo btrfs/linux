@@ -12,7 +12,6 @@
 #include <linux/err.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/timer.h>
 #include <linux/types.h>
@@ -103,7 +102,7 @@ static int rt_timer_probe(struct platform_device *pdev)
 	struct rt_timer *rt;
 	struct clk *clk;
 
-	rt = devm_kzalloc(&pdev->dev, sizeof(*rt), GFP_KERNEL);
+	rt = devm_kzalloc_obj(&pdev->dev, *rt);
 	if (!rt) {
 		dev_err(&pdev->dev, "failed to allocate memory\n");
 		return -ENOMEM;

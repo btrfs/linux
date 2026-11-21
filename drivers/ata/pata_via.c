@@ -435,7 +435,7 @@ static int via_port_start(struct ata_port *ap)
 	if (ret < 0)
 		return ret;
 
-	vp = devm_kzalloc(&pdev->dev, sizeof(struct via_port), GFP_KERNEL);
+	vp = devm_kzalloc_obj(&pdev->dev, struct via_port);
 	if (vp == NULL)
 		return -ENOMEM;
 	ap->private_data = vp;
@@ -675,16 +675,15 @@ static int via_reinit_one(struct pci_dev *pdev)
 #endif
 
 static const struct pci_device_id via[] = {
-	{ PCI_VDEVICE(VIA, 0x0415), },
-	{ PCI_VDEVICE(VIA, 0x0571), },
-	{ PCI_VDEVICE(VIA, 0x0581), },
-	{ PCI_VDEVICE(VIA, 0x1571), },
-	{ PCI_VDEVICE(VIA, 0x3164), },
-	{ PCI_VDEVICE(VIA, 0x5324), },
-	{ PCI_VDEVICE(VIA, 0xC409), VIA_IDFLAG_SINGLE },
-	{ PCI_VDEVICE(VIA, 0x9001), VIA_IDFLAG_SINGLE },
-
-	{ },
+	{ PCI_VDEVICE(VIA, 0x0415), .driver_data = 0 },
+	{ PCI_VDEVICE(VIA, 0x0571), .driver_data = 0 },
+	{ PCI_VDEVICE(VIA, 0x0581), .driver_data = 0 },
+	{ PCI_VDEVICE(VIA, 0x1571), .driver_data = 0 },
+	{ PCI_VDEVICE(VIA, 0x3164), .driver_data = 0 },
+	{ PCI_VDEVICE(VIA, 0x5324), .driver_data = 0 },
+	{ PCI_VDEVICE(VIA, 0xC409), .driver_data = VIA_IDFLAG_SINGLE },
+	{ PCI_VDEVICE(VIA, 0x9001), .driver_data = VIA_IDFLAG_SINGLE },
+	{ }
 };
 
 static struct pci_driver via_pci_driver = {

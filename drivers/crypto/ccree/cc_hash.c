@@ -3,6 +3,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/string.h>
 #include <crypto/algapi.h>
 #include <crypto/hash.h>
 #include <crypto/md5.h>
@@ -1448,6 +1449,7 @@ static int cc_mac_digest(struct ahash_request *req)
 	if (cc_map_hash_request_final(ctx->drvdata, state, req->src,
 				      req->nbytes, 1, flags)) {
 		dev_err(dev, "map_ahash_request_final() failed\n");
+		cc_unmap_result(dev, state, digestsize, req->result);
 		cc_unmap_req(dev, state, ctx);
 		return -ENOMEM;
 	}
@@ -1825,7 +1827,7 @@ static struct cc_hash_alg *cc_alloc_hash_alg(struct cc_hash_template *template,
 	struct crypto_alg *alg;
 	struct ahash_alg *halg;
 
-	t_crypto_alg = devm_kzalloc(dev, sizeof(*t_crypto_alg), GFP_KERNEL);
+	t_crypto_alg = devm_kzalloc_obj(dev, *t_crypto_alg);
 	if (!t_crypto_alg)
 		return ERR_PTR(-ENOMEM);
 
@@ -1834,16 +1836,12 @@ static struct cc_hash_alg *cc_alloc_hash_alg(struct cc_hash_template *template,
 	alg = &halg->halg.base;
 
 	if (keyed) {
-		snprintf(alg->cra_name, CRYPTO_MAX_ALG_NAME, "%s",
-			 template->mac_name);
-		snprintf(alg->cra_driver_name, CRYPTO_MAX_ALG_NAME, "%s",
-			 template->mac_driver_name);
+		strscpy(alg->cra_name, template->mac_name);
+		strscpy(alg->cra_driver_name, template->mac_driver_name);
 	} else {
 		halg->setkey = NULL;
-		snprintf(alg->cra_name, CRYPTO_MAX_ALG_NAME, "%s",
-			 template->name);
-		snprintf(alg->cra_driver_name, CRYPTO_MAX_ALG_NAME, "%s",
-			 template->driver_name);
+		strscpy(alg->cra_name, template->name);
+		strscpy(alg->cra_driver_name, template->driver_name);
 	}
 	alg->cra_module = THIS_MODULE;
 	alg->cra_ctxsize = sizeof(struct cc_hash_ctx) + crypto_dma_padding();
@@ -1958,7 +1956,7 @@ int cc_hash_alloc(struct cc_drvdata *drvdata)
 	int rc = 0;
 	int alg;
 
-	hash_handle = devm_kzalloc(dev, sizeof(*hash_handle), GFP_KERNEL);
+	hash_handle = devm_kzalloc_obj(dev, *hash_handle);
 	if (!hash_handle)
 		return -ENOMEM;
 

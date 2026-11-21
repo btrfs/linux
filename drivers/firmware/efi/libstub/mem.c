@@ -20,10 +20,10 @@
 efi_status_t efi_get_memory_map(struct efi_boot_memmap **map,
 				bool install_cfg_tbl)
 {
+	static efi_guid_t tbl_guid = LINUX_EFI_BOOT_MEMMAP_GUID;
 	struct efi_boot_memmap tmp, *m __free(efi_pool) = NULL;
 	int memtype = install_cfg_tbl ? EFI_ACPI_RECLAIM_MEMORY
 				      : EFI_LOADER_DATA;
-	efi_guid_t tbl_guid = LINUX_EFI_BOOT_MEMMAP_GUID;
 	efi_status_t status;
 	unsigned long size;
 
@@ -123,4 +123,86 @@ void efi_free(unsigned long size, unsigned long addr)
 
 	nr_pages = round_up(size, EFI_ALLOC_ALIGN) / EFI_PAGE_SIZE;
 	efi_bs_call(free_pages, addr, nr_pages);
+}
+
+/**
+ * efi_low_alloc_above() - allocate pages at or above given address
+ * @size:	size of the memory area to allocate
+ * @align:	minimum alignment of the allocated memory area. It should
+ *		a power of two.
+ * @addr:	on exit the address of the allocated memory
+ * @min:	minimum address to used for the memory allocation
+ *
+ * Allocate at the lowest possible address that is not below @min as
+ * EFI_LOADER_DATA. The allocated pages are aligned according to @align but at
+ * least EFI_ALLOC_ALIGN. The first allocated page will not below the address
+ * given by @min.
+ *
+ * Return:	status code
+ */
+efi_status_t efi_low_alloc_above(unsigned long size, unsigned long align,
+				 unsigned long *addr, unsigned long min)
+{
+	struct efi_boot_memmap *map __free(efi_pool) = NULL;
+	efi_status_t status;
+	unsigned long nr_pages;
+	int i;
+
+	status = efi_get_memory_map(&map, false);
+	if (status != EFI_SUCCESS)
+		return status;
+
+	/*
+	 * Enforce minimum alignment that EFI or Linux requires when
+	 * requesting a specific address.  We are doing page-based (or
+	 * larger) allocations, and both the address and size must meet
+	 * alignment constraints.
+	 */
+	if (align < EFI_ALLOC_ALIGN)
+		align = EFI_ALLOC_ALIGN;
+
+	size = round_up(size, EFI_ALLOC_ALIGN);
+	nr_pages = size / EFI_PAGE_SIZE;
+	for (i = 0; i < map->map_size / map->desc_size; i++) {
+		efi_memory_desc_t *desc;
+		unsigned long m = (unsigned long)map->map;
+		u64 start, end;
+
+		desc = efi_memdesc_ptr(m, map->desc_size, i);
+
+		if (desc->type != EFI_CONVENTIONAL_MEMORY)
+			continue;
+
+		if (desc->attribute & EFI_MEMORY_HOT_PLUGGABLE)
+			continue;
+
+		if (efi_soft_reserve_enabled() &&
+		    (desc->attribute & EFI_MEMORY_SP))
+			continue;
+
+		if (desc->num_pages < nr_pages)
+			continue;
+
+		start = desc->phys_addr;
+		end = start + desc->num_pages * EFI_PAGE_SIZE;
+
+		if (start < min)
+			start = min;
+
+		start = round_up(start, align);
+		if ((start + size) > end)
+			continue;
+
+		status = efi_bs_call(allocate_pages, EFI_ALLOCATE_ADDRESS,
+				     EFI_LOADER_DATA, nr_pages, &start);
+		if (status == EFI_SUCCESS) {
+			*addr = start;
+			break;
+		}
+	}
+
+	if (i == map->map_size / map->desc_size)
+		return EFI_NOT_FOUND;
+
+	return EFI_SUCCESS;
 }

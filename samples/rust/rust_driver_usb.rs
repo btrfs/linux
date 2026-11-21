@@ -3,7 +3,15 @@
 
 //! Rust USB driver sample.
 
-use kernel::{device, device::Core, prelude::*, sync::aref::ARef, usb};
+use kernel::{
+    device::{
+        self,
+        Core, //
+    },
+    prelude::*,
+    sync::aref::ARef,
+    usb, //
+};
 
 struct SampleDriver {
     _intf: ARef<usb::Interface>,
@@ -11,29 +19,28 @@ struct SampleDriver {
 
 kernel::usb_device_table!(
     USB_TABLE,
-    MODULE_USB_TABLE,
     <SampleDriver as usb::Driver>::IdInfo,
     [(usb::DeviceId::from_id(0x1234, 0x5678), ()),]
 );
 
 impl usb::Driver for SampleDriver {
     type IdInfo = ();
+    type Data<'bound> = Self;
     const ID_TABLE: usb::IdTable<Self::IdInfo> = &USB_TABLE;
 
-    fn probe(
-        intf: &usb::Interface<Core>,
+    fn probe<'bound>(
+        intf: &'bound usb::Interface<Core<'_>>,
         _id: &usb::DeviceId,
-        _info: &Self::IdInfo,
-    ) -> Result<Pin<KBox<Self>>> {
-        let dev: &device::Device<Core> = intf.as_ref();
+        _info: Option<&'bound Self::IdInfo>,
+    ) -> impl PinInit<Self, Error> + 'bound {
+        let dev: &device::Device<Core<'_>> = intf.as_ref();
         dev_info!(dev, "Rust USB driver sample probed\n");
 
-        let drvdata = KBox::new(Self { _intf: intf.into() }, GFP_KERNEL)?;
-        Ok(drvdata.into())
+        Ok(Self { _intf: intf.into() })
     }
 
-    fn disconnect(intf: &usb::Interface<Core>, _data: Pin<&Self>) {
-        let dev: &device::Device<Core> = intf.as_ref();
+    fn disconnect<'bound>(intf: &'bound usb::Interface<Core<'_>>, _data: Pin<&Self>) {
+        let dev: &device::Device<Core<'_>> = intf.as_ref();
         dev_info!(dev, "Rust USB driver sample disconnected\n");
     }
 }

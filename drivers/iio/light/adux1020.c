@@ -808,17 +808,15 @@ static int adux1020_probe(struct i2c_client *client)
 					NULL, adux1020_interrupt_handler,
 					IRQF_TRIGGER_HIGH | IRQF_ONESHOT,
 					ADUX1020_DRV_NAME, indio_dev);
-		if (ret) {
-			dev_err(&client->dev, "irq request error %d\n", -ret);
+		if (ret)
 			return ret;
-		}
 	}
 
 	return devm_iio_device_register(&client->dev, indio_dev);
 }
 
 static const struct i2c_device_id adux1020_id[] = {
-	{ "adux1020" },
+	{ .name = "adux1020" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, adux1020_id);

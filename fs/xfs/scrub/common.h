@@ -25,11 +25,15 @@ bool xchk_fblock_xref_process_error(struct xfs_scrub *sc,
 void xchk_block_set_preen(struct xfs_scrub *sc,
 		struct xfs_buf *bp);
 void xchk_ino_set_preen(struct xfs_scrub *sc, xfs_ino_t ino);
+void xchk_fblock_set_preen(struct xfs_scrub *sc,
+		int whichfork, xfs_fileoff_t offset);
 
 void xchk_set_corrupt(struct xfs_scrub *sc);
 void xchk_block_set_corrupt(struct xfs_scrub *sc,
 		struct xfs_buf *bp);
 void xchk_ino_set_corrupt(struct xfs_scrub *sc, xfs_ino_t ino);
+#define xchk_ip_set_corrupt(_sc, _ip) \
+	xchk_ino_set_corrupt((_sc), I_INO(_ip))
 void xchk_fblock_set_corrupt(struct xfs_scrub *sc, int whichfork,
 		xfs_fileoff_t offset);
 #ifdef CONFIG_XFS_QUOTA
@@ -39,8 +43,8 @@ void xchk_qcheck_set_corrupt(struct xfs_scrub *sc, unsigned int dqtype,
 
 void xchk_block_xref_set_corrupt(struct xfs_scrub *sc,
 		struct xfs_buf *bp);
-void xchk_ino_xref_set_corrupt(struct xfs_scrub *sc,
-		xfs_ino_t ino);
+void xchk_ip_xref_set_corrupt(struct xfs_scrub *sc,
+		struct xfs_inode *ip);
 void xchk_fblock_xref_set_corrupt(struct xfs_scrub *sc,
 		int whichfork, xfs_fileoff_t offset);
 
@@ -70,7 +74,6 @@ int xchk_setup_ag_rmapbt(struct xfs_scrub *sc);
 int xchk_setup_ag_refcountbt(struct xfs_scrub *sc);
 int xchk_setup_inode(struct xfs_scrub *sc);
 int xchk_setup_inode_bmap(struct xfs_scrub *sc);
-int xchk_setup_inode_bmap_data(struct xfs_scrub *sc);
 int xchk_setup_directory(struct xfs_scrub *sc);
 int xchk_setup_xattr(struct xfs_scrub *sc);
 int xchk_setup_symlink(struct xfs_scrub *sc);
@@ -106,9 +109,8 @@ xchk_ino_dqattach(struct xfs_scrub *sc)
 int xchk_setup_fscounters(struct xfs_scrub *sc);
 int xchk_setup_nlinks(struct xfs_scrub *sc);
 
-void xchk_ag_free(struct xfs_scrub *sc, struct xchk_ag *sa);
-int xchk_ag_init(struct xfs_scrub *sc, xfs_agnumber_t agno,
-		struct xchk_ag *sa);
+void xchk_ag_free(struct xfs_scrub *sc);
+int xchk_ag_init(struct xfs_scrub *sc, xfs_agnumber_t agno);
 int xchk_perag_drain_and_lock(struct xfs_scrub *sc);
 
 /*
@@ -119,10 +121,9 @@ int xchk_perag_drain_and_lock(struct xfs_scrub *sc);
 static inline int
 xchk_ag_init_existing(
 	struct xfs_scrub	*sc,
-	xfs_agnumber_t		agno,
-	struct xchk_ag		*sa)
+	xfs_agnumber_t		agno)
 {
-	int			error = xchk_ag_init(sc, agno, sa);
+	int			error = xchk_ag_init(sc, agno);
 
 	return error == -ENOENT ? -EFSCORRUPTED : error;
 }
@@ -134,38 +135,34 @@ xchk_ag_init_existing(
 				 XFS_RTGLOCK_RMAP | \
 				 XFS_RTGLOCK_REFCOUNT)
 
-int xchk_rtgroup_init(struct xfs_scrub *sc, xfs_rgnumber_t rgno,
-		struct xchk_rt *sr);
+int xchk_rtgroup_init(struct xfs_scrub *sc, xfs_rgnumber_t rgno);
 
 static inline int
 xchk_rtgroup_init_existing(
 	struct xfs_scrub	*sc,
-	xfs_rgnumber_t		rgno,
-	struct xchk_rt		*sr)
+	xfs_rgnumber_t		rgno)
 {
-	int			error = xchk_rtgroup_init(sc, rgno, sr);
+	int			error = xchk_rtgroup_init(sc, rgno);
 
 	return error == -ENOENT ? -EFSCORRUPTED : error;
 }
 
-int xchk_rtgroup_lock(struct xfs_scrub *sc, struct xchk_rt *sr,
-		unsigned int rtglock_flags);
-void xchk_rtgroup_unlock(struct xchk_rt *sr);
-void xchk_rtgroup_btcur_free(struct xchk_rt *sr);
-void xchk_rtgroup_free(struct xfs_scrub *sc, struct xchk_rt *sr);
+int xchk_rtgroup_lock(struct xfs_scrub *sc, unsigned int rtglock_flags);
+void xchk_rtgroup_unlock(struct xfs_scrub *sc);
+void xchk_rtgroup_btcur_free(struct xfs_scrub *sc);
+void xchk_rtgroup_free(struct xfs_scrub *sc);
 #else
-# define xchk_rtgroup_init(sc, rgno, sr)		(-EFSCORRUPTED)
-# define xchk_rtgroup_init_existing(sc, rgno, sr)	(-EFSCORRUPTED)
-# define xchk_rtgroup_lock(sc, sr, lockflags)		(-EFSCORRUPTED)
-# define xchk_rtgroup_unlock(sr)			do { } while (0)
-# define xchk_rtgroup_btcur_free(sr)			do { } while (0)
-# define xchk_rtgroup_free(sc, sr)			do { } while (0)
+# define xchk_rtgroup_init(sc, rgno)			(-EFSCORRUPTED)
+# define xchk_rtgroup_init_existing(sc, rgno)		(-EFSCORRUPTED)
+# define xchk_rtgroup_lock(sc, lockflags)		(-EFSCORRUPTED)
+# define xchk_rtgroup_unlock(sc)			do { } while (0)
+# define xchk_rtgroup_btcur_free(sc)			do { } while (0)
+# define xchk_rtgroup_free(sc)				do { } while (0)
 #endif /* CONFIG_XFS_RT */
 
-int xchk_ag_read_headers(struct xfs_scrub *sc, xfs_agnumber_t agno,
-		struct xchk_ag *sa);
-void xchk_ag_btcur_free(struct xchk_ag *sa);
-void xchk_ag_btcur_init(struct xfs_scrub *sc, struct xchk_ag *sa);
+int xchk_ag_read_headers(struct xfs_scrub *sc, xfs_agnumber_t agno);
+void xchk_ag_btcur_free(struct xfs_scrub *sc);
+void xchk_ag_btcur_init(struct xfs_scrub *sc);
 int xchk_count_rmap_ownedby_ag(struct xfs_scrub *sc, struct xfs_btree_cur *cur,
 		const struct xfs_owner_info *oinfo, xfs_filblks_t *blocks);
 
@@ -245,31 +242,6 @@ static inline bool xchk_could_repair(const struct xfs_scrub *sc)
 }
 
 int xchk_metadata_inode_forks(struct xfs_scrub *sc);
-
-/*
- * Helper macros to allocate and format xfile description strings.
- * Callers must kfree the pointer returned.
- */
-#define xchk_xfile_descr(sc, fmt, ...) \
-	kasprintf(XCHK_GFP_FLAGS, "XFS (%s): " fmt, \
-			(sc)->mp->m_super->s_id, ##__VA_ARGS__)
-#define xchk_xfile_ag_descr(sc, fmt, ...) \
-	kasprintf(XCHK_GFP_FLAGS, "XFS (%s): AG 0x%x " fmt, \
-			(sc)->mp->m_super->s_id, \
-			(sc)->sa.pag ? \
-				pag_agno((sc)->sa.pag) : (sc)->sm->sm_agno, \
-			##__VA_ARGS__)
-#define xchk_xfile_ino_descr(sc, fmt, ...) \
-	kasprintf(XCHK_GFP_FLAGS, "XFS (%s): inode 0x%llx " fmt, \
-			(sc)->mp->m_super->s_id, \
-			(sc)->ip ? (sc)->ip->i_ino : (sc)->sm->sm_ino, \
-			##__VA_ARGS__)
-#define xchk_xfile_rtgroup_descr(sc, fmt, ...) \
-	kasprintf(XCHK_GFP_FLAGS, "XFS (%s): rtgroup 0x%x " fmt, \
-			(sc)->mp->m_super->s_id, \
-			(sc)->sa.pag ? \
-				rtg_rgno((sc)->sr.rtg) : (sc)->sm->sm_agno, \
-			##__VA_ARGS__)
 
 /*
  * Setting up a hook to wait for intents to drain is costly -- we have to take

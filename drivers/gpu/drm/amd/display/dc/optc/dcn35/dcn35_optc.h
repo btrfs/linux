@@ -32,23 +32,12 @@
 #define OPTC_COMMON_MASK_SH_LIST_DCN3_5(mask_sh)\
 	OPTC_COMMON_MASK_SH_LIST_DCN3_2(mask_sh),\
 	SF(OTG0_OTG_CRC_CNTL, OTG_CRC_WINDOW_DB_EN, mask_sh),\
-	SF(OTG0_OTG_CRC1_DATA_RG, CRC1_R_CR, mask_sh),\
-	SF(OTG0_OTG_CRC1_DATA_RG, CRC1_G_Y, mask_sh),\
-	SF(OTG0_OTG_CRC1_DATA_B,  CRC1_B_CB, mask_sh),\
 	SF(OTG0_OTG_CRC2_DATA_RG, CRC2_R_CR, mask_sh),\
 	SF(OTG0_OTG_CRC2_DATA_RG, CRC2_G_Y, mask_sh),\
 	SF(OTG0_OTG_CRC2_DATA_B,  CRC2_B_CB, mask_sh),\
 	SF(OTG0_OTG_CRC3_DATA_RG, CRC3_R_CR, mask_sh),\
 	SF(OTG0_OTG_CRC3_DATA_RG, CRC3_G_Y, mask_sh),\
 	SF(OTG0_OTG_CRC3_DATA_B,  CRC3_B_CB, mask_sh),\
-	SF(OTG0_OTG_CRC1_WINDOWA_X_CONTROL, OTG_CRC1_WINDOWA_X_START, mask_sh),\
-	SF(OTG0_OTG_CRC1_WINDOWA_X_CONTROL, OTG_CRC1_WINDOWA_X_END, mask_sh),\
-	SF(OTG0_OTG_CRC1_WINDOWA_Y_CONTROL, OTG_CRC1_WINDOWA_Y_START, mask_sh),\
-	SF(OTG0_OTG_CRC1_WINDOWA_Y_CONTROL, OTG_CRC1_WINDOWA_Y_END, mask_sh),\
-	SF(OTG0_OTG_CRC1_WINDOWB_X_CONTROL, OTG_CRC1_WINDOWB_X_START, mask_sh),\
-	SF(OTG0_OTG_CRC1_WINDOWB_X_CONTROL, OTG_CRC1_WINDOWB_X_END, mask_sh),\
-	SF(OTG0_OTG_CRC1_WINDOWB_Y_CONTROL, OTG_CRC1_WINDOWB_Y_START, mask_sh),\
-	SF(OTG0_OTG_CRC1_WINDOWB_Y_CONTROL, OTG_CRC1_WINDOWB_Y_END, mask_sh),\
 	SF(OTG0_OTG_CRC0_WINDOWA_X_CONTROL_READBACK, OTG_CRC0_WINDOWA_X_START_READBACK, mask_sh),\
 	SF(OTG0_OTG_CRC0_WINDOWA_X_CONTROL_READBACK, OTG_CRC0_WINDOWA_X_END_READBACK, mask_sh),\
 	SF(OTG0_OTG_CRC0_WINDOWA_Y_CONTROL_READBACK, OTG_CRC0_WINDOWA_Y_START_READBACK, mask_sh),\
@@ -74,10 +63,29 @@
 	SF(OTG0_OTG_PIPE_UPDATE_STATUS, OTG_VUPDATE_KEEPOUT_STATUS, mask_sh),\
 	SF(OTG0_INTERRUPT_DEST, OTG0_IHC_OTG_VERTICAL_INTERRUPT2_DEST, mask_sh)
 
+#define OPTC_COMMON_MASK_SH_LIST_DCN3_6(mask_sh)\
+	OPTC_COMMON_MASK_SH_LIST_DCN3_5(mask_sh),\
+	SF(OTG0_OTG_CRC_CNTL, OTG_CRC_POLY_SEL, mask_sh),\
+	SF(OTG_CRC320_OTG_CRC0_DATA_R32, CRC0_R_CR32, mask_sh),\
+	SF(OTG_CRC320_OTG_CRC0_DATA_G32, CRC0_G_Y32, mask_sh),\
+	SF(OTG_CRC320_OTG_CRC0_DATA_B32, CRC0_B_CB32, mask_sh),\
+	SF(OTG_CRC320_OTG_CRC1_DATA_R32, CRC1_R_CR32, mask_sh),\
+	SF(OTG_CRC320_OTG_CRC1_DATA_G32, CRC1_G_Y32, mask_sh),\
+	SF(OTG_CRC320_OTG_CRC1_DATA_B32, CRC1_B_CB32, mask_sh)
+
 void dcn35_timing_generator_init(struct optc *optc1);
 
 void dcn35_timing_generator_set_fgcg(struct optc *optc1, bool enable);
 
 void optc35_set_drr(struct timing_generator *optc, const struct drr_params *params);
+
+void optc35_set_long_vtotal(
+	struct timing_generator *optc,
+	const struct long_vtotal_params *params);
+
+bool optc35_configure_crc(struct timing_generator *optc,
+				 const struct crc_params *params);
+
+void optc35_wait_otg_disable(struct timing_generator *optc);
 
 #endif /* __DC_OPTC_DCN35_H__ */

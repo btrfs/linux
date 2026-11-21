@@ -39,15 +39,19 @@ attribute-sets:
       -
         name: ipproto
         type: u8
+        checks:
+          min: 1
       -
         name: type
         type: u8
+        enum: encap-type
       -
         name: remcsum-nopartial
         type: flag
       -
         name: local-v4
         type: u32
+        byte-order: big-endian
       -
         name: local-v6
         type: binary
@@ -56,6 +60,7 @@ attribute-sets:
       -
         name: peer-v4
         type: u32
+        byte-order: big-endian
       -
         name: peer-v6
         type: binary
@@ -88,6 +93,7 @@ operations:
         request: &all_attrs
           attributes:
             - port
+            - af
             - ipproto
             - type
             - remcsum-nopartial

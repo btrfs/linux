@@ -13,7 +13,6 @@
 #include <linux/errno.h>
 #include <linux/gpio/consumer.h>
 #include <linux/map_to_7segment.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/types.h>
@@ -64,7 +63,7 @@ static int seg_led_probe(struct platform_device *pdev)
 	struct seg_led_priv *priv;
 	struct device *dev = &pdev->dev;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

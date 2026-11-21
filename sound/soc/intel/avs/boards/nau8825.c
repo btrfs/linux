@@ -23,8 +23,7 @@
 static int
 avs_nau8825_clock_control(struct snd_soc_dapm_widget *w, struct snd_kcontrol *control, int event)
 {
-	struct snd_soc_dapm_context *dapm = w->dapm;
-	struct snd_soc_card *card = dapm->card;
+	struct snd_soc_card *card = snd_soc_dapm_to_card(w->dapm);
 	struct snd_soc_dai *codec_dai;
 	int ret;
 
@@ -178,15 +177,15 @@ static int avs_create_dai_link(struct device *dev, int ssp_port, int tdm_slot,
 	struct snd_soc_dai_link_component *platform;
 	struct snd_soc_dai_link *dl;
 
-	dl = devm_kzalloc(dev, sizeof(*dl), GFP_KERNEL);
-	platform = devm_kzalloc(dev, sizeof(*platform), GFP_KERNEL);
+	dl = devm_kzalloc_obj(dev, *dl);
+	platform = devm_kzalloc_obj(dev, *platform);
 	if (!dl || !platform)
 		return -ENOMEM;
 
 	dl->name = devm_kasprintf(dev, GFP_KERNEL,
 				  AVS_STRING_FMT("SSP", "-Codec", ssp_port, tdm_slot));
-	dl->cpus = devm_kzalloc(dev, sizeof(*dl->cpus), GFP_KERNEL);
-	dl->codecs = devm_kzalloc(dev, sizeof(*dl->codecs), GFP_KERNEL);
+	dl->cpus = devm_kzalloc_obj(dev, *dl->cpus);
+	dl->codecs = devm_kzalloc_obj(dev, *dl->codecs);
 	if (!dl->name || !dl->cpus || !dl->codecs)
 		return -ENOMEM;
 
@@ -264,8 +263,8 @@ static int avs_nau8825_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	jack = devm_kzalloc(dev, sizeof(*jack), GFP_KERNEL);
-	card = devm_kzalloc(dev, sizeof(*card), GFP_KERNEL);
+	jack = devm_kzalloc_obj(dev, *jack);
+	card = devm_kzalloc_obj(dev, *card);
 	if (!jack || !card)
 		return -ENOMEM;
 
@@ -294,10 +293,8 @@ static int avs_nau8825_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id avs_nau8825_driver_ids[] = {
-	{
-		.name = "avs_nau8825",
-	},
-	{},
+	{ .name = "avs_nau8825" },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, avs_nau8825_driver_ids);
 

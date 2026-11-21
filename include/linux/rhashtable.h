@@ -20,9 +20,9 @@
 
 #include <linux/err.h>
 #include <linux/errno.h>
+#include <linux/irq_work.h>
 #include <linux/jhash.h>
 #include <linux/list_nulls.h>
-#include <linux/workqueue.h>
 #include <linux/rculist.h>
 #include <linux/bit_spinlock.h>
 
@@ -129,10 +129,10 @@ static __always_inline unsigned int rht_key_get_hash(struct rhashtable *ht,
 	unsigned int hash;
 
 	/* params must be equal to ht->p if it isn't constant. */
-	if (!__builtin_constant_p(params.key_len))
+	if (!__builtin_constant_p(params.key_len)) {
 		hash = ht->p.hashfn(key, ht->key_len, hash_rnd);
-	else if (params.key_len) {
-		unsigned int key_len = params.key_len;
+	} else {
+		unsigned int key_len = params.key_len ? : ht->p.key_len;
 
 		if (params.hashfn)
 			hash = params.hashfn(key, key_len, hash_rnd);
@@ -140,13 +140,6 @@ static __always_inline unsigned int rht_key_get_hash(struct rhashtable *ht,
 			hash = jhash(key, key_len, hash_rnd);
 		else
 			hash = jhash2(key, key_len / sizeof(u32), hash_rnd);
-	} else {
-		unsigned int key_len = ht->p.key_len;
-
-		if (params.hashfn)
-			hash = params.hashfn(key, key_len, hash_rnd);
-		else
-			hash = jhash(key, key_len, hash_rnd);
 	}
 
 	return hash;
@@ -245,16 +238,17 @@ void *rhashtable_insert_slow(struct rhashtable *ht, const void *key,
 void rhashtable_walk_enter(struct rhashtable *ht,
 			   struct rhashtable_iter *iter);
 void rhashtable_walk_exit(struct rhashtable_iter *iter);
-int rhashtable_walk_start_check(struct rhashtable_iter *iter) __acquires(RCU);
+int rhashtable_walk_start_check(struct rhashtable_iter *iter) __acquires_shared(RCU);
 
 static inline void rhashtable_walk_start(struct rhashtable_iter *iter)
+	__acquires_shared(RCU)
 {
 	(void)rhashtable_walk_start_check(iter);
 }
 
 void *rhashtable_walk_next(struct rhashtable_iter *iter);
 void *rhashtable_walk_peek(struct rhashtable_iter *iter);
-void rhashtable_walk_stop(struct rhashtable_iter *iter) __releases(RCU);
+void rhashtable_walk_stop(struct rhashtable_iter *iter) __releases_shared(RCU);
 
 void rhashtable_free_and_destroy(struct rhashtable *ht,
 				 void (*free_fn)(void *ptr, void *arg),
@@ -267,6 +261,8 @@ struct rhash_lock_head __rcu **__rht_bucket_nested(
 	const struct bucket_table *tbl, unsigned int hash);
 struct rhash_lock_head __rcu **rht_bucket_nested_insert(
 	struct rhashtable *ht, struct bucket_table *tbl, unsigned int hash);
+
+void *rhashtable_next_key(struct rhashtable *ht, const void *prev_key);
 
 #define rht_dereference(p, ht) \
 	rcu_dereference_protected(p, lockdep_rht_mutex_is_held(ht))
@@ -323,20 +319,10 @@ static inline struct rhash_lock_head __rcu **rht_bucket_insert(
  * When we write to a bucket without unlocking, we use rht_assign_locked().
  */
 
-static inline unsigned long rht_lock(struct bucket_table *tbl,
-				     struct rhash_lock_head __rcu **bkt)
-{
-	unsigned long flags;
-
-	local_irq_save(flags);
-	bit_spin_lock(0, (unsigned long *)bkt);
-	lock_map_acquire(&tbl->dep_map);
-	return flags;
-}
-
 static inline unsigned long rht_lock_nested(struct bucket_table *tbl,
 					struct rhash_lock_head __rcu **bucket,
 					unsigned int subclass)
+	__acquires(__bitlock(0, bucket))
 {
 	unsigned long flags;
 
@@ -346,21 +332,42 @@ static inline unsigned long rht_lock_nested(struct bucket_table *tbl,
 	return flags;
 }
 
+static inline unsigned long rht_lock(struct bucket_table *tbl,
+				     struct rhash_lock_head __rcu **bkt)
+	__acquires(__bitlock(0, bkt))
+{
+	return rht_lock_nested(tbl, bkt, 0);
+}
+
 static inline void rht_unlock(struct bucket_table *tbl,
 			      struct rhash_lock_head __rcu **bkt,
 			      unsigned long flags)
+	__releases(__bitlock(0, bkt))
 {
 	lock_map_release(&tbl->dep_map);
 	bit_spin_unlock(0, (unsigned long *)bkt);
 	local_irq_restore(flags);
 }
 
-static inline struct rhash_head *__rht_ptr(
-	struct rhash_lock_head *p, struct rhash_lock_head __rcu *const *bkt)
+enum rht_lookup_freq {
+	RHT_LOOKUP_NORMAL,
+	RHT_LOOKUP_LIKELY,
+};
+
+static __always_inline struct rhash_head *__rht_ptr(
+	struct rhash_lock_head *p, struct rhash_lock_head __rcu *const *bkt,
+	const enum rht_lookup_freq freq)
 {
-	return (struct rhash_head *)
-		((unsigned long)p & ~BIT(0) ?:
-		 (unsigned long)RHT_NULLS_MARKER(bkt));
+	unsigned long p_val = (unsigned long)p & ~BIT(0);
+
+	BUILD_BUG_ON(!__builtin_constant_p(freq));
+
+	if (freq == RHT_LOOKUP_LIKELY)
+		return (struct rhash_head *)
+			(likely(p_val) ? p_val : (unsigned long)RHT_NULLS_MARKER(bkt));
+	else
+		return (struct rhash_head *)
+			(p_val ?: (unsigned long)RHT_NULLS_MARKER(bkt));
 }
 
 /*
@@ -370,10 +377,17 @@ static inline struct rhash_head *__rht_ptr(
  *   rht_ptr_exclusive() dereferences in a context where exclusive
  *            access is guaranteed, such as when destroying the table.
  */
+static __always_inline struct rhash_head *__rht_ptr_rcu(
+	struct rhash_lock_head __rcu *const *bkt,
+	const enum rht_lookup_freq freq)
+{
+	return __rht_ptr(rcu_dereference_all(*bkt), bkt, freq);
+}
+
 static inline struct rhash_head *rht_ptr_rcu(
 	struct rhash_lock_head __rcu *const *bkt)
 {
-	return __rht_ptr(rcu_dereference_all(*bkt), bkt);
+	return __rht_ptr_rcu(bkt, RHT_LOOKUP_NORMAL);
 }
 
 static inline struct rhash_head *rht_ptr(
@@ -381,13 +395,15 @@ static inline struct rhash_head *rht_ptr(
 	struct bucket_table *tbl,
 	unsigned int hash)
 {
-	return __rht_ptr(rht_dereference_bucket(*bkt, tbl, hash), bkt);
+	return __rht_ptr(rht_dereference_bucket(*bkt, tbl, hash), bkt,
+			 RHT_LOOKUP_NORMAL);
 }
 
 static inline struct rhash_head *rht_ptr_exclusive(
 	struct rhash_lock_head __rcu *const *bkt)
 {
-	return __rht_ptr(rcu_dereference_protected(*bkt, 1), bkt);
+	return __rht_ptr(rcu_dereference_protected(*bkt, 1), bkt,
+			 RHT_LOOKUP_NORMAL);
 }
 
 static inline void rht_assign_locked(struct rhash_lock_head __rcu **bkt,
@@ -402,13 +418,14 @@ static inline void rht_assign_unlock(struct bucket_table *tbl,
 				     struct rhash_lock_head __rcu **bkt,
 				     struct rhash_head *obj,
 				     unsigned long flags)
+	__releases(__bitlock(0, bkt))
 {
 	if (rht_is_a_nulls(obj))
 		obj = NULL;
 	lock_map_release(&tbl->dep_map);
 	rcu_assign_pointer(*bkt, (void *)obj);
 	preempt_enable();
-	__release(bitlock);
+	__release(__bitlock(0, bkt));
 	local_irq_restore(flags);
 }
 
@@ -576,19 +593,31 @@ static inline void rht_assign_unlock(struct bucket_table *tbl,
 	for (pos = list; pos && rht_entry(tpos, pos, member);		\
 	     pos = rcu_dereference_all(pos->next))
 
-static inline int rhashtable_compare(struct rhashtable_compare_arg *arg,
-				     const void *obj)
+/*
+ * Use constant params from inlined callers to specialize memcmp(). If params
+ * isn't constant, it must be equal to ht->p.
+ */
+static __always_inline int rhashtable_compare(struct rhashtable_compare_arg *arg,
+					      const void *obj,
+					      const struct rhashtable_params params)
 {
 	struct rhashtable *ht = arg->ht;
 	const char *ptr = obj;
 
-	return memcmp(ptr + ht->p.key_offset, arg->key, ht->p.key_len);
+	if (!__builtin_constant_p(params.key_len))
+		return memcmp(ptr + ht->p.key_offset, arg->key,
+			      ht->p.key_len);
+
+	return memcmp(ptr + params.key_offset, arg->key,
+		      params.key_len ? : ht->p.key_len);
 }
 
 /* Internal function, do not use. */
 static __always_inline struct rhash_head *__rhashtable_lookup(
 	struct rhashtable *ht, const void *key,
-	const struct rhashtable_params params)
+	const struct rhashtable_params params,
+	const enum rht_lookup_freq freq)
+	__must_hold_shared(RCU)
 {
 	struct rhashtable_compare_arg arg = {
 		.ht = ht,
@@ -599,15 +628,16 @@ static __always_inline struct rhash_head *__rhashtable_lookup(
 	struct rhash_head *he;
 	unsigned int hash;
 
+	BUILD_BUG_ON(!__builtin_constant_p(freq));
 	tbl = rht_dereference_rcu(ht->tbl, ht);
 restart:
 	hash = rht_key_hashfn(ht, tbl, key, params);
 	bkt = rht_bucket(tbl, hash);
 	do {
-		rht_for_each_rcu_from(he, rht_ptr_rcu(bkt), tbl, hash) {
+		rht_for_each_rcu_from(he, __rht_ptr_rcu(bkt, freq), tbl, hash) {
 			if (params.obj_cmpfn ?
 			    params.obj_cmpfn(&arg, rht_obj(ht, he)) :
-			    rhashtable_compare(&arg, rht_obj(ht, he)))
+			    rhashtable_compare(&arg, rht_obj(ht, he), params))
 				continue;
 			return he;
 		}
@@ -642,10 +672,23 @@ restart:
 static __always_inline void *rhashtable_lookup(
 	struct rhashtable *ht, const void *key,
 	const struct rhashtable_params params)
+	__must_hold_shared(RCU)
 {
-	struct rhash_head *he = __rhashtable_lookup(ht, key, params);
+	struct rhash_head *he = __rhashtable_lookup(ht, key, params,
+						    RHT_LOOKUP_NORMAL);
 
 	return he ? rht_obj(ht, he) : NULL;
+}
+
+static __always_inline void *rhashtable_lookup_likely(
+	struct rhashtable *ht, const void *key,
+	const struct rhashtable_params params)
+	__must_hold_shared(RCU)
+{
+	struct rhash_head *he = __rhashtable_lookup(ht, key, params,
+						    RHT_LOOKUP_LIKELY);
+
+	return likely(he) ? rht_obj(ht, he) : NULL;
 }
 
 /**
@@ -692,10 +735,23 @@ static __always_inline void *rhashtable_lookup_fast(
 static __always_inline struct rhlist_head *rhltable_lookup(
 	struct rhltable *hlt, const void *key,
 	const struct rhashtable_params params)
+	__must_hold_shared(RCU)
 {
-	struct rhash_head *he = __rhashtable_lookup(&hlt->ht, key, params);
+	struct rhash_head *he = __rhashtable_lookup(&hlt->ht, key, params,
+						    RHT_LOOKUP_NORMAL);
 
 	return he ? container_of(he, struct rhlist_head, rhead) : NULL;
+}
+
+static __always_inline struct rhlist_head *rhltable_lookup_likely(
+	struct rhltable *hlt, const void *key,
+	const struct rhashtable_params params)
+	__must_hold_shared(RCU)
+{
+	struct rhash_head *he = __rhashtable_lookup(&hlt->ht, key, params,
+						    RHT_LOOKUP_LIKELY);
+
+	return likely(he) ? container_of(he, struct rhlist_head, rhead) : NULL;
 }
 
 /* Internal function, please use rhashtable_insert_fast() instead. This
@@ -746,7 +802,7 @@ slow_path:
 		if (!key ||
 		    (params.obj_cmpfn ?
 		     params.obj_cmpfn(&arg, rht_obj(ht, head)) :
-		     rhashtable_compare(&arg, rht_obj(ht, head)))) {
+		     rhashtable_compare(&arg, rht_obj(ht, head), params))) {
 			pprev = &head->next;
 			continue;
 		}
@@ -772,14 +828,15 @@ slow_path:
 		goto out;
 	}
 
-	if (elasticity <= 0)
+	if (elasticity <= 0 && !params.insecure_elasticity)
 		goto slow_path;
 
 	data = ERR_PTR(-E2BIG);
 	if (unlikely(rht_grow_above_max(ht, tbl)))
 		goto out_unlock;
 
-	if (unlikely(rht_grow_above_100(ht, tbl)))
+	if (unlikely(rht_grow_above_100(ht, tbl)) &&
+	    !params.insecure_elasticity)
 		goto slow_path;
 
 	/* Inserting at head of list makes unlocking free. */
@@ -797,7 +854,7 @@ slow_path:
 	rht_assign_unlock(tbl, bkt, obj, flags);
 
 	if (rht_grow_above_75(ht, tbl))
-		schedule_work(&ht->run_work);
+		irq_work_queue(&ht->run_irq_work);
 
 	data = NULL;
 out:
@@ -1066,7 +1123,7 @@ unlocked:
 		atomic_dec(&ht->nelems);
 		if (unlikely(ht->p.automatic_shrinking &&
 			     rht_shrink_below_30(ht, tbl)))
-			schedule_work(&ht->run_work);
+			irq_work_queue(&ht->run_irq_work);
 		err = 0;
 	}
 

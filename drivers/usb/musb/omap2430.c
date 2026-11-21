@@ -151,7 +151,6 @@ static void omap_musb_set_mailbox(struct omap2430_glue *glue)
 	default:
 		dev_dbg(musb->controller, "ID float\n");
 	}
-	pm_runtime_mark_last_busy(musb->controller);
 	pm_runtime_put_autosuspend(musb->controller);
 	atomic_notifier_call_chain(&musb->xceiv->notifier,
 			musb->xceiv->last_event, NULL);
@@ -316,7 +315,7 @@ static int omap2430_probe(struct platform_device *pdev)
 	if (!np)
 		return -ENODEV;
 
-	glue = devm_kzalloc(&pdev->dev, sizeof(*glue), GFP_KERNEL);
+	glue = devm_kzalloc_obj(&pdev->dev, *glue);
 	if (!glue)
 		return -ENOMEM;
 
@@ -338,22 +337,21 @@ static int omap2430_probe(struct platform_device *pdev)
 	} else {
 		device_set_of_node_from_dev(&musb->dev, &pdev->dev);
 	}
-	of_node_put(np);
 
 	glue->dev			= &pdev->dev;
 	glue->musb			= musb;
 	glue->status			= MUSB_UNKNOWN;
 	glue->control_otghs = ERR_PTR(-ENODEV);
 
-	pdata = devm_kzalloc(&pdev->dev, sizeof(*pdata), GFP_KERNEL);
+	pdata = devm_kzalloc_obj(&pdev->dev, *pdata);
 	if (!pdata)
 		goto err_put_musb;
 
-	data = devm_kzalloc(&pdev->dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(&pdev->dev, *data);
 	if (!data)
 		goto err_put_musb;
 
-	config = devm_kzalloc(&pdev->dev, sizeof(*config), GFP_KERNEL);
+	config = devm_kzalloc_obj(&pdev->dev, *config);
 	if (!config)
 		goto err_put_musb;
 

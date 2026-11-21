@@ -9,8 +9,12 @@
 #include <linux/delay.h>
 #include <linux/i2c.h>
 
+#include <drm/drm_fourcc.h>
 #include <drm/drm_modeset_helper.h>
 #include <drm/drm_modeset_helper_vtables.h>
+#include <drm/drm_plane.h>
+#include <drm/drm_plane_helper.h>
+#include <drm/drm_print.h>
 
 #include "framebuffer.h"
 #include "gem.h"
@@ -403,7 +407,7 @@ struct drm_display_mode *psb_intel_crtc_mode_get(struct drm_device *dev,
 		vsync = p->vsync;
 	}
 
-	mode = kzalloc(sizeof(*mode), GFP_KERNEL);
+	mode = kzalloc_obj(*mode);
 	if (!mode)
 		return NULL;
 
@@ -470,11 +474,25 @@ out:
 	REG_WRITE(base[gma_crtc->pipe], 0);
 }
 
+/*
+ * The display engine programs the primary plane with
+ * DISPPLANE_32BPP_NO_ALPHA, so no formats with alpha.
+ */
+static const uint32_t gma_primary_formats[] = {
+	DRM_FORMAT_XRGB8888,
+};
+
+static const struct drm_plane_funcs gma_primary_plane_funcs = {
+	.update_plane = drm_plane_helper_update_primary,
+	.disable_plane = drm_plane_helper_disable_primary,
+};
+
 void psb_intel_crtc_init(struct drm_device *dev, int pipe,
 		     struct psb_intel_mode_device *mode_dev)
 {
 	struct drm_psb_private *dev_priv = to_drm_psb_private(dev);
 	struct gma_crtc *gma_crtc;
+	struct drm_plane *primary;
 	int i;
 
 	/* We allocate a extra array of drm_connector pointers
@@ -486,14 +504,24 @@ void psb_intel_crtc_init(struct drm_device *dev, int pipe,
 		return;
 
 	gma_crtc->crtc_state =
-		kzalloc(sizeof(struct psb_intel_crtc_state), GFP_KERNEL);
+		kzalloc_obj(struct psb_intel_crtc_state);
 	if (!gma_crtc->crtc_state) {
 		dev_err(dev->dev, "Crtc state error: No memory\n");
 		kfree(gma_crtc);
 		return;
 	}
 
-	drm_crtc_init(dev, &gma_crtc->base, &gma_crtc_funcs);
+	primary = drmm_universal_plane_alloc(dev, struct drm_plane, dev, 0,
+					     &gma_primary_plane_funcs,
+					     gma_primary_formats,
+					     ARRAY_SIZE(gma_primary_formats),
+					     NULL, DRM_PLANE_TYPE_PRIMARY, NULL);
+	if (IS_ERR(primary))
+		goto err_free_crtc;
+
+	if (drm_crtc_init_with_planes(dev, &gma_crtc->base, primary, NULL,
+				      &gma_crtc_funcs, NULL))
+		goto err_free_crtc;
 
 	/* Set the CRTC clock functions from chip specific data */
 	gma_crtc->clock_funcs = dev_priv->ops->clock_funcs;
@@ -523,6 +551,11 @@ void psb_intel_crtc_init(struct drm_device *dev, int pipe,
 
 	/* Set to true so that the pipe is forced off on initial config. */
 	gma_crtc->active = true;
+	return;
+
+err_free_crtc:
+	kfree(gma_crtc->crtc_state);
+	kfree(gma_crtc);
 }
 
 struct drm_crtc *psb_intel_get_crtc_from_pipe(struct drm_device *dev, int pipe)

@@ -22,13 +22,14 @@
 #include <linux/pci.h>
 #include <linux/pm_runtime.h>
 #include <linux/pwm.h>
+#include <linux/sizes.h>
 
 #include "pwm-dwc.h"
 
 /* Elkhart Lake */
 static const struct dwc_pwm_info ehl_pwm_info = {
 	.nr = 2,
-	.size = 0x1000,
+	.size = SZ_4K,
 };
 
 static int dwc_pwm_init_one(struct device *dev, struct dwc_pwm_drvdata *ddata, unsigned int idx)
@@ -67,7 +68,7 @@ static int dwc_pwm_probe(struct pci_dev *pci, const struct pci_device_id *id)
 	pci_set_master(pci);
 
 	info = (const struct dwc_pwm_info *)id->driver_data;
-	ddata = devm_kzalloc(dev, struct_size(ddata, chips, info->nr), GFP_KERNEL);
+	ddata = devm_kzalloc_flex(dev, *ddata, chips, info->nr);
 	if (!ddata)
 		return -ENOMEM;
 
@@ -146,8 +147,8 @@ static int dwc_pwm_resume(struct device *dev)
 static DEFINE_SIMPLE_DEV_PM_OPS(dwc_pwm_pm_ops, dwc_pwm_suspend, dwc_pwm_resume);
 
 static const struct pci_device_id dwc_pwm_id_table[] = {
-	{ PCI_VDEVICE(INTEL, 0x4bb7), (kernel_ulong_t)&ehl_pwm_info },
-	{  }	/* Terminating Entry */
+	{ PCI_VDEVICE(INTEL, 0x4bb7), .driver_data = (kernel_ulong_t)&ehl_pwm_info },
+	{ }	/* Terminating Entry */
 };
 MODULE_DEVICE_TABLE(pci, dwc_pwm_id_table);
 

@@ -54,10 +54,10 @@ static __poll_t odev_poll(struct file *file, poll_table * wait);
  */
 
 static struct snd_seq_driver seq_oss_synth_driver = {
+	.probe = snd_seq_oss_synth_probe,
+	.remove = snd_seq_oss_synth_remove,
 	.driver = {
 		.name = KBUILD_MODNAME,
-		.probe = snd_seq_oss_synth_probe,
-		.remove = snd_seq_oss_synth_remove,
 	},
 	.id = SNDRV_SEQ_DEV_ID_OSS,
 	.argsize = sizeof(struct snd_seq_oss_reg),
@@ -66,6 +66,9 @@ static struct snd_seq_driver seq_oss_synth_driver = {
 static int __init alsa_seq_oss_init(void)
 {
 	int rc;
+
+	pr_warn("seq-oss: kernel OSS sequencer emulation is deprecated\n");
+	pr_warn("seq-oss: Use user-space solution (alsa-oss or oss-seq-emu) instead.\n");
 
 	rc = register_device();
 	if (rc < 0)
@@ -206,17 +209,16 @@ odev_poll(struct file *file, poll_table * wait)
  * registration of sequencer minor device
  */
 
-static const struct file_operations seq_oss_f_ops =
-{
-	.owner =	THIS_MODULE,
-	.read =		odev_read,
-	.write =	odev_write,
-	.open =		odev_open,
-	.release =	odev_release,
-	.poll =		odev_poll,
-	.unlocked_ioctl =	odev_ioctl,
-	.compat_ioctl =	odev_ioctl_compat,
-	.llseek =	noop_llseek,
+static const struct file_operations seq_oss_f_ops = {
+	.owner		=	THIS_MODULE,
+	.read		=	odev_read,
+	.write		=	odev_write,
+	.open		=	odev_open,
+	.release	=	odev_release,
+	.poll		=	odev_poll,
+	.unlocked_ioctl	=	odev_ioctl,
+	.compat_ioctl	=	odev_ioctl_compat,
+	.llseek		=	noop_llseek,
 };
 
 static int __init

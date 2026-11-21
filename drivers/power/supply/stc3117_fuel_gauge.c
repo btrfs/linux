@@ -532,7 +532,7 @@ static int stc3117_probe(struct i2c_client *client)
 	struct power_supply_battery_info *info;
 	int ret;
 
-	data = devm_kzalloc(&client->dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(&client->dev, *data);
 	if (!data)
 		return -ENOMEM;
 
@@ -584,7 +584,7 @@ static int stc3117_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id stc3117_id[] = {
-	{ "stc3117", 0 },
+	{ .name = "stc3117", .driver_data = 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, stc3117_id);

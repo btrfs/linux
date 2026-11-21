@@ -202,7 +202,7 @@ static int tw9903_probe(struct i2c_client *client)
 	v4l_info(client, "chip found @ 0x%02x (%s)\n",
 			client->addr << 1, client->adapter->name);
 
-	dec = devm_kzalloc(&client->dev, sizeof(*dec), GFP_KERNEL);
+	dec = devm_kzalloc_obj(&client->dev, *dec);
 	if (dec == NULL)
 		return -ENOMEM;
 	sd = &dec->sd;
@@ -228,6 +228,7 @@ static int tw9903_probe(struct i2c_client *client)
 
 	if (write_regs(sd, initial_registers) < 0) {
 		v4l2_err(client, "error initializing TW9903\n");
+		v4l2_ctrl_handler_free(hdl);
 		return -EINVAL;
 	}
 
@@ -245,7 +246,7 @@ static void tw9903_remove(struct i2c_client *client)
 /* ----------------------------------------------------------------------- */
 
 static const struct i2c_device_id tw9903_id[] = {
-	{ "tw9903" },
+	{ .name = "tw9903" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tw9903_id);

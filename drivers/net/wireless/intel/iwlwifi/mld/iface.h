@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2024-2025 Intel Corporation
+ * Copyright (C) 2024-2026 Intel Corporation
  */
 #ifndef __iwl_mld_iface_h__
 #define __iwl_mld_iface_h__
@@ -8,6 +8,7 @@
 #include <net/mac80211.h>
 
 #include "link.h"
+#include "nan.h"
 #include "session-protect.h"
 #include "d3.h"
 #include "fw/api/time-event.h"
@@ -32,6 +33,8 @@ enum iwl_mld_cca_40mhz_wa_status {
  *      link is preventing EMLSR. This is a temporary blocking that is set when
  *      there is an indication that a non-BSS interface is to be added.
  * @IWL_MLD_EMLSR_BLOCKED_TPT: throughput is too low to make EMLSR worthwhile
+ * @IWL_MLD_EMLSR_BLOCKED_NAN: NAN is preventing EMLSR.
+ * @IWL_MLD_EMLSR_BLOCKED_TDLS: TDLS connection is preventing EMLSR.
  */
 enum iwl_mld_emlsr_blocked {
 	IWL_MLD_EMLSR_BLOCKED_PREVENTION	= 0x1,
@@ -40,6 +43,8 @@ enum iwl_mld_emlsr_blocked {
 	IWL_MLD_EMLSR_BLOCKED_NON_BSS		= 0x8,
 	IWL_MLD_EMLSR_BLOCKED_TMP_NON_BSS	= 0x10,
 	IWL_MLD_EMLSR_BLOCKED_TPT		= 0x20,
+	IWL_MLD_EMLSR_BLOCKED_NAN		= 0x40,
+	IWL_MLD_EMLSR_BLOCKED_TDLS		= 0x80,
 };
 
 /**
@@ -133,7 +138,6 @@ struct iwl_mld_emlsr {
  * @beacon_inject_active: indicates an active debugfs beacon ie injection
  * @low_latency_causes: bit flags, indicating the causes for low-latency,
  *	see @iwl_mld_low_latency_cause.
- * @ps_disabled: indicates that PS is disabled for this interface
  * @last_link_activation_time: last time a link was activated, for
  *	deferring MLO scans (to make them more reliable)
  * @mld: pointer to the mld structure.
@@ -148,6 +152,16 @@ struct iwl_mld_emlsr {
  *	p2p device only. Set to %ROC_NUM_ACTIVITIES when not in use.
  * @aux_sta: station used for remain on channel. Used in P2P device.
  * @mlo_scan_start_wk: worker to start a deferred MLO scan
+ * @nan: NAN parameters
+ * @nan.links: NAN links for FW (indexed by FW link ID)
+ * @nan.mac_added: track whether or not the MAC was added to FW
+ * @nan.bcast_sta: internal station used for NAN synchronization and discovery
+ *	activities. No queue is associated with it.
+ * @nan.mgmt_sta: internal station used for NAN management frames, e.g., SDFs
+ *	and NAFs.
+ * @nan.mcast_data_sta: internal station used for multicast NAN Data frames.
+ * @nan.tx_igtk: TX IGTK key for NAN, tracked separately since NAN does not
+ *	use the vif links.
  */
 struct iwl_mld_vif {
 	/* Add here fields that need clean up on restart */
@@ -163,13 +177,22 @@ struct iwl_mld_vif {
 		bool beacon_inject_active;
 #endif
 		u8 low_latency_causes;
-		bool ps_disabled;
 		time64_t last_link_activation_time;
 	);
 	/* And here fields that survive a fw restart */
 	struct iwl_mld *mld;
 	struct iwl_mld_link deflink;
 	struct iwl_mld_link __rcu *link[IEEE80211_MLD_MAX_NUM_LINKS];
+
+	struct {
+		/* use only with wiphy protection */
+		struct iwl_mld_nan_link links[IWL_FW_MAX_LINKS];
+		bool mac_added;
+		struct iwl_mld_int_sta bcast_sta;
+		struct iwl_mld_int_sta mgmt_sta;
+		struct iwl_mld_int_sta mcast_data_sta;
+		struct ieee80211_key_conf *tx_igtk;
+	} nan;
 
 	struct iwl_mld_emlsr emlsr;
 
@@ -199,6 +222,29 @@ iwl_mld_vif_to_mac80211(struct iwl_mld_vif *mld_vif)
 	return container_of((void *)mld_vif, struct ieee80211_vif, drv_priv);
 }
 
+/* Call only for interfaces that were added to the driver! */
+static inline bool iwl_mld_vif_fw_id_valid(struct iwl_mld_vif *mld_vif)
+{
+	struct ieee80211_vif *vif = iwl_mld_vif_to_mac80211(mld_vif);
+
+	switch (vif->type) {
+	case NL80211_IFTYPE_NAN_DATA:
+		return false;
+	case NL80211_IFTYPE_NAN:
+		if (!mld_vif->nan.mac_added)
+			return false;
+		break;
+	default:
+		break;
+	}
+
+	/* Should be added to FW */
+	if (WARN_ON(mld_vif->fw_id >= ARRAY_SIZE(mld_vif->mld->fw_id_to_vif)))
+		return false;
+
+	return true;
+}
+
 #define iwl_mld_link_dereference_check(mld_vif, link_id)		\
 	rcu_dereference_check((mld_vif)->link[link_id],			\
 			      lockdep_is_held(&mld_vif->mld->wiphy->mtx))
@@ -207,6 +253,12 @@ iwl_mld_vif_to_mac80211(struct iwl_mld_vif *mld_vif)
 	for (int link_id = 0; link_id < ARRAY_SIZE((mld_vif)->link);	\
 	     link_id++)							\
 		if ((mld_link = iwl_mld_link_dereference_check(mld_vif, link_id)))
+
+#define for_each_mld_nan_valid_link(mld_vif, nan_link)			\
+	for (nan_link = &(mld_vif)->nan.links[0];			\
+	     nan_link < &(mld_vif)->nan.links[ARRAY_SIZE((mld_vif)->nan.links)]; \
+	     nan_link++)						\
+		if (nan_link->fw_id != FW_CTXT_ID_INVALID)
 
 /* Retrieve pointer to mld link from mac80211 structures */
 static inline struct iwl_mld_link *
@@ -217,13 +269,12 @@ iwl_mld_link_from_mac80211(struct ieee80211_bss_conf *bss_conf)
 	return iwl_mld_link_dereference_check(mld_vif, bss_conf->link_id);
 }
 
-int iwl_mld_mac80211_iftype_to_fw(const struct ieee80211_vif *vif);
-
 /* Cleanup function for struct iwl_mld_vif, will be called in restart */
 void iwl_mld_cleanup_vif(void *data, u8 *mac, struct ieee80211_vif *vif);
 int iwl_mld_mac_fw_action(struct iwl_mld *mld, struct ieee80211_vif *vif,
 			  u32 action);
 int iwl_mld_add_vif(struct iwl_mld *mld, struct ieee80211_vif *vif);
+int iwl_mld_add_nan_vif(struct iwl_mld *mld, struct ieee80211_vif *vif);
 void iwl_mld_rm_vif(struct iwl_mld *mld, struct ieee80211_vif *vif);
 void iwl_mld_set_vif_associated(struct iwl_mld *mld,
 				struct ieee80211_vif *vif);
@@ -234,9 +285,6 @@ void iwl_mld_handle_probe_resp_data_notif(struct iwl_mld *mld,
 void iwl_mld_handle_datapath_monitor_notif(struct iwl_mld *mld,
 					   struct iwl_rx_packet *pkt);
 
-void iwl_mld_handle_uapsd_misbehaving_ap_notif(struct iwl_mld *mld,
-					       struct iwl_rx_packet *pkt);
-
 void iwl_mld_reset_cca_40mhz_workaround(struct iwl_mld *mld,
 					struct ieee80211_vif *vif);
 
@@ -246,5 +294,20 @@ static inline bool iwl_mld_vif_low_latency(const struct iwl_mld_vif *mld_vif)
 }
 
 struct ieee80211_vif *iwl_mld_get_bss_vif(struct iwl_mld *mld);
+
+static inline struct iwl_mld_link_sta *
+iwl_mld_get_ap_link_sta(struct ieee80211_vif *vif, int link_id)
+{
+	struct iwl_mld_vif *mld_vif = iwl_mld_vif_from_mac80211(vif);
+	struct ieee80211_sta *ap_sta = mld_vif->ap_sta;
+	struct iwl_mld_sta *mld_ap_sta;
+
+	if (!ap_sta)
+		return NULL;
+
+	mld_ap_sta = iwl_mld_sta_from_mac80211(ap_sta);
+
+	return iwl_mld_link_sta_dereference_check(mld_ap_sta, link_id);
+}
 
 #endif /* __iwl_mld_iface_h__ */

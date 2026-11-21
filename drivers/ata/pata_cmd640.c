@@ -153,7 +153,7 @@ static int cmd640_port_start(struct ata_port *ap)
 	struct pci_dev *pdev = to_pci_dev(ap->host->dev);
 	struct cmd640_reg *timing;
 
-	timing = devm_kzalloc(&pdev->dev, sizeof(struct cmd640_reg), GFP_KERNEL);
+	timing = devm_kzalloc_obj(&pdev->dev, struct cmd640_reg);
 	if (timing == NULL)
 		return -ENOMEM;
 	timing->last = -1;	/* Force a load */
@@ -248,8 +248,8 @@ static int cmd640_reinit_one(struct pci_dev *pdev)
 #endif
 
 static const struct pci_device_id cmd640[] = {
-	{ PCI_VDEVICE(CMD, 0x640), 0 },
-	{ },
+	{ PCI_VDEVICE(CMD, 0x0640) },
+	{ }
 };
 
 static struct pci_driver cmd640_pci_driver = {

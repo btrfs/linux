@@ -724,7 +724,7 @@ static int max77693_charger_probe(struct platform_device *pdev)
 	struct max77693_dev *max77693 = dev_get_drvdata(pdev->dev.parent);
 	int ret;
 
-	chg = devm_kzalloc(&pdev->dev, sizeof(*chg), GFP_KERNEL);
+	chg = devm_kzalloc_obj(&pdev->dev, *chg);
 	if (!chg)
 		return -ENOMEM;
 
@@ -788,7 +788,7 @@ static void max77693_charger_remove(struct platform_device *pdev)
 }
 
 static const struct platform_device_id max77693_charger_id[] = {
-	{ "max77693-charger", 0, },
+	{ .name = "max77693-charger" },
 	{ }
 };
 MODULE_DEVICE_TABLE(platform, max77693_charger_id);

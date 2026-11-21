@@ -427,8 +427,7 @@ static int lm3530_probe(struct i2c_client *client)
 		return -EIO;
 	}
 
-	drvdata = devm_kzalloc(&client->dev, sizeof(struct lm3530_data),
-				GFP_KERNEL);
+	drvdata = devm_kzalloc_obj(&client->dev, struct lm3530_data);
 	if (drvdata == NULL)
 		return -ENOMEM;
 
@@ -478,8 +477,8 @@ static void lm3530_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id lm3530_id[] = {
-	{ LM3530_NAME },
-	{}
+	{ .name = LM3530_NAME },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, lm3530_id);
 

@@ -369,6 +369,7 @@ static void enc35_stream_encoder_map_to_link(
 		uint32_t stream_enc_inst,
 		uint32_t link_enc_inst)
 {
+	(void)stream_enc_inst;
 	struct dcn10_stream_encoder *enc1 = DCN10STRENC_FROM_STRENC(enc);
 
 	ASSERT(stream_enc_inst < 5 && link_enc_inst < 5);
@@ -516,5 +517,7 @@ void dcn35_dio_stream_encoder_construct(
 	enc1->se_shift = se_shift;
 	enc1->se_mask = se_mask;
 	enc1->base.stream_enc_inst = vpg->inst;
+	enc1->base.inst = enc1->base.stream_enc_inst;
+
 }
 

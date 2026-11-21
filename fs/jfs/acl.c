@@ -61,7 +61,7 @@ static int __jfs_set_acl(tid_t tid, struct inode *inode, int type,
 {
 	char *ea_name;
 	int rc;
-	int size = 0;
+	size_t size = 0;
 	char *value = NULL;
 
 	switch (type) {
@@ -76,16 +76,11 @@ static int __jfs_set_acl(tid_t tid, struct inode *inode, int type,
 	}
 
 	if (acl) {
-		size = posix_acl_xattr_size(acl->a_count);
-		value = kmalloc(size, GFP_KERNEL);
+		value = posix_acl_to_xattr(&init_user_ns, acl, &size, GFP_KERNEL);
 		if (!value)
 			return -ENOMEM;
-		rc = posix_acl_to_xattr(&init_user_ns, acl, value, size);
-		if (rc < 0)
-			goto out;
 	}
 	rc = __jfs_setxattr(tid, inode, ea_name, value, size, 0);
-out:
 	kfree(value);
 
 	if (!rc)
@@ -94,7 +89,7 @@ out:
 	return rc;
 }
 
-int jfs_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
+int jfs_set_acl(const struct mnt_idmap *idmap, struct dentry *dentry,
 		struct posix_acl *acl, int type)
 {
 	int rc;

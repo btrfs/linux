@@ -82,7 +82,7 @@ static int snap_request(struct datalink_proto *dl,
 			struct sk_buff *skb, const u8 *dest)
 {
 	memcpy(skb_push(skb, 5), dl->type, 5);
-	llc_build_and_send_ui_pkt(snap_sap, skb, dest, snap_sap->laddr.lsap);
+	llc_build_and_send_ui_pkt(snap_sap, skb, dest, snap_sap->lsap);
 	return 0;
 }
 
@@ -132,7 +132,7 @@ struct datalink_proto *register_snap_client(const unsigned char *desc,
 	if (find_snap_client(desc))
 		goto out;
 
-	proto = kmalloc(sizeof(*proto), GFP_ATOMIC);
+	proto = kmalloc_obj(*proto, GFP_ATOMIC);
 	if (proto) {
 		memcpy(proto->type, desc, 5);
 		proto->rcvfunc		= rcvfunc;

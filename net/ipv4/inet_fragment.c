@@ -17,14 +17,14 @@
 #include <linux/rtnetlink.h>
 #include <linux/slab.h>
 #include <linux/rhashtable.h>
+#include <linux/sizes.h>
 
 #include <net/sock.h>
 #include <net/inet_frag.h>
 #include <net/inet_ecn.h>
 #include <net/ip.h>
 #include <net/ipv6.h>
-
-#include "../core/sock_destructor.h"
+#include <net/xfrm.h>
 
 /* Use skb->cb to track consecutive/adjacent fragments coming at
  * the end of the queue. Nodes in the rb-tree queue will
@@ -188,7 +188,7 @@ static void fqdir_work_fn(struct work_struct *work)
 
 int fqdir_init(struct fqdir **fqdirp, struct inet_frags *f, struct net *net)
 {
-	struct fqdir *fqdir = kzalloc(sizeof(*fqdir), GFP_KERNEL);
+	struct fqdir *fqdir = kzalloc_obj(*fqdir);
 	int res;
 
 	if (!fqdir)
@@ -217,6 +217,47 @@ static int __init inet_frag_wq_init(void)
 }
 
 pure_initcall(inet_frag_wq_init);
+
+void fqdir_pre_exit(struct fqdir *fqdir)
+{
+	struct inet_frag_queue *fq;
+	struct rhashtable_iter hti;
+
+	/* Prevent creation of new frags.
+	 * Pairs with READ_ONCE() in inet_frag_find().
+	 */
+	WRITE_ONCE(fqdir->high_thresh, 0);
+
+	/* Pairs with READ_ONCE() in inet_frag_kill(), ip_expire()
+	 * and ip6frag_expire_frag_queue().
+	 */
+	WRITE_ONCE(fqdir->dead, true);
+
+	rhashtable_walk_enter(&fqdir->rhashtable, &hti);
+	rhashtable_walk_start(&hti);
+
+	while ((fq = rhashtable_walk_next(&hti))) {
+		int refs = 0;
+
+		if (IS_ERR(fq)) {
+			if (PTR_ERR(fq) != -EAGAIN)
+				break;
+			continue;
+		}
+		spin_lock_bh(&fq->lock);
+		if (!(fq->flags & INET_FRAG_COMPLETE))
+			inet_frag_kill(fq, &refs);
+
+		if (fq->flags & INET_FRAG_HASH_DEAD)
+			inet_frag_queue_flush(fq, 0);
+		spin_unlock_bh(&fq->lock);
+		inet_frag_putn(fq, refs);
+	}
+
+	rhashtable_walk_stop(&hti);
+	rhashtable_walk_exit(&hti);
+}
+EXPORT_SYMBOL(fqdir_pre_exit);
 
 void fqdir_exit(struct fqdir *fqdir)
 {
@@ -263,8 +304,8 @@ static void inet_frag_destroy_rcu(struct rcu_head *head)
 	kmem_cache_free(f->frags_cachep, q);
 }
 
-unsigned int inet_frag_rbtree_purge(struct rb_root *root,
-				    enum skb_drop_reason reason)
+static unsigned int
+inet_frag_rbtree_purge(struct rb_root *root, enum skb_drop_reason reason)
 {
 	struct rb_node *p = rb_first(root);
 	unsigned int sum = 0;
@@ -284,7 +325,21 @@ unsigned int inet_frag_rbtree_purge(struct rb_root *root,
 	}
 	return sum;
 }
-EXPORT_SYMBOL(inet_frag_rbtree_purge);
+
+void inet_frag_queue_flush(struct inet_frag_queue *q,
+			   enum skb_drop_reason reason)
+{
+	unsigned int sum;
+
+	reason = reason ?: SKB_DROP_REASON_FRAG_REASM_TIMEOUT;
+	sum = inet_frag_rbtree_purge(&q->rb_fragments, reason);
+	sub_frag_mem_limit(q->fqdir, sum);
+	q->rb_fragments = RB_ROOT;
+	q->fragments_tail = NULL;
+	q->last_run_head = NULL;
+	q->truesize = 0;
+}
+EXPORT_SYMBOL(inet_frag_queue_flush);
 
 void inet_frag_destroy(struct inet_frag_queue *q)
 {
@@ -327,7 +382,9 @@ static struct inet_frag_queue *inet_frag_alloc(struct fqdir *fqdir,
 
 	timer_setup(&q->timer, f->frag_expire, 0);
 	spin_lock_init(&q->lock);
-	/* One reference for the timer, one for the hash table. */
+	/* One reference for the timer, one for the hash table.
+	 * We never take any extra references, only decrement this field.
+	 */
 	refcount_set(&q->refcnt, 2);
 
 	return q;
@@ -345,8 +402,8 @@ static struct inet_frag_queue *inet_frag_create(struct fqdir *fqdir,
 		*prev = ERR_PTR(-ENOMEM);
 		return NULL;
 	}
-	mod_timer(&q->timer, jiffies + fqdir->timeout);
 
+	spin_lock_bh(&q->lock);
 	*prev = rhashtable_lookup_get_insert_key(&fqdir->rhashtable, &q->key,
 						 &q->node, f->rhash_params);
 	if (*prev) {
@@ -354,13 +411,13 @@ static struct inet_frag_queue *inet_frag_create(struct fqdir *fqdir,
 		 * we need to cancel what inet_frag_alloc()
 		 * anticipated.
 		 */
-		int refs = 1;
-
 		q->flags |= INET_FRAG_COMPLETE;
-		inet_frag_kill(q, &refs);
-		inet_frag_putn(q, refs);
+		spin_unlock_bh(&q->lock);
+		inet_frag_putn(q, 2);
 		return NULL;
 	}
+	mod_timer(&q->timer, jiffies + fqdir->timeout);
+	spin_unlock_bh(&q->lock);
 	return q;
 }
 
@@ -386,6 +443,20 @@ int inet_frag_queue_insert(struct inet_frag_queue *q, struct sk_buff *skb,
 			   int offset, int end)
 {
 	struct sk_buff *last = q->fragments_tail;
+
+	/* The reassembled skb keeps the first fragment's secpath. */
+	if (last && !secpath_equal(last, skb))
+		return IPFRAG_MIXED_SECPATH;
+
+	if (skb->truesize > INET_FRAG_MAX_TRUESIZE - q->truesize)
+		return IPFRAG_TOOBIG;
+
+	/* An IP fragment is never a GSO packet, but an untrusted source
+	 * (virtio_net_hdr) may have attached GSO metadata to it. Do not let
+	 * that reach the reassembled skb, whose head keeps the first
+	 * fragment's shinfo and whose frag_list is not GRO-shaped.
+	 */
+	skb_gso_reset(skb);
 
 	/* RFC5722, Section 4, amended by Errata ID : 3089
 	 *                          When reassembling an IPv6 datagram, if
@@ -441,10 +512,50 @@ int inet_frag_queue_insert(struct inet_frag_queue *q, struct sk_buff *skb,
 	}
 
 	FRAG_CB(skb)->ip_defrag_offset = offset;
+	if (offset)
+		nf_reset_ct(skb);
 
+	q->truesize += skb->truesize;
 	return IPFRAG_OK;
 }
 EXPORT_SYMBOL(inet_frag_queue_insert);
+
+/* When a socket owned fragment completes a queue, the truesize of all
+ * other fragments is charged to its sk_wmem_alloc, although they were
+ * orphaned when queued and possibly sent by someone else.
+ * Bound this like ip_append_data() bounds the memory a socket can
+ * allocate (2 * sk_sndbuf), plus slack for fragments inflated by a
+ * refragmentation using a small MTU. Otherwise, several reassembled skbs
+ * alive at the same time can saturate sk_wmem_alloc, and leak the socket.
+ *
+ * Several queues can complete at the same time for the same socket,
+ * and some sockets (tun) use sk_sndbuf = INT_MAX. The charge is reserved
+ * with a cmpxchg() loop, a refcount_t has no helper for this.
+ */
+#define INET_FRAG_WMEM_SLACK	SZ_4M
+
+static bool inet_frag_wmem_reserve(struct sock *sk, unsigned int charge)
+{
+	u64 limit = 2ULL * READ_ONCE(sk->sk_sndbuf) + INET_FRAG_WMEM_SLACK;
+	int old = refcount_read(&sk->sk_wmem_alloc);
+
+	limit = min_t(u64, limit, INET_FRAG_MAX_TRUESIZE);
+	do {
+		if (old <= 0 || (u64)old + charge > limit)
+			return false;
+	} while (!atomic_try_cmpxchg(&sk->sk_wmem_alloc.refs, &old,
+				     old + charge));
+
+	return true;
+}
+
+static void inet_frag_wmem_adjust(struct sock *sk, int delta)
+{
+	if (delta >= 0)
+		refcount_add(delta, &sk->sk_wmem_alloc);
+	else
+		WARN_ON_ONCE(refcount_sub_and_test(-delta, &sk->sk_wmem_alloc));
+}
 
 void *inet_frag_reasm_prepare(struct inet_frag_queue *q, struct sk_buff *skb,
 			      struct sk_buff *parent)
@@ -457,6 +568,11 @@ void *inet_frag_reasm_prepare(struct inet_frag_queue *q, struct sk_buff *skb,
 	int delta;
 
 	if (sk && is_skb_wmem(skb)) {
+		/* skb->truesize is already charged to sk, and is part of
+		 * q->truesize. inet_frag_reasm_finish() settles the charge.
+		 */
+		if (!inet_frag_wmem_reserve(sk, q->truesize - skb->truesize))
+			return NULL;
 		/* TX: skb->sk might have been passed as argument to
 		 * dst->output and must remain valid until tx completes.
 		 *
@@ -472,7 +588,6 @@ void *inet_frag_reasm_prepare(struct inet_frag_queue *q, struct sk_buff *skb,
 			head = skb;
 			goto out_restore_sk;
 		}
-		FRAG_CB(fp)->next_frag = FRAG_CB(skb)->next_frag;
 		if (RB_EMPTY_NODE(&skb->rbnode))
 			FRAG_CB(parent)->next_frag = fp;
 		else
@@ -487,7 +602,6 @@ void *inet_frag_reasm_prepare(struct inet_frag_queue *q, struct sk_buff *skb,
 			skb->destructor = NULL;
 		}
 		skb_morph(skb, head);
-		FRAG_CB(skb)->next_frag = FRAG_CB(head)->next_frag;
 		rb_replace_node(&head->rbnode, &skb->rbnode,
 				&q->rb_fragments);
 		consume_skb(head);
@@ -534,17 +648,18 @@ void *inet_frag_reasm_prepare(struct inet_frag_queue *q, struct sk_buff *skb,
 
 out_restore_sk:
 	if (orig_truesize) {
-		int ts_delta = head->truesize - orig_truesize;
-
 		/* if this reassembled skb is fragmented later,
 		 * fraglist skbs will get skb->sk assigned from head->sk,
 		 * and each frag skb will be released via sock_wfree.
-		 *
-		 * Update sk_wmem_alloc.
 		 */
 		head->sk = sk;
 		head->destructor = destructor;
-		refcount_add(ts_delta, &sk->sk_wmem_alloc);
+		/* On failure, head stays in the queue and will be freed
+		 * with the queue: only charge its truesize.
+		 */
+		if (!nextp)
+			inet_frag_wmem_adjust(sk, (int)head->truesize -
+						  (int)q->truesize);
 	}
 
 	return nextp;
@@ -555,7 +670,6 @@ void inet_frag_reasm_finish(struct inet_frag_queue *q, struct sk_buff *head,
 			    void *reasm_data, bool try_coalesce)
 {
 	struct sock *sk = is_skb_wmem(head) ? head->sk : NULL;
-	const unsigned int head_truesize = head->truesize;
 	struct sk_buff **nextp = reasm_data;
 	struct rb_node *rbn;
 	struct sk_buff *fp;
@@ -620,8 +734,12 @@ void inet_frag_reasm_finish(struct inet_frag_queue *q, struct sk_buff *head,
 	head->tstamp = q->stamp;
 	head->tstamp_type = q->tstamp_type;
 
+	/* After inet_frag_reasm_prepare(), q->truesize is charged to sk.
+	 * sum_truesize also includes what it added (skb_unclone() and
+	 * frag_list clone).
+	 */
 	if (sk)
-		refcount_add(sum_truesize - head_truesize, &sk->sk_wmem_alloc);
+		inet_frag_wmem_adjust(sk, sum_truesize - (int)q->truesize);
 }
 EXPORT_SYMBOL(inet_frag_reasm_finish);
 

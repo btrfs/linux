@@ -26,11 +26,15 @@ static struct hnae3_ae_algo ae_algovf;
 static struct workqueue_struct *hclgevf_wq;
 
 static const struct pci_device_id ae_algovf_pci_tbl[] = {
-	{PCI_VDEVICE(HUAWEI, HNAE3_DEV_ID_VF), 0},
-	{PCI_VDEVICE(HUAWEI, HNAE3_DEV_ID_RDMA_DCB_PFC_VF),
-	 HNAE3_DEV_SUPPORT_ROCE_DCB_BITS},
+	{
+		PCI_VDEVICE(HUAWEI, HNAE3_DEV_ID_VF),
+		.driver_data = 0,
+	}, {
+		PCI_VDEVICE(HUAWEI, HNAE3_DEV_ID_RDMA_DCB_PFC_VF),
+		.driver_data = HNAE3_DEV_SUPPORT_ROCE_DCB_BITS,
+	},
 	/* required last entry */
-	{0, }
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, ae_algovf_pci_tbl);
@@ -302,8 +306,8 @@ static int hclgevf_alloc_tqps(struct hclgevf_dev *hdev)
 	struct hclge_comm_tqp *tqp;
 	int i;
 
-	hdev->htqp = devm_kcalloc(&hdev->pdev->dev, hdev->num_tqps,
-				  sizeof(struct hclge_comm_tqp), GFP_KERNEL);
+	hdev->htqp = devm_kzalloc_objs(&hdev->pdev->dev, struct hclge_comm_tqp,
+				       hdev->num_tqps);
 	if (!hdev->htqp)
 		return -ENOMEM;
 
@@ -368,12 +372,12 @@ static int hclgevf_knic_setup(struct hclgevf_dev *hdev)
 	new_tqps = kinfo->rss_size * num_tc;
 	kinfo->num_tqps = min(new_tqps, hdev->num_tqps);
 
-	kinfo->tqp = devm_kcalloc(&hdev->pdev->dev, kinfo->num_tqps,
-				  sizeof(struct hnae3_queue *), GFP_KERNEL);
+	kinfo->tqp = devm_kzalloc_objs(&hdev->pdev->dev, struct hnae3_queue *,
+				       hdev->num_tqps);
 	if (!kinfo->tqp)
 		return -ENOMEM;
 
-	for (i = 0; i < kinfo->num_tqps; i++) {
+	for (i = 0; i < hdev->num_tqps; i++) {
 		hdev->htqp[i].q.handle = &hdev->nic;
 		hdev->htqp[i].q.tqp_index = i;
 		kinfo->tqp[i] = &hdev->htqp[i].q;
@@ -977,7 +981,7 @@ static int hclgevf_update_mac_list(struct hnae3_handle *handle,
 		return -ENOENT;
 	}
 
-	mac_node = kzalloc(sizeof(*mac_node), GFP_ATOMIC);
+	mac_node = kzalloc_obj(*mac_node, GFP_ATOMIC);
 	if (!mac_node) {
 		spin_unlock_bh(&hdev->mac_table.mac_list_lock);
 		return -ENOMEM;
@@ -1156,7 +1160,7 @@ static void hclgevf_sync_mac_list(struct hclgevf_dev *hdev,
 			list_move_tail(&mac_node->node, &tmp_del_list);
 			break;
 		case HCLGEVF_MAC_TO_ADD:
-			new_node = kzalloc(sizeof(*new_node), GFP_ATOMIC);
+			new_node = kzalloc_obj(*new_node, GFP_ATOMIC);
 			if (!new_node)
 				goto stop_traverse;
 
@@ -1876,7 +1880,7 @@ static void hclgevf_reset_service_task(struct hclgevf_dev *hdev)
 		 * from PF as cmdq would be in unreliable state i.e. mailbox
 		 * communication between PF and VF would be broken.
 		 *
-		 * if we are never geting into pending state it means either:
+		 * if we are never getting into pending state it means either:
 		 * 1. PF is not receiving our request which could be due to IMP
 		 *    reset
 		 * 2. PF is screwed
@@ -2126,7 +2130,7 @@ static int hclgevf_alloc_hdev(struct hnae3_ae_dev *ae_dev)
 	struct pci_dev *pdev = ae_dev->pdev;
 	struct hclgevf_dev *hdev;
 
-	hdev = devm_kzalloc(&pdev->dev, sizeof(*hdev), GFP_KERNEL);
+	hdev = devm_kzalloc_obj(&pdev->dev, *hdev);
 	if (!hdev)
 		return -ENOMEM;
 
@@ -2381,8 +2385,7 @@ static int hclgevf_init_msi(struct hclgevf_dev *hdev)
 	hdev->num_msi = vectors;
 	hdev->num_msi_left = vectors;
 
-	hdev->vector_status = devm_kcalloc(&pdev->dev, hdev->num_msi,
-					   sizeof(u16), GFP_KERNEL);
+	hdev->vector_status = devm_kzalloc_objs(&pdev->dev, u16, hdev->num_msi);
 	if (!hdev->vector_status) {
 		pci_free_irq_vectors(pdev);
 		return -ENOMEM;
@@ -2391,8 +2394,7 @@ static int hclgevf_init_msi(struct hclgevf_dev *hdev)
 	for (i = 0; i < hdev->num_msi; i++)
 		hdev->vector_status[i] = HCLGEVF_INVALID_VPORT;
 
-	hdev->vector_irq = devm_kcalloc(&pdev->dev, hdev->num_msi,
-					sizeof(int), GFP_KERNEL);
+	hdev->vector_irq = devm_kzalloc_objs(&pdev->dev, int, hdev->num_msi);
 	if (!hdev->vector_irq) {
 		devm_kfree(&pdev->dev, hdev->vector_status);
 		pci_free_irq_vectors(pdev);
@@ -3180,8 +3182,7 @@ static int hclgevf_set_channels(struct hnae3_handle *handle, u32 new_tqps_num,
 		goto out;
 
 	/* Reinitializes the rss indirect table according to the new RSS size */
-	rss_indir = kcalloc(hdev->ae_dev->dev_specs.rss_ind_tbl_size,
-			    sizeof(u32), GFP_KERNEL);
+	rss_indir = kzalloc_objs(u32, hdev->ae_dev->dev_specs.rss_ind_tbl_size);
 	if (!rss_indir)
 		return -ENOMEM;
 

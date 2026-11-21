@@ -59,7 +59,7 @@ struct clk *rockchip_clk_register_muxgrf(const char *name,
 				int shift, int width, int mux_flags)
 {
 	struct rockchip_muxgrf_clock *muxgrf_clock;
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	struct clk *clk;
 
 	if (IS_ERR(regmap)) {
@@ -67,7 +67,7 @@ struct clk *rockchip_clk_register_muxgrf(const char *name,
 		return ERR_PTR(-ENOTSUPP);
 	}
 
-	muxgrf_clock = kmalloc(sizeof(*muxgrf_clock), GFP_KERNEL);
+	muxgrf_clock = kmalloc_obj(*muxgrf_clock);
 	if (!muxgrf_clock)
 		return ERR_PTR(-ENOMEM);
 

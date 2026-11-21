@@ -219,8 +219,7 @@ static int st_nci_spi_probe(struct spi_device *dev)
 		return -ENODEV;
 	}
 
-	phy = devm_kzalloc(&dev->dev, sizeof(struct st_nci_spi_phy),
-			   GFP_KERNEL);
+	phy = devm_kzalloc_obj(&dev->dev, struct st_nci_spi_phy);
 	if (!phy)
 		return -ENOMEM;
 
@@ -271,21 +270,21 @@ static void st_nci_spi_remove(struct spi_device *dev)
 }
 
 static struct spi_device_id st_nci_spi_id_table[] = {
-	{ST_NCI_SPI_DRIVER_NAME, 0},
-	{"st21nfcb-spi", 0},
-	{}
+	{ .name = ST_NCI_SPI_DRIVER_NAME },
+	{ .name = "st21nfcb-spi" },
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, st_nci_spi_id_table);
 
-static const struct acpi_device_id st_nci_spi_acpi_match[] __maybe_unused = {
-	{"SMO2101", 0},
-	{}
+static const struct acpi_device_id st_nci_spi_acpi_match[] = {
+	{ .id = "SMO2101" },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, st_nci_spi_acpi_match);
 
-static const struct of_device_id of_st_nci_spi_match[] __maybe_unused = {
-	{ .compatible = "st,st21nfcb-spi", },
-	{}
+static const struct of_device_id of_st_nci_spi_match[] = {
+	{ .compatible = "st,st21nfcb-spi" },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, of_st_nci_spi_match);
 

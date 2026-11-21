@@ -164,8 +164,7 @@ static int cros_ec_regulator_probe(struct platform_device *pdev)
 	struct regulator_desc *desc;
 	int ret;
 
-	drvdata = devm_kzalloc(
-		&pdev->dev, sizeof(struct cros_ec_regulator_data), GFP_KERNEL);
+	drvdata = devm_kzalloc_obj(&pdev->dev, struct cros_ec_regulator_data);
 	if (!drvdata)
 		return -ENOMEM;
 
@@ -183,6 +182,7 @@ static int cros_ec_regulator_probe(struct platform_device *pdev)
 	desc->owner = THIS_MODULE;
 	desc->type = REGULATOR_VOLTAGE;
 	desc->ops = &cros_ec_regulator_voltage_ops;
+	desc->supply_name = "vin";
 
 	ret = cros_ec_regulator_init_info(dev, drvdata);
 	if (ret < 0)

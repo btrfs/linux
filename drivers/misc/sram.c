@@ -191,7 +191,7 @@ static int sram_reserve_regions(struct sram_dev *sram, struct resource *res)
 	 * after the reserved blocks from the dt are processed.
 	 */
 	nblocks = (np) ? of_get_available_child_count(np) + 1 : 1;
-	rblocks = kcalloc(nblocks, sizeof(*rblocks), GFP_KERNEL);
+	rblocks = kzalloc_objs(*rblocks, nblocks);
 	if (!rblocks)
 		return -ENOMEM;
 
@@ -267,9 +267,8 @@ static int sram_reserve_regions(struct sram_dev *sram, struct resource *res)
 	list_sort(NULL, &reserve_list, sram_reserve_cmp);
 
 	if (exports) {
-		sram->partition = devm_kcalloc(sram->dev,
-				       exports, sizeof(*sram->partition),
-				       GFP_KERNEL);
+		sram->partition = devm_kzalloc_objs(sram->dev, *sram->partition,
+						    exports);
 		if (!sram->partition) {
 			ret = -ENOMEM;
 			goto err_chunks;
@@ -370,7 +369,7 @@ static const struct of_device_id sram_dt_ids[] = {
 	{ .compatible = "nvidia,tegra186-sysram", .data = &tegra_sysram_config },
 	{ .compatible = "nvidia,tegra194-sysram", .data = &tegra_sysram_config },
 	{ .compatible = "nvidia,tegra234-sysram", .data = &tegra_sysram_config },
-	{}
+	{ }
 };
 
 static int sram_probe(struct platform_device *pdev)
@@ -383,7 +382,7 @@ static int sram_probe(struct platform_device *pdev)
 
 	config = of_device_get_match_data(&pdev->dev);
 
-	sram = devm_kzalloc(&pdev->dev, sizeof(*sram), GFP_KERNEL);
+	sram = devm_kzalloc_obj(&pdev->dev, *sram);
 	if (!sram)
 		return -ENOMEM;
 

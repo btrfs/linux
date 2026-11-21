@@ -358,7 +358,8 @@ static int dpi_pfvf_mbox_setup(struct dpipf *dpi)
 	int vf;
 
 	for (vf = 0; vf < DPI_MAX_VFS; vf++) {
-		dpi->mbox[vf] = devm_kzalloc(&dpi->pdev->dev, sizeof(*dpi->mbox[vf]), GFP_KERNEL);
+		dpi->mbox[vf] = devm_kzalloc_obj(&dpi->pdev->dev,
+						 *dpi->mbox[vf]);
 
 		if (!dpi->mbox[vf])
 			return -ENOMEM;
@@ -470,10 +471,8 @@ static int dpi_irq_init(struct dpipf *dpi)
 
 	ret = devm_request_irq(dev, pci_irq_vector(pdev, DPI_MBOX_PF_VF_INT_IDX),
 			       dpi_mbox_intr_handler, 0, "dpi-mbox", dpi);
-	if (ret) {
-		dev_err(dev, "DPI: request_irq failed for mbox; err=%d\n", ret);
+	if (ret)
 		return ret;
-	}
 
 	dpi_reg_write(dpi, DPI_MBOX_VF_PF_INT_ENA_W1S, GENMASK_ULL(31, 0));
 
@@ -586,7 +585,7 @@ static int dpi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	struct dpipf *dpi;
 	int ret;
 
-	dpi = devm_kzalloc(dev, sizeof(*dpi), GFP_KERNEL);
+	dpi = devm_kzalloc_obj(dev, *dpi);
 	if (!dpi)
 		return -ENOMEM;
 
@@ -658,7 +657,7 @@ static void dpi_remove(struct pci_dev *pdev)
 static const struct pci_device_id dpi_id_table[] = {
 	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_CAVIUM, PCI_DEVID_MRVL_CN10K_DPI_PF,
 			 PCI_VENDOR_ID_CAVIUM, PCI_SUBDEVID_MRVL_CN10K_DPI_PF) },
-	{ 0, }  /* end of table */
+	{ }  /* end of table */
 };
 
 static struct pci_driver dpi_driver = {

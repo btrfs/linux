@@ -136,7 +136,7 @@ a connection with NX co-processor engine:
 	follows::
 
 		#define VAS_MAGIC 'v'
-		#define VAS_TX_WIN_OPEN _IOW(VAS_MAGIC, 1,
+		#define VAS_TX_WIN_OPEN _IOW(VAS_MAGIC, 0x20,
 						struct vas_tx_win_open_attr)
 
 		struct vas_tx_win_open_attr attr;
@@ -265,7 +265,7 @@ Simple example
 		{
 			int rc, fd;
 			void *addr;
-			struct vas_setup_attr txattr;
+			struct vas_tx_win_open_attr txattr;
 
 			fd = open("/dev/crypto/nx-gzip", O_RDWR);
 			if (fd < 0) {
@@ -293,7 +293,7 @@ Simple example
 				//Format CRB request with compression or
 				//uncompression
 				// Refer tests for vas_copy/vas_paste
-				vas_copy((&crb, 0, 1);
+				vas_copy(&crb, 0, 1);
 				vas_paste(addr, 0, 1);
 				// Poll on csb.flags with timeout
 				// csb address is listed in CRB

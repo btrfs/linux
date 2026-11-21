@@ -92,7 +92,7 @@ static ssize_t temp_input_show(struct device *dev,
 	if (ret)
 		return ret;
 
-	return sprintf(buf, "%d\n", data->temp_input * 1000);
+	return sysfs_emit(buf, "%d\n", data->temp_input * 1000);
 }
 static SENSOR_DEVICE_ATTR_RO(temp1_input, temp_input, 0);
 
@@ -113,7 +113,7 @@ static int tc74_probe(struct i2c_client *client)
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_BYTE_DATA))
 		return -EOPNOTSUPP;
 
-	data = devm_kzalloc(dev, sizeof(struct tc74_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct tc74_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -151,8 +151,8 @@ static int tc74_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id tc74_id[] = {
-	{ "tc74" },
-	{}
+	{ .name = "tc74" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tc74_id);
 

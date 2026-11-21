@@ -28,7 +28,7 @@
 	};
 
 	chosen {
-		stdout-path = &uart4;
+		stdout-path = "serial0:115200n8";
 	};
 
 	backlight: backlight {
@@ -373,9 +373,6 @@ baseboard_eeprom: &sip_eeprom {
 &usbotg_hs {
 	phys = <&usbphyc_port1 0>;
 	phy-names = "usb2-phy";
-
-	vusb_d-supply = <&vdd_usb>;
-	vusb_a-supply = <&reg18>;
 
 	status = "okay";
 };

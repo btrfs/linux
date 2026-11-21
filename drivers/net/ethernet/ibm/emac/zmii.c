@@ -19,7 +19,6 @@
 #include <linux/slab.h>
 #include <linux/kernel.h>
 #include <linux/ethtool.h>
-#include <linux/mod_devicetable.h>
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
 #include <asm/io.h>
@@ -235,8 +234,7 @@ static int zmii_probe(struct platform_device *ofdev)
 	struct zmii_instance *dev;
 	int err;
 
-	dev = devm_kzalloc(&ofdev->dev, sizeof(struct zmii_instance),
-			   GFP_KERNEL);
+	dev = devm_kzalloc_obj(&ofdev->dev, struct zmii_instance);
 	if (!dev)
 		return -ENOMEM;
 

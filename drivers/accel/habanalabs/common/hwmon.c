@@ -178,7 +178,7 @@ int hl_build_hwmon_channel_info(struct hl_device *hdev, struct cpucp_sensor *sen
 		num_sensors_for_type = counts[i] + 1;
 		dev_dbg(hdev->dev, "num_sensors_for_type %d = %d\n", i, num_sensors_for_type);
 
-		curr_arr = kcalloc(num_sensors_for_type, sizeof(*curr_arr), GFP_KERNEL);
+		curr_arr = kzalloc_objs(*curr_arr, num_sensors_for_type);
 		if (!curr_arr) {
 			rc = -ENOMEM;
 			goto sensors_type_err;
@@ -195,15 +195,15 @@ int hl_build_hwmon_channel_info(struct hl_device *hdev, struct cpucp_sensor *sen
 		curr_arr[sensors_by_type_next_index[type]++] = flags;
 	}
 
-	channels_info = kcalloc(num_active_sensor_types + 1, sizeof(struct hwmon_channel_info *),
-				GFP_KERNEL);
+	channels_info = kzalloc_objs(struct hwmon_channel_info *,
+				     num_active_sensor_types + 1);
 	if (!channels_info) {
 		rc = -ENOMEM;
 		goto channels_info_array_err;
 	}
 
 	for (i = 0 ; i < num_active_sensor_types ; i++) {
-		channels_info[i] = kzalloc(sizeof(*channels_info[i]), GFP_KERNEL);
+		channels_info[i] = kzalloc_obj(*channels_info[i]);
 		if (!channels_info[i]) {
 			rc = -ENOMEM;
 			goto channel_info_err;

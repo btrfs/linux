@@ -562,7 +562,7 @@ static int mp2891_probe(struct i2c_client *client)
 {
 	struct mp2891_data *data;
 
-	data = devm_kzalloc(&client->dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(&client->dev, *data);
 	if (!data)
 		return -ENOMEM;
 
@@ -572,7 +572,7 @@ static int mp2891_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id mp2891_id[] = {
-	{ "mp2891" },
+	{ .name = "mp2891" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mp2891_id);

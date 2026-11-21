@@ -558,7 +558,7 @@ static int isl12022_probe(struct i2c_client *client)
 		return -ENODEV;
 
 	/* Allocate driver state */
-	isl12022 = devm_kzalloc(&client->dev, sizeof(*isl12022), GFP_KERNEL);
+	isl12022 = devm_kzalloc_obj(&client->dev, *isl12022);
 	if (!isl12022)
 		return -ENOMEM;
 
@@ -604,7 +604,7 @@ static const struct of_device_id isl12022_dt_match[] = {
 MODULE_DEVICE_TABLE(of, isl12022_dt_match);
 
 static const struct i2c_device_id isl12022_id[] = {
-	{ "isl12022" },
+	{ .name = "isl12022" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, isl12022_id);

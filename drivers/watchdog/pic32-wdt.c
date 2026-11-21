@@ -12,11 +12,10 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/platform_data/pic32.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
 #include <linux/watchdog.h>
-
-#include <asm/mach-pic32/pic32.h>
 
 /* Watchdog Timer Registers */
 #define WDTCON_REG		0x00
@@ -168,7 +167,7 @@ static int pic32_wdt_drv_probe(struct platform_device *pdev)
 	struct watchdog_device *wdd = &pic32_wdd;
 	struct pic32_wdt *wdt;
 
-	wdt = devm_kzalloc(dev, sizeof(*wdt), GFP_KERNEL);
+	wdt = devm_kzalloc_obj(dev, *wdt);
 	if (!wdt)
 		return -ENOMEM;
 

@@ -1260,16 +1260,16 @@ static int sis_chip_create(struct snd_card *card,
 	sis->irq = -1;
 	sis->ioport = pci_resource_start(pci, 0);
 
-	rc = pcim_request_all_regions(pci, "SiS7019");
+	rc = pcim_request_region(pci, 0, "SiS7019");
 	if (rc) {
-		dev_err(&pci->dev, "unable request regions\n");
+		dev_err(&pci->dev, "unable request I/O region\n");
 		return rc;
 	}
 
-	sis->ioaddr = devm_ioremap(&pci->dev, pci_resource_start(pci, 1), 0x4000);
-	if (!sis->ioaddr) {
+	sis->ioaddr = pcim_iomap_region(pci, 1, "SiS7019");
+	if (IS_ERR(sis->ioaddr)) {
 		dev_err(&pci->dev, "unable to remap MMIO, aborting\n");
-		return -EIO;
+		return PTR_ERR(sis->ioaddr);
 	}
 
 	rc = sis_alloc_suspend(sis);
@@ -1309,10 +1309,10 @@ static int sis_chip_create(struct snd_card *card,
 	return 0;
 }
 
-static int __snd_sis7019_probe(struct pci_dev *pci,
-			       const struct pci_device_id *pci_id)
+static int snd_sis7019_probe(struct pci_dev *pci,
+			     const struct pci_device_id *pci_id)
 {
-	struct snd_card *card;
+	struct snd_card *card __free(snd_card_free) = NULL;
 	struct sis7019 *sis;
 	int rc;
 
@@ -1361,13 +1361,8 @@ static int __snd_sis7019_probe(struct pci_dev *pci,
 		return rc;
 
 	pci_set_drvdata(pci, card);
+	card = NULL; /* probe succeeded, don't release as error */
 	return 0;
-}
-
-static int snd_sis7019_probe(struct pci_dev *pci,
-			     const struct pci_device_id *pci_id)
-{
-	return snd_card_free_on_error(&pci->dev, __snd_sis7019_probe(pci, pci_id));
 }
 
 static struct pci_driver sis7019_driver = {

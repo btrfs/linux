@@ -11,7 +11,6 @@
 #include <linux/i2c.h>
 #include <linux/delay.h>
 #include <linux/pm.h>
-#include <linux/mod_devicetable.h>
 #include <linux/power_supply.h>
 #include <linux/platform_device.h>
 #include <linux/of.h>
@@ -699,7 +698,7 @@ static int adp5061_probe(struct i2c_client *client)
 	struct power_supply_config psy_cfg = {};
 	struct adp5061_state *st;
 
-	st = devm_kzalloc(&client->dev, sizeof(*st), GFP_KERNEL);
+	st = devm_kzalloc_obj(&client->dev, *st);
 	if (!st)
 		return -ENOMEM;
 
@@ -727,7 +726,7 @@ static int adp5061_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id adp5061_id[] = {
-	{ "adp5061" },
+	{ .name = "adp5061" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, adp5061_id);

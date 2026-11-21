@@ -11,6 +11,7 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
+#include <linux/stringify.h>
 #include <linux/types.h>
 #include <linux/watchdog.h>
 
@@ -31,12 +32,12 @@
 static bool nowayout = WATCHDOG_NOWAYOUT;
 module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started default="
-		 __MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
+		 __stringify(WATCHDOG_NOWAYOUT) ")");
 
 static unsigned int timeout;
 module_param(timeout, uint, 0);
 MODULE_PARM_DESC(timeout, "Watchdog heartbeat in seconds="
-		 __MODULE_STRING(DEFAULT_TIMEOUT) ")");
+		 __stringify(DEFAULT_TIMEOUT) ")");
 
 struct meson_gxbb_wdt {
 	void __iomem *reg_base;
@@ -123,7 +124,8 @@ static int __maybe_unused meson_gxbb_wdt_resume(struct device *dev)
 {
 	struct meson_gxbb_wdt *data = dev_get_drvdata(dev);
 
-	if (watchdog_active(&data->wdt_dev))
+	if (watchdog_active(&data->wdt_dev) ||
+	    watchdog_hw_running(&data->wdt_dev))
 		meson_gxbb_wdt_start(&data->wdt_dev);
 
 	return 0;
@@ -133,7 +135,8 @@ static int __maybe_unused meson_gxbb_wdt_suspend(struct device *dev)
 {
 	struct meson_gxbb_wdt *data = dev_get_drvdata(dev);
 
-	if (watchdog_active(&data->wdt_dev))
+	if (watchdog_active(&data->wdt_dev) ||
+	    watchdog_hw_running(&data->wdt_dev))
 		meson_gxbb_wdt_stop(&data->wdt_dev);
 
 	return 0;
@@ -165,7 +168,7 @@ static int meson_gxbb_wdt_probe(struct platform_device *pdev)
 	struct wdt_params *params;
 	u32 ctrl_reg;
 
-	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, *data);
 	if (!data)
 		return -ENOMEM;
 

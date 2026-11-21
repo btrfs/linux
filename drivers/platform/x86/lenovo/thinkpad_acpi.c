@@ -36,7 +36,10 @@
 
 #include <linux/acpi.h>
 #include <linux/backlight.h>
+#include <linux/bitfield.h>
 #include <linux/bitops.h>
+#include <linux/cleanup.h>
+#include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/dmi.h>
 #include <linux/freezer.h>
@@ -65,6 +68,7 @@
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/string_choices.h>
 #include <linux/string_helpers.h>
 #include <linux/sysfs.h>
 #include <linux/types.h>
@@ -184,6 +188,7 @@ enum tpacpi_hkey_event_t {
 	TP_HKEY_EV_AMT_TOGGLE		= 0x131a, /* Toggle AMT on/off */
 	TP_HKEY_EV_CAMERASHUTTER_TOGGLE = 0x131b, /* Toggle Camera Shutter */
 	TP_HKEY_EV_DOUBLETAP_TOGGLE	= 0x131c, /* Toggle trackpoint doubletap on/off */
+	TP_HKEY_EV_USB_C_SECURITY	= 0x131e, /* USB C Security (Fn+U, Fn+S) */
 	TP_HKEY_EV_PROFILE_TOGGLE	= 0x131f, /* Toggle platform profile in 2024 systems */
 	TP_HKEY_EV_PROFILE_TOGGLE2	= 0x1401, /* Toggle platform profile in 2025 + systems */
 
@@ -217,8 +222,10 @@ enum tpacpi_hkey_event_t {
 	TP_HKEY_EV_LID_OPEN		= 0x5002, /* laptop lid opened */
 	TP_HKEY_EV_TABLET_TABLET	= 0x5009, /* tablet swivel up */
 	TP_HKEY_EV_TABLET_NOTEBOOK	= 0x500a, /* tablet swivel down */
-	TP_HKEY_EV_TABLET_CHANGED	= 0x60c0, /* X1 Yoga (2016):
-						   * enter/leave tablet mode
+	TP_HKEY_EV_TABLET_CHANGED	= 0x60c0, /* posture change event:
+						   * X1 Yoga (2016): enter/leave tablet mode
+						   * X1 Fold 16 Gen 1: keyboard
+						   * attachment state changed
 						   */
 	TP_HKEY_EV_PEN_INSERTED		= 0x500b, /* tablet pen inserted */
 	TP_HKEY_EV_PEN_REMOVED		= 0x500c, /* tablet pen removed */
@@ -298,7 +305,6 @@ struct ibm_struct;
 
 struct tp_acpi_drv_struct {
 	const struct acpi_device_id *hid;
-	struct acpi_driver *driver;
 
 	void (*notify) (struct ibm_struct *, u32);
 	acpi_handle *handle;
@@ -308,6 +314,7 @@ struct tp_acpi_drv_struct {
 
 struct ibm_struct {
 	char *name;
+	acpi_device_class device_class;
 
 	int (*read) (struct seq_file *);
 	int (*write) (char *);
@@ -321,7 +328,6 @@ struct ibm_struct {
 	struct tp_acpi_drv_struct *acpi;
 
 	struct {
-		u8 acpi_driver_registered:1;
 		u8 acpi_notify_installed:1;
 		u8 proc_created:1;
 		u8 init_called:1;
@@ -373,7 +379,10 @@ static struct {
 	u32 hotkey_poll_active:1;
 	u32 has_adaptive_kbd:1;
 	u32 kbd_lang:1;
-	u32 trackpoint_doubletap:1;
+	u32 trackpoint_doubletap_enable:1;
+	u32 usbc_security_supported:1;
+	u32 has_keyboard_attached_on_screen:1;
+	bool usbc_security_enabled;
 	struct quirk_entry *quirks;
 } tp_features;
 
@@ -450,9 +459,7 @@ do {									\
 
 #ifdef CONFIG_THINKPAD_ACPI_DEBUG
 #define vdbg_printk dbg_printk
-static const char *str_supported(int is_supported);
 #else
-static inline const char *str_supported(int is_supported) { return ""; }
 #define vdbg_printk(a_dbg_level, format, arg...)	\
 	do { if (0) no_printk(format, ##arg); } while (0)
 #endif
@@ -768,7 +775,7 @@ static acpi_status __init tpacpi_acpi_handle_locate_callback(acpi_handle handle,
 	if (!strcmp(context, "video")) {
 		struct acpi_device *dev = acpi_fetch_acpi_dev(handle);
 
-		if (!dev || strcmp(ACPI_VIDEO_HID, acpi_device_hid(dev)))
+		if (!acpi_dev_is_video_device(dev))
 			return AE_OK;
 	}
 
@@ -831,16 +838,15 @@ static int __init setup_acpi_notify(struct ibm_struct *ibm)
 	vdbg_printk(TPACPI_DBG_INIT,
 		"setting up ACPI notify for %s\n", ibm->name);
 
-	ibm->acpi->device = acpi_fetch_acpi_dev(*ibm->acpi->handle);
+	ibm->acpi->device = acpi_get_acpi_dev(*ibm->acpi->handle);
 	if (!ibm->acpi->device) {
-		pr_err("acpi_fetch_acpi_dev(%s) failed\n", ibm->name);
+		pr_err("acpi_get_acpi_dev(%s) failed\n", ibm->name);
 		return -ENODEV;
 	}
 
 	ibm->acpi->device->driver_data = ibm;
-	scnprintf(acpi_device_class(ibm->acpi->device),
-		  sizeof(acpi_device_class(ibm->acpi->device)),
-		  "%s/%s", TPACPI_ACPI_EVENT_PREFIX, ibm->name);
+	scnprintf(ibm->device_class, sizeof(ibm->device_class), "%s/%s",
+		  TPACPI_ACPI_EVENT_PREFIX, ibm->name);
 
 	status = acpi_install_notify_handler(*ibm->acpi->handle,
 			ibm->acpi->type, dispatch_acpi_notify, ibm);
@@ -857,44 +863,6 @@ static int __init setup_acpi_notify(struct ibm_struct *ibm)
 	ibm->flags.acpi_notify_installed = 1;
 	return 0;
 }
-
-static int __init tpacpi_device_add(struct acpi_device *device)
-{
-	return 0;
-}
-
-static int __init register_tpacpi_subdriver(struct ibm_struct *ibm)
-{
-	int rc;
-
-	dbg_printk(TPACPI_DBG_INIT,
-		"registering %s as an ACPI driver\n", ibm->name);
-
-	BUG_ON(!ibm->acpi);
-
-	ibm->acpi->driver = kzalloc(sizeof(struct acpi_driver), GFP_KERNEL);
-	if (!ibm->acpi->driver) {
-		pr_err("failed to allocate memory for ibm->acpi->driver\n");
-		return -ENOMEM;
-	}
-
-	sprintf(ibm->acpi->driver->name, "%s_%s", TPACPI_NAME, ibm->name);
-	ibm->acpi->driver->ids = ibm->acpi->hid;
-
-	ibm->acpi->driver->ops.add = &tpacpi_device_add;
-
-	rc = acpi_bus_register_driver(ibm->acpi->driver);
-	if (rc < 0) {
-		pr_err("acpi_bus_register_driver(%s) failed: %d\n",
-		       ibm->name, rc);
-		kfree(ibm->acpi->driver);
-		ibm->acpi->driver = NULL;
-	} else if (!rc)
-		ibm->flags.acpi_driver_registered = 1;
-
-	return rc;
-}
-
 
 /****************************************************************************
  ****************************************************************************
@@ -923,7 +891,6 @@ static ssize_t dispatch_proc_write(struct file *file,
 			size_t count, loff_t *pos)
 {
 	struct ibm_struct *ibm = pde_data(file_inode(file));
-	char *kernbuf;
 	int ret;
 
 	if (!ibm || !ibm->write)
@@ -931,16 +898,15 @@ static ssize_t dispatch_proc_write(struct file *file,
 	if (count > PAGE_SIZE - 1)
 		return -EINVAL;
 
-	kernbuf = memdup_user_nul(userbuf, count);
+	char *kernbuf __free(kfree) = memdup_user_nul(userbuf, count);
 	if (IS_ERR(kernbuf))
 		return PTR_ERR(kernbuf);
+
 	ret = ibm->write(kernbuf);
-	if (ret == 0)
-		ret = count;
+	if (ret)
+		return ret;
 
-	kfree(kernbuf);
-
-	return ret;
+	return count;
 }
 
 static const struct proc_ops dispatch_proc_ops = {
@@ -1196,7 +1162,7 @@ static int __init tpacpi_new_rfkill(const enum tpacpi_rfk_id id,
 
 	BUG_ON(id >= TPACPI_RFK_SW_MAX || tpacpi_rfkill_switches[id]);
 
-	atp_rfk = kzalloc(sizeof(struct tpacpi_rfk), GFP_KERNEL);
+	atp_rfk = kzalloc_obj(struct tpacpi_rfk);
 	if (atp_rfk)
 		atp_rfk->rfkill = rfkill_alloc(name,
 						&tpacpi_pdev->dev,
@@ -1314,7 +1280,7 @@ static ssize_t tpacpi_rfk_sysfs_enable_store(const enum tpacpi_rfk_id id,
 static int tpacpi_rfk_procfs_read(const enum tpacpi_rfk_id id, struct seq_file *m)
 {
 	if (id >= TPACPI_RFK_SW_MAX)
-		seq_printf(m, "status:\t\tnot supported\n");
+		seq_puts(m, "status:\t\tnot supported\n");
 	else {
 		int status;
 
@@ -1329,7 +1295,7 @@ static int tpacpi_rfk_procfs_read(const enum tpacpi_rfk_id id, struct seq_file *
 		}
 
 		seq_printf(m, "status:\t\t%s\n", str_enabled_disabled(status == TPACPI_RFK_RADIO_ON));
-		seq_printf(m, "commands:\tenable, disable\n");
+		seq_puts(m, "commands:\tenable, disable\n");
 	}
 
 	return 0;
@@ -1919,6 +1885,7 @@ static u32 hotkey_reserved_mask;	/* events better left disabled */
 static u32 hotkey_driver_mask;		/* events needed by the driver */
 static u32 hotkey_user_mask;		/* events visible to userspace */
 static u32 hotkey_acpi_mask;		/* events enabled in firmware */
+static bool hotkey_input_enabled;
 
 static bool tpacpi_driver_event(const unsigned int hkey_event);
 static void hotkey_poll_setup(const bool may_warn);
@@ -2140,7 +2107,7 @@ static int hotkey_mask_set(u32 mask)
 	}
 
 	/*
-	 * We *must* make an inconditional call to hotkey_mask_get to
+	 * We *must* make an unconditional call to hotkey_mask_get to
 	 * refresh hotkey_acpi_mask and update hotkey_user_mask
 	 *
 	 * Take the opportunity to also log when we cannot _enable_
@@ -2202,7 +2169,7 @@ static int tpacpi_hotkey_driver_mask_set(const u32 mask)
 		return 0;
 	}
 
-	mutex_lock(&hotkey_mutex);
+	guard(mutex)(&hotkey_mutex);
 
 	HOTKEY_CONFIG_CRITICAL_START
 	hotkey_driver_mask = mask;
@@ -2214,8 +2181,6 @@ static int tpacpi_hotkey_driver_mask_set(const u32 mask)
 	rc = hotkey_mask_set((hotkey_acpi_mask | hotkey_driver_mask) &
 							~hotkey_source_mask);
 	hotkey_poll_setup(true);
-
-	mutex_unlock(&hotkey_mutex);
 
 	return rc;
 }
@@ -2240,15 +2205,12 @@ static void tpacpi_input_send_tabletsw(void)
 {
 	int state;
 
-	if (tp_features.hotkey_tablet &&
-	    !hotkey_get_tablet_mode(&state)) {
-		mutex_lock(&tpacpi_inputdev_send_mutex);
+	if (tp_features.hotkey_tablet && !hotkey_get_tablet_mode(&state)) {
+		guard(mutex)(&tpacpi_inputdev_send_mutex);
 
 		input_report_switch(tpacpi_inputdev,
 				    SW_TABLET_MODE, !!state);
 		input_sync(tpacpi_inputdev);
-
-		mutex_unlock(&tpacpi_inputdev_send_mutex);
 	}
 }
 
@@ -2273,7 +2235,6 @@ static int get_camera_shutter(void)
 
 static bool tpacpi_input_send_key(const u32 hkey, bool *send_acpi_ev)
 {
-	bool known_ev;
 	u32 scancode;
 
 	if (tpacpi_driver_event(hkey))
@@ -2316,11 +2277,8 @@ static bool tpacpi_input_send_key(const u32 hkey, bool *send_acpi_ev)
 		scancode = hkey;
 	}
 
-	mutex_lock(&tpacpi_inputdev_send_mutex);
-	known_ev = sparse_keymap_report_event(tpacpi_inputdev, scancode, 1, true);
-	mutex_unlock(&tpacpi_inputdev_send_mutex);
-
-	return known_ev;
+	guard(mutex)(&tpacpi_inputdev_send_mutex);
+	return sparse_keymap_report_event(tpacpi_inputdev, scancode, 1, true);
 }
 
 #ifdef CONFIG_THINKPAD_ACPI_HOTKEY_POLL
@@ -2508,7 +2466,7 @@ static int hotkey_kthread(void *data)
 	bool was_frozen;
 
 	if (tpacpi_lifecycle == TPACPI_LIFE_EXITING)
-		goto exit;
+		return 0;
 
 	set_freezable();
 
@@ -2565,7 +2523,6 @@ static int hotkey_kthread(void *data)
 		si ^= 1;
 	}
 
-exit:
 	return 0;
 }
 
@@ -2587,8 +2544,7 @@ static void hotkey_poll_setup(const bool may_warn)
 	lockdep_assert_held(&hotkey_mutex);
 
 	if (hotkey_poll_freq > 0 &&
-	    (poll_driver_mask ||
-	     (poll_user_mask && tpacpi_inputdev->users > 0))) {
+	    (poll_driver_mask || (poll_user_mask && hotkey_input_enabled))) {
 		if (!tpacpi_hotkey_task) {
 			tpacpi_hotkey_task = kthread_run(hotkey_kthread,
 					NULL, TPACPI_NVRAM_KTHREAD_NAME);
@@ -2609,9 +2565,8 @@ static void hotkey_poll_setup(const bool may_warn)
 
 static void hotkey_poll_setup_safe(const bool may_warn)
 {
-	mutex_lock(&hotkey_mutex);
+	guard(mutex)(&hotkey_mutex);
 	hotkey_poll_setup(may_warn);
-	mutex_unlock(&hotkey_mutex);
 }
 
 static void hotkey_poll_set_freq(unsigned int freq)
@@ -2644,7 +2599,10 @@ static int hotkey_inputdev_open(struct input_dev *dev)
 	switch (tpacpi_lifecycle) {
 	case TPACPI_LIFE_INIT:
 	case TPACPI_LIFE_RUNNING:
-		hotkey_poll_setup_safe(false);
+		scoped_guard(mutex, &hotkey_mutex) {
+			hotkey_input_enabled = true;
+			hotkey_poll_setup(false);
+		}
 		return 0;
 	case TPACPI_LIFE_EXITING:
 		return -EBUSY;
@@ -2657,10 +2615,14 @@ static int hotkey_inputdev_open(struct input_dev *dev)
 
 static void hotkey_inputdev_close(struct input_dev *dev)
 {
+	guard(mutex)(&hotkey_mutex);
+
+	hotkey_input_enabled = false;
+
 	/* disable hotkey polling when possible */
 	if (tpacpi_lifecycle != TPACPI_LIFE_EXITING &&
 	    !(hotkey_source_mask & hotkey_driver_mask))
-		hotkey_poll_setup_safe(false);
+		hotkey_poll_setup(false);
 }
 
 /* sysfs hotkey enable ------------------------------------------------- */
@@ -2718,16 +2680,16 @@ static ssize_t hotkey_mask_store(struct device *dev,
 	if (parse_strtoul(buf, 0xffffffffUL, &t))
 		return -EINVAL;
 
-	if (mutex_lock_killable(&hotkey_mutex))
-		return -ERESTARTSYS;
+	ACQUIRE(mutex_kill, guard)(&hotkey_mutex);
+	res = ACQUIRE_ERR(mutex_kill, &guard);
+	if (res)
+		return res;
 
 	res = hotkey_user_mask_set(t);
 
 #ifdef CONFIG_THINKPAD_ACPI_HOTKEY_POLL
 	hotkey_poll_setup(true);
 #endif
-
-	mutex_unlock(&hotkey_mutex);
 
 	tpacpi_disclose_usertask("hotkey_mask", "set to 0x%08lx\n", t);
 
@@ -2814,8 +2776,10 @@ static ssize_t hotkey_source_mask_store(struct device *dev,
 		((t & ~TPACPI_HKEY_NVRAM_KNOWN_MASK) != 0))
 		return -EINVAL;
 
-	if (mutex_lock_killable(&hotkey_mutex))
-		return -ERESTARTSYS;
+	ACQUIRE(mutex_kill, guard)(&hotkey_mutex);
+	rc = ACQUIRE_ERR(mutex_kill, &guard);
+	if (rc)
+		return rc;
 
 	HOTKEY_CONFIG_CRITICAL_START
 	hotkey_source_mask = t;
@@ -2828,8 +2792,6 @@ static ssize_t hotkey_source_mask_store(struct device *dev,
 	/* check if events needed by the driver got disabled */
 	r_ev = hotkey_driver_mask & ~(hotkey_acpi_mask & hotkey_all_mask)
 		& ~hotkey_source_mask & TPACPI_HKEY_NVRAM_KNOWN_MASK;
-
-	mutex_unlock(&hotkey_mutex);
 
 	if (rc < 0)
 		pr_err("hotkey_source_mask: failed to update the firmware event mask!\n");
@@ -2858,17 +2820,18 @@ static ssize_t hotkey_poll_freq_store(struct device *dev,
 			    const char *buf, size_t count)
 {
 	unsigned long t;
+	int err;
 
 	if (parse_strtoul(buf, 25, &t))
 		return -EINVAL;
 
-	if (mutex_lock_killable(&hotkey_mutex))
-		return -ERESTARTSYS;
+	ACQUIRE(mutex_kill, guard)(&hotkey_mutex);
+	err = ACQUIRE_ERR(mutex_kill, &guard);
+	if (err)
+		return err;
 
 	hotkey_poll_set_freq(t);
 	hotkey_poll_setup(true);
-
-	mutex_unlock(&hotkey_mutex);
 
 	tpacpi_disclose_usertask("hotkey_poll_freq", "set to %lu\n", t);
 
@@ -2925,6 +2888,63 @@ static void hotkey_tablet_mode_notify_change(void)
 	if (tp_features.hotkey_tablet)
 		sysfs_notify(&tpacpi_pdev->dev.kobj, NULL,
 			     "hotkey_tablet_mode");
+}
+
+static bool keyboard_attached_on_screen;
+static bool keyboard_attached_on_screen_initialized;
+
+static int x1_fold_keyboard_attached_on_screen_get(bool *attached)
+{
+	int state;
+
+	if (!tp_features.has_keyboard_attached_on_screen)
+		return -ENODEV;
+
+	if (!acpi_evalf(NULL, &state, "\\_SB.DEVD.GDST", "d"))
+		return -EIO;
+
+	*attached = state != 0;
+	return 0;
+}
+
+static ssize_t keyboard_attached_on_screen_show(struct device *dev,
+						struct device_attribute *attr,
+						char *buf)
+{
+	bool attached;
+	int res;
+
+	res = x1_fold_keyboard_attached_on_screen_get(&attached);
+	if (res)
+		return res;
+
+	return sysfs_emit(buf, "%d\n", attached);
+}
+
+static DEVICE_ATTR_RO(keyboard_attached_on_screen);
+
+static void keyboard_attached_on_screen_notify_change(void)
+{
+	if (tp_features.has_keyboard_attached_on_screen)
+		sysfs_notify(&tpacpi_pdev->dev.kobj, NULL,
+			     "keyboard_attached_on_screen");
+}
+
+static bool keyboard_attached_on_screen_update(void)
+{
+	bool attached;
+
+	if (x1_fold_keyboard_attached_on_screen_get(&attached))
+		return false;
+
+	if (keyboard_attached_on_screen_initialized &&
+	    keyboard_attached_on_screen == attached)
+		return false;
+
+	keyboard_attached_on_screen = attached;
+	keyboard_attached_on_screen_initialized = true;
+
+	return true;
 }
 
 /* sysfs wakeup reason (pollable) -------------------------------------- */
@@ -3018,6 +3038,31 @@ static const struct attribute_group adaptive_kbd_attr_group = {
 	.attrs = adaptive_kbd_attributes,
 };
 
+/* sysfs doubletap enable --------------------------------------------- */
+static ssize_t doubletap_enable_show(struct device *dev,
+				     struct device_attribute *attr,
+				     char *buf)
+{
+	return sysfs_emit(buf, "%d\n", tp_features.trackpoint_doubletap_enable);
+}
+
+static ssize_t doubletap_enable_store(struct device *dev,
+				      struct device_attribute *attr,
+				      const char *buf, size_t count)
+{
+	bool enable;
+	int err;
+
+	err = kstrtobool(buf, &enable);
+	if (err)
+		return err;
+
+	tp_features.trackpoint_doubletap_enable = enable;
+	return count;
+}
+
+static DEVICE_ATTR_RW(doubletap_enable);
+
 /* --------------------------------------------------------------------- */
 
 static struct attribute *hotkey_attributes[] = {
@@ -3031,7 +3076,9 @@ static struct attribute *hotkey_attributes[] = {
 	&dev_attr_hotkey_adaptive_all_mask.attr,
 	&dev_attr_hotkey_recommended_mask.attr,
 	&dev_attr_hotkey_tablet_mode.attr,
+	&dev_attr_keyboard_attached_on_screen.attr,
 	&dev_attr_hotkey_radio_sw.attr,
+	&dev_attr_doubletap_enable.attr,
 #ifdef CONFIG_THINKPAD_ACPI_HOTKEY_POLL
 	&dev_attr_hotkey_source_mask.attr,
 	&dev_attr_hotkey_poll_freq.attr,
@@ -3044,6 +3091,9 @@ static umode_t hotkey_attr_is_visible(struct kobject *kobj,
 {
 	if (attr == &dev_attr_hotkey_tablet_mode.attr) {
 		if (!tp_features.hotkey_tablet)
+			return 0;
+	} else if (attr == &dev_attr_keyboard_attached_on_screen.attr) {
+		if (!tp_features.has_keyboard_attached_on_screen)
 			return 0;
 	} else if (attr == &dev_attr_hotkey_radio_sw.attr) {
 		if (!tp_features.hotkey_wlsw)
@@ -3088,13 +3138,11 @@ static void tpacpi_send_radiosw_update(void)
 
 	/* Issue rfkill input event for WLSW switch */
 	if (!(wlsw < 0)) {
-		mutex_lock(&tpacpi_inputdev_send_mutex);
+		guard(mutex)(&tpacpi_inputdev_send_mutex);
 
 		input_report_switch(tpacpi_inputdev,
 				    SW_RFKILL_ALL, (wlsw > 0));
 		input_sync(tpacpi_inputdev);
-
-		mutex_unlock(&tpacpi_inputdev_send_mutex);
 	}
 
 	/*
@@ -3106,7 +3154,7 @@ static void tpacpi_send_radiosw_update(void)
 
 static void hotkey_exit(void)
 {
-	mutex_lock(&hotkey_mutex);
+	guard(mutex)(&hotkey_mutex);
 	hotkey_poll_stop_sync();
 	dbg_printk(TPACPI_DBG_EXIT | TPACPI_DBG_HKEY,
 		   "restoring original HKEY status and mask\n");
@@ -3116,8 +3164,6 @@ static void hotkey_exit(void)
 	      hotkey_mask_set(hotkey_orig_mask)) |
 	     hotkey_status_set(false)) != 0)
 		pr_err("failed to restore hot key mask to BIOS defaults\n");
-
-	mutex_unlock(&hotkey_mutex);
 }
 
 /*
@@ -3346,7 +3392,7 @@ static int __init hotkey_init(struct ibm_init_struct *iibm)
 
 	vdbg_printk(TPACPI_DBG_INIT | TPACPI_DBG_HKEY,
 		"hotkeys are %s\n",
-		str_supported(tp_features.hotkey));
+		str_supported_unsupported(tp_features.hotkey));
 
 	if (!tp_features.hotkey)
 		return -ENODEV;
@@ -3423,7 +3469,7 @@ static int __init hotkey_init(struct ibm_init_struct *iibm)
 
 	vdbg_printk(TPACPI_DBG_INIT | TPACPI_DBG_HKEY,
 		"hotkey masks are %s\n",
-		str_supported(tp_features.hotkey_mask));
+		str_supported_unsupported(tp_features.hotkey_mask));
 
 	/* Init hotkey_all_mask if not initialized yet */
 	if (!tp_features.hotkey_mask && !hotkey_all_mask &&
@@ -3434,11 +3480,11 @@ static int __init hotkey_init(struct ibm_init_struct *iibm)
 	if (tp_features.hotkey_mask) {
 		/* hotkey_source_mask *must* be zero for
 		 * the first hotkey_mask_get to return hotkey_orig_mask */
-		mutex_lock(&hotkey_mutex);
-		res = hotkey_mask_get();
-		mutex_unlock(&hotkey_mutex);
-		if (res)
-			return res;
+		scoped_guard(mutex, &hotkey_mutex) {
+			res = hotkey_mask_get();
+			if (res)
+				return res;
+		}
 
 		hotkey_orig_mask = hotkey_acpi_mask;
 	} else {
@@ -3461,6 +3507,7 @@ static int __init hotkey_init(struct ibm_init_struct *iibm)
 	}
 
 	tabletsw_state = hotkey_init_tablet_mode();
+	keyboard_attached_on_screen_update();
 
 	/* Set up key map */
 	keymap_id = tpacpi_check_quirks(tpacpi_keymap_qtable,
@@ -3537,11 +3584,11 @@ static int __init hotkey_init(struct ibm_init_struct *iibm)
 		hotkey_exit();
 		return res;
 	}
-	mutex_lock(&hotkey_mutex);
-	res = hotkey_mask_set(((hotkey_all_mask & ~hotkey_reserved_mask)
-			       | hotkey_driver_mask)
-			      & ~hotkey_source_mask);
-	mutex_unlock(&hotkey_mutex);
+	scoped_guard(mutex, &hotkey_mutex) {
+		res = hotkey_mask_set(((hotkey_all_mask & ~hotkey_reserved_mask)
+				       | hotkey_driver_mask)
+				      & ~hotkey_source_mask);
+	}
 	if (res < 0 && res != -ENXIO) {
 		hotkey_exit();
 		return res;
@@ -3557,8 +3604,8 @@ static int __init hotkey_init(struct ibm_init_struct *iibm)
 
 	hotkey_poll_setup_safe(true);
 
-	/* Enable doubletap by default */
-	tp_features.trackpoint_doubletap = 1;
+	/* Enable TrackPoint doubletap event reporting by default. */
+	tp_features.trackpoint_doubletap_enable = 1;
 
 	return 0;
 }
@@ -3728,7 +3775,7 @@ static bool hotkey_notify_dockevent(const u32 hkey, bool *send_acpi_ev)
 		return true;
 
 	/*
-	 * Deliberately ignore attaching and detaching the keybord cover to avoid
+	 * Deliberately ignore attaching and detaching the keyboard cover to avoid
 	 * duplicates from intel-vbtn, which already emits SW_TABLET_MODE events
 	 * to userspace.
 	 *
@@ -3841,6 +3888,8 @@ static bool hotkey_notify_6xxx(const u32 hkey, bool *send_acpi_ev)
 	case TP_HKEY_EV_TABLET_CHANGED:
 		tpacpi_input_send_tabletsw();
 		hotkey_tablet_mode_notify_change();
+		if (keyboard_attached_on_screen_update())
+			keyboard_attached_on_screen_notify_change();
 		*send_acpi_ev = false;
 		return true;
 
@@ -3863,9 +3912,9 @@ static bool hotkey_notify_8xxx(const u32 hkey, bool *send_acpi_ev)
 {
 	switch (hkey) {
 	case TP_HKEY_EV_TRACK_DOUBLETAP:
-		if (tp_features.trackpoint_doubletap)
-			tpacpi_input_send_key(hkey, send_acpi_ev);
-
+		/* Only send event if doubletap is enabled */
+		if (!tp_features.trackpoint_doubletap_enable)
+			*send_acpi_ev = false;
 		return true;
 	default:
 		return false;
@@ -3882,7 +3931,7 @@ static void hotkey_notify(struct ibm_struct *ibm, u32 event)
 		pr_err("unknown HKEY notification event %d\n", event);
 		/* forward it to userspace, maybe it knows how to handle it */
 		acpi_bus_generate_netlink_event(
-					ibm->acpi->device->pnp.device_class,
+					ibm->device_class,
 					dev_name(&ibm->acpi->device->dev),
 					event, 0);
 		return;
@@ -3962,7 +4011,7 @@ static void hotkey_notify(struct ibm_struct *ibm, u32 event)
 		/* netlink events */
 		if (send_acpi_ev) {
 			acpi_bus_generate_netlink_event(
-					ibm->acpi->device->pnp.device_class,
+					ibm->device_class,
 					dev_name(&ibm->acpi->device->dev),
 					event, hkey);
 		}
@@ -3988,20 +4037,22 @@ static void hotkey_resume(void)
 {
 	tpacpi_disable_brightness_delay();
 
-	mutex_lock(&hotkey_mutex);
-	if (hotkey_status_set(true) < 0 ||
-	    hotkey_mask_set(hotkey_acpi_mask) < 0)
-		pr_err("error while attempting to reset the event firmware interface\n");
-	mutex_unlock(&hotkey_mutex);
+	scoped_guard(mutex, &hotkey_mutex) {
+		if (hotkey_status_set(true) < 0 ||
+		    hotkey_mask_set(hotkey_acpi_mask) < 0)
+			pr_err("error while attempting to reset the event firmware interface\n");
+	}
 
 	tpacpi_send_radiosw_update();
 	tpacpi_input_send_tabletsw();
 	hotkey_tablet_mode_notify_change();
+	keyboard_attached_on_screen_update();
+	keyboard_attached_on_screen_notify_change();
 	hotkey_wakeup_reason_notify_change();
 	hotkey_wakeup_hotunplug_complete_notify_change();
 	hotkey_poll_setup_safe(false);
 
-	/* restore previous mode of adapive keyboard of X1 Carbon */
+	/* restore previous mode of adaptive keyboard of X1 Carbon */
 	if (tp_features.has_adaptive_kbd) {
 		if (!acpi_evalf(hkey_handle, NULL, "STRW", "vd",
 					adaptive_keyboard_prev_mode)) {
@@ -4016,26 +4067,27 @@ static int hotkey_read(struct seq_file *m)
 	int res, status;
 
 	if (!tp_features.hotkey) {
-		seq_printf(m, "status:\t\tnot supported\n");
+		seq_puts(m, "status:\t\tnot supported\n");
 		return 0;
 	}
 
-	if (mutex_lock_killable(&hotkey_mutex))
-		return -ERESTARTSYS;
+	ACQUIRE(mutex_kill, guard)(&hotkey_mutex);
+	res = ACQUIRE_ERR(mutex_kill, &guard);
+	if (res)
+		return res;
 	res = hotkey_status_get(&status);
 	if (!res)
 		res = hotkey_mask_get();
-	mutex_unlock(&hotkey_mutex);
 	if (res)
 		return res;
 
 	seq_printf(m, "status:\t\t%s\n", str_enabled_disabled(status & BIT(0)));
 	if (hotkey_all_mask) {
 		seq_printf(m, "mask:\t\t0x%08x\n", hotkey_user_mask);
-		seq_printf(m, "commands:\tenable, disable, reset, <mask>\n");
+		seq_puts(m, "commands:\tenable, disable, reset, <mask>\n");
 	} else {
-		seq_printf(m, "mask:\t\tnot supported\n");
-		seq_printf(m, "commands:\tenable, disable, reset\n");
+		seq_puts(m, "mask:\t\tnot supported\n");
+		seq_puts(m, "commands:\tenable, disable, reset\n");
 	}
 
 	return 0;
@@ -4058,8 +4110,10 @@ static int hotkey_write(char *buf)
 	if (!tp_features.hotkey)
 		return -ENODEV;
 
-	if (mutex_lock_killable(&hotkey_mutex))
-		return -ERESTARTSYS;
+	ACQUIRE(mutex_kill, guard)(&hotkey_mutex);
+	res = ACQUIRE_ERR(mutex_kill, &guard);
+	if (res)
+		return res;
 
 	mask = hotkey_user_mask;
 
@@ -4078,8 +4132,7 @@ static int hotkey_write(char *buf)
 		} else if (sscanf(cmd, "%x", &mask) == 1) {
 			/* mask set */
 		} else {
-			res = -EINVAL;
-			goto errexit;
+			return -EINVAL;
 		}
 	}
 
@@ -4089,8 +4142,6 @@ static int hotkey_write(char *buf)
 		res = hotkey_user_mask_set(mask);
 	}
 
-errexit:
-	mutex_unlock(&hotkey_mutex);
 	return res;
 }
 
@@ -4295,6 +4346,17 @@ static const struct dmi_system_id fwbug_list[] __initconst = {
 	{}
 };
 
+static const struct dmi_system_id keyboard_attached_on_screen_list[] __initconst = {
+	{
+		.ident = "ThinkPad X1 Fold 16 Gen 1",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_FAMILY, "ThinkPad X1 Fold 16 Gen 1"),
+		},
+	},
+	{}
+};
+
 static const struct pci_device_id fwbug_cards_ids[] __initconst = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, 0x24F3) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, 0x24FD) },
@@ -4335,7 +4397,7 @@ static int __init bluetooth_init(struct ibm_init_struct *iibm)
 
 	vdbg_printk(TPACPI_DBG_INIT | TPACPI_DBG_RFKILL,
 		"bluetooth is %s, status 0x%02x\n",
-		str_supported(tp_features.bluetooth),
+		str_supported_unsupported(tp_features.bluetooth),
 		status);
 
 #ifdef CONFIG_THINKPAD_ACPI_DEBUGFACILITIES
@@ -4514,7 +4576,7 @@ static int __init wan_init(struct ibm_init_struct *iibm)
 
 	vdbg_printk(TPACPI_DBG_INIT | TPACPI_DBG_RFKILL,
 		"wan is %s, status 0x%02x\n",
-		str_supported(tp_features.wan),
+		str_supported_unsupported(tp_features.wan),
 		status);
 
 #ifdef CONFIG_THINKPAD_ACPI_DEBUGFACILITIES
@@ -4642,7 +4704,7 @@ static int __init uwb_init(struct ibm_init_struct *iibm)
 
 	vdbg_printk(TPACPI_DBG_INIT | TPACPI_DBG_RFKILL,
 		"uwb is %s, status 0x%02x\n",
-		str_supported(tp_features.uwb),
+		str_supported_unsupported(tp_features.uwb),
 		status);
 
 #ifdef CONFIG_THINKPAD_ACPI_DEBUGFACILITIES
@@ -4750,7 +4812,7 @@ static int __init video_init(struct ibm_init_struct *iibm)
 		video_supported = TPACPI_VIDEO_NEW;
 
 	vdbg_printk(TPACPI_DBG_INIT, "video is %s, mode %d\n",
-		str_supported(video_supported != TPACPI_VIDEO_NONE),
+		str_supported_unsupported(video_supported != TPACPI_VIDEO_NONE),
 		video_supported);
 
 	return (video_supported != TPACPI_VIDEO_NONE) ? 0 : -ENODEV;
@@ -4932,7 +4994,7 @@ static int video_read(struct seq_file *m)
 	int status, autosw;
 
 	if (video_supported == TPACPI_VIDEO_NONE) {
-		seq_printf(m, "status:\t\tnot supported\n");
+		seq_puts(m, "status:\t\tnot supported\n");
 		return 0;
 	}
 
@@ -4948,18 +5010,18 @@ static int video_read(struct seq_file *m)
 	if (autosw < 0)
 		return autosw;
 
-	seq_printf(m, "status:\t\tsupported\n");
+	seq_puts(m, "status:\t\tsupported\n");
 	seq_printf(m, "lcd:\t\t%s\n", str_enabled_disabled(status & BIT(0)));
 	seq_printf(m, "crt:\t\t%s\n", str_enabled_disabled(status & BIT(1)));
 	if (video_supported == TPACPI_VIDEO_NEW)
 		seq_printf(m, "dvi:\t\t%s\n", str_enabled_disabled(status & BIT(3)));
 	seq_printf(m, "auto:\t\t%s\n", str_enabled_disabled(autosw & BIT(0)));
-	seq_printf(m, "commands:\tlcd_enable, lcd_disable\n");
-	seq_printf(m, "commands:\tcrt_enable, crt_disable\n");
+	seq_puts(m, "commands:\tlcd_enable, lcd_disable\n");
+	seq_puts(m, "commands:\tcrt_enable, crt_disable\n");
 	if (video_supported == TPACPI_VIDEO_NEW)
-		seq_printf(m, "commands:\tdvi_enable, dvi_disable\n");
-	seq_printf(m, "commands:\tauto_enable, auto_disable\n");
-	seq_printf(m, "commands:\tvideo_switch, expand_toggle\n");
+		seq_puts(m, "commands:\tdvi_enable, dvi_disable\n");
+	seq_puts(m, "commands:\tauto_enable, auto_disable\n");
+	seq_puts(m, "commands:\tvideo_switch, expand_toggle\n");
 
 	return 0;
 }
@@ -5045,21 +5107,16 @@ static DEFINE_MUTEX(kbdlight_mutex);
 
 static int kbdlight_set_level(int level)
 {
-	int ret = 0;
-
 	if (!hkey_handle)
 		return -ENXIO;
 
-	mutex_lock(&kbdlight_mutex);
+	guard(mutex)(&kbdlight_mutex);
 
 	if (!acpi_evalf(hkey_handle, NULL, "MLCS", "dd", level))
-		ret = -EIO;
-	else
-		kbdlight_brightness = level;
+		return -EIO;
 
-	mutex_unlock(&kbdlight_mutex);
-
-	return ret;
+	kbdlight_brightness = level;
+	return 0;
 }
 
 static int kbdlight_get_level(void)
@@ -5203,14 +5260,14 @@ static int kbdlight_read(struct seq_file *m)
 	int level;
 
 	if (!tp_features.kbdlight) {
-		seq_printf(m, "status:\t\tnot supported\n");
+		seq_puts(m, "status:\t\tnot supported\n");
 	} else {
 		level = kbdlight_get_level();
 		if (level < 0)
 			seq_printf(m, "status:\t\terror %d\n", level);
 		else
 			seq_printf(m, "status:\t\t%d\n", level);
-		seq_printf(m, "commands:\t0, 1, 2\n");
+		seq_puts(m, "commands:\t0, 1, 2\n");
 	}
 
 	return 0;
@@ -5348,8 +5405,8 @@ static int __init light_init(struct ibm_init_struct *iibm)
 			acpi_evalf(ec_handle, NULL, "KBLT", "qv");
 
 	vdbg_printk(TPACPI_DBG_INIT, "light is %s, light status is %s\n",
-		str_supported(tp_features.light),
-		str_supported(tp_features.light_status));
+		str_supported_unsupported(tp_features.light),
+		str_supported_unsupported(tp_features.light_status));
 
 	if (!tp_features.light)
 		return -ENODEV;
@@ -5377,16 +5434,16 @@ static int light_read(struct seq_file *m)
 	int status;
 
 	if (!tp_features.light) {
-		seq_printf(m, "status:\t\tnot supported\n");
+		seq_puts(m, "status:\t\tnot supported\n");
 	} else if (!tp_features.light_status) {
-		seq_printf(m, "status:\t\tunknown\n");
-		seq_printf(m, "commands:\ton, off\n");
+		seq_puts(m, "status:\t\tunknown\n");
+		seq_puts(m, "commands:\ton, off\n");
 	} else {
 		status = light_get_status();
 		if (status < 0)
 			return status;
 		seq_printf(m, "status:\t\t%s\n", str_on_off(status & BIT(0)));
-		seq_printf(m, "commands:\ton, off\n");
+		seq_puts(m, "commands:\ton, off\n");
 	}
 
 	return 0;
@@ -5466,7 +5523,7 @@ static int __init cmos_init(struct ibm_init_struct *iibm)
 	TPACPI_ACPIHANDLE_INIT(cmos);
 
 	vdbg_printk(TPACPI_DBG_INIT, "cmos commands are %s\n",
-		    str_supported(cmos_handle != NULL));
+		    str_supported_unsupported(cmos_handle));
 
 	return cmos_handle ? 0 : -ENODEV;
 }
@@ -5476,10 +5533,10 @@ static int cmos_read(struct seq_file *m)
 	/* cmos not supported on 570, 600e/x, 770e, 770x, A21e, A2xm/p,
 	   R30, R31, T20-22, X20-21 */
 	if (!cmos_handle)
-		seq_printf(m, "status:\t\tnot supported\n");
+		seq_puts(m, "status:\t\tnot supported\n");
 	else {
-		seq_printf(m, "status:\t\tsupported\n");
-		seq_printf(m, "commands:\t<cmd> (<cmd> is 0-21)\n");
+		seq_puts(m, "status:\t\tsupported\n");
+		seq_puts(m, "commands:\t<cmd> (<cmd> is 0-21)\n");
 	}
 
 	return 0;
@@ -5811,13 +5868,13 @@ static int __init led_init(struct ibm_init_struct *iibm)
 	}
 
 	vdbg_printk(TPACPI_DBG_INIT, "LED commands are %s, mode %d\n",
-		str_supported(led_supported), led_supported);
+		str_supported_unsupported(led_supported != TPACPI_LED_NONE),
+		led_supported);
 
 	if (led_supported == TPACPI_LED_NONE)
 		return -ENODEV;
 
-	tpacpi_leds = kcalloc(TPACPI_LED_NUMLEDS, sizeof(*tpacpi_leds),
-			      GFP_KERNEL);
+	tpacpi_leds = kzalloc_objs(*tpacpi_leds, TPACPI_LED_NUMLEDS);
 	if (!tpacpi_leds) {
 		pr_err("Out of memory for LED data\n");
 		return -ENOMEM;
@@ -5846,10 +5903,10 @@ static int __init led_init(struct ibm_init_struct *iibm)
 static int led_read(struct seq_file *m)
 {
 	if (!led_supported) {
-		seq_printf(m, "status:\t\tnot supported\n");
+		seq_puts(m, "status:\t\tnot supported\n");
 		return 0;
 	}
-	seq_printf(m, "status:\t\tsupported\n");
+	seq_puts(m, "status:\t\tsupported\n");
 
 	if (led_supported == TPACPI_LED_570) {
 		/* 570 */
@@ -5862,7 +5919,7 @@ static int led_read(struct seq_file *m)
 		}
 	}
 
-	seq_printf(m, "commands:\t<led> on, <led> off, <led> blink (<led> is 0-15)\n");
+	seq_puts(m, "commands:\t<led> on, <led> off, <led> blink (<led> is 0-15)\n");
 
 	return 0;
 }
@@ -5933,7 +5990,7 @@ static int __init beep_init(struct ibm_init_struct *iibm)
 	TPACPI_ACPIHANDLE_INIT(beep);
 
 	vdbg_printk(TPACPI_DBG_INIT, "beep is %s\n",
-		str_supported(beep_handle != NULL));
+		str_supported_unsupported(beep_handle));
 
 	quirks = tpacpi_check_quirks(beep_quirk_table,
 				     ARRAY_SIZE(beep_quirk_table));
@@ -5945,12 +6002,8 @@ static int __init beep_init(struct ibm_init_struct *iibm)
 
 static int beep_read(struct seq_file *m)
 {
-	if (!beep_handle)
-		seq_printf(m, "status:\t\tnot supported\n");
-	else {
-		seq_printf(m, "status:\t\tsupported\n");
-		seq_printf(m, "commands:\t<cmd> (<cmd> is 0-17)\n");
-	}
+	seq_puts(m, "status:\t\tsupported\n");
+	seq_puts(m, "commands:\t<cmd> (<cmd> is 0-17)\n");
 
 	return 0;
 }
@@ -6383,7 +6436,7 @@ static int __init thermal_init(struct ibm_init_struct *iibm)
 	thermal_read_mode = thermal_read_mode_check();
 
 	vdbg_printk(TPACPI_DBG_INIT, "thermal is %s, mode %d\n",
-		str_supported(thermal_read_mode != TPACPI_THERMAL_NONE),
+		str_supported_unsupported(thermal_read_mode != TPACPI_THERMAL_NONE),
 		thermal_read_mode);
 
 	return thermal_read_mode != TPACPI_THERMAL_NONE ? 0 : -ENODEV;
@@ -6398,14 +6451,14 @@ static int thermal_read(struct seq_file *m)
 	if (unlikely(n < 0))
 		return n;
 
-	seq_printf(m, "temperatures:\t");
+	seq_puts(m, "temperatures:\t");
 
 	if (n > 0) {
 		for (i = 0; i < (n - 1); i++)
 			seq_printf(m, "%d ", t.temp[i] / 1000);
 		seq_printf(m, "%d\n", t.temp[i] / 1000);
 	} else
-		seq_printf(m, "not supported\n");
+		seq_puts(m, "not supported\n");
 
 	return 0;
 }
@@ -6491,11 +6544,12 @@ static void tpacpi_brightness_checkpoint_nvram(void)
 	vdbg_printk(TPACPI_DBG_BRGHT,
 		"trying to checkpoint backlight level to NVRAM...\n");
 
-	if (mutex_lock_killable(&brightness_mutex) < 0)
+	ACQUIRE(mutex_kill, guard)(&brightness_mutex);
+	if (ACQUIRE_ERR(mutex_kill, &guard))
 		return;
 
 	if (unlikely(!acpi_ec_read(TP_EC_BACKLIGHT, &lec)))
-		goto unlock;
+		return;
 	lec &= TP_EC_BACKLIGHT_LVLMSK;
 	b_nvram = nvram_read_byte(TP_NVRAM_ADDR_BRIGHTNESS);
 
@@ -6513,9 +6567,6 @@ static void tpacpi_brightness_checkpoint_nvram(void)
 		vdbg_printk(TPACPI_DBG_BRGHT,
 			   "NVRAM backlight level already is %u (0x%02x)\n",
 			   (unsigned int) lec, (unsigned int) b_nvram);
-
-unlock:
-	mutex_unlock(&brightness_mutex);
 }
 
 
@@ -6593,8 +6644,9 @@ static int brightness_set(unsigned int value)
 	vdbg_printk(TPACPI_DBG_BRGHT,
 			"set backlight level to %d\n", value);
 
-	res = mutex_lock_killable(&brightness_mutex);
-	if (res < 0)
+	ACQUIRE(mutex_kill, guard)(&brightness_mutex);
+	res = ACQUIRE_ERR(mutex_kill, &guard);
+	if (res)
 		return res;
 
 	switch (brightness_mode) {
@@ -6609,7 +6661,6 @@ static int brightness_set(unsigned int value)
 		res = -ENXIO;
 	}
 
-	mutex_unlock(&brightness_mutex);
 	return res;
 }
 
@@ -6632,14 +6683,11 @@ static int brightness_get(struct backlight_device *bd)
 {
 	int status, res;
 
-	res = mutex_lock_killable(&brightness_mutex);
-	if (res < 0)
+	ACQUIRE(mutex_kill, guard)(&brightness_mutex);
+	if (ACQUIRE_ERR(mutex_kill, &guard))
 		return 0;
 
 	res = tpacpi_brightness_get_raw(&status);
-
-	mutex_unlock(&brightness_mutex);
-
 	if (res < 0)
 		return 0;
 
@@ -6662,26 +6710,21 @@ static const struct backlight_ops ibm_backlight_data = {
 static int __init tpacpi_evaluate_bcl(struct acpi_device *adev, void *not_used)
 {
 	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
-	union acpi_object *obj;
 	acpi_status status;
-	int rc;
 
 	status = acpi_evaluate_object(adev->handle, "_BCL", NULL, &buffer);
 	if (ACPI_FAILURE(status))
 		return 0;
 
-	obj = buffer.pointer;
+	union acpi_object *obj __free(kfree) = buffer.pointer;
 	if (!obj || obj->type != ACPI_TYPE_PACKAGE) {
 		acpi_handle_info(adev->handle,
 				 "Unknown _BCL data, please report this to %s\n",
 				 TPACPI_MAIL);
-		rc = 0;
-	} else {
-		rc = obj->package.count;
+		return 0;
 	}
-	kfree(obj);
 
-	return rc;
+	return obj->package.count;
 }
 
 /*
@@ -6918,10 +6961,10 @@ static int brightness_read(struct seq_file *m)
 
 	level = brightness_get(NULL);
 	if (level < 0) {
-		seq_printf(m, "level:\t\tunreadable\n");
+		seq_puts(m, "level:\t\tunreadable\n");
 	} else {
 		seq_printf(m, "level:\t\t%d\n", level);
-		seq_printf(m, "commands:\tup, down\n");
+		seq_puts(m, "commands:\tup, down\n");
 		seq_printf(m, "commands:\tlevel <level> (<level> is 0-%d)\n",
 			       bright_maxlvl);
 	}
@@ -7078,7 +7121,7 @@ static bool software_mute_active;
 static int software_mute_orig_mode;
 
 /*
- * Used to syncronize writers to TP_EC_AUDIO and
+ * Used to synchronize writers to TP_EC_AUDIO and
  * TP_NVRAM_ADDR_MIXER, as we need to do read-modify-write
  */
 static struct mutex volume_mutex;
@@ -7104,11 +7147,12 @@ static void tpacpi_volume_checkpoint_nvram(void)
 	else
 		ec_mask = TP_EC_AUDIO_MUTESW_MSK | TP_EC_AUDIO_LVL_MSK;
 
-	if (mutex_lock_killable(&volume_mutex) < 0)
+	ACQUIRE(mutex_kill, guard)(&volume_mutex);
+	if (ACQUIRE_ERR(mutex_kill, &guard))
 		return;
 
 	if (unlikely(!acpi_ec_read(TP_EC_AUDIO, &lec)))
-		goto unlock;
+		return;
 	lec &= ec_mask;
 	b_nvram = nvram_read_byte(TP_NVRAM_ADDR_MIXER);
 
@@ -7125,9 +7169,6 @@ static void tpacpi_volume_checkpoint_nvram(void)
 			   "NVRAM mixer status already is 0x%02x (0x%02x)\n",
 			   (unsigned int) lec, (unsigned int) b_nvram);
 	}
-
-unlock:
-	mutex_unlock(&volume_mutex);
 }
 
 static int volume_get_status_ec(u8 *status)
@@ -7176,12 +7217,14 @@ static int __volume_set_mute_ec(const bool mute)
 	int rc;
 	u8 s, n;
 
-	if (mutex_lock_killable(&volume_mutex) < 0)
-		return -EINTR;
+	ACQUIRE(mutex_kill, guard)(&volume_mutex);
+	rc = ACQUIRE_ERR(mutex_kill, &guard);
+	if (rc)
+		return rc;
 
 	rc = volume_get_status_ec(&s);
 	if (rc)
-		goto unlock;
+		return rc;
 
 	n = (mute) ? s | TP_EC_AUDIO_MUTESW_MSK :
 		     s & ~TP_EC_AUDIO_MUTESW_MSK;
@@ -7192,8 +7235,6 @@ static int __volume_set_mute_ec(const bool mute)
 			rc = 1;
 	}
 
-unlock:
-	mutex_unlock(&volume_mutex);
 	return rc;
 }
 
@@ -7224,12 +7265,14 @@ static int __volume_set_volume_ec(const u8 vol)
 	if (vol > TP_EC_VOLUME_MAX)
 		return -EINVAL;
 
-	if (mutex_lock_killable(&volume_mutex) < 0)
-		return -EINTR;
+	ACQUIRE(mutex_kill, guard)(&volume_mutex);
+	rc = ACQUIRE_ERR(mutex_kill, &guard);
+	if (rc)
+		return rc;
 
 	rc = volume_get_status_ec(&s);
 	if (rc)
-		goto unlock;
+		return rc;
 
 	n = (s & ~TP_EC_AUDIO_LVL_MSK) | vol;
 
@@ -7239,8 +7282,6 @@ static int __volume_set_volume_ec(const u8 vol)
 			rc = 1;
 	}
 
-unlock:
-	mutex_unlock(&volume_mutex);
 	return rc;
 }
 
@@ -7271,7 +7312,7 @@ static int volume_set_software_mute(bool startup)
 
 	/*
 	 * In software mute mode, the standard codec controls take
-	 * precendence, so we unmute the ThinkPad HW switch at
+	 * precedence, so we unmute the ThinkPad HW switch at
 	 * startup.  Just on case there are SAUM-capable ThinkPads
 	 * with level controls, set max HW volume as well.
 	 */
@@ -7605,7 +7646,7 @@ static int __init volume_init(struct ibm_init_struct *iibm)
 
 	vdbg_printk(TPACPI_DBG_INIT | TPACPI_DBG_MIXER,
 			"mute is supported, volume control is %s\n",
-			str_supported(!tp_features.mixer_no_level_control));
+			str_supported_unsupported(!tp_features.mixer_no_level_control));
 
 	if (software_mute_requested && volume_set_software_mute(true) == 0) {
 		software_mute_active = true;
@@ -7637,10 +7678,10 @@ static int volume_read(struct seq_file *m)
 	u8 status;
 
 	if (volume_get_status(&status) < 0) {
-		seq_printf(m, "level:\t\tunreadable\n");
+		seq_puts(m, "level:\t\tunreadable\n");
 	} else {
 		if (tp_features.mixer_no_level_control)
-			seq_printf(m, "level:\t\tunsupported\n");
+			seq_puts(m, "level:\t\tunsupported\n");
 		else
 			seq_printf(m, "level:\t\t%d\n",
 					status & TP_EC_AUDIO_LVL_MSK);
@@ -7648,9 +7689,9 @@ static int volume_read(struct seq_file *m)
 		seq_printf(m, "mute:\t\t%s\n", str_on_off(status & BIT(TP_EC_AUDIO_MUTESW)));
 
 		if (volume_control_allowed) {
-			seq_printf(m, "commands:\tunmute, mute\n");
+			seq_puts(m, "commands:\tunmute, mute\n");
 			if (!tp_features.mixer_no_level_control) {
-				seq_printf(m, "commands:\tup, down\n");
+				seq_puts(m, "commands:\tup, down\n");
 				seq_printf(m, "commands:\tlevel <level> (<level> is 0-%d)\n",
 					      TP_EC_VOLUME_MAX);
 			}
@@ -7990,7 +8031,7 @@ TPACPI_HANDLE(fanw, ec, "FANW",	/* E531 */
 	   );			/* all others */
 
 /*
- * Unitialized HFSP quirk: ACPI DSDT and EC fail to initialize the
+ * Uninitialized HFSP quirk: ACPI DSDT and EC fail to initialize the
  * HFSP register at boot, so it contains 0x07 but the Thinkpad could
  * be in auto mode (0x80).
  *
@@ -8144,13 +8185,14 @@ static int fan_get_status_safe(u8 *status)
 	int rc;
 	u8 s;
 
-	if (mutex_lock_killable(&fan_mutex))
-		return -ERESTARTSYS;
+	ACQUIRE(mutex_kill, guard)(&fan_mutex);
+	rc = ACQUIRE_ERR(mutex_kill, &guard);
+	if (rc)
+		return rc;
 	rc = fan_get_status(&s);
 	/* NS EC doesn't have register with level settings */
 	if (!rc && !fan_with_ns_addr)
 		fan_update_desired_level(s);
-	mutex_unlock(&fan_mutex);
 
 	if (rc)
 		return rc;
@@ -8343,8 +8385,10 @@ static int fan_set_level_safe(int level)
 	if (!fan_control_allowed)
 		return -EPERM;
 
-	if (mutex_lock_killable(&fan_mutex))
-		return -ERESTARTSYS;
+	ACQUIRE(mutex_kill, guard)(&fan_mutex);
+	rc = ACQUIRE_ERR(mutex_kill, &guard);
+	if (rc)
+		return rc;
 
 	if (level == TPACPI_FAN_LAST_LEVEL)
 		level = fan_control_desired_level;
@@ -8353,7 +8397,6 @@ static int fan_set_level_safe(int level)
 	if (!rc)
 		fan_update_desired_level(level);
 
-	mutex_unlock(&fan_mutex);
 	return rc;
 }
 
@@ -8365,8 +8408,10 @@ static int fan_set_enable(void)
 	if (!fan_control_allowed)
 		return -EPERM;
 
-	if (mutex_lock_killable(&fan_mutex))
-		return -ERESTARTSYS;
+	ACQUIRE(mutex_kill, guard)(&fan_mutex);
+	rc = ACQUIRE_ERR(mutex_kill, &guard);
+	if (rc)
+		return rc;
 
 	switch (fan_control_access_mode) {
 	case TPACPI_FAN_WR_ACPI_FANS:
@@ -8422,8 +8467,6 @@ static int fan_set_enable(void)
 		rc = -ENXIO;
 	}
 
-	mutex_unlock(&fan_mutex);
-
 	if (!rc)
 		vdbg_printk(TPACPI_DBG_FAN,
 			"fan control: set fan control register to 0x%02x\n",
@@ -8438,8 +8481,10 @@ static int fan_set_disable(void)
 	if (!fan_control_allowed)
 		return -EPERM;
 
-	if (mutex_lock_killable(&fan_mutex))
-		return -ERESTARTSYS;
+	ACQUIRE(mutex_kill, guard)(&fan_mutex);
+	rc = ACQUIRE_ERR(mutex_kill, &guard);
+	if (rc)
+		return rc;
 
 	rc = 0;
 	switch (fan_control_access_mode) {
@@ -8484,7 +8529,6 @@ static int fan_set_disable(void)
 		vdbg_printk(TPACPI_DBG_FAN,
 			"fan control: set fan control register to 0\n");
 
-	mutex_unlock(&fan_mutex);
 	return rc;
 }
 
@@ -8495,8 +8539,10 @@ static int fan_set_speed(int speed)
 	if (!fan_control_allowed)
 		return -EPERM;
 
-	if (mutex_lock_killable(&fan_mutex))
-		return -ERESTARTSYS;
+	ACQUIRE(mutex_kill, guard)(&fan_mutex);
+	rc = ACQUIRE_ERR(mutex_kill, &guard);
+	if (rc)
+		return rc;
 
 	rc = 0;
 	switch (fan_control_access_mode) {
@@ -8530,7 +8576,6 @@ static int fan_set_speed(int speed)
 		rc = -ENXIO;
 	}
 
-	mutex_unlock(&fan_mutex);
 	return rc;
 }
 
@@ -8690,8 +8735,10 @@ static ssize_t fan_pwm1_store(struct device *dev,
 	/* scale down from 0-255 to 0-7 */
 	newlevel = (s >> 5) & 0x07;
 
-	if (mutex_lock_killable(&fan_mutex))
-		return -ERESTARTSYS;
+	ACQUIRE(mutex_kill, guard)(&fan_mutex);
+	rc = ACQUIRE_ERR(mutex_kill, &guard);
+	if (rc)
+		return rc;
 
 	rc = fan_get_status(&status);
 	if (!rc && (status &
@@ -8705,7 +8752,6 @@ static ssize_t fan_pwm1_store(struct device *dev,
 		}
 	}
 
-	mutex_unlock(&fan_mutex);
 	return (rc) ? rc : count;
 }
 
@@ -8854,6 +8900,8 @@ static const struct tpacpi_quirk fan_quirk_table[] __initconst = {
 	TPACPI_Q_LNV3('R', '0', 'T', TPACPI_FAN_NS),	/* 11e Gen5 GL */
 	TPACPI_Q_LNV3('R', '1', 'D', TPACPI_FAN_NS),	/* 11e Gen5 GL-R */
 	TPACPI_Q_LNV3('R', '0', 'V', TPACPI_FAN_NS),	/* 11e Gen5 KL-Y */
+	TPACPI_Q_LNV('H', '3', TPACPI_FAN_NS),		/* Edge E330 */
+	TPACPI_Q_LNV('J', '4', TPACPI_FAN_NS),		/* L440 / L540 */
 	TPACPI_Q_LNV3('N', '1', 'O', TPACPI_FAN_NOFAN),	/* X1 Tablet (2nd gen) */
 	TPACPI_Q_LNV3('R', '0', 'Q', TPACPI_FAN_DECRPM),/* L480 */
 	TPACPI_Q_LNV('8', 'F', TPACPI_FAN_TPR),		/* ThinkPad x120e */
@@ -9001,8 +9049,8 @@ static int __init fan_init(struct ibm_init_struct *iibm)
 
 	vdbg_printk(TPACPI_DBG_INIT | TPACPI_DBG_FAN,
 		"fan is %s, modes %d, %d\n",
-		str_supported(fan_status_access_mode != TPACPI_FAN_NONE ||
-		  fan_control_access_mode != TPACPI_FAN_WR_NONE),
+		str_supported_unsupported(fan_status_access_mode != TPACPI_FAN_NONE ||
+					  fan_control_access_mode != TPACPI_FAN_WR_NONE),
 		fan_status_access_mode, fan_control_access_mode);
 
 	/* fan control master switch */
@@ -9156,9 +9204,9 @@ static int fan_read(struct seq_file *m)
 		} else if (fan_status_access_mode == TPACPI_FAN_RD_TPEC) {
 			if (status & TP_EC_FAN_FULLSPEED)
 				/* Disengaged mode takes precedence */
-				seq_printf(m, "level:\t\tdisengaged\n");
+				seq_puts(m, "level:\t\tdisengaged\n");
 			else if (status & TP_EC_FAN_AUTO)
-				seq_printf(m, "level:\t\tauto\n");
+				seq_puts(m, "level:\t\tauto\n");
 			else
 				seq_printf(m, "level:\t\t%d\n", status);
 		}
@@ -9166,19 +9214,19 @@ static int fan_read(struct seq_file *m)
 
 	case TPACPI_FAN_NONE:
 	default:
-		seq_printf(m, "status:\t\tnot supported\n");
+		seq_puts(m, "status:\t\tnot supported\n");
 	}
 
 	if (fan_control_commands & TPACPI_FAN_CMD_LEVEL) {
-		seq_printf(m, "commands:\tlevel <level>");
+		seq_puts(m, "commands:\tlevel <level>");
 
 		switch (fan_control_access_mode) {
 		case TPACPI_FAN_WR_ACPI_SFAN:
-			seq_printf(m, " (<level> is 0-7)\n");
+			seq_puts(m, " (<level> is 0-7)\n");
 			break;
 
 		default:
-			seq_printf(m, " (<level> is 0-7, auto, disengaged, full-speed)\n");
+			seq_puts(m, " (<level> is 0-7, auto, disengaged, full-speed)\n");
 			break;
 		}
 	}
@@ -9188,7 +9236,7 @@ static int fan_read(struct seq_file *m)
 			       "commands:\twatchdog <timeout> (<timeout> is 0 (off), 1-120 (seconds))\n");
 
 	if (fan_control_commands & TPACPI_FAN_CMD_SPEED)
-		seq_printf(m, "commands:\tspeed <speed> (<speed> is 0-65535)\n");
+		seq_puts(m, "commands:\tspeed <speed> (<speed> is 0-65535)\n");
 
 	return 0;
 }
@@ -9248,9 +9296,6 @@ static int fan_write_cmd_disable(const char *cmd, int *rc)
 static int fan_write_cmd_speed(const char *cmd, int *rc)
 {
 	int speed;
-
-	/* TODO:
-	 * Support speed <low> <medium> <high> ? */
 
 	if (sscanf(cmd, "speed %d", &speed) != 1)
 		return 0;
@@ -9525,14 +9570,16 @@ static int tpacpi_battery_get(int what, int battery, int *ret)
 {
 	switch (what) {
 	case THRESHOLD_START:
-		if ACPI_FAILURE(tpacpi_battery_acpi_eval(GET_START, ret, battery))
+		if (!battery_info.batteries[battery].start_support ||
+		    ACPI_FAILURE(tpacpi_battery_acpi_eval(GET_START, ret, battery)))
 			return -ENODEV;
 
 		/* The value is in the low 8 bits of the response */
 		*ret = *ret & 0xFF;
 		return 0;
 	case THRESHOLD_STOP:
-		if ACPI_FAILURE(tpacpi_battery_acpi_eval(GET_STOP, ret, battery))
+		if (!battery_info.batteries[battery].stop_support ||
+		    ACPI_FAILURE(tpacpi_battery_acpi_eval(GET_STOP, ret, battery)))
 			return -ENODEV;
 		/* Value is in lower 8 bits */
 		*ret = *ret & 0xFF;
@@ -10116,9 +10163,8 @@ static void lcdshadow_resume(void)
 	if (!lcdshadow_dev)
 		return;
 
-	mutex_lock(&lcdshadow_dev->lock);
+	guard(mutex)(&lcdshadow_dev->lock);
 	lcdshadow_set_sw_state(lcdshadow_dev, lcdshadow_dev->sw_state);
-	mutex_unlock(&lcdshadow_dev->lock);
 }
 
 static int lcdshadow_read(struct seq_file *m)
@@ -10150,9 +10196,8 @@ static int lcdshadow_write(char *buf)
 	if (state >= 2 || state < 0)
 		return -EINVAL;
 
-	mutex_lock(&lcdshadow_dev->lock);
-	res = lcdshadow_set_sw_state(lcdshadow_dev, state);
-	mutex_unlock(&lcdshadow_dev->lock);
+	scoped_guard(mutex, &lcdshadow_dev->lock)
+		res = lcdshadow_set_sw_state(lcdshadow_dev, state);
 
 	drm_privacy_screen_call_notifier_chain(lcdshadow_dev);
 
@@ -10556,13 +10601,14 @@ static int dytc_profile_set(struct device *dev,
 	int output;
 	int err;
 
-	err = mutex_lock_interruptible(&dytc_mutex);
+	ACQUIRE(mutex_intr, guard)(&dytc_mutex);
+	err = ACQUIRE_ERR(mutex_intr, &guard);
 	if (err)
 		return err;
 
 	err = convert_profile_to_dytc(profile, &perfmode);
 	if (err)
-		goto unlock;
+		return err;
 
 	if (dytc_capabilities & BIT(DYTC_FC_MMC)) {
 		if (profile == PLATFORM_PROFILE_BALANCED) {
@@ -10570,22 +10616,22 @@ static int dytc_profile_set(struct device *dev,
 			 * To get back to balanced mode we need to issue a reset command.
 			 * Note we still need to disable CQL mode before hand and re-enable
 			 * it afterwards, otherwise dytc_lapmode gets reset to 0 and stays
-			 * stuck at 0 for aprox. 30 minutes.
+			 * stuck at 0 for approx. 30 minutes.
 			 */
 			err = dytc_cql_command(DYTC_CMD_RESET, &output);
 			if (err)
-				goto unlock;
+				return err;
 		} else {
 			/* Determine if we are in CQL mode. This alters the commands we do */
 			err = dytc_cql_command(DYTC_SET_COMMAND(DYTC_FUNCTION_MMC, perfmode, 1),
 						&output);
 			if (err)
-				goto unlock;
+				return err;
 		}
 	} else if (dytc_capabilities & BIT(DYTC_FC_PSC)) {
 		err = dytc_command(DYTC_SET_COMMAND(DYTC_FUNCTION_PSC, perfmode, 1), &output);
 		if (err)
-			goto unlock;
+			return err;
 
 		/* system supports AMT, activate it when on balanced */
 		if (dytc_capabilities & BIT(DYTC_FC_AMT))
@@ -10593,8 +10639,6 @@ static int dytc_profile_set(struct device *dev,
 	}
 	/* Success - update current profile */
 	dytc_current_profile = profile;
-unlock:
-	mutex_unlock(&dytc_mutex);
 	return err;
 }
 
@@ -10616,26 +10660,26 @@ static const struct platform_profile_ops dytc_profile_ops = {
 static void dytc_profile_refresh(void)
 {
 	enum platform_profile_option profile;
-	int output = 0, err = 0;
+	int output = 0, err;
 	int perfmode, funcmode = 0;
 
-	mutex_lock(&dytc_mutex);
-	if (dytc_capabilities & BIT(DYTC_FC_MMC)) {
-		if (dytc_mmc_get_available)
-			err = dytc_command(DYTC_CMD_MMC_GET, &output);
-		else
-			err = dytc_cql_command(DYTC_CMD_GET, &output);
-		funcmode = DYTC_FUNCTION_MMC;
-	} else if (dytc_capabilities & BIT(DYTC_FC_PSC)) {
-		err = dytc_command(DYTC_CMD_GET, &output);
-		/* Check if we are PSC mode, or have AMT enabled */
-		funcmode = (output >> DYTC_GET_FUNCTION_BIT) & 0xF;
-	} else { /* Unknown profile mode */
-		err = -ENODEV;
+	scoped_guard(mutex, &dytc_mutex) {
+		if (dytc_capabilities & BIT(DYTC_FC_MMC)) {
+			if (dytc_mmc_get_available)
+				err = dytc_command(DYTC_CMD_MMC_GET, &output);
+			else
+				err = dytc_cql_command(DYTC_CMD_GET, &output);
+			funcmode = DYTC_FUNCTION_MMC;
+		} else if (dytc_capabilities & BIT(DYTC_FC_PSC)) {
+			err = dytc_command(DYTC_CMD_GET, &output);
+			/* Check if we are PSC mode, or have AMT enabled */
+			funcmode = (output >> DYTC_GET_FUNCTION_BIT) & 0xF;
+		} else { /* Unknown profile mode */
+			err = -ENODEV;
+		}
+		if (err)
+			return;
 	}
-	mutex_unlock(&dytc_mutex);
-	if (err)
-		return;
 
 	perfmode = (output >> DYTC_GET_MODE_BIT) & 0xF;
 	err = convert_dytc_to_profile(funcmode, perfmode, &profile);
@@ -11024,24 +11068,23 @@ static int auxmac_init(struct ibm_init_struct *iibm)
 {
 	acpi_status status;
 	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
-	union acpi_object *obj;
 
 	status = acpi_evaluate_object(NULL, "\\MACA", NULL, &buffer);
-
 	if (ACPI_FAILURE(status))
 		return -ENODEV;
 
-	obj = buffer.pointer;
-
-	if (obj->type != ACPI_TYPE_STRING || obj->string.length != AUXMAC_STRLEN) {
+	union acpi_object *obj __free(kfree) = buffer.pointer;
+	if (!obj || obj->type != ACPI_TYPE_STRING || obj->string.length != AUXMAC_STRLEN) {
 		pr_info("Invalid buffer for MAC address pass-through.\n");
-		goto auxmacinvalid;
+		strscpy(auxmac, "unavailable", sizeof(auxmac));
+		return 0;
 	}
 
 	if (obj->string.pointer[AUXMAC_BEGIN_MARKER] != '#' ||
 	    obj->string.pointer[AUXMAC_END_MARKER] != '#') {
 		pr_info("Invalid header for MAC address pass-through.\n");
-		goto auxmacinvalid;
+		strscpy(auxmac, "unavailable", sizeof(auxmac));
+		return 0;
 	}
 
 	if (strncmp(obj->string.pointer + AUXMAC_START, "XXXXXXXXXXXX", AUXMAC_LEN) != 0)
@@ -11049,13 +11092,7 @@ static int auxmac_init(struct ibm_init_struct *iibm)
 	else
 		strscpy(auxmac, "disabled", sizeof(auxmac));
 
-free:
-	kfree(obj);
 	return 0;
-
-auxmacinvalid:
-	strscpy(auxmac, "unavailable", sizeof(auxmac));
-	goto free;
 }
 
 static struct ibm_struct auxmac_data = {
@@ -11078,6 +11115,334 @@ static struct attribute *auxmac_attributes[] = {
 static const struct attribute_group auxmac_attr_group = {
 	.is_visible = auxmac_attr_is_visible,
 	.attrs = auxmac_attributes,
+};
+
+/*************************************************************************
+ * HWDD subdriver, for the Lenovo Hardware Damage Detection feature.
+ */
+
+#define HWDD_GET_DMG_USBC	0x80000001
+#define HWDD_GET_CAP		0
+#define HWDD_NOT_SUPPORTED	BIT(31)
+#define HWDD_SUPPORT_USBC	BIT(0)
+
+#define PORT_STATUS     GENMASK(7, 4)
+#define LID_STATUS      GENMASK(11, 8)
+#define BASE_STATUS     GENMASK(15, 12)
+#define POS_STATUS      GENMASK(3, 2)
+#define PANEL_STATUS    GENMASK(1, 0)
+
+#define PORT_DETAIL_OFFSET	16
+
+#define PANEL_TOP	0
+#define PANEL_BASE	1
+#define PANEL_LEFT	2
+#define PANEL_RIGHT	3
+
+#define POS_LEFT	0
+#define POS_CENTER	1
+#define POS_RIGHT	2
+
+#define NUM_PORTS	4
+
+static bool hwdd_support_available;
+static bool ucdd_supported;
+
+static int hwdd_command(int command, int *output)
+{
+	acpi_handle hwdd_handle;
+
+	if (ACPI_FAILURE(acpi_get_handle(hkey_handle, "HWDD", &hwdd_handle)))
+		return -ENODEV;
+
+	if (!acpi_evalf(hwdd_handle, output, NULL, "dd", command))
+		return -EIO;
+
+	return 0;
+}
+
+static bool display_damage(char *buf, int *count, char *type, unsigned int dmg_status)
+{
+	unsigned char lid_status, base_status, port_status;
+	unsigned char loc_status, pos_status, panel_status;
+	bool damage_detected = false;
+	int i;
+
+	port_status = FIELD_GET(PORT_STATUS, dmg_status);
+	lid_status = FIELD_GET(LID_STATUS, dmg_status);
+	base_status = FIELD_GET(BASE_STATUS, dmg_status);
+	for (i = 0; i < NUM_PORTS; i++) {
+		if (!(dmg_status & BIT(i)) || !(port_status & BIT(i)))
+			continue;
+
+		*count += sysfs_emit_at(buf, *count, "%s: ", type);
+		loc_status = (dmg_status >> (PORT_DETAIL_OFFSET + (4 * i))) & 0xF;
+		pos_status = FIELD_GET(POS_STATUS, loc_status);
+		panel_status = FIELD_GET(PANEL_STATUS, loc_status);
+
+		if (lid_status & BIT(i))
+			*count += sysfs_emit_at(buf, *count, "Lid, ");
+		if (base_status & BIT(i))
+			*count += sysfs_emit_at(buf, *count, "Base, ");
+
+		switch (pos_status) {
+		case PANEL_TOP:
+			*count += sysfs_emit_at(buf, *count, "Top, ");
+			break;
+		case PANEL_BASE:
+			*count += sysfs_emit_at(buf, *count, "Bottom, ");
+			break;
+		case PANEL_LEFT:
+			*count += sysfs_emit_at(buf, *count, "Left, ");
+			break;
+		case PANEL_RIGHT:
+			*count += sysfs_emit_at(buf, *count, "Right, ");
+			break;
+		default:
+			pr_err("Unexpected value %d in switch statement\n", pos_status);
+		}
+
+		switch (panel_status) {
+		case POS_LEFT:
+			*count += sysfs_emit_at(buf, *count, "Left port\n");
+			break;
+		case POS_CENTER:
+			*count += sysfs_emit_at(buf, *count, "Center port\n");
+			break;
+		case POS_RIGHT:
+			*count += sysfs_emit_at(buf, *count, "Right port\n");
+			break;
+		default:
+			*count += sysfs_emit_at(buf, *count, "Undefined\n");
+			break;
+		}
+		damage_detected = true;
+	}
+	return damage_detected;
+}
+
+/* sysfs type-c damage detection detail */
+static ssize_t hwdd_detail_show(struct device *dev,
+				struct device_attribute *attr,
+				char *buf)
+{
+	unsigned int damage_status;
+	int err, count = 0;
+
+	if (!ucdd_supported)
+		return -ENODEV;
+
+	/* Get USB TYPE-C damage status */
+	err = hwdd_command(HWDD_GET_DMG_USBC, &damage_status);
+	if (err)
+		return err;
+
+	if (!display_damage(buf, &count, "Type-C", damage_status))
+		count += sysfs_emit_at(buf, count, "No damage detected\n");
+
+	return count;
+}
+
+/* sysfs type-c damage detection capability */
+static ssize_t hwdd_status_show(struct device *dev,
+				struct device_attribute *attr,
+				char *buf)
+{
+	unsigned int damage_status, port_status;
+	int err, i;
+
+	if (!ucdd_supported)
+		return -ENODEV;
+
+	/* Get USB TYPE-C damage status */
+	err = hwdd_command(HWDD_GET_DMG_USBC, &damage_status);
+	if (err)
+		return err;
+
+	port_status = FIELD_GET(PORT_STATUS, damage_status);
+	for (i = 0; i < NUM_PORTS; i++) {
+		if (!(damage_status & BIT(i)))
+			continue;
+		if (port_status & BIT(i))
+			return sysfs_emit(buf, "1\n");
+	}
+
+	return sysfs_emit(buf, "0\n");
+}
+
+/* sysfs type-c damage detection raw data - accessed via debugfs*/
+static int hwdd_raw_show(struct seq_file *m, void *v)
+{
+	unsigned int damage_status;
+	int err;
+
+	if (!ucdd_supported)
+		return -ENODEV;
+
+	/* Get USB TYPE-C damage status */
+	err = hwdd_command(HWDD_GET_DMG_USBC, &damage_status);
+	if (err)
+		return err;
+
+	seq_printf(m, "HWDD: 0x%x\n", damage_status);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(hwdd_raw);
+
+static DEVICE_ATTR_RO(hwdd_status);
+static DEVICE_ATTR_RO(hwdd_detail);
+
+static struct attribute *hwdd_attributes[] = {
+	&dev_attr_hwdd_status.attr,
+	&dev_attr_hwdd_detail.attr,
+	NULL
+};
+
+static umode_t hwdd_attr_is_visible(struct kobject *kobj,
+				struct attribute *attr, int n)
+{
+	return hwdd_support_available ? attr->mode : 0;
+}
+
+static const struct attribute_group hwdd_attr_group = {
+	.is_visible = hwdd_attr_is_visible,
+	.attrs = hwdd_attributes,
+};
+
+static int tpacpi_hwdd_init(struct ibm_init_struct *iibm)
+{
+	int err, output;
+
+	/* Below command checks the HWDD damage capability */
+	err = hwdd_command(HWDD_GET_CAP, &output);
+	if (err)
+		return err;
+
+	if (!(output & HWDD_NOT_SUPPORTED))
+		return -ENODEV;
+
+	hwdd_support_available = true;
+
+	/*
+	 * BIT(0) is assigned to check capability of damage detection is
+	 * supported for USB Type-C port or not.
+	 */
+	if (output & HWDD_SUPPORT_USBC)
+		ucdd_supported = true;
+
+	return err;
+}
+
+static struct ibm_struct hwdd_driver_data = {
+	.name = "hwdd",
+};
+
+/*************************************************************************
+ * USB-C Security subdriver
+ *
+ * HKEY.USCS(0) is a read-only ACPI method; its argument is ignored.
+ * It always returns:
+ *   bit 16 - USB-C security capability present on this SKU or not
+ *   bit  0 - USB-C Security state (enable or disable)
+ *
+ * Hotkey
+ * ------
+ * 0x131e (Fn+U, Fn+S): firmware toggles USBS before firing the event.
+ * The driver reads back the new state and notifies the sysfs attribute.
+ */
+
+/* USCS() return word bit layout */
+#define USCS_CAP_BIT		BIT(16)	/* capability: feature present on SKU */
+#define USCS_STATUS_BIT		BIT(0)	/* current security state */
+
+/* Protects USCS() ACPI method calls in usbc_security_query() */
+static DEFINE_MUTEX(usbc_security_mutex);
+
+/**
+ * usbc_security_query - read current USB-C security state via USCS()
+ * @enabled: out - true when security is ON (data connections blocked)
+ *
+ * Returns:
+ *   0        success, @enabled contains the current state
+ *  -EIO      ACPI evaluation failed
+ *  -ENODEV   capability bit absent; feature not present on this SKU*
+ */
+static int usbc_security_query(bool *enabled)
+{
+	int status;
+
+	guard(mutex)(&usbc_security_mutex);
+	if (!acpi_evalf(hkey_handle, &status, "USCS", "dd", 0))
+		return -EIO;
+
+	if (!(status & USCS_CAP_BIT)) {
+		pr_debug("USCS cap bit absent (raw=0x%x)\n", status);
+		return -ENODEV;
+	}
+
+	*enabled = status & USCS_STATUS_BIT;
+	return 0;
+}
+
+/* sysfs: /sys/devices/platform/thinkpad_acpi/usb_c_security ---------- */
+static ssize_t usb_c_security_show(struct device *dev,
+				   struct device_attribute *attr,
+				   char *buf)
+{
+	return sysfs_emit(buf, "%s\n",
+			  str_enabled_disabled(tp_features.usbc_security_enabled));
+}
+
+static DEVICE_ATTR_RO(usb_c_security);
+
+static struct attribute *usbc_security_attributes[] = {
+	&dev_attr_usb_c_security.attr,
+	NULL,
+};
+
+static umode_t usbc_security_attr_is_visible(struct kobject *kobj,
+					     struct attribute *attr, int n)
+{
+	return tp_features.usbc_security_supported ? attr->mode : 0;
+}
+
+static const struct attribute_group usbc_security_attr_group = {
+	.is_visible = usbc_security_attr_is_visible,
+	.attrs = usbc_security_attributes,
+};
+
+static int tpacpi_usbc_security_init(struct ibm_init_struct *iibm)
+{
+	int err;
+
+	if (!acpi_has_method(hkey_handle, "USCS"))
+		return -ENODEV;
+
+	err = usbc_security_query(&tp_features.usbc_security_enabled);
+	if (err == -ENODEV)
+		return 0;
+	if (err)
+		return err;
+
+	tp_features.usbc_security_supported = true;
+	return 0;
+}
+
+/* tpacpi_usbc_security_hotkey - handle Fn+U Fn+S hotkey (0x131e) */
+static bool tpacpi_usbc_security_hotkey(void)
+{
+	if (!tp_features.usbc_security_supported)
+		return false;
+
+	if (usbc_security_query(&tp_features.usbc_security_enabled))
+		return false;
+
+	sysfs_notify(&tpacpi_pdev->dev.kobj, NULL, "usb_c_security");
+	return true;
+}
+
+static struct ibm_struct usbc_security_driver_data = {
+	.name = "usbc_security",
 };
 
 /* --------------------------------------------------------------------- */
@@ -11139,6 +11504,8 @@ static const struct attribute_group *tpacpi_groups[] = {
 	&kbdlang_attr_group,
 	&dprc_attr_group,
 	&auxmac_attr_group,
+	&hwdd_attr_group,
+	&usbc_security_attr_group,
 	NULL,
 };
 
@@ -11217,7 +11584,7 @@ static bool tpacpi_driver_event(const unsigned int hkey_event)
 		if (tp_features.kbdlight) {
 			enum led_brightness brightness;
 
-			mutex_lock(&kbdlight_mutex);
+			guard(mutex)(&kbdlight_mutex);
 
 			/*
 			 * Check the brightness actually changed, setting the brightness
@@ -11229,8 +11596,6 @@ static bool tpacpi_driver_event(const unsigned int hkey_event)
 				led_classdev_notify_brightness_hw_changed(
 					&tpacpi_led_kbdlight.led_classdev, brightness);
 			}
-
-			mutex_unlock(&kbdlight_mutex);
 		}
 		/* Key events are suppressed by default hotkey_user_mask */
 		return false;
@@ -11252,11 +11617,11 @@ static bool tpacpi_driver_event(const unsigned int hkey_event)
 			enum drm_privacy_screen_status old_hw_state;
 			bool changed;
 
-			mutex_lock(&lcdshadow_dev->lock);
-			old_hw_state = lcdshadow_dev->hw_state;
-			lcdshadow_get_hw_state(lcdshadow_dev);
-			changed = lcdshadow_dev->hw_state != old_hw_state;
-			mutex_unlock(&lcdshadow_dev->lock);
+			scoped_guard(mutex, &lcdshadow_dev->lock) {
+				old_hw_state = lcdshadow_dev->hw_state;
+				lcdshadow_get_hw_state(lcdshadow_dev);
+				changed = lcdshadow_dev->hw_state != old_hw_state;
+			}
 
 			if (changed)
 				drm_privacy_screen_call_notifier_chain(lcdshadow_dev);
@@ -11277,20 +11642,22 @@ static bool tpacpi_driver_event(const unsigned int hkey_event)
 			pr_err("Error retrieving camera shutter state after shutter event\n");
 			return true;
 		}
-		mutex_lock(&tpacpi_inputdev_send_mutex);
-
-		input_report_switch(tpacpi_inputdev, SW_CAMERA_LENS_COVER, camera_shutter_state);
-		input_sync(tpacpi_inputdev);
-
-		mutex_unlock(&tpacpi_inputdev_send_mutex);
+		scoped_guard(mutex, &tpacpi_inputdev_send_mutex) {
+			input_report_switch(tpacpi_inputdev, SW_CAMERA_LENS_COVER, camera_shutter_state);
+			input_sync(tpacpi_inputdev);
+		}
 		return true;
 	case TP_HKEY_EV_DOUBLETAP_TOGGLE:
-		tp_features.trackpoint_doubletap = !tp_features.trackpoint_doubletap;
+		/* Toggle kernel-level doubletap event filtering */
+		tp_features.trackpoint_doubletap_enable =
+			!tp_features.trackpoint_doubletap_enable;
 		return true;
 	case TP_HKEY_EV_PROFILE_TOGGLE:
 	case TP_HKEY_EV_PROFILE_TOGGLE2:
 		platform_profile_cycle();
 		return true;
+	case TP_HKEY_EV_USB_C_SECURITY:
+		return tpacpi_usbc_security_hotkey();
 	}
 
 	return false;
@@ -11302,19 +11669,24 @@ static bool tpacpi_driver_event(const unsigned int hkey_event)
 static struct proc_dir_entry *proc_dir;
 
 /*
- * Module and infrastructure proble, init and exit handling
+ * Module and infrastructure probe, init and exit handling
  */
 
 static bool force_load;
 
-#ifdef CONFIG_THINKPAD_ACPI_DEBUG
-static const char * __init str_supported(int is_supported)
+static struct dentry *tpacpi_dbg;
+static void tpacpi_debugfs_init(void)
 {
-	static char text_unsupported[] __initdata = "not supported";
+	tpacpi_dbg = debugfs_create_dir("tpacpi", NULL);
 
-	return (is_supported) ? &text_unsupported[4] : &text_unsupported[0];
+	/* HWDD raw data */
+	debugfs_create_file("hwdd-raw", 0444, tpacpi_dbg, NULL, &hwdd_raw_fops);
 }
-#endif /* CONFIG_THINKPAD_ACPI_DEBUG */
+
+static void tpacpi_debugfs_remove(void)
+{
+	debugfs_remove_recursive(tpacpi_dbg);
+}
 
 static void ibm_exit(struct ibm_struct *ibm)
 {
@@ -11329,6 +11701,8 @@ static void ibm_exit(struct ibm_struct *ibm)
 		acpi_remove_notify_handler(*ibm->acpi->handle,
 					   ibm->acpi->type,
 					   dispatch_acpi_notify);
+		ibm->acpi->device->driver_data = NULL;
+		acpi_dev_put(ibm->acpi->device);
 		ibm->flags.acpi_notify_installed = 0;
 	}
 
@@ -11337,16 +11711,6 @@ static void ibm_exit(struct ibm_struct *ibm)
 			"%s: remove_proc_entry\n", ibm->name);
 		remove_proc_entry(ibm->name, proc_dir);
 		ibm->flags.proc_created = 0;
-	}
-
-	if (ibm->flags.acpi_driver_registered) {
-		dbg_printk(TPACPI_DBG_EXIT,
-			"%s: acpi_bus_unregister_driver\n", ibm->name);
-		BUG_ON(!ibm->acpi);
-		acpi_bus_unregister_driver(ibm->acpi->driver);
-		kfree(ibm->acpi->driver);
-		ibm->acpi->driver = NULL;
-		ibm->flags.acpi_driver_registered = 0;
 	}
 
 	if (ibm->flags.init_called && ibm->exit) {
@@ -11384,12 +11748,6 @@ static int __init ibm_init(struct ibm_init_struct *iibm)
 	}
 
 	if (ibm->acpi) {
-		if (ibm->acpi->hid) {
-			ret = register_tpacpi_subdriver(ibm);
-			if (ret)
-				goto err_out;
-		}
-
 		if (ibm->acpi->notify) {
 			ret = setup_acpi_notify(ibm);
 			if (ret == -ENODEV) {
@@ -11600,7 +11958,7 @@ static int __must_check __init get_thinkpad_model_data(
 
 static int __init probe_for_thinkpad(void)
 {
-	int is_thinkpad;
+	bool is_thinkpad;
 
 	if (acpi_disabled)
 		return -ENODEV;
@@ -11752,6 +12110,14 @@ static struct ibm_init_struct ibms_init[] __initdata = {
 		.init = auxmac_init,
 		.data = &auxmac_data,
 	},
+	{
+		.init = tpacpi_hwdd_init,
+		.data = &hwdd_driver_data,
+	},
+	{
+		.init = tpacpi_usbc_security_init,
+		.data = &usbc_security_driver_data,
+	},
 };
 
 static int __init set_ibm_param(const char *val, const struct kernel_param *kp)
@@ -11890,6 +12256,8 @@ static void thinkpad_acpi_module_exit(void)
 		remove_proc_entry(TPACPI_PROC_DIR, acpi_root_dir);
 	if (tpacpi_wq)
 		destroy_workqueue(tpacpi_wq);
+	if (tpacpi_dbg)
+		tpacpi_debugfs_remove();
 
 	kfree(thinkpad_id.bios_version_str);
 	kfree(thinkpad_id.ec_version_str);
@@ -12020,9 +12388,13 @@ static int __init thinkpad_acpi_module_init(void)
 		return -ENODEV;
 	}
 
+	tpacpi_debugfs_init();
+
 	dmi_id = dmi_first_match(fwbug_list);
 	if (dmi_id)
 		tp_features.quirks = dmi_id->driver_data;
+	tp_features.has_keyboard_attached_on_screen =
+		dmi_check_system(keyboard_attached_on_screen_list);
 
 	/* Device initialization */
 	tpacpi_pdev = platform_device_register_simple(TPACPI_DRVR_NAME, PLATFORM_DEVID_NONE,

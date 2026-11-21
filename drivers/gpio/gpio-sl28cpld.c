@@ -10,7 +10,6 @@
 #include <linux/gpio/regmap.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -61,7 +60,7 @@ static int sl28cpld_gpio_irq_init(struct platform_device *pdev,
 	if (irq < 0)
 		return irq;
 
-	irq_chip = devm_kzalloc(dev, sizeof(*irq_chip), GFP_KERNEL);
+	irq_chip = devm_kzalloc_obj(dev, *irq_chip);
 	if (!irq_chip)
 		return -ENOMEM;
 

@@ -141,7 +141,7 @@ static union apci_descriptor *ibm_slot_from_id(int id)
 
 ibm_slot_done:
 	if (ret) {
-		ret = kmalloc(sizeof(union apci_descriptor), GFP_KERNEL);
+		ret = kmalloc_obj(union apci_descriptor);
 		if (ret)
 			memcpy(ret, des, sizeof(union apci_descriptor));
 	}
@@ -258,8 +258,7 @@ static void ibm_handle_events(acpi_handle handle, u32 event, void *context)
 
 	if (subevent == 0x80) {
 		pr_debug("%s: generating bus event\n", __func__);
-		acpi_bus_generate_netlink_event(note->device->pnp.device_class,
-						  dev_name(&note->device->dev),
+		acpi_bus_generate_netlink_event("", dev_name(&note->device->dev),
 						  note->event, detail);
 	} else
 		note->event = event;

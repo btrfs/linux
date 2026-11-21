@@ -779,7 +779,7 @@ static int fsl_i2c_probe(struct platform_device *op)
 	int result;
 	u32 clock;
 
-	i2c = devm_kzalloc(&op->dev, sizeof(*i2c), GFP_KERNEL);
+	i2c = devm_kzalloc_obj(&op->dev, *i2c);
 	if (!i2c)
 		return -ENOMEM;
 
@@ -844,7 +844,7 @@ static int fsl_i2c_probe(struct platform_device *op)
 					      "fsl,timeout", &mpc_ops.timeout);
 
 	if (!result) {
-		mpc_ops.timeout *= HZ / 1000000;
+		mpc_ops.timeout = mpc_ops.timeout * HZ / 1000000;
 		if (mpc_ops.timeout < 5)
 			mpc_ops.timeout = 5;
 	} else {

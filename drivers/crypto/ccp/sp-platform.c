@@ -40,8 +40,8 @@ static const struct sp_dev_vdata dev_vdata[] = {
 };
 
 static const struct acpi_device_id sp_acpi_match[] = {
-	{ "AMDI0C00", (kernel_ulong_t)&dev_vdata[0] },
-	{ },
+	{ .id = "AMDI0C00", .driver_data = (kernel_ulong_t)&dev_vdata[0] },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, sp_acpi_match);
 
@@ -52,24 +52,13 @@ static const struct of_device_id sp_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, sp_of_match);
 
-static struct sp_dev_vdata *sp_get_of_version(struct platform_device *pdev)
-{
-	const struct of_device_id *match;
-
-	match = of_match_node(sp_of_match, pdev->dev.of_node);
-	if (match && match->data)
-		return (struct sp_dev_vdata *)match->data;
-
-	return NULL;
-}
-
-static struct sp_dev_vdata *sp_get_acpi_version(struct platform_device *pdev)
+static const struct sp_dev_vdata *sp_get_acpi_version(struct platform_device *pdev)
 {
 	const struct acpi_device_id *match;
 
 	match = acpi_match_device(sp_acpi_match, &pdev->dev);
 	if (match && match->driver_data)
-		return (struct sp_dev_vdata *)match->driver_data;
+		return (const struct sp_dev_vdata *)match->driver_data;
 
 	return NULL;
 }
@@ -118,12 +107,12 @@ static int sp_platform_probe(struct platform_device *pdev)
 	if (!sp)
 		goto e_err;
 
-	sp_platform = devm_kzalloc(dev, sizeof(*sp_platform), GFP_KERNEL);
+	sp_platform = devm_kzalloc_obj(dev, *sp_platform);
 	if (!sp_platform)
 		goto e_err;
 
 	sp->dev_specific = sp_platform;
-	sp->dev_vdata = pdev->dev.of_node ? sp_get_of_version(pdev)
+	sp->dev_vdata = pdev->dev.of_node ? of_device_get_match_data(&pdev->dev)
 					 : sp_get_acpi_version(pdev);
 	if (!sp->dev_vdata) {
 		ret = -ENODEV;

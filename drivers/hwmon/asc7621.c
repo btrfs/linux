@@ -1095,8 +1095,7 @@ asc7621_probe(struct i2c_client *client)
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_BYTE_DATA))
 		return -EIO;
 
-	data = devm_kzalloc(&client->dev, sizeof(struct asc7621_data),
-			    GFP_KERNEL);
+	data = devm_kzalloc_obj(&client->dev, struct asc7621_data);
 	if (data == NULL)
 		return -ENOMEM;
 
@@ -1179,9 +1178,9 @@ static void asc7621_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id asc7621_id[] = {
-	{"asc7621", asc7621},
-	{"asc7621a", asc7621a},
-	{},
+	{ .name = "asc7621", .driver_data = asc7621 },
+	{ .name = "asc7621a", .driver_data = asc7621a },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, asc7621_id);

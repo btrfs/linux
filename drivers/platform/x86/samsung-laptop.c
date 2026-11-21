@@ -295,7 +295,7 @@ static const struct sabi_config sabi_configs[] = {
  *   d0, d1, d2, d3   - data fields
  *   call             - call SABI using command and data
  *
- * This allow to call arbitrary sabi commands wihout
+ * This allow to call arbitrary sabi commands without
  * modifying the driver at all.
  * For example, setting the keyboard backlight brightness to 5
  *
@@ -1671,7 +1671,7 @@ static int __init samsung_init(void)
 	if (!force && !dmi_check_system(samsung_dmi_table))
 		return -ENODEV;
 
-	samsung = kzalloc(sizeof(*samsung), GFP_KERNEL);
+	samsung = kzalloc_obj(*samsung);
 	if (!samsung)
 		return -ENOMEM;
 

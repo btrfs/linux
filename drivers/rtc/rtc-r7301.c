@@ -12,7 +12,6 @@
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/delay.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
@@ -372,7 +371,7 @@ static int __init rtc7301_rtc_probe(struct platform_device *dev)
 	int ret;
 	u32 val;
 
-	priv = devm_kzalloc(&dev->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&dev->dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

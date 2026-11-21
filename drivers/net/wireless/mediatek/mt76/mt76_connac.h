@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: ISC */
+/* SPDX-License-Identifier: BSD-3-Clause-Clear */
 /* Copyright (C) 2020 MediaTek Inc. */
 
 #ifndef __MT76_CONNAC_H
@@ -47,6 +47,11 @@ enum rx_pkt_type {
 #define MT_TXD_LEN_MASK			GENMASK(11, 0)
 #define MT_TXD_LEN_MSDU_LAST		BIT(14)
 #define MT_TXD_LEN_AMSDU_LAST		BIT(15)
+
+/* PCIE part */
+#define PCIE_AER_UNC_STATUS_OFFSET  0x204
+#define PCIE_AER_UNC_MASK_OFFSET    0x208
+#define PCIE_AER_CO_STATUS_OFFSET   0x210
 
 enum {
 	CMD_CBW_20MHZ = IEEE80211_STA_RX_BW_20,
@@ -172,9 +177,29 @@ struct mt76_connac_tx_free {
 
 extern const struct wiphy_wowlan_support mt76_connac_wowlan_support;
 
+static inline bool is_connac3(struct mt76_dev *dev)
+{
+	return mt76_chip(dev) == 0x7925 || mt76_chip(dev) == 0x7927 || mt76_chip(dev) == 0x7928;
+}
+
 static inline bool is_mt7925(struct mt76_dev *dev)
 {
 	return mt76_chip(dev) == 0x7925;
+}
+
+static inline bool is_mt7927(struct mt76_dev *dev)
+{
+	return mt76_chip(dev) == 0x7927;
+}
+
+static inline bool is_mt7928(struct mt76_dev *dev)
+{
+	return mt76_chip(dev) == 0x7928;
+}
+
+static inline bool is_320mhz_supported(struct mt76_dev *dev)
+{
+	return mt76_chip(dev) == 0x7927;
 }
 
 static inline bool is_mt7920(struct mt76_dev *dev)
@@ -182,14 +207,20 @@ static inline bool is_mt7920(struct mt76_dev *dev)
 	return mt76_chip(dev) == 0x7920;
 }
 
+static inline bool is_mt7902(struct mt76_dev *dev)
+{
+	return mt76_chip(dev) == 0x7902;
+}
+
 static inline bool is_mt7922(struct mt76_dev *dev)
 {
 	return mt76_chip(dev) == 0x7922;
 }
 
-static inline bool is_mt7921(struct mt76_dev *dev)
+static inline bool is_connac2(struct mt76_dev *dev)
 {
-	return mt76_chip(dev) == 0x7961 || is_mt7922(dev) || is_mt7920(dev);
+	return mt76_chip(dev) == 0x7961 || is_mt7922(dev) || is_mt7920(dev) ||
+				is_mt7902(dev);
 }
 
 static inline bool is_mt7663(struct mt76_dev *dev)
@@ -224,7 +255,8 @@ static inline bool is_mt798x(struct mt76_dev *dev)
 
 static inline bool is_mt7996(struct mt76_dev *dev)
 {
-	return mt76_chip(dev) == 0x7990;
+	u16 chip = mt76_chip(dev);
+	return chip == 0x7990 || chip == 0x7991;
 }
 
 static inline bool is_mt7992(struct mt76_dev *dev)
@@ -271,7 +303,10 @@ static inline bool is_mt76_fw_txp(struct mt76_dev *dev)
 	case 0x7961:
 	case 0x7920:
 	case 0x7922:
+	case 0x7902:
 	case 0x7925:
+	case 0x7927:
+	case 0x7928:
 	case 0x7663:
 	case 0x7622:
 		return false;
@@ -413,7 +448,10 @@ mt76_connac_mutex_release(struct mt76_dev *dev, struct mt76_connac_pm *pm)
 void mt76_connac_gen_ppe_thresh(u8 *he_ppet, int nss, enum nl80211_band band);
 int mt76_connac_init_tx_queues(struct mt76_phy *phy, int idx, int n_desc,
 			       int ring_base, void *wed, u32 flags);
-
+void mt76_connac_set_txpower_cur(struct mt76_phy *phy, s8 max_power);
+s8 mt76_connac_get_rate_power_limit(struct mt76_phy *phy,
+				    struct ieee80211_channel *chan,
+				    struct mt76_power_limits *limits);
 void mt76_connac_write_hw_txp(struct mt76_dev *dev,
 			      struct mt76_tx_info *tx_info,
 			      void *txp_ptr, u32 id);

@@ -678,7 +678,7 @@ static int as3645a_probe(struct i2c_client *client)
 	if (!dev_fwnode(&client->dev))
 		return -ENODEV;
 
-	flash = devm_kzalloc(&client->dev, sizeof(*flash), GFP_KERNEL);
+	flash = devm_kzalloc_obj(&client->dev, *flash);
 	if (flash == NULL)
 		return -ENOMEM;
 
@@ -741,7 +741,7 @@ static void as3645a_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id as3645a_id_table[] = {
-	{ AS_NAME },
+	{ .name = AS_NAME },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, as3645a_id_table);

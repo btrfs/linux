@@ -74,7 +74,7 @@ static int adc_keys_load_keymap(struct device *dev, struct adc_keys_state *st)
 		return -EINVAL;
 	}
 
-	map = devm_kmalloc_array(dev, st->num_keys, sizeof(*map), GFP_KERNEL);
+	map = devm_kmalloc_objs(dev, *map, st->num_keys);
 	if (!map)
 		return -ENOMEM;
 
@@ -109,7 +109,7 @@ static int adc_keys_probe(struct platform_device *pdev)
 	int i, value;
 	int error;
 
-	st = devm_kzalloc(dev, sizeof(*st), GFP_KERNEL);
+	st = devm_kzalloc_obj(dev, *st);
 	if (!st)
 		return -ENOMEM;
 
@@ -202,3 +202,4 @@ module_platform_driver(adc_keys_driver);
 MODULE_AUTHOR("Alexandre Belloni <alexandre.belloni@free-electrons.com>");
 MODULE_DESCRIPTION("Input driver for resistor ladder connected on ADC");
 MODULE_LICENSE("GPL v2");
+MODULE_IMPORT_NS("IIO_CONSUMER");
