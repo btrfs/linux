@@ -50,7 +50,7 @@ static int ov7640_probe(struct i2c_client *client)
 	if (!i2c_check_functionality(adapter, I2C_FUNC_SMBUS_BYTE_DATA))
 		return -ENODEV;
 
-	sd = devm_kzalloc(&client->dev, sizeof(*sd), GFP_KERNEL);
+	sd = devm_kzalloc_obj(&client->dev, *sd);
 	if (sd == NULL)
 		return -ENOMEM;
 	v4l2_i2c_subdev_init(sd, client, &ov7640_ops);
@@ -77,7 +77,7 @@ static void ov7640_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ov7640_id[] = {
-	{ "ov7640" },
+	{ .name = "ov7640" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ov7640_id);

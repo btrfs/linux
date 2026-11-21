@@ -72,16 +72,16 @@ int arch_show_interrupts(struct seq_file *p, int prec)
 	int j;
 
 #ifdef CONFIG_SMP
-	seq_puts(p, "IPI: ");
+	seq_puts(p, " IPI: ");
 	for_each_online_cpu(j)
 		seq_printf(p, "%10lu ", cpu_data[j].ipi_count);
 	seq_putc(p, '\n');
 #endif
-	seq_puts(p, "PMI: ");
+	seq_puts(p, " PMI: ");
 	for_each_online_cpu(j)
 		seq_printf(p, "%10lu ", per_cpu(irq_pmi_count, j));
-	seq_puts(p, "          Performance Monitoring\n");
-	seq_printf(p, "ERR: %10lu\n", irq_err_count);
+	seq_puts(p, " Performance Monitoring\n");
+	seq_printf(p, " ERR: %10lu\n", irq_err_count);
 	return 0;
 }
 
@@ -107,18 +107,21 @@ handle_irq(int irq)
 	 * handled by some other CPU. (or is disabled)
 	 */
 	static unsigned int illegal_count=0;
-	struct irq_desc *desc = irq_to_desc(irq);
-	
+	struct irq_desc *desc;
+
+	irq_enter();
+
+	desc = irq_to_desc(irq);
 	if (!desc || ((unsigned) irq > ACTUAL_NR_IRQS &&
 	    illegal_count < MAX_ILLEGAL_IRQS)) {
 		irq_err_count++;
 		illegal_count++;
 		printk(KERN_CRIT "device_interrupt: invalid interrupt %d\n",
 		       irq);
+		irq_exit();
 		return;
 	}
 
-	irq_enter();
 	generic_handle_irq_desc(desc);
 	irq_exit();
 }

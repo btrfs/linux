@@ -10,41 +10,24 @@
 #include "processor.h"
 #include "vmx.h"
 
-#define PAGE_SHIFT_4K  12
-
 #define KVM_EPT_PAGE_TABLE_MIN_PADDR 0x1c0000
+
+#define EPTP_MT_SHIFT		0 /* EPTP memtype bits 2:0 */
+#define EPTP_PWL_SHIFT		3 /* EPTP page walk length bits 5:3 */
+#define EPTP_AD_ENABLED_SHIFT	6 /* EPTP AD enabled bit 6 */
+
+#define EPTP_WB			(X86_MEMTYPE_WB << EPTP_MT_SHIFT)
+#define EPTP_PWL_4		(3ULL << EPTP_PWL_SHIFT) /* PWL is (levels - 1) */
+#define EPTP_AD_ENABLED		(1ULL << EPTP_AD_ENABLED_SHIFT)
 
 bool enable_evmcs;
 
 struct hv_enlightened_vmcs *current_evmcs;
 struct hv_vp_assist_page *current_vp_assist;
 
-struct eptPageTableEntry {
-	uint64_t readable:1;
-	uint64_t writable:1;
-	uint64_t executable:1;
-	uint64_t memory_type:3;
-	uint64_t ignore_pat:1;
-	uint64_t page_size:1;
-	uint64_t accessed:1;
-	uint64_t dirty:1;
-	uint64_t ignored_11_10:2;
-	uint64_t address:40;
-	uint64_t ignored_62_52:11;
-	uint64_t suppress_ve:1;
-};
-
-struct eptPageTablePointer {
-	uint64_t memory_type:3;
-	uint64_t page_walk_length:3;
-	uint64_t ad_enabled:1;
-	uint64_t reserved_11_07:5;
-	uint64_t address:40;
-	uint64_t reserved_63_52:12;
-};
 int vcpu_enable_evmcs(struct kvm_vcpu *vcpu)
 {
-	uint16_t evmcs_ver;
+	u16 evmcs_ver;
 
 	vcpu_enable_cap(vcpu, KVM_CAP_HYPERV_ENLIGHTENED_VMCS,
 			(unsigned long)&evmcs_ver);
@@ -56,6 +39,32 @@ int vcpu_enable_evmcs(struct kvm_vcpu *vcpu)
 		    evmcs_ver & 0xff, evmcs_ver >> 8);
 
 	return evmcs_ver;
+}
+
+void vm_enable_ept(struct kvm_vm *vm)
+{
+	struct pte_masks pte_masks;
+
+	TEST_ASSERT(kvm_cpu_has_ept(), "KVM doesn't support nested EPT");
+
+	/*
+	 * EPTs do not have 'present' or 'user' bits, instead bit 0 is the
+	 * 'readable' bit.
+	 */
+	pte_masks = (struct pte_masks) {
+		.present	=	0,
+		.user		=	0,
+		.readable	=	BIT_ULL(0),
+		.writable	=	BIT_ULL(1),
+		.executable	=	BIT_ULL(2),
+		.huge		=	BIT_ULL(7),
+		.accessed	=	BIT_ULL(8),
+		.dirty		=	BIT_ULL(9),
+		.nx		=	0,
+	};
+
+	/* TODO: Add support for 5-level EPT. */
+	tdp_mmu_init(vm, 4, &pte_masks);
 }
 
 /* Allocate memory regions for nested VMX tests.
@@ -70,51 +79,56 @@ int vcpu_enable_evmcs(struct kvm_vcpu *vcpu)
  *   Pointer to structure with the addresses of the VMX areas.
  */
 struct vmx_pages *
-vcpu_alloc_vmx(struct kvm_vm *vm, vm_vaddr_t *p_vmx_gva)
+vcpu_alloc_vmx(struct kvm_vm *vm, gva_t *p_vmx_gva)
 {
-	vm_vaddr_t vmx_gva = vm_vaddr_alloc_page(vm);
+	gva_t vmx_gva = vm_alloc_page(vm);
 	struct vmx_pages *vmx = addr_gva2hva(vm, vmx_gva);
 
 	/* Setup of a region of guest memory for the vmxon region. */
-	vmx->vmxon = (void *)vm_vaddr_alloc_page(vm);
+	vmx->vmxon = (void *)vm_alloc_page(vm);
 	vmx->vmxon_hva = addr_gva2hva(vm, (uintptr_t)vmx->vmxon);
 	vmx->vmxon_gpa = addr_gva2gpa(vm, (uintptr_t)vmx->vmxon);
 
 	/* Setup of a region of guest memory for a vmcs. */
-	vmx->vmcs = (void *)vm_vaddr_alloc_page(vm);
+	vmx->vmcs = (void *)vm_alloc_page(vm);
 	vmx->vmcs_hva = addr_gva2hva(vm, (uintptr_t)vmx->vmcs);
 	vmx->vmcs_gpa = addr_gva2gpa(vm, (uintptr_t)vmx->vmcs);
 
 	/* Setup of a region of guest memory for the MSR bitmap. */
-	vmx->msr = (void *)vm_vaddr_alloc_page(vm);
+	vmx->msr = (void *)vm_alloc_page(vm);
 	vmx->msr_hva = addr_gva2hva(vm, (uintptr_t)vmx->msr);
 	vmx->msr_gpa = addr_gva2gpa(vm, (uintptr_t)vmx->msr);
 	memset(vmx->msr_hva, 0, getpagesize());
 
 	/* Setup of a region of guest memory for the shadow VMCS. */
-	vmx->shadow_vmcs = (void *)vm_vaddr_alloc_page(vm);
+	vmx->shadow_vmcs = (void *)vm_alloc_page(vm);
 	vmx->shadow_vmcs_hva = addr_gva2hva(vm, (uintptr_t)vmx->shadow_vmcs);
 	vmx->shadow_vmcs_gpa = addr_gva2gpa(vm, (uintptr_t)vmx->shadow_vmcs);
 
 	/* Setup of a region of guest memory for the VMREAD and VMWRITE bitmaps. */
-	vmx->vmread = (void *)vm_vaddr_alloc_page(vm);
+	vmx->vmread = (void *)vm_alloc_page(vm);
 	vmx->vmread_hva = addr_gva2hva(vm, (uintptr_t)vmx->vmread);
 	vmx->vmread_gpa = addr_gva2gpa(vm, (uintptr_t)vmx->vmread);
 	memset(vmx->vmread_hva, 0, getpagesize());
 
-	vmx->vmwrite = (void *)vm_vaddr_alloc_page(vm);
+	vmx->vmwrite = (void *)vm_alloc_page(vm);
 	vmx->vmwrite_hva = addr_gva2hva(vm, (uintptr_t)vmx->vmwrite);
 	vmx->vmwrite_gpa = addr_gva2gpa(vm, (uintptr_t)vmx->vmwrite);
 	memset(vmx->vmwrite_hva, 0, getpagesize());
+
+	vmx->stack = (void *)vm_alloc_stack(vm, 1);
+
+	if (vm->stage2_mmu.pgd_created)
+		vmx->eptp_gpa = vm->stage2_mmu.pgd;
 
 	*p_vmx_gva = vmx_gva;
 	return vmx;
 }
 
-bool prepare_for_vmx_operation(struct vmx_pages *vmx)
+void prepare_for_vmx_operation(struct vmx_pages *vmx)
 {
-	uint64_t feature_control;
-	uint64_t required;
+	u64 feature_control;
+	u64 required;
 	unsigned long cr0;
 	unsigned long cr4;
 
@@ -148,32 +162,79 @@ bool prepare_for_vmx_operation(struct vmx_pages *vmx)
 		wrmsr(MSR_IA32_FEAT_CTL, feature_control | required);
 
 	/* Enter VMX root operation. */
-	*(uint32_t *)(vmx->vmxon) = vmcs_revision();
-	if (vmxon(vmx->vmxon_gpa))
-		return false;
-
-	return true;
+	*(u32 *)(vmx->vmxon) = vmcs_revision();
+	vmxon(vmx->vmxon_gpa);
 }
 
-bool load_vmcs(struct vmx_pages *vmx)
+void load_vmcs(struct vmx_pages *vmx)
 {
 	/* Load a VMCS. */
-	*(uint32_t *)(vmx->vmcs) = vmcs_revision();
-	if (vmclear(vmx->vmcs_gpa))
-		return false;
+	*(u32 *)(vmx->vmcs) = vmcs_revision();
+	vmclear(vmx->vmcs_gpa);
 
-	if (vmptrld(vmx->vmcs_gpa))
-		return false;
+	vmptrld(vmx->vmcs_gpa);
 
 	/* Setup shadow VMCS, do not load it yet. */
-	*(uint32_t *)(vmx->shadow_vmcs) = vmcs_revision() | 0x80000000ul;
-	if (vmclear(vmx->shadow_vmcs_gpa))
-		return false;
-
-	return true;
+	*(u32 *)(vmx->shadow_vmcs) = vmcs_revision() | 0x80000000ul;
+	vmclear(vmx->shadow_vmcs_gpa);
 }
 
-static bool ept_vpid_cap_supported(uint64_t mask)
+#define __BUILD_VMX_VM_ENTRY_HELPER(insn, prefix, vmwrite_insn, vmwrite_operand,	\
+				    __host_rsp, __host_rip)				\
+static int __##prefix##_##insn(void)							\
+{											\
+	int ret;									\
+											\
+	__asm__ __volatile__("push $0;"							\
+			     __stringify(vmwrite_insn) " %%rsp, %[host_rsp];"		\
+			     "lea 1f(%%rip), %%rax;"					\
+			     __stringify(vmwrite_insn) " %%rax, %[host_rip];"		\
+			     VMX_SWITCH_GPRS_ASM					\
+			     __stringify(insn)";"					\
+			     "incq (%%rsp);"						\
+			     "1: ;"							\
+			     VMX_SWITCH_GPRS_ASM					\
+			     "pop %%rax;"						\
+			     : [ret]"=&a"(ret)						\
+			     : [host_rsp]__stringify(vmwrite_operand)(__host_rsp),	\
+			       [host_rip]__stringify(vmwrite_operand)(__host_rip),	\
+			       GUEST_REGS_OFFSETS					\
+			     : "memory", "cc");						\
+	return ret;									\
+}
+
+#define BUILD_VMX_VM_ENTRY_HELPER(insn) \
+	__BUILD_VMX_VM_ENTRY_HELPER(insn, _, vmwrite, r, (u64)HOST_RSP, (u64)HOST_RIP)	\
+	__BUILD_VMX_VM_ENTRY_HELPER(insn, __evmcs, mov, m,				\
+				    current_evmcs->host_rsp, current_evmcs->host_rip)
+
+BUILD_VMX_VM_ENTRY_HELPER(vmlaunch)
+BUILD_VMX_VM_ENTRY_HELPER(vmresume)
+
+int __vmlaunch(void)
+{
+	if (enable_evmcs) {
+		current_evmcs->hv_clean_fields = 0;
+		return ____evmcs_vmlaunch();
+	}
+
+	return ____vmlaunch();
+}
+
+int __vmresume(void)
+{
+	if (enable_evmcs) {
+		/* HOST_RIP */
+		current_evmcs->hv_clean_fields &= ~HV_VMX_ENLIGHTENED_CLEAN_FIELD_HOST_GRP1;
+		/* HOST_RSP */
+		current_evmcs->hv_clean_fields &= ~HV_VMX_ENLIGHTENED_CLEAN_FIELD_HOST_POINTER;
+		return ____evmcs_vmresume();
+	}
+
+	return ____vmresume();
+}
+
+static bool ept_vpid_cap_supported(u64 mask)
 {
 	return rdmsr(MSR_IA32_VMX_EPT_VPID_CAP) & mask;
 }
@@ -188,28 +249,27 @@ bool ept_1g_pages_supported(void)
  */
 static inline void init_vmcs_control_fields(struct vmx_pages *vmx)
 {
-	uint32_t sec_exec_ctl = 0;
+	u32 sec_exec_ctl = 0;
 
-	vmwrite(VIRTUAL_PROCESSOR_ID, 0);
-	vmwrite(POSTED_INTR_NV, 0);
+	__vmwrite(VIRTUAL_PROCESSOR_ID, 0);
+	__vmwrite(POSTED_INTR_NV, 0);
 
 	vmwrite(PIN_BASED_VM_EXEC_CONTROL, rdmsr(MSR_IA32_VMX_TRUE_PINBASED_CTLS));
 
 	if (vmx->eptp_gpa) {
-		uint64_t ept_paddr;
-		struct eptPageTablePointer eptp = {
-			.memory_type = X86_MEMTYPE_WB,
-			.page_walk_length = 3, /* + 1 */
-			.ad_enabled = ept_vpid_cap_supported(VMX_EPT_VPID_CAP_AD_BITS),
-			.address = vmx->eptp_gpa >> PAGE_SHIFT_4K,
-		};
+		u64 eptp = vmx->eptp_gpa | EPTP_WB | EPTP_PWL_4;
 
-		memcpy(&ept_paddr, &eptp, sizeof(ept_paddr));
-		vmwrite(EPT_POINTER, ept_paddr);
+		TEST_ASSERT((vmx->eptp_gpa & ~PHYSICAL_PAGE_MASK) == 0,
+			    "Illegal bits set in vmx->eptp_gpa");
+
+		if (ept_vpid_cap_supported(VMX_EPT_VPID_CAP_AD_BITS))
+			eptp |= EPTP_AD_ENABLED;
+
+		vmwrite(EPT_POINTER, eptp);
 		sec_exec_ctl |= SECONDARY_EXEC_ENABLE_EPT;
 	}
 
-	if (!vmwrite(SECONDARY_VM_EXEC_CONTROL, sec_exec_ctl))
+	if (!__vmwrite(SECONDARY_VM_EXEC_CONTROL, sec_exec_ctl))
 		vmwrite(CPU_BASED_VM_EXEC_CONTROL,
 			rdmsr(MSR_IA32_VMX_TRUE_PROCBASED_CTLS) | CPU_BASED_ACTIVATE_SECONDARY_CONTROLS);
 	else {
@@ -219,7 +279,7 @@ static inline void init_vmcs_control_fields(struct vmx_pages *vmx)
 
 	vmwrite(EXCEPTION_BITMAP, 0);
 	vmwrite(PAGE_FAULT_ERROR_CODE_MASK, 0);
-	vmwrite(PAGE_FAULT_ERROR_CODE_MATCH, -1); /* Never match */
+	vmwrite(PAGE_FAULT_ERROR_CODE_MATCH, 0);
 	vmwrite(CR3_TARGET_COUNT, 0);
 	vmwrite(VM_EXIT_CONTROLS, rdmsr(MSR_IA32_VMX_EXIT_CTLS) |
 		VM_EXIT_HOST_ADDR_SPACE_SIZE);	  /* 64-bit host */
@@ -229,16 +289,16 @@ static inline void init_vmcs_control_fields(struct vmx_pages *vmx)
 		VM_ENTRY_IA32E_MODE);		  /* 64-bit guest */
 	vmwrite(VM_ENTRY_MSR_LOAD_COUNT, 0);
 	vmwrite(VM_ENTRY_INTR_INFO_FIELD, 0);
-	vmwrite(TPR_THRESHOLD, 0);
+	__vmwrite(TPR_THRESHOLD, 0);
 
 	vmwrite(CR0_GUEST_HOST_MASK, 0);
 	vmwrite(CR4_GUEST_HOST_MASK, 0);
 	vmwrite(CR0_READ_SHADOW, get_cr0());
 	vmwrite(CR4_READ_SHADOW, get_cr4());
 
-	vmwrite(MSR_BITMAP, vmx->msr_gpa);
-	vmwrite(VMREAD_BITMAP, vmx->vmread_gpa);
-	vmwrite(VMWRITE_BITMAP, vmx->vmwrite_gpa);
+	__vmwrite(MSR_BITMAP, vmx->msr_gpa);
+	__vmwrite(VMREAD_BITMAP, vmx->vmread_gpa);
+	__vmwrite(VMWRITE_BITMAP, vmx->vmwrite_gpa);
 }
 
 /*
@@ -248,7 +308,7 @@ static inline void init_vmcs_control_fields(struct vmx_pages *vmx)
  */
 static inline void init_vmcs_host_state(void)
 {
-	uint32_t exit_controls = vmreadz(VM_EXIT_CONTROLS);
+	u32 exit_controls = vmread(VM_EXIT_CONTROLS);
 
 	vmwrite(HOST_ES_SELECTOR, get_es());
 	vmwrite(HOST_CS_SELECTOR, get_cs());
@@ -288,23 +348,23 @@ static inline void init_vmcs_host_state(void)
  */
 static inline void init_vmcs_guest_state(void *rip, void *rsp)
 {
-	vmwrite(GUEST_ES_SELECTOR, vmreadz(HOST_ES_SELECTOR));
-	vmwrite(GUEST_CS_SELECTOR, vmreadz(HOST_CS_SELECTOR));
-	vmwrite(GUEST_SS_SELECTOR, vmreadz(HOST_SS_SELECTOR));
-	vmwrite(GUEST_DS_SELECTOR, vmreadz(HOST_DS_SELECTOR));
-	vmwrite(GUEST_FS_SELECTOR, vmreadz(HOST_FS_SELECTOR));
-	vmwrite(GUEST_GS_SELECTOR, vmreadz(HOST_GS_SELECTOR));
+	vmwrite(GUEST_ES_SELECTOR, vmread(HOST_ES_SELECTOR));
+	vmwrite(GUEST_CS_SELECTOR, vmread(HOST_CS_SELECTOR));
+	vmwrite(GUEST_SS_SELECTOR, vmread(HOST_SS_SELECTOR));
+	vmwrite(GUEST_DS_SELECTOR, vmread(HOST_DS_SELECTOR));
+	vmwrite(GUEST_FS_SELECTOR, vmread(HOST_FS_SELECTOR));
+	vmwrite(GUEST_GS_SELECTOR, vmread(HOST_GS_SELECTOR));
 	vmwrite(GUEST_LDTR_SELECTOR, 0);
-	vmwrite(GUEST_TR_SELECTOR, vmreadz(HOST_TR_SELECTOR));
-	vmwrite(GUEST_INTR_STATUS, 0);
-	vmwrite(GUEST_PML_INDEX, 0);
+	vmwrite(GUEST_TR_SELECTOR, vmread(HOST_TR_SELECTOR));
+	__vmwrite(GUEST_INTR_STATUS, 0);
+	__vmwrite(GUEST_PML_INDEX, 0);
 
 	vmwrite(VMCS_LINK_POINTER, -1ll);
 	vmwrite(GUEST_IA32_DEBUGCTL, 0);
-	vmwrite(GUEST_IA32_PAT, vmreadz(HOST_IA32_PAT));
-	vmwrite(GUEST_IA32_EFER, vmreadz(HOST_IA32_EFER));
-	vmwrite(GUEST_IA32_PERF_GLOBAL_CTRL,
-		vmreadz(HOST_IA32_PERF_GLOBAL_CTRL));
+	__vmwrite(GUEST_IA32_PAT, vmread(HOST_IA32_PAT));
+	__vmwrite(GUEST_IA32_EFER, vmread(HOST_IA32_EFER));
+	__vmwrite(GUEST_IA32_PERF_GLOBAL_CTRL,
+		  vmread(HOST_IA32_PERF_GLOBAL_CTRL));
 
 	vmwrite(GUEST_ES_LIMIT, -1);
 	vmwrite(GUEST_CS_LIMIT, -1);
@@ -317,236 +377,69 @@ static inline void init_vmcs_guest_state(void *rip, void *rsp)
 	vmwrite(GUEST_GDTR_LIMIT, 0xffff);
 	vmwrite(GUEST_IDTR_LIMIT, 0xffff);
 	vmwrite(GUEST_ES_AR_BYTES,
-		vmreadz(GUEST_ES_SELECTOR) == 0 ? 0x10000 : 0xc093);
+		vmread(GUEST_ES_SELECTOR) == 0 ? 0x10000 : 0xc093);
 	vmwrite(GUEST_CS_AR_BYTES, 0xa09b);
 	vmwrite(GUEST_SS_AR_BYTES, 0xc093);
 	vmwrite(GUEST_DS_AR_BYTES,
-		vmreadz(GUEST_DS_SELECTOR) == 0 ? 0x10000 : 0xc093);
+		vmread(GUEST_DS_SELECTOR) == 0 ? 0x10000 : 0xc093);
 	vmwrite(GUEST_FS_AR_BYTES,
-		vmreadz(GUEST_FS_SELECTOR) == 0 ? 0x10000 : 0xc093);
+		vmread(GUEST_FS_SELECTOR) == 0 ? 0x10000 : 0xc093);
 	vmwrite(GUEST_GS_AR_BYTES,
-		vmreadz(GUEST_GS_SELECTOR) == 0 ? 0x10000 : 0xc093);
+		vmread(GUEST_GS_SELECTOR) == 0 ? 0x10000 : 0xc093);
 	vmwrite(GUEST_LDTR_AR_BYTES, 0x10000);
 	vmwrite(GUEST_TR_AR_BYTES, 0x8b);
 	vmwrite(GUEST_INTERRUPTIBILITY_INFO, 0);
 	vmwrite(GUEST_ACTIVITY_STATE, 0);
-	vmwrite(GUEST_SYSENTER_CS, vmreadz(HOST_IA32_SYSENTER_CS));
-	vmwrite(VMX_PREEMPTION_TIMER_VALUE, 0);
+	vmwrite(GUEST_SYSENTER_CS, vmread(HOST_IA32_SYSENTER_CS));
+	__vmwrite(VMX_PREEMPTION_TIMER_VALUE, 0);
 
-	vmwrite(GUEST_CR0, vmreadz(HOST_CR0));
-	vmwrite(GUEST_CR3, vmreadz(HOST_CR3));
-	vmwrite(GUEST_CR4, vmreadz(HOST_CR4));
+	vmwrite(GUEST_CR0, vmread(HOST_CR0));
+	vmwrite(GUEST_CR3, vmread(HOST_CR3));
+	vmwrite(GUEST_CR4, vmread(HOST_CR4));
 	vmwrite(GUEST_ES_BASE, 0);
 	vmwrite(GUEST_CS_BASE, 0);
 	vmwrite(GUEST_SS_BASE, 0);
 	vmwrite(GUEST_DS_BASE, 0);
-	vmwrite(GUEST_FS_BASE, vmreadz(HOST_FS_BASE));
-	vmwrite(GUEST_GS_BASE, vmreadz(HOST_GS_BASE));
+	vmwrite(GUEST_FS_BASE, vmread(HOST_FS_BASE));
+	vmwrite(GUEST_GS_BASE, vmread(HOST_GS_BASE));
 	vmwrite(GUEST_LDTR_BASE, 0);
-	vmwrite(GUEST_TR_BASE, vmreadz(HOST_TR_BASE));
-	vmwrite(GUEST_GDTR_BASE, vmreadz(HOST_GDTR_BASE));
-	vmwrite(GUEST_IDTR_BASE, vmreadz(HOST_IDTR_BASE));
+	vmwrite(GUEST_TR_BASE, vmread(HOST_TR_BASE));
+	vmwrite(GUEST_GDTR_BASE, vmread(HOST_GDTR_BASE));
+	vmwrite(GUEST_IDTR_BASE, vmread(HOST_IDTR_BASE));
 	vmwrite(GUEST_DR7, 0x400);
-	vmwrite(GUEST_RSP, (uint64_t)rsp);
-	vmwrite(GUEST_RIP, (uint64_t)rip);
-	vmwrite(GUEST_RFLAGS, 2);
+	vmwrite(GUEST_RSP, (u64)rsp);
+	vmwrite(GUEST_RIP, (u64)rip);
+	vmwrite(GUEST_RFLAGS, X86_EFLAGS_FIXED);
 	vmwrite(GUEST_PENDING_DBG_EXCEPTIONS, 0);
-	vmwrite(GUEST_SYSENTER_ESP, vmreadz(HOST_IA32_SYSENTER_ESP));
-	vmwrite(GUEST_SYSENTER_EIP, vmreadz(HOST_IA32_SYSENTER_EIP));
+	vmwrite(GUEST_SYSENTER_ESP, vmread(HOST_IA32_SYSENTER_ESP));
+	vmwrite(GUEST_SYSENTER_EIP, vmread(HOST_IA32_SYSENTER_EIP));
 }
 
-void prepare_vmcs(struct vmx_pages *vmx, void *guest_rip, void *guest_rsp)
+void prepare_vmcs(struct vmx_pages *vmx, void *guest_rip)
 {
 	init_vmcs_control_fields(vmx);
 	init_vmcs_host_state();
-	init_vmcs_guest_state(guest_rip, guest_rsp);
+	init_vmcs_guest_state(guest_rip, vmx->stack);
 }
 
-static void nested_create_pte(struct kvm_vm *vm,
-			      struct eptPageTableEntry *pte,
-			      uint64_t nested_paddr,
-			      uint64_t paddr,
-			      int current_level,
-			      int target_level)
+bool kvm_cpu_has_secondary_exec_control(u32 ctrl)
 {
-	if (!pte->readable) {
-		pte->writable = true;
-		pte->readable = true;
-		pte->executable = true;
-		pte->page_size = (current_level == target_level);
-		if (pte->page_size)
-			pte->address = paddr >> vm->page_shift;
-		else
-			pte->address = vm_alloc_page_table(vm) >> vm->page_shift;
-	} else {
-		/*
-		 * Entry already present.  Assert that the caller doesn't want
-		 * a hugepage at this level, and that there isn't a hugepage at
-		 * this level.
-		 */
-		TEST_ASSERT(current_level != target_level,
-			    "Cannot create hugepage at level: %u, nested_paddr: 0x%lx",
-			    current_level, nested_paddr);
-		TEST_ASSERT(!pte->page_size,
-			    "Cannot create page table at level: %u, nested_paddr: 0x%lx",
-			    current_level, nested_paddr);
-	}
-}
+	u64 ctrl_msr;
 
-
-void __nested_pg_map(struct vmx_pages *vmx, struct kvm_vm *vm,
-		     uint64_t nested_paddr, uint64_t paddr, int target_level)
-{
-	const uint64_t page_size = PG_LEVEL_SIZE(target_level);
-	struct eptPageTableEntry *pt = vmx->eptp_hva, *pte;
-	uint16_t index;
-
-	TEST_ASSERT(vm->mode == VM_MODE_PXXV48_4K, "Attempt to use "
-		    "unknown or unsupported guest mode, mode: 0x%x", vm->mode);
-
-	TEST_ASSERT((nested_paddr >> 48) == 0,
-		    "Nested physical address 0x%lx requires 5-level paging",
-		    nested_paddr);
-	TEST_ASSERT((nested_paddr % page_size) == 0,
-		    "Nested physical address not on page boundary,\n"
-		    "  nested_paddr: 0x%lx page_size: 0x%lx",
-		    nested_paddr, page_size);
-	TEST_ASSERT((nested_paddr >> vm->page_shift) <= vm->max_gfn,
-		    "Physical address beyond beyond maximum supported,\n"
-		    "  nested_paddr: 0x%lx vm->max_gfn: 0x%lx vm->page_size: 0x%x",
-		    paddr, vm->max_gfn, vm->page_size);
-	TEST_ASSERT((paddr % page_size) == 0,
-		    "Physical address not on page boundary,\n"
-		    "  paddr: 0x%lx page_size: 0x%lx",
-		    paddr, page_size);
-	TEST_ASSERT((paddr >> vm->page_shift) <= vm->max_gfn,
-		    "Physical address beyond beyond maximum supported,\n"
-		    "  paddr: 0x%lx vm->max_gfn: 0x%lx vm->page_size: 0x%x",
-		    paddr, vm->max_gfn, vm->page_size);
-
-	for (int level = PG_LEVEL_512G; level >= PG_LEVEL_4K; level--) {
-		index = (nested_paddr >> PG_LEVEL_SHIFT(level)) & 0x1ffu;
-		pte = &pt[index];
-
-		nested_create_pte(vm, pte, nested_paddr, paddr, level, target_level);
-
-		if (pte->page_size)
-			break;
-
-		pt = addr_gpa2hva(vm, pte->address * vm->page_size);
-	}
-
-	/*
-	 * For now mark these as accessed and dirty because the only
-	 * testcase we have needs that.  Can be reconsidered later.
-	 */
-	pte->accessed = true;
-	pte->dirty = true;
-
-}
-
-void nested_pg_map(struct vmx_pages *vmx, struct kvm_vm *vm,
-		   uint64_t nested_paddr, uint64_t paddr)
-{
-	__nested_pg_map(vmx, vm, nested_paddr, paddr, PG_LEVEL_4K);
-}
-
-/*
- * Map a range of EPT guest physical addresses to the VM's physical address
- *
- * Input Args:
- *   vm - Virtual Machine
- *   nested_paddr - Nested guest physical address to map
- *   paddr - VM Physical Address
- *   size - The size of the range to map
- *   level - The level at which to map the range
- *
- * Output Args: None
- *
- * Return: None
- *
- * Within the VM given by vm, creates a nested guest translation for the
- * page range starting at nested_paddr to the page range starting at paddr.
- */
-void __nested_map(struct vmx_pages *vmx, struct kvm_vm *vm,
-		  uint64_t nested_paddr, uint64_t paddr, uint64_t size,
-		  int level)
-{
-	size_t page_size = PG_LEVEL_SIZE(level);
-	size_t npages = size / page_size;
-
-	TEST_ASSERT(nested_paddr + size > nested_paddr, "Vaddr overflow");
-	TEST_ASSERT(paddr + size > paddr, "Paddr overflow");
-
-	while (npages--) {
-		__nested_pg_map(vmx, vm, nested_paddr, paddr, level);
-		nested_paddr += page_size;
-		paddr += page_size;
-	}
-}
-
-void nested_map(struct vmx_pages *vmx, struct kvm_vm *vm,
-		uint64_t nested_paddr, uint64_t paddr, uint64_t size)
-{
-	__nested_map(vmx, vm, nested_paddr, paddr, size, PG_LEVEL_4K);
-}
-
-/* Prepare an identity extended page table that maps all the
- * physical pages in VM.
- */
-void nested_map_memslot(struct vmx_pages *vmx, struct kvm_vm *vm,
-			uint32_t memslot)
-{
-	sparsebit_idx_t i, last;
-	struct userspace_mem_region *region =
-		memslot2region(vm, memslot);
-
-	i = (region->region.guest_phys_addr >> vm->page_shift) - 1;
-	last = i + (region->region.memory_size >> vm->page_shift);
-	for (;;) {
-		i = sparsebit_next_clear(region->unused_phy_pages, i);
-		if (i > last)
-			break;
-
-		nested_map(vmx, vm,
-			   (uint64_t)i << vm->page_shift,
-			   (uint64_t)i << vm->page_shift,
-			   1 << vm->page_shift);
-	}
-}
-
-/* Identity map a region with 1GiB Pages. */
-void nested_identity_map_1g(struct vmx_pages *vmx, struct kvm_vm *vm,
-			    uint64_t addr, uint64_t size)
-{
-	__nested_map(vmx, vm, addr, addr, size, PG_LEVEL_1G);
-}
-
-bool kvm_cpu_has_ept(void)
-{
-	uint64_t ctrl;
-
-	ctrl = kvm_get_feature_msr(MSR_IA32_VMX_TRUE_PROCBASED_CTLS) >> 32;
-	if (!(ctrl & CPU_BASED_ACTIVATE_SECONDARY_CONTROLS))
+	if (!kvm_cpu_has(X86_FEATURE_VMX))
 		return false;
 
-	ctrl = kvm_get_feature_msr(MSR_IA32_VMX_PROCBASED_CTLS2) >> 32;
-	return ctrl & SECONDARY_EXEC_ENABLE_EPT;
-}
+	ctrl_msr = kvm_get_feature_msr(MSR_IA32_VMX_TRUE_PROCBASED_CTLS) >> 32;
+	if (!(ctrl_msr & CPU_BASED_ACTIVATE_SECONDARY_CONTROLS))
+		return false;
 
-void prepare_eptp(struct vmx_pages *vmx, struct kvm_vm *vm,
-		  uint32_t eptp_memslot)
-{
-	TEST_ASSERT(kvm_cpu_has_ept(), "KVM doesn't support nested EPT");
-
-	vmx->eptp = (void *)vm_vaddr_alloc_page(vm);
-	vmx->eptp_hva = addr_gva2hva(vm, (uintptr_t)vmx->eptp);
-	vmx->eptp_gpa = addr_gva2gpa(vm, (uintptr_t)vmx->eptp);
+	ctrl_msr = kvm_get_feature_msr(MSR_IA32_VMX_PROCBASED_CTLS2) >> 32;
+	return ctrl_msr & ctrl;
 }
 
 void prepare_virtualize_apic_accesses(struct vmx_pages *vmx, struct kvm_vm *vm)
 {
-	vmx->apic_access = (void *)vm_vaddr_alloc_page(vm);
+	vmx->apic_access = (void *)vm_alloc_page(vm);
 	vmx->apic_access_hva = addr_gva2hva(vm, (uintptr_t)vmx->apic_access);
 	vmx->apic_access_gpa = addr_gva2gpa(vm, (uintptr_t)vmx->apic_access);
 }

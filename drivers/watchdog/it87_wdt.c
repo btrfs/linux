@@ -29,6 +29,7 @@
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/printk.h>
+#include <linux/stringify.h>
 #include <linux/types.h>
 #include <linux/watchdog.h>
 
@@ -105,13 +106,13 @@ static bool nowayout = DEFAULT_NOWAYOUT;
 
 module_param(timeout, int, 0);
 MODULE_PARM_DESC(timeout, "Watchdog timeout in seconds, default="
-		__MODULE_STRING(DEFAULT_TIMEOUT));
+		__stringify(DEFAULT_TIMEOUT));
 module_param(testmode, int, 0);
 MODULE_PARM_DESC(testmode, "Watchdog test mode (1 = no reboot), default="
-		__MODULE_STRING(DEFAULT_TESTMODE));
+		__stringify(DEFAULT_TESTMODE));
 module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started, default="
-		__MODULE_STRING(WATCHDOG_NOWAYOUT));
+		__stringify(WATCHDOG_NOWAYOUT));
 
 /* Superio Chip */
 
@@ -186,6 +187,12 @@ static void _wdt_update_timeout(unsigned int t)
 	superio_outb(t, WDTVALLSB);
 	if (max_units > 255)
 		superio_outb(t >> 8, WDTVALMSB);
+}
+
+/* Internal function, should be called after superio_select(GPIO) */
+static bool _wdt_running(void)
+{
+	return superio_inb(WDTVALLSB) || (max_units > 255 && superio_inb(WDTVALMSB));
 }
 
 static int wdt_update_timeout(unsigned int t)
@@ -372,6 +379,12 @@ static int __init it87_wdt_init(void)
 			ctrl |= WDT_PWRGD;
 			superio_outb(ctrl, SCR1);
 		}
+	}
+
+	/* wdt already left running by firmware? */
+	if (_wdt_running()) {
+		pr_info("Left running by firmware.\n");
+		set_bit(WDOG_HW_RUNNING, &wdt_dev.status);
 	}
 
 	superio_exit();

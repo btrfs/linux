@@ -854,6 +854,7 @@ static void vivid_dev_release(struct v4l2_device *v4l2_dev)
 	struct vivid_dev *dev = container_of(v4l2_dev, struct vivid_dev, v4l2_dev);
 
 	cancel_work_sync(&dev->update_hdmi_ctrl_work);
+	cancel_work_sync(&dev->update_svid_ctrl_work);
 	vivid_free_controls(dev);
 	v4l2_device_unregister(&dev->v4l2_dev);
 #ifdef CONFIG_MEDIA_CONTROLLER
@@ -1814,7 +1815,7 @@ static int vivid_create_instance(struct platform_device *pdev, int inst)
 	int i;
 
 	/* allocate main vivid state structure */
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev)
 		return -ENOMEM;
 
@@ -1856,15 +1857,15 @@ static int vivid_create_instance(struct platform_device *pdev, int inst)
 	tpg_init(&dev->tpg, 640, 360);
 	if (tpg_alloc(&dev->tpg, array_size(MAX_WIDTH, MAX_ZOOM)))
 		goto free_dev;
-	dev->scaled_line = vzalloc(array_size(MAX_WIDTH, MAX_ZOOM));
+	dev->scaled_line = vcalloc(MAX_WIDTH, MAX_ZOOM);
 	if (!dev->scaled_line)
 		goto free_dev;
-	dev->blended_line = vzalloc(array_size(MAX_WIDTH, MAX_ZOOM));
+	dev->blended_line = vcalloc(MAX_WIDTH, MAX_ZOOM);
 	if (!dev->blended_line)
 		goto free_dev;
 
 	/* load the edid */
-	dev->edid = vmalloc(array_size(256, 128));
+	dev->edid = vmalloc_array(256, 128);
 	if (!dev->edid)
 		goto free_dev;
 
@@ -2289,8 +2290,10 @@ static int __init vivid_init(void)
 		}
 	}
 	ret = platform_device_register(&vivid_pdev);
-	if (ret)
+	if (ret) {
+		platform_device_put(&vivid_pdev);
 		goto free_output_strings;
+	}
 	ret = platform_driver_register(&vivid_pdrv);
 	if (ret)
 		goto unreg_device;
@@ -2311,7 +2314,7 @@ static int __init vivid_init(void)
 destroy_hdmi_wq:
 	destroy_workqueue(update_hdmi_ctrls_workqueue);
 unreg_driver:
-	platform_driver_register(&vivid_pdrv);
+	platform_driver_unregister(&vivid_pdrv);
 unreg_device:
 	platform_device_unregister(&vivid_pdev);
 free_output_strings:

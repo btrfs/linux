@@ -9,7 +9,6 @@
 
 #include <linux/backlight.h>
 #include <linux/delay.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 
@@ -108,7 +107,7 @@ static int da9052_backlight_probe(struct platform_device *pdev)
 	struct backlight_properties props;
 	struct da9052_bl *wleds;
 
-	wleds = devm_kzalloc(&pdev->dev, sizeof(struct da9052_bl), GFP_KERNEL);
+	wleds = devm_kzalloc_obj(&pdev->dev, struct da9052_bl);
 	if (!wleds)
 		return -ENOMEM;
 

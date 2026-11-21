@@ -429,7 +429,7 @@ static int pem_probe(struct i2c_client *client)
 				     | I2C_FUNC_SMBUS_WRITE_BYTE))
 		return -ENODEV;
 
-	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, *data);
 	if (!data)
 		return -ENOMEM;
 
@@ -502,8 +502,8 @@ static int pem_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id pem_id[] = {
-	{"lineage_pem"},
-	{}
+	{ .name = "lineage_pem" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, pem_id);
 

@@ -318,8 +318,11 @@ static int mt8188_afe_fe_startup(struct snd_pcm_substream *substream,
 	ret = snd_pcm_hw_constraint_minmax(runtime,
 					   SNDRV_PCM_HW_PARAM_PERIOD_SIZE, 1,
 					   MT8188_MEMIF_DL7_MAX_PERIOD_SIZE);
-	if (ret < 0)
+	if (ret >= 0)
+		ret = 0;
+	else
 		dev_dbg(afe->dev, "hw_constraint_minmax failed\n");
+
 out:
 	return ret;
 }
@@ -1623,8 +1626,7 @@ static SOC_VALUE_ENUM_SINGLE_DECL(ul10_fs_timing_sel_enum,
 static int mt8188_memif_1x_en_sel_put(struct snd_kcontrol *kcontrol,
 				      struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-		snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(component);
 	struct mt8188_afe_private *afe_priv = afe->platform_priv;
 	struct mtk_dai_memif_priv *memif_priv;
@@ -1647,8 +1649,7 @@ static int mt8188_memif_1x_en_sel_put(struct snd_kcontrol *kcontrol,
 static int mt8188_asys_irq_1x_en_sel_put(struct snd_kcontrol *kcontrol,
 					 struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-		snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(component);
 	struct mt8188_afe_private *afe_priv = afe->platform_priv;
 	unsigned int id = kcontrol->id.device;
@@ -1668,7 +1669,7 @@ static int mt8188_asys_irq_1x_en_sel_put(struct snd_kcontrol *kcontrol,
 static int mt8188_memif_fs_timing_sel_get(struct snd_kcontrol *kcontrol,
 					  struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(component);
 	struct mt8188_afe_private *afe_priv = afe->platform_priv;
 	struct mtk_dai_memif_priv *memif_priv;
@@ -1686,7 +1687,7 @@ static int mt8188_memif_fs_timing_sel_get(struct snd_kcontrol *kcontrol,
 static int mt8188_memif_fs_timing_sel_put(struct snd_kcontrol *kcontrol,
 					  struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(component);
 	struct mt8188_afe_private *afe_priv = afe->platform_priv;
 	struct mtk_dai_memif_priv *memif_priv;
@@ -3032,22 +3033,33 @@ static int mt8188_afe_runtime_resume(struct device *dev)
 	struct mtk_base_afe *afe = dev_get_drvdata(dev);
 	struct mt8188_afe_private *afe_priv = afe->platform_priv;
 	struct arm_smccc_res res;
+	int ret;
 
 	arm_smccc_smc(MTK_SIP_AUDIO_CONTROL,
 		      MTK_AUDIO_SMC_OP_DOMAIN_SIDEBANDS,
 		      0, 0, 0, 0, 0, 0, &res);
 
-	mt8188_afe_enable_reg_rw_clk(afe);
+	ret = mt8188_afe_enable_reg_rw_clk(afe);
+	if (ret)
+		return ret;
 
 	if (!afe->regmap || afe_priv->pm_runtime_bypass_reg_ctl)
-		goto skip_regmap;
+		return 0;
 
 	regcache_cache_only(afe->regmap, false);
-	regcache_sync(afe->regmap);
+	ret = regcache_sync(afe->regmap);
+	if (ret)
+		goto err;
 
-	mt8188_afe_enable_main_clock(afe);
-skip_regmap:
+	ret = mt8188_afe_enable_main_clock(afe);
+	if (ret)
+		goto err;
+
 	return 0;
+err:
+	mt8188_afe_disable_reg_rw_clk(afe);
+	regcache_cache_only(afe->regmap, true);
+	return ret;
 }
 
 static int init_memif_priv_data(struct mtk_base_afe *afe)
@@ -3057,9 +3069,8 @@ static int init_memif_priv_data(struct mtk_base_afe *afe)
 	int i;
 
 	for (i = MT8188_AFE_MEMIF_START; i < MT8188_AFE_MEMIF_END; i++) {
-		memif_priv = devm_kzalloc(afe->dev,
-					  sizeof(struct mtk_dai_memif_priv),
-					  GFP_KERNEL);
+		memif_priv = devm_kzalloc_obj(afe->dev,
+					      struct mtk_dai_memif_priv);
 		if (!memif_priv)
 			return -ENOMEM;
 
@@ -3073,7 +3084,7 @@ static int mt8188_dai_memif_register(struct mtk_base_afe *afe)
 {
 	struct mtk_base_afe_dai *dai;
 
-	dai = devm_kzalloc(afe->dev, sizeof(*dai), GFP_KERNEL);
+	dai = devm_kzalloc_obj(afe->dev, *dai);
 	if (!dai)
 		return -ENOMEM;
 
@@ -3201,7 +3212,7 @@ static int mt8188_afe_pcm_dev_probe(struct platform_device *pdev)
 	struct regmap *infra_ao;
 	int i, irq_id, ret;
 
-	ret = of_reserved_mem_device_init(dev);
+	ret = devm_of_reserved_mem_device_init(dev);
 	if (ret)
 		dev_dbg(dev, "failed to assign memory region: %d\n", ret);
 
@@ -3209,12 +3220,11 @@ static int mt8188_afe_pcm_dev_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	afe = devm_kzalloc(&pdev->dev, sizeof(*afe), GFP_KERNEL);
+	afe = devm_kzalloc_obj(&pdev->dev, *afe);
 	if (!afe)
 		return -ENOMEM;
 
-	afe->platform_priv = devm_kzalloc(&pdev->dev, sizeof(*afe_priv),
-					  GFP_KERNEL);
+	afe->platform_priv = devm_kzalloc_obj(&pdev->dev, *afe_priv);
 	if (!afe->platform_priv)
 		return -ENOMEM;
 
@@ -3223,8 +3233,7 @@ static int mt8188_afe_pcm_dev_probe(struct platform_device *pdev)
 
 	afe->base_addr = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(afe->base_addr))
-		return dev_err_probe(dev, PTR_ERR(afe->base_addr),
-				     "AFE base_addr not found\n");
+		return PTR_ERR(afe->base_addr);
 
 	infra_ao = syscon_regmap_lookup_by_phandle(dev->of_node,
 						   "mediatek,infracfg");
@@ -3260,7 +3269,7 @@ static int mt8188_afe_pcm_dev_probe(struct platform_device *pdev)
 	/* initial audio related clock */
 	ret = mt8188_afe_init_clock(afe);
 	if (ret)
-		return dev_err_probe(dev, ret, "init clock error");
+		return ret;
 
 	spin_lock_init(&afe_priv->afe_ctrl_lock);
 
@@ -3268,8 +3277,7 @@ static int mt8188_afe_pcm_dev_probe(struct platform_device *pdev)
 
 	/* irq initialize */
 	afe->irqs_size = MT8188_AFE_IRQ_NUM;
-	afe->irqs = devm_kcalloc(dev, afe->irqs_size, sizeof(*afe->irqs),
-				 GFP_KERNEL);
+	afe->irqs = devm_kzalloc_objs(dev, *afe->irqs, afe->irqs_size);
 	if (!afe->irqs)
 		return -ENOMEM;
 
@@ -3278,8 +3286,7 @@ static int mt8188_afe_pcm_dev_probe(struct platform_device *pdev)
 
 	/* init memif */
 	afe->memif_size = MT8188_AFE_MEMIF_NUM;
-	afe->memif = devm_kcalloc(dev, afe->memif_size, sizeof(*afe->memif),
-				  GFP_KERNEL);
+	afe->memif = devm_kzalloc_objs(dev, *afe->memif, afe->memif_size);
 	if (!afe->memif)
 		return -ENOMEM;
 
@@ -3293,12 +3300,12 @@ static int mt8188_afe_pcm_dev_probe(struct platform_device *pdev)
 	/* request irq */
 	irq_id = platform_get_irq(pdev, 0);
 	if (irq_id < 0)
-		return dev_err_probe(dev, irq_id, "no irq found");
+		return irq_id;
 
 	ret = devm_request_irq(dev, irq_id, mt8188_afe_irq_handler,
 			       IRQF_TRIGGER_NONE, "asys-isr", (void *)afe);
 	if (ret)
-		return dev_err_probe(dev, ret, "could not request_irq for asys-isr\n");
+		return ret;
 
 	/* init sub_dais */
 	INIT_LIST_HEAD(&afe->sub_dais);
@@ -3354,10 +3361,8 @@ static int mt8188_afe_pcm_dev_probe(struct platform_device *pdev)
 	/* register component */
 	ret = devm_snd_soc_register_component(dev, &mtk_afe_pcm_platform,
 					      afe->dai_drivers, afe->num_dai_drivers);
-	if (ret) {
-		dev_warn(dev, "err_platform\n");
+	if (ret)
 		goto err_pm_put;
-	}
 
 	mt8188_afe_init_registers(afe);
 

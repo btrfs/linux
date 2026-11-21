@@ -28,6 +28,19 @@
 /* flags for v9fs_stat2inode() & v9fs_stat2inode_dotl() */
 #define V9FS_STAT2INODE_KEEP_ISIZE 1
 
+/**
+ * struct v9fs_dentry - v9fs specific dentry data
+ * @head: List of fid associated with this dentry
+ * @expire_time: Lookup cache expiration time for negative dentries
+ * @rcu: used by kfree_rcu to schedule clean up job
+ */
+struct v9fs_dentry {
+	struct hlist_head head;
+	u64 expire_time;
+	struct rcu_head rcu;
+};
+#define to_v9fs_dentry(d) ((struct v9fs_dentry *)((d)->d_fsdata))
+
 extern struct file_system_type v9fs_fs_type;
 extern const struct address_space_operations v9fs_addr_operations;
 extern const struct file_operations v9fs_file_operations;
@@ -35,6 +48,8 @@ extern const struct file_operations v9fs_file_operations_dotl;
 extern const struct file_operations v9fs_dir_operations;
 extern const struct file_operations v9fs_dir_operations_dotl;
 extern const struct dentry_operations v9fs_dentry_operations;
+extern void v9fs_ndentry_refresh_timeout(struct dentry *dentry);
+extern void v9fs_dentry_fid_remove(struct dentry *dentry);
 extern const struct dentry_operations v9fs_cached_dentry_operations;
 extern struct kmem_cache *v9fs_inode_cache;
 
@@ -59,7 +74,7 @@ int v9fs_file_open(struct inode *inode, struct file *file);
 int v9fs_uflags2omode(int uflags, int extended);
 
 void v9fs_blank_wstat(struct p9_wstat *wstat);
-int v9fs_vfs_setattr_dotl(struct mnt_idmap *idmap,
+int v9fs_vfs_setattr_dotl(const struct mnt_idmap *idmap,
 			  struct dentry *dentry, struct iattr *iattr);
 int v9fs_file_fsync_dotl(struct file *filp, loff_t start, loff_t end,
 			 int datasync);
@@ -75,17 +90,4 @@ static inline void v9fs_invalidate_inode_attr(struct inode *inode)
 
 int v9fs_open_to_dotl_flags(int flags);
 
-static inline void v9fs_i_size_write(struct inode *inode, loff_t i_size)
-{
-	/*
-	 * 32-bit need the lock, concurrent updates could break the
-	 * sequences and make i_size_read() loop forever.
-	 * 64-bit updates are atomic and can skip the locking.
-	 */
-	if (sizeof(i_size) > sizeof(long))
-		spin_lock(&inode->i_lock);
-	i_size_write(inode, i_size);
-	if (sizeof(i_size) > sizeof(long))
-		spin_unlock(&inode->i_lock);
-}
 #endif

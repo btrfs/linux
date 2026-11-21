@@ -238,6 +238,16 @@ All md devices contain:
      the number of devices in a raid4/5/6, or to support external
      metadata formats which mandate such clipping.
 
+  logical_block_size
+     Configure the array's logical block size in bytes. This attribute
+     is only supported for 1.x meta. Write the value before starting
+     array. The final array LBS uses the maximum between this
+     configuration and LBS of all combined devices. Note that
+     LBS cannot exceed PAGE_SIZE before RAID supports folio.
+     WARNING: Arrays created on new kernel cannot be assembled at old
+     kernel due to padding check, Set module parameter 'check_new_feature'
+     to false to bypass, but data loss may occur.
+
   reshape_position
      This is either ``none`` or a sector number within the devices of
      the array where ``reshape`` is up to.  If this is set, the three
@@ -724,7 +734,7 @@ also have
       They should be scaled by the bitmap_chunksize.
 
    sync_speed_min, sync_speed_max
-     This are similar to ``/proc/sys/dev/raid/speed_limit_{min,max}``
+     These are similar to ``/proc/sys/dev/raid/speed_limit_{min,max}``
      however they only apply to the particular array.
 
      If no value has been written to these, or if the word ``system``

@@ -463,7 +463,7 @@ static int elan_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	int ret;
 	struct elan_drvdata *drvdata;
 
-	drvdata = devm_kzalloc(&hdev->dev, sizeof(*drvdata), GFP_KERNEL);
+	drvdata = devm_kzalloc_obj(&hdev->dev, *drvdata);
 
 	if (!drvdata)
 		return -ENOMEM;
@@ -513,6 +513,7 @@ static const struct hid_device_id elan_devices[] = {
 	{ HID_USB_DEVICE(USB_VENDOR_ID_ELAN, USB_DEVICE_ID_HP_X2_10_COVER),
 	  .driver_data = ELAN_HAS_LED },
 	{ HID_I2C_DEVICE(USB_VENDOR_ID_ELAN, USB_DEVICE_ID_TOSHIBA_CLICK_L9W) },
+	{ HID_I2C_DEVICE(USB_VENDOR_ID_ELAN, USB_DEVICE_ID_SB974D) },
 	{ }
 };
 MODULE_DEVICE_TABLE(hid, elan_devices);

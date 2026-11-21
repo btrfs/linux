@@ -12,6 +12,12 @@
 #include "xe_map.h"
 #include "xe_vm_types.h"
 
+/**
+ * MAX_FAULTS_SAVED_PER_VM - Maximum number of faults each vm can store before future
+ * faults are discarded to prevent memory overuse
+ */
+#define MAX_FAULTS_SAVED_PER_VM	50
+
 struct drm_device;
 struct drm_printer;
 struct drm_file;
@@ -22,6 +28,7 @@ struct dma_fence;
 
 struct xe_exec_queue;
 struct xe_file;
+struct xe_pagefault;
 struct xe_sync_entry;
 struct xe_svm_range;
 struct drm_exec;
@@ -68,6 +75,9 @@ xe_vm_find_overlapping_vma(struct xe_vm *vm, u64 start, u64 range);
 
 bool xe_vma_has_default_mem_attrs(struct xe_vma *vma);
 
+void xe_vm_find_cpu_addr_mirror_vma_range(struct xe_vm *vm,
+					  u64 *start,
+					  u64 *end);
 /**
  * xe_vm_has_scratch() - Whether the vm is configured for scratch PTEs
  * @vm: The vm
@@ -200,6 +210,9 @@ int xe_vm_destroy_ioctl(struct drm_device *dev, void *data,
 int xe_vm_bind_ioctl(struct drm_device *dev, void *data,
 		     struct drm_file *file);
 int xe_vm_query_vmas_attrs_ioctl(struct drm_device *dev, void *data, struct drm_file *file);
+int xe_vm_get_property_ioctl(struct drm_device *dev, void *data,
+			     struct drm_file *file);
+
 void xe_vm_close_and_put(struct xe_vm *vm);
 
 static inline bool xe_vm_in_fault_mode(struct xe_vm *vm)
@@ -217,6 +230,13 @@ static inline bool xe_vm_in_preempt_fence_mode(struct xe_vm *vm)
 	return xe_vm_in_lr_mode(vm) && !xe_vm_in_fault_mode(vm);
 }
 
+static inline bool xe_vm_allow_vm_eviction(struct xe_vm *vm)
+{
+	return !xe_vm_in_lr_mode(vm) ||
+		(xe_vm_in_fault_mode(vm) &&
+		 !(vm->flags & XE_VM_FLAG_NO_VM_OVERCOMMIT));
+}
+
 int xe_vm_add_compute_exec_queue(struct xe_vm *vm, struct xe_exec_queue *q);
 void xe_vm_remove_compute_exec_queue(struct xe_vm *vm, struct xe_exec_queue *q);
 
@@ -230,10 +250,9 @@ struct dma_fence *xe_vm_range_rebind(struct xe_vm *vm,
 struct dma_fence *xe_vm_range_unbind(struct xe_vm *vm,
 				     struct xe_svm_range *range);
 
-int xe_vm_range_tilemask_tlb_inval(struct xe_vm *vm, u64 start,
-				   u64 end, u8 tile_mask);
-
 int xe_vm_invalidate_vma(struct xe_vma *vma);
+
+int xe_vm_invalidate_vma_submit(struct xe_vma *vma, struct xe_tlb_inval_batch *batch);
 
 int xe_vm_validate_protected(struct xe_vm *vm);
 
@@ -265,6 +284,8 @@ int xe_vm_lock_vma(struct drm_exec *exec, struct xe_vma *vma);
 int xe_vm_validate_rebind(struct xe_vm *vm, struct drm_exec *exec,
 			  unsigned int num_fences);
 
+void xe_vm_bump_lru(struct xe_vm *vm, struct drm_exec *exec);
+
 struct dma_fence *xe_vm_bind_kernel_bo(struct xe_vm *vm, struct xe_bo *bo,
 				       struct xe_exec_queue *q, u64 addr,
 				       enum xe_cache_level cache_lvl);
@@ -283,6 +304,9 @@ static inline struct dma_resv *xe_vm_resv(struct xe_vm *vm)
 }
 
 void xe_vm_kill(struct xe_vm *vm, bool unlocked);
+
+void xe_vm_add_exec_queue(struct xe_vm *vm, struct xe_exec_queue *q);
+void xe_vm_remove_exec_queue(struct xe_vm *vm, struct xe_exec_queue *q);
 
 /**
  * xe_vm_assert_held(vm) - Assert that the vm's reservation object is held.
@@ -305,6 +329,8 @@ struct xe_vm_snapshot *xe_vm_snapshot_capture(struct xe_vm *vm);
 void xe_vm_snapshot_capture_delayed(struct xe_vm_snapshot *snap);
 void xe_vm_snapshot_print(struct xe_vm_snapshot *snap, struct drm_printer *p);
 void xe_vm_snapshot_free(struct xe_vm_snapshot *snap);
+
+void xe_vm_add_fault_entry_pf(struct xe_vm *vm, struct xe_pagefault *pf);
 
 /**
  * xe_vm_set_validating() - Register this task as currently making bos resident
@@ -379,7 +405,7 @@ static inline void xe_vm_set_validation_exec(struct xe_vm *vm, struct drm_exec *
 }
 
 /**
- * xe_vm_set_validation_exec() - Accessor to read the drm_exec object
+ * xe_vm_validation_exec() - Accessor to read the drm_exec object
  * @vm: The vm we want to register a drm_exec object with.
  *
  * Return: The drm_exec object used to lock the vm's resv. The value
@@ -410,5 +436,9 @@ static inline struct drm_exec *xe_vm_validation_exec(struct xe_vm *vm)
  */
 #define xe_vm_has_valid_gpu_mapping(tile, tile_present, tile_invalidated)	\
 	((READ_ONCE(tile_present) & ~READ_ONCE(tile_invalidated)) & BIT((tile)->id))
+
+void xe_vma_mem_attr_copy(struct xe_vma_mem_attr *to, struct xe_vma_mem_attr *from);
+
+struct xe_pt *xe_vm_pt_root(struct xe_vm *vm, u8 tile_id);
 
 #endif

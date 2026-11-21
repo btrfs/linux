@@ -7,7 +7,6 @@
 #include <linux/err.h>
 #include <linux/leds.h>
 #include <linux/leds-ti-lmu-common.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -111,7 +110,7 @@ static int lm36274_probe(struct platform_device *pdev)
 	struct lm36274 *chip;
 	int ret;
 
-	chip = devm_kzalloc(&pdev->dev, sizeof(*chip), GFP_KERNEL);
+	chip = devm_kzalloc_obj(&pdev->dev, *chip);
 	if (!chip)
 		return -ENOMEM;
 

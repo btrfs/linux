@@ -5,7 +5,6 @@
 #include <linux/bits.h>
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
@@ -306,7 +305,7 @@ static int lm3697_probe(struct i2c_client *client)
 		return -ENODEV;
 	}
 
-	led = devm_kzalloc(dev, struct_size(led, leds, count), GFP_KERNEL);
+	led = devm_kzalloc_flex(dev, *led, leds, count);
 	if (!led)
 		return -ENOMEM;
 
@@ -354,7 +353,7 @@ static void lm3697_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id lm3697_id[] = {
-	{ "lm3697" },
+	{ .name = "lm3697" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, lm3697_id);

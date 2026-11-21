@@ -260,7 +260,7 @@ static int sht21_probe(struct i2c_client *client)
 		return -ENODEV;
 	}
 
-	sht21 = devm_kzalloc(dev, sizeof(*sht21), GFP_KERNEL);
+	sht21 = devm_kzalloc_obj(dev, *sht21);
 	if (!sht21)
 		return -ENOMEM;
 
@@ -275,9 +275,9 @@ static int sht21_probe(struct i2c_client *client)
 
 /* Device ID table */
 static const struct i2c_device_id sht21_id[] = {
-	{ "sht20" },
-	{ "sht21" },
-	{ "sht25" },
+	{ .name = "sht20" },
+	{ .name = "sht21" },
+	{ .name = "sht25" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, sht21_id);

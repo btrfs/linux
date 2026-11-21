@@ -53,7 +53,6 @@
 #include <linux/kmod.h>
 #include <linux/module.h>
 #include <linux/panic_notifier.h>
-#include <linux/mod_devicetable.h>
 #include <linux/gpio/consumer.h>
 #include <linux/reboot.h>
 #include <linux/property.h>
@@ -263,7 +262,7 @@ static int ltc2952_poweroff_probe(struct platform_device *pdev)
 		return -EBUSY;
 	}
 
-	data = devm_kzalloc(&pdev->dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(&pdev->dev, *data);
 	if (!data)
 		return -ENOMEM;
 

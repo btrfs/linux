@@ -8,7 +8,7 @@ Landlock: unprivileged access control
 =====================================
 
 :Author: Mickaël Salaün
-:Date: March 2025
+:Date: October 2026
 
 The goal of Landlock is to enable restriction of ambient rights (e.g. global
 filesystem or network access) for a set of processes.  Because Landlock
@@ -29,31 +29,40 @@ If Landlock is not currently supported, we need to
 Landlock rules
 ==============
 
-A Landlock rule describes an action on an object which the process intends to
-perform.  A set of rules is aggregated in a ruleset, which can then restrict
-the thread enforcing it, and its future children.
+A Landlock rule describes the actions a process is allowed to perform on a
+specific resource.  A set of rules is aggregated in a ruleset, which can then
+restrict the thread enforcing it, and its future children.
 
-The two existing types of rules are:
+The existing types of rules are:
 
 Filesystem rules
-    For these rules, the object is a file hierarchy,
-    and the related filesystem actions are defined with
-    `filesystem access rights`.
+    The rule key is a file hierarchy, and the actions it allows are
+    defined with `filesystem access rights`.
 
-Network rules (since ABI v4)
-    For these rules, the object is a TCP port,
+Network rules (since ABI v4 for TCP and v10 for UDP)
+    For these rules, the object is a TCP or UDP port,
     and the related actions are defined with `network access rights`.
+
+Capability rules (since ABI v12)
+    The rule body lists which Linux capabilities (see
+    :manpage:`capabilities(7)`) the process may exercise; the action is
+    defined with `permission flags`.
+
+Namespace rules (since ABI v12)
+    The rule body lists which namespace types (see
+    :manpage:`namespaces(7)`) the process may use; the action is defined
+    with `permission flags`.
 
 Defining and enforcing a security policy
 ----------------------------------------
 
 We first need to define the ruleset that will contain our rules.
 
-For this example, the ruleset will contain rules that only allow filesystem
-read actions and establish a specific TCP connection. Filesystem write
-actions and other TCP actions will be denied.
+For this example, the ruleset will contain rules that only allow some
+filesystem read actions and some specific UDP and TCP actions. Filesystem
+write actions and other TCP/UDP actions will be denied.
 
-The ruleset then needs to handle both these kinds of actions.  This is
+The ruleset then needs to handle all these kinds of actions.  This is
 required for backward and forward compatibility (i.e. the kernel and user
 space may not know each other's supported restrictions), hence the need
 to be explicit about the denied-by-default access rights.
@@ -77,13 +86,19 @@ to be explicit about the denied-by-default access rights.
             LANDLOCK_ACCESS_FS_MAKE_SYM |
             LANDLOCK_ACCESS_FS_REFER |
             LANDLOCK_ACCESS_FS_TRUNCATE |
-            LANDLOCK_ACCESS_FS_IOCTL_DEV,
+            LANDLOCK_ACCESS_FS_IOCTL_DEV |
+            LANDLOCK_ACCESS_FS_RESOLVE_UNIX,
         .handled_access_net =
             LANDLOCK_ACCESS_NET_BIND_TCP |
-            LANDLOCK_ACCESS_NET_CONNECT_TCP,
+            LANDLOCK_ACCESS_NET_CONNECT_TCP |
+            LANDLOCK_ACCESS_NET_BIND_UDP |
+            LANDLOCK_ACCESS_NET_CONNECT_SEND_UDP,
         .scoped =
             LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET |
             LANDLOCK_SCOPE_SIGNAL,
+        .handled_permissions =
+            LANDLOCK_PERMISSION_NAMESPACE_USE |
+            LANDLOCK_PERMISSION_CAPABILITY_USE,
     };
 
 Because we may not know which kernel version an application will be executed
@@ -127,6 +142,23 @@ version, and only use the available subset of access rights:
         /* Removes LANDLOCK_SCOPE_* for ABI < 6 */
         ruleset_attr.scoped &= ~(LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET |
                                  LANDLOCK_SCOPE_SIGNAL);
+        __attribute__((fallthrough));
+    case 6 ... 8:
+        /* Removes LANDLOCK_ACCESS_FS_RESOLVE_UNIX for ABI < 9 */
+        ruleset_attr.handled_access_fs &= ~LANDLOCK_ACCESS_FS_RESOLVE_UNIX;
+        __attribute__((fallthrough));
+    case 9:
+        /* Removes LANDLOCK_ACCESS_NET_*_UDP for ABI < 10 */
+        ruleset_attr.handled_access_net &=
+            ~(LANDLOCK_ACCESS_NET_BIND_UDP |
+              LANDLOCK_ACCESS_NET_CONNECT_SEND_UDP);
+        __attribute__((fallthrough));
+    case 10:
+    case 11:
+        /* Removes LANDLOCK_PERMISSION_* for ABI < 12 */
+        ruleset_attr.handled_permissions &=
+            ~(LANDLOCK_PERMISSION_NAMESPACE_USE |
+              LANDLOCK_PERMISSION_CAPABILITY_USE);
     }
 
 This enables the creation of an inclusive ruleset that will contain our rules.
@@ -142,15 +174,15 @@ This enables the creation of an inclusive ruleset that will contain our rules.
     }
 
 We can now add a new rule to this ruleset thanks to the returned file
-descriptor referring to this ruleset.  The rule will only allow reading the
-file hierarchy ``/usr``.  Without another rule, write actions would then be
-denied by the ruleset.  To add ``/usr`` to the ruleset, we open it with the
-``O_PATH`` flag and fill the &struct landlock_path_beneath_attr with this file
-descriptor.
+descriptor referring to this ruleset.  The rule will allow reading and
+executing the file hierarchy ``/usr``.  Without another rule, write actions
+would then be denied by the ruleset.  To add ``/usr`` to the ruleset, we open
+it with the ``O_PATH`` flag and fill the &struct landlock_path_beneath_attr with
+this file descriptor.
 
 .. code-block:: c
 
-    int err;
+    int err = 0;
     struct landlock_path_beneath_attr path_beneath = {
         .allowed_access =
             LANDLOCK_ACCESS_FS_EXECUTE |
@@ -158,47 +190,186 @@ descriptor.
             LANDLOCK_ACCESS_FS_READ_DIR,
     };
 
-    path_beneath.parent_fd = open("/usr", O_PATH | O_CLOEXEC);
-    if (path_beneath.parent_fd < 0) {
-        perror("Failed to open file");
-        close(ruleset_fd);
-        return 1;
-    }
-    err = landlock_add_rule(ruleset_fd, LANDLOCK_RULE_PATH_BENEATH,
-                            &path_beneath, 0);
-    close(path_beneath.parent_fd);
-    if (err) {
-        perror("Failed to update ruleset");
-        close(ruleset_fd);
-        return 1;
+    path_beneath.allowed_access &= ruleset_attr.handled_access_fs;
+    if (path_beneath.allowed_access) {
+        path_beneath.parent_fd = open("/usr", O_PATH | O_CLOEXEC);
+        if (path_beneath.parent_fd < 0) {
+            perror("Failed to open file");
+            close(ruleset_fd);
+            return 1;
+        }
+        err = landlock_add_rule(ruleset_fd, LANDLOCK_RULE_PATH_BENEATH,
+                                &path_beneath, 0);
+        close(path_beneath.parent_fd);
+        if (err) {
+            perror("Failed to update ruleset");
+            close(ruleset_fd);
+            return 1;
+        }
     }
 
-It may also be required to create rules following the same logic as explained
-for the ruleset creation, by filtering access rights according to the Landlock
-ABI version.  In this example, this is not required because all of the requested
-``allowed_access`` rights are already available in ABI 1.
+As shown above, masking the rule's ``allowed_access`` against the ruleset's
+``handled_access_*`` is the recommended best-effort pattern: rights the running
+kernel does not support are dropped (the compatibility switch above already
+cleared them in ``handled_access_*``), and the rule is skipped if no supported
+right remains.
 
-For network access-control, we can add a set of rules that allow to use a port
-number for a specific action: HTTPS connections.
+For network access-control, we will add a set of rules to allow DNS
+queries, which requires both UDP and TCP. For TCP, we need to allow
+outbound connections to port 53, which can be handled and granted starting
+with ABI 4:
 
 .. code-block:: c
 
-    struct landlock_net_port_attr net_port = {
+    struct landlock_net_port_attr tcp_conn = {
         .allowed_access = LANDLOCK_ACCESS_NET_CONNECT_TCP,
-        .port = 443,
+        .port = 53,
     };
 
-    err = landlock_add_rule(ruleset_fd, LANDLOCK_RULE_NET_PORT,
-                            &net_port, 0);
+    tcp_conn.allowed_access &= ruleset_attr.handled_access_net;
+    if (tcp_conn.allowed_access)
+        err = landlock_add_rule(ruleset_fd, LANDLOCK_RULE_NET_PORT,
+                                &tcp_conn, 0);
 
-The next step is to restrict the current thread from gaining more privileges
-(e.g. through a SUID binary).  We now have a ruleset with the first rule
-allowing read access to ``/usr`` while denying all other handled accesses for
-the filesystem, and a second rule allowing HTTPS connections.
+We also need to be able to send UDP datagrams to port 53, which requires
+granting ``LANDLOCK_ACCESS_NET_CONNECT_SEND_UDP``. Since our DNS client will
+emit datagrams without explicitly binding to a specific source port, its UDP
+socket will automatically bind an ephemeral port. To allow this behaviour,
+we also need to grant ``LANDLOCK_ACCESS_NET_BIND_UDP`` on port 0, as if
+the program explicitly called :manpage:`bind(2)` on port 0.
 
 .. code-block:: c
 
-    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
+    struct landlock_net_port_attr udp_send = {
+        .allowed_access = LANDLOCK_ACCESS_NET_CONNECT_SEND_UDP,
+        .port = 53,
+    };
+
+    udp_send.allowed_access &= ruleset_attr.handled_access_net;
+    if (udp_send.allowed_access)
+        err = landlock_add_rule(ruleset_fd, LANDLOCK_RULE_NET_PORT,
+                                &udp_send, 0);
+    [...]
+
+    struct landlock_net_port_attr udp_bind = {
+        .allowed_access = LANDLOCK_ACCESS_NET_BIND_UDP,
+        .port = 0,
+    };
+
+    udp_bind.allowed_access &= ruleset_attr.handled_access_net;
+    if (udp_bind.allowed_access)
+        err = landlock_add_rule(ruleset_fd, LANDLOCK_RULE_NET_PORT,
+                                &udp_bind, 0);
+
+Capability and namespace rules use a different attribute layout:
+``permissions`` identifies the permission category (a single
+``LANDLOCK_PERMISSION_*`` flag) and a type-specific value field carries the
+bitmask to allow within it.  See `Capability and namespace restrictions`_ for
+the model.
+
+For capability access-control, we can add rules that allow specific
+capabilities (see :manpage:`capabilities(7)` for the list of ``CAP_*``
+values).  For instance, to allow ``CAP_SYS_CHROOT`` (so the sandboxed
+process can call :manpage:`chroot(2)` inside a user namespace):
+
+.. code-block:: c
+
+    struct landlock_capability_attr cap_attr = {
+        .permissions = LANDLOCK_PERMISSION_CAPABILITY_USE,
+        .allowed_capabilities = (1ULL << CAP_SYS_CHROOT),
+    };
+
+    cap_attr.permissions &= ruleset_attr.handled_permissions;
+    if (cap_attr.permissions)
+        err = landlock_add_rule(ruleset_fd, LANDLOCK_RULE_CAPABILITY,
+                                &cap_attr, 0);
+
+For namespace access-control, we can add rules that allow using specific
+namespace types (see :manpage:`namespaces(7)` for the list of ``CLONE_NEW*``
+values): creating them via :manpage:`unshare(2)` / :manpage:`clone(2)` /
+:manpage:`clone3(2)`, joining them via :manpage:`setns(2)`, or acquiring an fd
+reference via :manpage:`open_tree(2)` / :manpage:`fsmount(2)`.  For instance,
+to allow creating user namespaces (which grants all capabilities inside the new
+namespace):
+
+.. code-block:: c
+
+    struct landlock_namespace_attr ns_attr = {
+        .permissions = LANDLOCK_PERMISSION_NAMESPACE_USE,
+        .allowed_namespace_types = CLONE_NEWUSER,
+    };
+
+    ns_attr.permissions &= ruleset_attr.handled_permissions;
+    if (ns_attr.permissions)
+        err = landlock_add_rule(ruleset_fd, LANDLOCK_RULE_NAMESPACE,
+                                &ns_attr, 0);
+
+Together, these two rules allow an unprivileged process to create a user
+namespace and call :manpage:`chroot(2)` inside it, while denying all other
+capabilities and namespace types.  User namespace creation is the one operation
+that does not require ``CAP_SYS_ADMIN``, so no capability rule is needed for it.
+See `Capability and namespace restrictions`_ for details on capability
+requirements.
+
+When passing a non-zero ``flags`` argument to ``landlock_restrict_self()``, a
+similar backwards compatibility check is needed for the restrict flags
+(see sys_landlock_restrict_self() documentation for available flags):
+
+.. code-block:: c
+
+    __u32 restrict_flags =
+        LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON |
+        LANDLOCK_RESTRICT_SELF_TSYNC |
+        LANDLOCK_RESTRICT_SELF_NO_NEW_PRIVS;
+    switch (abi) {
+    case 1 ... 6:
+        /* Removes logging flags for ABI < 7 */
+        restrict_flags &= ~(LANDLOCK_RESTRICT_SELF_LOG_SAME_EXEC_OFF |
+                            LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON |
+                            LANDLOCK_RESTRICT_SELF_LOG_SUBDOMAINS_OFF);
+        __attribute__((fallthrough));
+    case 7:
+        /*
+         * Removes multithreaded enforcement flag for ABI < 8
+         *
+         * WARNING: Without this flag, calling landlock_restrict_self(2) is
+         * only equivalent if the calling process is single-threaded. Below
+         * ABI v8 (and as of ABI v8, when not using this flag), a Landlock
+         * policy would only be enforced for the calling thread and its
+         * children (and not for all threads, including parents and siblings).
+         */
+        restrict_flags &= ~LANDLOCK_RESTRICT_SELF_TSYNC;
+        __attribute__((fallthrough));
+    case 8 ... 10:
+        /* Removes no new privs flag for ABI < 11 */
+        restrict_flags &= ~LANDLOCK_RESTRICT_SELF_NO_NEW_PRIVS;
+    }
+
+The next step is to restrict the current thread from gaining more privileges
+(e.g. through a SUID binary).  For unprivileged processes, setting the
+no_new_privs attribute is required by Landlock.
+
+Processes with ``CAP_SYS_ADMIN`` in their namespace can enforce a ruleset
+without setting no_new_privs, but leaving no_new_privs unset is risky even
+when Landlock does not require this attribute: sandboxed processes could
+still execute set-user-ID, set-group-ID or file-capability binaries, which
+would then run with elevated privileges while being restricted by a Landlock
+domain they may not expect, making them potential confused deputies.
+no_new_privs should only be left unset if such a privilege transition is
+expected.
+
+We now have a ruleset with the first rule allowing read and execute access to
+``/usr`` while denying all other handled accesses for the filesystem, and two
+more rules allowing DNS queries.
+
+.. code-block:: c
+
+    /*
+     * If the ABI > 10, we can tie setting no_new_privs with successful ruleset
+     * enforcement and skip the manual prctl(PR_SET_NO_NEW_PRIVS, ...) call.
+     */
+    if (!(restrict_flags & LANDLOCK_RESTRICT_SELF_NO_NEW_PRIVS) &&
+        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
         perror("Failed to restrict privileges");
         close(ruleset_fd);
         return 1;
@@ -208,7 +379,7 @@ The current thread is now ready to sandbox itself with the ruleset.
 
 .. code-block:: c
 
-    if (landlock_restrict_self(ruleset_fd, 0)) {
+    if (landlock_restrict_self(ruleset_fd, restrict_flags)) {
         perror("Failed to enforce ruleset");
         close(ruleset_fd);
         return 1;
@@ -340,17 +511,147 @@ The operations which can be scoped are:
     A :manpage:`sendto(2)` on a socket which was previously connected will not
     be restricted.  This works for both datagram and stream sockets.
 
-IPC scoping does not support exceptions via :manpage:`landlock_add_rule(2)`.
-If an operation is scoped within a domain, no rules can be added to allow access
-to resources or processes outside of the scope.
+Scoping does not support exceptions via :manpage:`landlock_add_rule(2)`.  If an
+operation is scoped within a domain, no rules can be added to allow access to
+resources or processes outside of the scope.
+
+Capability and namespace restrictions
+-------------------------------------
+
+``handled_permissions`` declares per-category permissions: each permission
+selects which members of a kernel-defined category (CAP_* capabilities,
+CLONE_NEW* namespace types) the process may use.  Unlike per-object access
+rights (``handled_access_*``) or cross-domain scopes (``scoped``), per-category
+permissions constrain the sandboxed process's own use of these enums; members
+not allowed by a rule are denied by default.
+
+``LANDLOCK_PERMISSION_NAMESPACE_USE`` gates *acquisition of access* to
+namespaces: creation via :manpage:`unshare(2)` / :manpage:`clone(2)`
+/ :manpage:`clone3(2)`, entry via :manpage:`setns(2)`, and fd-reference
+acquisition via :manpage:`open_tree(2)` / :manpage:`fsmount(2)`.  Namespaces
+the process is already a member of when the domain is enforced are implicitly
+allowed (the process could not continue running otherwise); rules describe
+which new namespace types the process may acquire.
+``LANDLOCK_PERMISSION_CAPABILITY_USE`` gates every exercise of a capability
+after the domain is enforced, regardless
+of how the capability was obtained (inherited credentials, ``CLONE_NEWUSER``
+grant, ``setuid``/file-cap-bearing :manpage:`execve(2)`, etc.).  Configuring
+both together restricts what privileges are available *and* the namespaces in
+which they take effect, which matters because user namespace creation has no
+capability check and grants all capabilities within the new namespace: gating
+only one of the two leaves a kernel attack-surface widening path open.  When a
+domain handles both permissions, an operation is allowed only if each
+independently allows it: :manpage:`unshare(2)` with ``CLONE_NEWNET`` then
+requires both a rule allowing ``CLONE_NEWNET`` and a rule allowing
+``CAP_SYS_ADMIN``.
+
+``LANDLOCK_PERMISSION_CAPABILITY_USE`` complements :manpage:`prctl(2)`
+``PR_SET_NO_NEW_PRIVS`` but does not replace it.  ``PR_SET_NO_NEW_PRIVS``
+prevents privilege *acquisition* via :manpage:`execve(2)` (setuid, file
+capability xattrs, privilege-elevating LSM transitions) and is a prerequisite
+for unprivileged Landlock self-sandboxing.
+``LANDLOCK_PERMISSION_CAPABILITY_USE`` restricts *exercise* of capabilities the
+process already holds, including those
+gained via ``CLONE_NEWUSER`` which ``PR_SET_NO_NEW_PRIVS`` does not block.
+Sandboxes typically set both.
+
+Rules are added with ``LANDLOCK_RULE_CAPABILITY`` and &struct
+landlock_capability_attr (each rule lists ``CAP_*`` values to allow), and with
+``LANDLOCK_RULE_NAMESPACE`` and &struct landlock_namespace_attr (each rule
+lists ``CLONE_NEW*`` flags to allow).  Landlock is purely restrictive: it can
+only deny what the traditional check would have allowed, never grant additional
+privileges.
+
+Denials of specific capabilities or namespace types can be excluded from audit
+logging per rule, by listing them in the ``quiet_capabilities`` or
+``quiet_namespace_types`` field of the rule (independently of the allowed
+members).  Quieting requires the permission to be handled, is member-granular,
+and only suppresses the audit record of a denial attributed to the rule's own
+layer; it never changes the denial itself or suppresses its trace event, which
+reports ``logged=0``.  Sandboxes should quiet only specific members known to be
+requested but expected to be denied (for example for compatibility with older
+callers), never a blanket set: a blanket set follows the running kernel's known
+members and would hide surprising or future denials from audit.
+
+Rule bodies silently accept values unknown to the current kernel (capabilities
+above ``CAP_LAST_CAP``, unrecognised ``CLONE_NEW*`` bits): they have no runtime
+effect, so a rule compiled against future kernel headers loads without error on
+older kernels.  Future kernels gain new members denied by default until a rule
+explicitly allows them.
+
+The single ``LANDLOCK_PERMISSION_NAMESPACE_USE`` bit gates every kernel path
+that grants the calling process access to a namespace of the controlled types,
+whether by becoming a member of the namespace or by holding a file descriptor
+that references it.  The covered syscall paths are:
+
+* :manpage:`unshare(2)` with ``CLONE_NEW*``: the caller becomes a member of a
+  newly-created namespace.
+* :manpage:`clone(2)` (or :manpage:`clone3(2)`) with ``CLONE_NEW*``: the
+  child becomes a member of a newly-created namespace.
+* :manpage:`setns(2)`: the caller becomes a member of an existing namespace
+  referenced by file descriptor.
+* :manpage:`open_tree(2)` with ``OPEN_TREE_NAMESPACE``: the caller obtains a
+  file descriptor referring to a newly-created mount namespace.
+* :manpage:`open_tree(2)` with ``OPEN_TREE_CLONE``: the caller obtains a file
+  descriptor referring to a newly-created anonymous mount namespace.
+* :manpage:`fsmount(2)` with ``FSMOUNT_NAMESPACE``: the caller obtains a file
+  descriptor referring to a newly-created mount namespace.
+* :manpage:`fsmount(2)` (default): the caller obtains a file descriptor
+  referring to a newly-created anonymous mount namespace.
+
+Anonymous mount namespaces (created by ``open_tree(OPEN_TREE_CLONE)`` and the
+default :manpage:`fsmount(2)`) are intentionally covered by the bit even though
+the calling process does not become a member of them.  Without this coverage, a
+sandboxed process could combine ``open_tree(OPEN_TREE_CLONE)`` with
+:manpage:`move_mount(2)` to graft mounts from a freshly-allocated mount
+namespace into its current namespace, bypassing a ``CLONE_NEWNS`` restriction
+(these mount operations require ``CAP_SYS_ADMIN``, which a sandboxed process
+typically obtains by first creating a user namespace).
+
+In practice, unprivileged processes first create a user namespace (which
+requires no capability and grants all capabilities within it), then use those
+capabilities to create other namespace types.  All non-user namespace types
+require ``CAP_SYS_ADMIN`` for both creation and :manpage:`setns(2)` entry; mount
+namespace entry additionally requires ``CAP_SYS_CHROOT``.  For
+:manpage:`setns(2)`, capabilities are checked relative to the target namespace,
+so a process in an ancestor user namespace naturally satisfies them; this
+includes joining user namespaces, which requires ``CAP_SYS_ADMIN``.  When
+``LANDLOCK_PERMISSION_CAPABILITY_USE`` is also handled, each of these
+capabilities must be explicitly allowed by a rule.
+
+Creating a non-user namespace always requires ``CAP_SYS_ADMIN``, and
+``LANDLOCK_PERMISSION_CAPABILITY_USE`` (when handled) gates that check
+regardless of which user namespace it targets.  This is true whether the
+namespace is created
+on its own, combined with ``CLONE_NEWUSER`` in a single :manpage:`unshare(2)`
+call, or in a separate :manpage:`unshare(2)` call after a user namespace: in
+all cases the kernel checks ``CAP_SYS_ADMIN`` against the owning user
+namespace, and Landlock denies it unless a rule allows
+``CAP_SYS_ADMIN``.  Combining ``CLONE_NEWUSER`` with another ``CLONE_NEW*``
+flag therefore does not avoid the capability check; only user namespace
+creation itself needs no capability rule.
+
+When creating child user namespaces, it is recommended to also create a
+dedicated Landlock domain with restrictions relevant to each namespace context.
+
+Note that ``LANDLOCK_PERMISSION_CAPABILITY_USE`` restricts the *use* of
+capabilities, not their presence in the process's credential.  Capability sets
+can change
+after a domain is enforced through user namespace entry or :manpage:`capset(2)`;
+privileged sandboxes that did not set ``PR_SET_NO_NEW_PRIVS`` may also gain
+capabilities through :manpage:`execve(2)` of binaries with file capabilities.
+In all cases, :manpage:`capget(2)` will report the credential's capability sets,
+but any denied capability will fail with ``EPERM`` when exercised.  Do not rely
+on :manpage:`capget(2)` to determine whether the policy permits a given
+capability; only the actual operation will return ``EPERM`` upon denial.
 
 Truncating files
 ----------------
 
 The operations covered by ``LANDLOCK_ACCESS_FS_WRITE_FILE`` and
 ``LANDLOCK_ACCESS_FS_TRUNCATE`` both change the contents of a file and sometimes
-overlap in non-intuitive ways.  It is recommended to always specify both of
-these together.
+overlap in non-intuitive ways.  It is strongly recommended to always specify
+both of these together (either granting both, or granting none).
 
 A particularly surprising example is :manpage:`creat(2)`.  The name suggests
 that this system call requires the rights to create and write files.  However,
@@ -361,6 +662,10 @@ It should also be noted that truncating files does not require the
 ``LANDLOCK_ACCESS_FS_WRITE_FILE`` right.  Apart from the :manpage:`truncate(2)`
 system call, this can also be done through :manpage:`open(2)` with the flags
 ``O_RDONLY | O_TRUNC``.
+
+At the same time, on some filesystems, :manpage:`fallocate(2)` offers a way to
+shorten file contents with ``FALLOC_FL_COLLAPSE_RANGE`` when the file is opened
+for writing, sidestepping the ``LANDLOCK_ACCESS_FS_TRUNCATE`` right.
 
 The truncate right is associated with the opened file (see below).
 
@@ -431,9 +736,71 @@ system call:
         printf("Landlock supports LANDLOCK_ACCESS_FS_REFER.\n");
     }
 
-The following kernel interfaces are implicitly supported by the first ABI
-version.  Features only supported from a specific version are explicitly marked
-as such.
+All Landlock kernel interfaces are supported by the first ABI version unless
+explicitly noted in their documentation.
+
+Landlock errata
+---------------
+
+In addition to ABI versions, Landlock provides an errata mechanism to track
+fixes for issues that may affect backwards compatibility or require userspace
+awareness.  The errata bitmask can be queried using:
+
+.. code-block:: c
+
+    int errata;
+
+    errata = landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_ERRATA);
+    if (errata < 0) {
+        /* Landlock not available or disabled */
+        return 0;
+    }
+
+The returned value is a bitmask where each bit represents a specific erratum.
+If bit N is set (``errata & (1 << (N - 1))``), then erratum N has been fixed
+in the running kernel.
+
+.. warning::
+
+   **Most applications should NOT check errata.** In 99.9% of cases, checking
+   errata is unnecessary, increases code complexity, and can potentially
+   decrease protection if misused.  For example, disabling the sandbox when an
+   erratum is not fixed could leave the system less secure than using
+   Landlock's best-effort protection.  When in doubt, ignore errata.
+
+.. kernel-doc:: security/landlock/errata/abi-4.h
+    :doc: erratum_1
+
+.. kernel-doc:: security/landlock/errata/abi-6.h
+    :doc: erratum_2
+
+.. kernel-doc:: security/landlock/errata/abi-1.h
+    :doc: erratum_3
+
+.. kernel-doc:: security/landlock/errata/abi-1.h
+    :doc: erratum_4
+
+How to check for errata
+~~~~~~~~~~~~~~~~~~~~~~~
+
+If you determine that your application needs to check for specific errata,
+use this pattern:
+
+.. code-block:: c
+
+    int errata = landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_ERRATA);
+    if (errata >= 0) {
+        /* Check for specific erratum (1-indexed) */
+        if (errata & (1 << (erratum_number - 1))) {
+            /* Erratum N is fixed in this kernel */
+        } else {
+            /* Erratum N is NOT fixed - consider implications for your use case */
+        }
+    }
+
+**Important:** Only check errata if your application specifically relies on
+behavior that changed due to the fix.  The fixes generally make Landlock less
+restrictive or more correct, not more restrictive.
 
 Kernel interface
 ================
@@ -442,7 +809,7 @@ Access rights
 -------------
 
 .. kernel-doc:: include/uapi/linux/landlock.h
-    :identifiers: fs_access net_access scope
+    :identifiers: fs_access net_access scope permission
 
 Creating a new ruleset
 ----------------------
@@ -461,7 +828,8 @@ Extending a ruleset
 
 .. kernel-doc:: include/uapi/linux/landlock.h
     :identifiers: landlock_rule_type landlock_path_beneath_attr
-                  landlock_net_port_attr
+                  landlock_net_port_attr landlock_capability_attr
+                  landlock_namespace_attr
 
 Enforcing a ruleset
 -------------------
@@ -594,6 +962,8 @@ Starting with the Landlock ABI version 6, it is possible to restrict
 :manpage:`signal(7)` sending by setting ``LANDLOCK_SCOPE_SIGNAL`` to the
 ``scoped`` ruleset attribute.
 
+.. _landlock_log_flags:
+
 Logging (ABI < 7)
 -----------------
 
@@ -601,8 +971,85 @@ Starting with the Landlock ABI version 7, it is possible to control logging of
 Landlock audit events with the ``LANDLOCK_RESTRICT_SELF_LOG_SAME_EXEC_OFF``,
 ``LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON``, and
 ``LANDLOCK_RESTRICT_SELF_LOG_SUBDOMAINS_OFF`` flags passed to
-sys_landlock_restrict_self().  See Documentation/admin-guide/LSM/landlock.rst
-for more details on audit.
+sys_landlock_restrict_self().  These flags control audit record generation.
+Landlock tracepoints are not affected by these flags and always fire when
+enabled, providing an alternative observability channel for debugging and
+monitoring.  See Documentation/admin-guide/LSM/landlock.rst for more
+details on audit and tracepoints, and
+Documentation/trace/events-landlock.rst for the complete trace event
+reference.
+
+Thread synchronization (ABI < 8)
+--------------------------------
+
+Starting with the Landlock ABI version 8, it is now possible to
+enforce Landlock rulesets across all threads of the calling process
+using the ``LANDLOCK_RESTRICT_SELF_TSYNC`` flag passed to
+sys_landlock_restrict_self().
+
+Pathname UNIX sockets (ABI < 9)
+-------------------------------
+
+Starting with the Landlock ABI version 9, it is possible to restrict
+connections to pathname UNIX domain sockets (:manpage:`unix(7)`) using
+the new ``LANDLOCK_ACCESS_FS_RESOLVE_UNIX`` right.
+
+UDP bind, connect and send* (ABI < 10)
+--------------------------------------
+
+Starting with the Landlock ABI version 10, it is possible to restrict
+setting the local port of UDP sockets with the
+``LANDLOCK_ACCESS_NET_BIND_UDP`` right. This includes restricting the
+ability to trigger autobind of an ephemeral port by the kernel by e.g.
+sending a first datagram or setting the remote peer of a socket.
+The ``LANDLOCK_ACCESS_NET_CONNECT_SEND_UDP`` right controls setting the
+remote port of UDP sockets (via :manpage:`connect(2)`), and sending
+datagrams to an explicit remote port (ignoring any destination set on
+UDP sockets, via e.g. :manpage:`sendto(2)`).
+
+Quiet rule flag (ABI < 10)
+--------------------------
+
+Starting with the Landlock ABI version 10, it is possible to selectively
+suppress logs for specific denied accesses on a per-object basis with
+the ``LANDLOCK_ADD_RULE_QUIET`` flag of sys_landlock_add_rule(), in
+combination with the ``quiet_access_fs`` and ``quiet_access_net`` fields
+of struct landlock_ruleset_attr.  It is also now possible to suppress
+logs for scope accesses via the ``quiet_scoped`` field of struct
+landlock_ruleset_attr.  The object is marked as quiet within a ruleset
+when at least one sys_landlock_add_rule() call is made for it with the
+``LANDLOCK_ADD_RULE_QUIET`` flag, additional add-rule calls for the same
+object without this flag do not clear it.
+
+no_new_privs flag (ABI < 11)
+----------------------------
+
+Starting with the Landlock ABI version 11, sys_landlock_restrict_self()
+accepts the ``LANDLOCK_RESTRICT_SELF_NO_NEW_PRIVS`` flag, which sets the
+no_new_privs attribute of the calling thread only once the enforcement of
+the ruleset succeeded: no_new_privs is set if and only if the call
+succeeds.  This removes the need for a prior :manpage:`prctl(2)`
+``PR_SET_NO_NEW_PRIVS`` call (or ``CAP_SYS_ADMIN`` use).  When combined
+with ``LANDLOCK_RESTRICT_SELF_TSYNC``, no_new_privs is set on all threads
+of the process.  As explained in the tutorial above, leaving no_new_privs
+unset is risky even when Landlock does not require it.
+
+Capability (ABI < 12)
+---------------------
+
+Starting with the Landlock ABI version 12, it is possible to restrict
+:manpage:`capabilities(7)` with the new ``LANDLOCK_PERMISSION_CAPABILITY_USE``
+permission flag and ``LANDLOCK_RULE_CAPABILITY`` rule type.
+
+Namespace (ABI < 12)
+--------------------
+
+Starting with the Landlock ABI version 12, it is possible to restrict namespace
+use (see :manpage:`namespaces(7)`) across creation (:manpage:`unshare(2)`,
+:manpage:`clone(2)`, :manpage:`clone3(2)`), entry (:manpage:`setns(2)`), and
+fd-reference acquisition (:manpage:`open_tree(2)`, :manpage:`fsmount(2)`) with
+the new ``LANDLOCK_PERMISSION_NAMESPACE_USE`` permission flag and
+``LANDLOCK_RULE_NAMESPACE`` rule type.
 
 .. _kernel_support:
 
@@ -666,10 +1113,10 @@ the boot loader.
 Network support
 ---------------
 
-To be able to explicitly allow TCP operations (e.g., adding a network rule with
-``LANDLOCK_ACCESS_NET_BIND_TCP``), the kernel must support TCP
+To be able to explicitly allow TCP or UDP operations (e.g., adding a network rule with
+``LANDLOCK_ACCESS_NET_BIND_TCP``), the kernel must support the TCP/IP protocol suite
 (``CONFIG_INET=y``).  Otherwise, sys_landlock_add_rule() returns an
-``EAFNOSUPPORT`` error, which can safely be ignored because this kind of TCP
+``EAFNOSUPPORT`` error, which can safely be ignored because this kind of TCP or UDP
 operation is already not possible.
 
 Questions and answers
@@ -702,6 +1149,7 @@ Additional documentation
 ========================
 
 * Documentation/admin-guide/LSM/landlock.rst
+* Documentation/trace/events-landlock.rst
 * Documentation/security/landlock.rst
 * https://landlock.io
 

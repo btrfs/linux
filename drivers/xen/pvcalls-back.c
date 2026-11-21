@@ -324,7 +324,7 @@ static struct sock_mapping *pvcalls_new_active_socket(
 	struct sock_mapping *map;
 	void *page;
 
-	map = kzalloc(sizeof(*map), GFP_KERNEL);
+	map = kzalloc_obj(*map);
 	if (map == NULL) {
 		sock_release(sock);
 		return NULL;
@@ -337,7 +337,7 @@ static struct sock_mapping *pvcalls_new_active_socket(
 
 	ret = xenbus_map_ring_valloc(fedata->dev, &ref, 1, &page);
 	if (ret < 0)
-		goto out;
+		goto out_map;
 	map->ring = page;
 	map->ring_order = map->ring->ring_order;
 	/* first read the order, then map the data ring */
@@ -345,19 +345,19 @@ static struct sock_mapping *pvcalls_new_active_socket(
 	if (map->ring_order > MAX_RING_ORDER) {
 		pr_warn("%s frontend requested ring_order %u, which is > MAX (%u)\n",
 				__func__, map->ring_order, MAX_RING_ORDER);
-		goto out;
+		goto out_unmap_ring;
 	}
 	ret = xenbus_map_ring_valloc(fedata->dev, map->ring->ref,
 				     (1 << map->ring_order), &page);
 	if (ret < 0)
-		goto out;
+		goto out_unmap_ring;
 	map->bytes = page;
 
 	ret = bind_interdomain_evtchn_to_irqhandler_lateeoi(
 			fedata->dev, evtchn,
 			pvcalls_back_conn_event, 0, "pvcalls-backend", map);
 	if (ret < 0)
-		goto out;
+		goto out_unmap_bytes;
 	map->irq = ret;
 
 	map->data.in = map->bytes;
@@ -365,7 +365,7 @@ static struct sock_mapping *pvcalls_new_active_socket(
 
 	map->ioworker.wq = alloc_ordered_workqueue("pvcalls_io", 0);
 	if (!map->ioworker.wq)
-		goto out;
+		goto out_unbind;
 	atomic_set(&map->io, 1);
 	INIT_WORK(&map->ioworker.register_work,	pvcalls_back_ioworker);
 
@@ -381,11 +381,16 @@ static struct sock_mapping *pvcalls_new_active_socket(
 	write_unlock_bh(&map->sock->sk->sk_callback_lock);
 
 	return map;
-out:
-	down(&fedata->socket_lock);
-	list_del(&map->list);
-	pvcalls_back_release_active(fedata->dev, fedata, map);
-	up(&fedata->socket_lock);
+
+out_unbind:
+	unbind_from_irqhandler(map->irq, map);
+out_unmap_bytes:
+	xenbus_unmap_ring_vfree(fedata->dev, map->bytes);
+out_unmap_ring:
+	xenbus_unmap_ring_vfree(fedata->dev, (void *)map->ring);
+out_map:
+	sock_release(sock);
+	kfree(map);
 	return NULL;
 }
 
@@ -409,7 +414,7 @@ static int pvcalls_back_connect(struct xenbus_device *dev,
 	ret = sock_create(AF_INET, SOCK_STREAM, 0, &sock);
 	if (ret < 0)
 		goto out;
-	ret = inet_stream_connect(sock, sa, req->u.connect.len, 0);
+	ret = inet_stream_connect(sock, (struct sockaddr_unsized *)sa, req->u.connect.len, 0);
 	if (ret < 0) {
 		sock_release(sock);
 		goto out;
@@ -447,6 +452,7 @@ static int pvcalls_back_release_active(struct xenbus_device *dev,
 
 	atomic_set(&map->release, 1);
 	flush_work(&map->ioworker.register_work);
+	destroy_workqueue(map->ioworker.wq);
 
 	xenbus_unmap_ring_vfree(dev, map->bytes);
 	xenbus_unmap_ring_vfree(dev, (void *)map->ring);
@@ -632,7 +638,7 @@ static int pvcalls_back_bind(struct xenbus_device *dev,
 
 	fedata = dev_get_drvdata(&dev->dev);
 
-	map = kzalloc(sizeof(*map), GFP_KERNEL);
+	map = kzalloc_obj(*map);
 	if (map == NULL) {
 		ret = -ENOMEM;
 		goto out;
@@ -650,7 +656,7 @@ static int pvcalls_back_bind(struct xenbus_device *dev,
 	if (ret < 0)
 		goto out;
 
-	ret = inet_bind(map->sock, (struct sockaddr *)&req->u.bind.addr,
+	ret = inet_bind(map->sock, (struct sockaddr_unsized *)&req->u.bind.addr,
 			req->u.bind.len);
 	if (ret < 0)
 		goto out;
@@ -934,7 +940,7 @@ static int backend_connect(struct xenbus_device *dev)
 	grant_ref_t ring_ref;
 	struct pvcalls_fedata *fedata = NULL;
 
-	fedata = kzalloc(sizeof(struct pvcalls_fedata), GFP_KERNEL);
+	fedata = kzalloc_obj(struct pvcalls_fedata);
 	if (!fedata)
 		return -ENOMEM;
 

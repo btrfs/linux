@@ -216,12 +216,9 @@ static int clps711x_fb_probe(struct platform_device *pdev)
 	cfb = info->par;
 	platform_set_drvdata(pdev, info);
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!res)
-		goto out_fb_release;
-	cfb->base = devm_ioremap(dev, res->start, resource_size(res));
-	if (!cfb->base) {
-		ret = -ENOMEM;
+	cfb->base = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
+	if (IS_ERR(cfb->base)) {
+		ret = PTR_ERR(cfb->base);
 		goto out_fb_release;
 	}
 
@@ -331,8 +328,6 @@ static int clps711x_fb_probe(struct platform_device *pdev)
 		goto out_fb_dealloc_cmap;
 
 	return 0;
-
-	unregister_framebuffer(info);
 
 out_fb_dealloc_cmap:
 	regmap_update_bits(cfb->syscon, SYSCON_OFFSET, SYSCON1_LCDEN, 0);

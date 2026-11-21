@@ -1,17 +1,24 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2025 Google LLC.
 
-use super::{Reader, Writer};
-use crate::debugfs::callback_adapters::Adapter;
-use crate::prelude::*;
-use crate::seq_file::SeqFile;
-use crate::seq_print;
-use crate::uaccess::UserSlice;
-use core::fmt::{Display, Formatter, Result};
-use core::marker::PhantomData;
+use super::{
+    BinaryReader,
+    BinaryWriter,
+    Reader,
+    Writer, //
+};
 
-#[cfg(CONFIG_DEBUG_FS)]
-use core::ops::Deref;
+use crate::{
+    debugfs::callback_adapters::Adapter,
+    fmt,
+    fs::file,
+    prelude::*,
+    seq_file::SeqFile,
+    seq_print,
+    uaccess::UserSlice, //
+};
+
+use core::marker::PhantomData;
 
 /// # Invariant
 ///
@@ -20,7 +27,7 @@ use core::ops::Deref;
 /// into a reference.
 pub(super) struct FileOps<T> {
     #[cfg(CONFIG_DEBUG_FS)]
-    operations: bindings::file_operations,
+    operations: &'static bindings::file_operations,
     #[cfg(CONFIG_DEBUG_FS)]
     mode: u16,
     _phantom: PhantomData<T>,
@@ -31,7 +38,7 @@ impl<T> FileOps<T> {
     ///
     /// The caller asserts that the provided `operations` is safe to use for a file whose
     /// inode has a pointer to `T` in its private data that is safe to convert into a reference.
-    const unsafe fn new(operations: bindings::file_operations, mode: u16) -> Self {
+    const unsafe fn new(operations: &'static bindings::file_operations, mode: u16) -> Self {
         Self {
             #[cfg(CONFIG_DEBUG_FS)]
             operations,
@@ -55,18 +62,18 @@ impl<T: Adapter> FileOps<T> {
 }
 
 #[cfg(CONFIG_DEBUG_FS)]
-impl<T> Deref for FileOps<T> {
-    type Target = bindings::file_operations;
-
-    fn deref(&self) -> &Self::Target {
-        &self.operations
+impl<T> FileOps<T> {
+    /// Returns a `'static` reference to the inner `file_operations`.
+    #[inline]
+    pub(crate) fn fops(&self) -> &'static bindings::file_operations {
+        self.operations
     }
 }
 
 struct WriterAdapter<T>(T);
 
-impl<'a, T: Writer> Display for WriterAdapter<&'a T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+impl<'a, T: Writer> fmt::Display for WriterAdapter<&'a T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.write(f)
     }
 }
@@ -120,13 +127,12 @@ pub(crate) trait ReadFile<T> {
 
 impl<T: Writer + Sync> ReadFile<T> for T {
     const FILE_OPS: FileOps<T> = {
-        let operations = bindings::file_operations {
+        let operations = &bindings::file_operations {
             read: Some(bindings::seq_read),
             llseek: Some(bindings::seq_lseek),
             release: Some(bindings::single_release),
             open: Some(writer_open::<Self>),
-            // SAFETY: `file_operations` supports zeroes in all fields.
-            ..unsafe { core::mem::zeroed() }
+            ..pin_init::zeroed()
         };
         // SAFETY: `operations` is all stock `seq_file` implementations except for `writer_open`.
         // `open`'s only requirement beyond what is provided to all open functions is that the
@@ -172,14 +178,13 @@ pub(crate) trait ReadWriteFile<T> {
 
 impl<T: Writer + Reader + Sync> ReadWriteFile<T> for T {
     const FILE_OPS: FileOps<T> = {
-        let operations = bindings::file_operations {
+        let operations = &bindings::file_operations {
             open: Some(writer_open::<T>),
             read: Some(bindings::seq_read),
             write: Some(write::<T>),
             llseek: Some(bindings::seq_lseek),
             release: Some(bindings::single_release),
-            // SAFETY: `file_operations` supports zeroes in all fields.
-            ..unsafe { core::mem::zeroed() }
+            ..pin_init::zeroed()
         };
         // SAFETY: `operations` is all stock `seq_file` implementations except for `writer_open`
         // and `write`.
@@ -230,12 +235,11 @@ pub(crate) trait WriteFile<T> {
 
 impl<T: Reader + Sync> WriteFile<T> for T {
     const FILE_OPS: FileOps<T> = {
-        let operations = bindings::file_operations {
+        let operations = &bindings::file_operations {
             open: Some(write_only_open),
             write: Some(write_only_write::<T>),
             llseek: Some(bindings::noop_llseek),
-            // SAFETY: `file_operations` supports zeroes in all fields.
-            ..unsafe { core::mem::zeroed() }
+            ..pin_init::zeroed()
         };
         // SAFETY:
         // * `write_only_open` populates the file private data with the inode private data
@@ -243,5 +247,139 @@ impl<T: Reader + Sync> WriteFile<T> for T {
         //   a `T` and be legal to convert to a shared reference, which `write_only_open`
         //   satisfies.
         unsafe { FileOps::new(operations, 0o200) }
+    };
+}
+
+extern "C" fn blob_read<T: BinaryWriter>(
+    file: *mut bindings::file,
+    buf: *mut c_char,
+    count: usize,
+    ppos: *mut bindings::loff_t,
+) -> isize {
+    // SAFETY:
+    // - `file` is a valid pointer to a `struct file`.
+    // - The type invariant of `FileOps` guarantees that `private_data` points to a valid `T`.
+    let this = unsafe { &*((*file).private_data.cast::<T>()) };
+
+    // SAFETY:
+    // - `ppos` is a valid `file::Offset` pointer.
+    // - We have exclusive access to `ppos`.
+    let pos: &mut file::Offset = unsafe { &mut *ppos };
+
+    let mut writer = UserSlice::new(UserPtr::from_ptr(buf.cast()), count).writer();
+
+    let ret = || -> Result<isize> {
+        let written = this.write_to_slice(&mut writer, pos)?;
+
+        Ok(written.try_into()?)
+    }();
+
+    match ret {
+        Ok(n) => n,
+        Err(e) => e.to_errno() as isize,
+    }
+}
+
+/// Representation of [`FileOps`] for read only binary files.
+pub(crate) trait BinaryReadFile<T> {
+    const FILE_OPS: FileOps<T>;
+}
+
+impl<T: BinaryWriter + Sync> BinaryReadFile<T> for T {
+    const FILE_OPS: FileOps<T> = {
+        let operations = &bindings::file_operations {
+            read: Some(blob_read::<T>),
+            llseek: Some(bindings::default_llseek),
+            open: Some(bindings::simple_open),
+            ..pin_init::zeroed()
+        };
+
+        // SAFETY:
+        // - The private data of `struct inode` does always contain a pointer to a valid `T`.
+        // - `simple_open()` stores the `struct inode`'s private data in the private data of the
+        //   corresponding `struct file`.
+        // - `blob_read()` re-creates a reference to `T` from the `struct file`'s private data.
+        // - `default_llseek()` does not access the `struct file`'s private data.
+        unsafe { FileOps::new(operations, 0o400) }
+    };
+}
+
+extern "C" fn blob_write<T: BinaryReader>(
+    file: *mut bindings::file,
+    buf: *const c_char,
+    count: usize,
+    ppos: *mut bindings::loff_t,
+) -> isize {
+    // SAFETY:
+    // - `file` is a valid pointer to a `struct file`.
+    // - The type invariant of `FileOps` guarantees that `private_data` points to a valid `T`.
+    let this = unsafe { &*((*file).private_data.cast::<T>()) };
+
+    // SAFETY:
+    // - `ppos` is a valid `file::Offset` pointer.
+    // - We have exclusive access to `ppos`.
+    let pos: &mut file::Offset = unsafe { &mut *ppos };
+
+    let mut reader = UserSlice::new(UserPtr::from_ptr(buf.cast_mut().cast()), count).reader();
+
+    let ret = || -> Result<isize> {
+        let read = this.read_from_slice(&mut reader, pos)?;
+
+        Ok(read.try_into()?)
+    }();
+
+    match ret {
+        Ok(n) => n,
+        Err(e) => e.to_errno() as isize,
+    }
+}
+
+/// Representation of [`FileOps`] for write only binary files.
+pub(crate) trait BinaryWriteFile<T> {
+    const FILE_OPS: FileOps<T>;
+}
+
+impl<T: BinaryReader + Sync> BinaryWriteFile<T> for T {
+    const FILE_OPS: FileOps<T> = {
+        let operations = &bindings::file_operations {
+            write: Some(blob_write::<T>),
+            llseek: Some(bindings::default_llseek),
+            open: Some(bindings::simple_open),
+            ..pin_init::zeroed()
+        };
+
+        // SAFETY:
+        // - The private data of `struct inode` does always contain a pointer to a valid `T`.
+        // - `simple_open()` stores the `struct inode`'s private data in the private data of the
+        //   corresponding `struct file`.
+        // - `blob_write()` re-creates a reference to `T` from the `struct file`'s private data.
+        // - `default_llseek()` does not access the `struct file`'s private data.
+        unsafe { FileOps::new(operations, 0o200) }
+    };
+}
+
+/// Representation of [`FileOps`] for read/write binary files.
+pub(crate) trait BinaryReadWriteFile<T> {
+    const FILE_OPS: FileOps<T>;
+}
+
+impl<T: BinaryWriter + BinaryReader + Sync> BinaryReadWriteFile<T> for T {
+    const FILE_OPS: FileOps<T> = {
+        let operations = &bindings::file_operations {
+            read: Some(blob_read::<T>),
+            write: Some(blob_write::<T>),
+            llseek: Some(bindings::default_llseek),
+            open: Some(bindings::simple_open),
+            ..pin_init::zeroed()
+        };
+
+        // SAFETY:
+        // - The private data of `struct inode` does always contain a pointer to a valid `T`.
+        // - `simple_open()` stores the `struct inode`'s private data in the private data of the
+        //   corresponding `struct file`.
+        // - `blob_read()` re-creates a reference to `T` from the `struct file`'s private data.
+        // - `blob_write()` re-creates a reference to `T` from the `struct file`'s private data.
+        // - `default_llseek()` does not access the `struct file`'s private data.
+        unsafe { FileOps::new(operations, 0o600) }
     };
 }

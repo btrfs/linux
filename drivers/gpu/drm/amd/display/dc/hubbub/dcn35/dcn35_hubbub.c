@@ -31,6 +31,7 @@
 #include "dcn35_hubbub.h"
 #include "dm_services.h"
 #include "reg_helper.h"
+#include "dc_dmub_srv.h"
 
 
 #define CTX \
@@ -259,6 +260,7 @@ void hubbub35_get_dchub_ref_freq(struct hubbub *hubbub,
 		unsigned int dccg_ref_freq_inKhz,
 		unsigned int *dchub_ref_freq_inKhz)
 {
+	(void)dccg_ref_freq_inKhz;
 	struct dcn20_hubbub *hubbub2 = TO_DCN20_HUBBUB(hubbub);
 	uint32_t ref_div = 0;
 	uint32_t ref_en = 0;
@@ -529,12 +531,7 @@ void hubbub35_init(struct hubbub *hubbub)
 	hubbub35_set_fgcg(hubbub2,
 			  hubbub->ctx->dc->debug.enable_fine_grain_clock_gating
 				  .bits.dchubbub);
-	/*
-	ignore the "df_pre_cstate_req" from the SDP port control.
-	only the DCN will determine when to connect the SDP port
-	*/
-	REG_UPDATE(DCHUBBUB_SDPIF_CFG0,
-			SDPIF_PORT_CONTROL, 1);
+
 	/*Set SDP's max outstanding request
 	When set to 1: Max outstanding is 512
 	When set to 0: Max outstanding is 256
@@ -547,6 +544,61 @@ void hubbub35_init(struct hubbub *hubbub)
 			DCHUBBUB_ARB_MIN_REQ_OUTSTAND, 256);
 
 	memset(&hubbub2->watermarks.a.cstate_pstate, 0, sizeof(hubbub2->watermarks.a.cstate_pstate));
+}
+
+void dcn35_dchvm_init(struct hubbub *hubbub)
+{
+	struct dcn20_hubbub *hubbub2 = TO_DCN20_HUBBUB(hubbub);
+	uint32_t riommu_active;
+	int i;
+
+	//Init DCHVM block
+	REG_UPDATE(DCHVM_CTRL0, HOSTVM_INIT_REQ, 1);
+
+	//Poll until RIOMMU_ACTIVE = 1
+	for (i = 0; i < 100; i++) {
+		REG_GET(DCHVM_RIOMMU_STAT0, RIOMMU_ACTIVE, &riommu_active);
+
+		if (riommu_active)
+			break;
+		else
+			udelay(5);
+	}
+
+	if (riommu_active) {
+		// Disable gating and memory power requests
+		REG_UPDATE_2(DCHVM_MEM_CTRL, HVM_GPUVMRET_PWR_REQ_DIS, 1, HVM_GPUVMRET_FORCE_REQ, 0);
+		REG_UPDATE_4(DCHVM_CLK_CTRL,
+						HVM_DISPCLK_R_GATE_DIS, 1,
+						HVM_DISPCLK_G_GATE_DIS, 1,
+						HVM_DCFCLK_R_GATE_DIS, 1,
+						HVM_DCFCLK_G_GATE_DIS, 1);
+
+		//Reflect the power status of DCHUBBUB
+		REG_UPDATE(DCHVM_RIOMMU_CTRL0, HOSTVM_POWERSTATUS, 1);
+		udelay(5);
+	}
+
+	// generically re-allow the DCHVM<->rIOMMU SDP port to disconnect after powerstatus=1
+	dc_dmub_srv_hubbub_set_riommu_pctrl(hubbub->ctx, 0x20);
+
+	if (riommu_active) {
+		//Start rIOMMU prefetching
+		REG_UPDATE(DCHVM_RIOMMU_CTRL0, HOSTVM_PREFETCH_REQ, 1);
+
+		//Poll until HOSTVM_PREFETCH_DONE = 1
+		REG_WAIT(DCHVM_RIOMMU_STAT0, HOSTVM_PREFETCH_DONE, 1, 5, 100);
+
+		//Enable memory power requests
+		REG_UPDATE(DCHVM_MEM_CTRL, HVM_GPUVMRET_PWR_REQ_DIS, 0);
+		// Enable dynamic clock gating
+		REG_UPDATE_4(DCHVM_CLK_CTRL,
+						HVM_DISPCLK_R_GATE_DIS, 0,
+						HVM_DISPCLK_G_GATE_DIS, 0,
+						HVM_DCFCLK_R_GATE_DIS, 0,
+						HVM_DCFCLK_G_GATE_DIS, 0);
+		hubbub->riommu_active = true;
+	}
 }
 
 /*static void hubbub35_set_request_limit(struct hubbub *hubbub,
@@ -589,8 +641,8 @@ static const struct hubbub_funcs hubbub35_funcs = {
 	.hubbub_read_state = hubbub2_read_state,
 	.force_usr_retraining_allow = hubbub32_force_usr_retraining_allow,
 	.dchubbub_init = hubbub35_init,
-	.get_det_sizes = hubbub3_get_det_sizes,
-	.compbuf_config_error = hubbub3_compbuf_config_error,
+	.hubbub_read_reg_state = hubbub3_read_reg_state,
+	.dchvm_init = dcn35_dchvm_init
 };
 
 void hubbub35_construct(struct dcn20_hubbub *hubbub2,
@@ -603,6 +655,8 @@ void hubbub35_construct(struct dcn20_hubbub *hubbub2,
 	int config_return_buffer_size_kb)
 {
 	hubbub2->base.ctx = ctx;
+
+	hubbub2->base.inst = 0;
 	hubbub2->base.funcs = &hubbub35_funcs;
 	hubbub2->regs = hubbub_regs;
 	hubbub2->shifts = hubbub_shift;

@@ -106,7 +106,8 @@ define RUN_TESTS
 	if [ "X$(summary)" != "X" ]; then       \
 		per_test_logging=1;		\
 	fi;                                     \
-	run_many $(1)
+	run_many $(1);				\
+	ktap_print_totals
 endef
 
 define INSTALL_INCLUDES
@@ -155,7 +156,7 @@ endef
 
 define INSTALL_MODS_RULE
 	$(if $(INSTALL_LIST),@mkdir -p $(INSTALL_PATH)/$(INSTALL_LIST))
-	$(if $(INSTALL_LIST),rsync -a --copy-unsafe-links $(INSTALL_LIST)/*.ko $(INSTALL_PATH)/$(INSTALL_LIST))
+	$(if $(wildcard $(INSTALL_LIST)/*.ko),rsync -a --copy-unsafe-links $(INSTALL_LIST)/*.ko $(INSTALL_PATH)/$(INSTALL_LIST))
 endef
 
 define INSTALL_RULE
@@ -178,11 +179,15 @@ else
 	$(error Error: set INSTALL_PATH to use install)
 endif
 
-emit_tests:
+define EMIT_TESTS
 	for TEST in $(TEST_GEN_PROGS) $(TEST_CUSTOM_PROGS) $(TEST_PROGS); do \
 		BASENAME_TEST=`basename $$TEST`;	\
 		echo "$(COLLECTION):$$BASENAME_TEST";	\
 	done
+endef
+
+emit_tests:
+	+$(EMIT_TESTS)
 
 # define if isn't already. It is undefined in make O= case.
 ifeq ($(RM),)
@@ -198,6 +203,9 @@ clean: $(if $(TEST_GEN_MODS_DIR),clean_mods_dir)
 
 # Build with _GNU_SOURCE by default
 CFLAGS += -D_GNU_SOURCE=
+
+# Additional include paths needed by kselftest.h and local headers
+CFLAGS += -I${top_srcdir}/tools/testing/selftests
 
 # Enables to extend CFLAGS and LDFLAGS from command line, e.g.
 # make USERCFLAGS=-Werror USERLDFLAGS=-static

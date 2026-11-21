@@ -52,11 +52,6 @@ struct drm_scanout_buffer;
 struct drm_writeback_connector;
 struct drm_writeback_job;
 
-enum mode_set_atomic {
-	LEAVE_ATOMIC_MODE_SET,
-	ENTER_ATOMIC_MODE_SET,
-};
-
 /**
  * struct drm_crtc_helper_funcs - helper operations for CRTCs
  *
@@ -254,24 +249,6 @@ struct drm_crtc_helper_funcs {
 			     struct drm_framebuffer *old_fb);
 
 	/**
-	 * @mode_set_base_atomic:
-	 *
-	 * This callback is used by the fbdev helpers to set a new framebuffer
-	 * and scanout without sleeping, i.e. from an atomic calling context. It
-	 * is only used to implement kgdb support.
-	 *
-	 * This callback is optional and only needed for kgdb support in the fbdev
-	 * helpers.
-	 *
-	 * RETURNS:
-	 *
-	 * 0 on success or a negative error code on failure.
-	 */
-	int (*mode_set_base_atomic)(struct drm_crtc *crtc,
-				    struct drm_framebuffer *fb, int x, int y,
-				    enum mode_set_atomic);
-
-	/**
 	 * @disable:
 	 *
 	 * This callback should be used to disable the CRTC. With the atomic
@@ -303,6 +280,20 @@ struct drm_crtc_helper_funcs {
 	 * rules under atomic.
 	 */
 	void (*disable)(struct drm_crtc *crtc);
+
+	/**
+	 * @hw_reset:
+	 *
+	 * Optional hook for CRTC hardware reset.
+	 *
+	 * Unlike @drm_crtc_funcs.reset, which both resets hardware and
+	 * creates new software state, this hook only resets the
+	 * hardware to a known good state without touching the software
+	 * state at all.
+	 *
+	 * This hook is called by drm_mode_config_reset().
+	 */
+	void (*hw_reset)(struct drm_crtc *crtc);
 
 	/**
 	 * @atomic_check:
@@ -355,7 +346,7 @@ struct drm_crtc_helper_funcs {
 	 * deadlock.
 	 */
 	int (*atomic_check)(struct drm_crtc *crtc,
-			    struct drm_atomic_state *state);
+			    struct drm_atomic_commit *state);
 
 	/**
 	 * @atomic_begin:
@@ -376,7 +367,7 @@ struct drm_crtc_helper_funcs {
 	 * optional.
 	 */
 	void (*atomic_begin)(struct drm_crtc *crtc,
-			     struct drm_atomic_state *state);
+			     struct drm_atomic_commit *state);
 	/**
 	 * @atomic_flush:
 	 *
@@ -400,7 +391,7 @@ struct drm_crtc_helper_funcs {
 	 * optional.
 	 */
 	void (*atomic_flush)(struct drm_crtc *crtc,
-			     struct drm_atomic_state *state);
+			     struct drm_atomic_commit *state);
 
 	/**
 	 * @atomic_enable:
@@ -422,7 +413,7 @@ struct drm_crtc_helper_funcs {
 	 * This function is optional.
 	 */
 	void (*atomic_enable)(struct drm_crtc *crtc,
-			      struct drm_atomic_state *state);
+			      struct drm_atomic_commit *state);
 
 	/**
 	 * @atomic_disable:
@@ -442,7 +433,7 @@ struct drm_crtc_helper_funcs {
 	 * This function is optional.
 	 */
 	void (*atomic_disable)(struct drm_crtc *crtc,
-			       struct drm_atomic_state *state);
+			       struct drm_atomic_commit *state);
 
 	/**
 	 * @get_scanout_position:
@@ -490,6 +481,18 @@ struct drm_crtc_helper_funcs {
 				     bool in_vblank_irq, int *vpos, int *hpos,
 				     ktime_t *stime, ktime_t *etime,
 				     const struct drm_display_mode *mode);
+
+	/**
+	 * @handle_vblank_timeout: Handles timeouts of the vblank timer.
+	 *
+	 * Called by CRTC's the vblank timer on each timeout. Semantics is
+	 * equivalient to drm_crtc_handle_vblank(). Implementations should
+	 * invoke drm_crtc_handle_vblank() as part of processing the timeout.
+	 *
+	 * This callback is optional. If unset, the vblank timer invokes
+	 * drm_crtc_handle_vblank() directly.
+	 */
+	bool (*handle_vblank_timeout)(struct drm_crtc *crtc);
 };
 
 /**
@@ -724,7 +727,7 @@ struct drm_encoder_helper_funcs {
 	 * @atomic_enable.
 	 */
 	void (*atomic_disable)(struct drm_encoder *encoder,
-			       struct drm_atomic_state *state);
+			       struct drm_atomic_commit *state);
 
 	/**
 	 * @atomic_enable:
@@ -747,7 +750,7 @@ struct drm_encoder_helper_funcs {
 	 * @atomic_disable.
 	 */
 	void (*atomic_enable)(struct drm_encoder *encoder,
-			      struct drm_atomic_state *state);
+			      struct drm_atomic_commit *state);
 
 	/**
 	 * @disable:
@@ -820,7 +823,7 @@ struct drm_encoder_helper_funcs {
 	 *
 	 * This function is called in the check phase of an atomic update. The
 	 * driver is not allowed to change anything outside of the free-standing
-	 * state objects passed-in or assembled in the overall &drm_atomic_state
+	 * state objects passed-in or assembled in the overall &drm_atomic_commit
 	 * update tracking structure.
 	 *
 	 * Also beware that userspace can request its own custom modes, neither
@@ -931,6 +934,34 @@ struct drm_connector_helper_funcs {
 	int (*detect_ctx)(struct drm_connector *connector,
 			  struct drm_modeset_acquire_ctx *ctx,
 			  bool force);
+
+	/**
+	 * @force_ctx:
+	 *
+	 * This function is called to update internal encoder state when the
+	 * connector is forced to a certain state by userspace, either through
+	 * the sysfs interfaces or on the kernel cmdline. In that case the
+	 * @detect_ctx callback isn't called.
+	 *
+	 * This is the atomic version of &drm_connector_funcs.force.  When
+	 * both are implemented, this one takes precedence and
+	 * &drm_connector_funcs.force is not called.
+	 *
+	 * To avoid races against concurrent connector state updates, the
+	 * helper libraries always call this with ctx set to a valid context,
+	 * and &drm_mode_config.connection_mutex will always be locked with
+	 * the ctx parameter set to this ctx. This allows taking additional
+	 * locks as required.
+	 *
+	 * RETURNS:
+	 *
+	 * Zero on success, or a negative error code otherwise.  This includes
+	 * -EDEADLK when a lock acquisition needs to be restarted, in which
+	 * case the helpers take care of backing off and calling this function
+	 * again.
+	 */
+	int (*force_ctx)(struct drm_connector *connector,
+			 struct drm_modeset_acquire_ctx *ctx);
 
 	/**
 	 * @mode_valid:
@@ -1055,7 +1086,7 @@ struct drm_connector_helper_funcs {
 	 *
 	 * This function is called in the check phase of an atomic update. The
 	 * driver is not allowed to change anything outside of the
-	 * &drm_atomic_state update tracking structure passed in.
+	 * &drm_atomic_commit update tracking structure passed in.
 	 *
 	 * RETURNS:
 	 *
@@ -1065,7 +1096,7 @@ struct drm_connector_helper_funcs {
 	 * for this.
 	 */
 	struct drm_encoder *(*atomic_best_encoder)(struct drm_connector *connector,
-						   struct drm_atomic_state *state);
+						   struct drm_atomic_commit *state);
 
 	/**
 	 * @atomic_check:
@@ -1088,7 +1119,7 @@ struct drm_connector_helper_funcs {
 	 *
 	 * This function is called in the check phase of an atomic update. The
 	 * driver is not allowed to change anything outside of the free-standing
-	 * state objects passed-in or assembled in the overall &drm_atomic_state
+	 * state objects passed-in or assembled in the overall &drm_atomic_commit
 	 * update tracking structure.
 	 *
 	 * RETURNS:
@@ -1099,7 +1130,7 @@ struct drm_connector_helper_funcs {
 	 * deadlock.
 	 */
 	int (*atomic_check)(struct drm_connector *connector,
-			    struct drm_atomic_state *state);
+			    struct drm_atomic_commit *state);
 
 	/**
 	 * @atomic_commit:
@@ -1114,7 +1145,7 @@ struct drm_connector_helper_funcs {
 	 * This callback is used by the atomic modeset helpers.
 	 */
 	void (*atomic_commit)(struct drm_connector *connector,
-			      struct drm_atomic_state *state);
+			      struct drm_atomic_commit *state);
 
 	/**
 	 * @prepare_writeback_job:
@@ -1310,7 +1341,7 @@ struct drm_plane_helper_funcs {
 	 *
 	 * This function is called in the check phase of an atomic update. The
 	 * driver is not allowed to change anything outside of the
-	 * &drm_atomic_state update tracking structure.
+	 * &drm_atomic_commit update tracking structure.
 	 *
 	 * RETURNS:
 	 *
@@ -1320,7 +1351,7 @@ struct drm_plane_helper_funcs {
 	 * deadlock.
 	 */
 	int (*atomic_check)(struct drm_plane *plane,
-			    struct drm_atomic_state *state);
+			    struct drm_atomic_commit *state);
 
 	/**
 	 * @atomic_update:
@@ -1337,7 +1368,7 @@ struct drm_plane_helper_funcs {
 	 * This callback is used by the atomic modeset helpers, but it is optional.
 	 */
 	void (*atomic_update)(struct drm_plane *plane,
-			      struct drm_atomic_state *state);
+			      struct drm_atomic_commit *state);
 
 	/**
 	 * @atomic_enable:
@@ -1362,7 +1393,7 @@ struct drm_plane_helper_funcs {
 	 * implement the complete plane update in @atomic_update.
 	 */
 	void (*atomic_enable)(struct drm_plane *plane,
-			      struct drm_atomic_state *state);
+			      struct drm_atomic_commit *state);
 
 	/**
 	 * @atomic_disable:
@@ -1387,7 +1418,7 @@ struct drm_plane_helper_funcs {
 	 * optional. It's intended to reverse the effects of @atomic_enable.
 	 */
 	void (*atomic_disable)(struct drm_plane *plane,
-			       struct drm_atomic_state *state);
+			       struct drm_atomic_commit *state);
 
 	/**
 	 * @atomic_async_check:
@@ -1411,7 +1442,7 @@ struct drm_plane_helper_funcs {
 	 * can not be applied in asynchronous manner.
 	 */
 	int (*atomic_async_check)(struct drm_plane *plane,
-				  struct drm_atomic_state *state, bool flip);
+				  struct drm_atomic_commit *state, bool flip);
 
 	/**
 	 * @atomic_async_update:
@@ -1448,22 +1479,25 @@ struct drm_plane_helper_funcs {
 	 *    for deferring if needed, until a common solution is created.
 	 */
 	void (*atomic_async_update)(struct drm_plane *plane,
-				    struct drm_atomic_state *state);
+				    struct drm_atomic_commit *state);
 
 	/**
 	 * @get_scanout_buffer:
 	 *
-	 * Get the current scanout buffer, to display a message with drm_panic.
+	 * Get the current scanout buffer to display a message with drm_panic.
 	 * The driver should do the minimum changes to provide a buffer,
 	 * that can be used to display the panic screen. Currently only linear
 	 * buffers are supported. Non-linear buffer support is on the TODO list.
 	 * The device &dev.mode_config.panic_lock is taken before calling this
 	 * function, so you can safely access the &plane.state
 	 * It is called from a panic callback, and must follow its restrictions.
-	 * Please look the documentation at drm_panic_trylock() for an in-depth
+	 * Please look the documentation on DRM panic handling for an in-depth
 	 * discussions of what's safe and what is not allowed.
+	 *
 	 * It's a best effort mode, so it's expected that in some complex cases
-	 * the panic screen won't be displayed.
+	 * the panic screen won't be displayed. Drivers must not make any
+	 * assumptions about the actual state of the hardware.
+	 *
 	 * The returned &drm_scanout_buffer.map must be valid if no error code is
 	 * returned.
 	 *
@@ -1483,7 +1517,7 @@ struct drm_plane_helper_funcs {
 	 * It is only called if get_scanout_buffer() returned successfully, and
 	 * the &dev.mode_config.panic_lock is held during the entire sequence.
 	 * It is called from a panic callback, and must follow its restrictions.
-	 * Please look the documentation at drm_panic_trylock() for an in-depth
+	 * Please look the documentation on DRM panic handling for an in-depth
 	 * discussions of what's safe and what is not allowed.
 	 */
 	void (*panic_flush)(struct drm_plane *plane);
@@ -1541,7 +1575,7 @@ struct drm_mode_config_helper_funcs {
 	 * This hook is optional, the default implementation is
 	 * drm_atomic_helper_commit_tail().
 	 */
-	void (*atomic_commit_tail)(struct drm_atomic_state *state);
+	void (*atomic_commit_tail)(struct drm_atomic_commit *state);
 
 	/**
 	 * @atomic_commit_setup:
@@ -1562,7 +1596,7 @@ struct drm_mode_config_helper_funcs {
 	 *
 	 * This hook is optional.
 	 */
-	int (*atomic_commit_setup)(struct drm_atomic_state *state);
+	int (*atomic_commit_setup)(struct drm_atomic_commit *state);
 };
 
 #endif

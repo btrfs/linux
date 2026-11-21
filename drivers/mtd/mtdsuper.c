@@ -31,8 +31,10 @@ static int mtd_get_sb(struct fs_context *fc,
 	int ret;
 
 	sb = sget_dev(fc, MKDEV(MTD_BLOCK_MAJOR, mtd->index));
-	if (IS_ERR(sb))
+	if (IS_ERR(sb)) {
+		put_mtd_device(mtd);
 		return PTR_ERR(sb);
+	}
 
 	if (sb->s_root) {
 		/* new mountpoint for an already mounted superblock */
@@ -132,12 +134,12 @@ int get_tree_mtd(struct fs_context *fc,
 
 		} else if (isdigit(fc->source[3])) {
 			/* mount by MTD device number name */
-			char *endptr;
+			unsigned int mtdnr_val;
 
-			mtdnr = simple_strtoul(fc->source + 3, &endptr, 0);
-			if (!*endptr) {
+			if (kstrtouint(fc->source + 3, 0, &mtdnr_val) == 0) {
+				mtdnr = mtdnr_val;
 				/* It was a valid number */
-				pr_debug("MTDSB: mtd%%d, mtdnr %d\n", mtdnr);
+				pr_debug("MTDSB: mtd%%d, mtdnr %u\n", mtdnr_val);
 				return mtd_get_sb_by_nr(fc, mtdnr, fill_super);
 			}
 		}

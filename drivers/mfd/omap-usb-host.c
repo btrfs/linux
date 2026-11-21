@@ -539,7 +539,7 @@ static int usbhs_omap_probe(struct platform_device *pdev)
 
 	if (dev->of_node) {
 		/* For DT boot we populate platform data from OF node */
-		pdata = devm_kzalloc(dev, sizeof(*pdata), GFP_KERNEL);
+		pdata = devm_kzalloc_obj(dev, *pdata);
 		if (!pdata)
 			return -ENOMEM;
 
@@ -561,7 +561,7 @@ static int usbhs_omap_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
-	omap = devm_kzalloc(dev, sizeof(*omap), GFP_KERNEL);
+	omap = devm_kzalloc_obj(dev, *omap);
 	if (!omap) {
 		dev_err(dev, "Memory allocation failed\n");
 		return -ENOMEM;
@@ -819,8 +819,10 @@ static void usbhs_omap_remove(struct platform_device *pdev)
 {
 	pm_runtime_disable(&pdev->dev);
 
-	/* remove children */
-	device_for_each_child(&pdev->dev, NULL, usbhs_omap_remove_child);
+	if (pdev->dev.of_node)
+		of_platform_depopulate(&pdev->dev);
+	else
+		device_for_each_child(&pdev->dev, NULL, usbhs_omap_remove_child);
 }
 
 static const struct dev_pm_ops usbhsomap_dev_pm_ops = {

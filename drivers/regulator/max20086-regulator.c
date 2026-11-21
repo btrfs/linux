@@ -144,8 +144,8 @@ static int max20086_parse_regulators_dt(struct max20086 *chip, bool *boot_on)
 		return -ENODEV;
 	}
 
-	matches = devm_kcalloc(chip->dev, chip->info->num_outputs,
-			       sizeof(*matches), GFP_KERNEL);
+	matches = devm_kzalloc_objs(chip->dev, *matches,
+				    chip->info->num_outputs);
 	if (!matches)
 		return -ENOMEM;
 
@@ -223,7 +223,7 @@ static int max20086_i2c_probe(struct i2c_client *i2c)
 	bool boot_on;
 	int ret;
 
-	chip = devm_kzalloc(&i2c->dev, sizeof(*chip), GFP_KERNEL);
+	chip = devm_kzalloc_obj(&i2c->dev, *chip);
 	if (!chip)
 		return -ENOMEM;
 
@@ -301,10 +301,10 @@ static const struct max20086_chip_info max20089_chip_info = {
 };
 
 static const struct i2c_device_id max20086_i2c_id[] = {
-	{ "max20086", (kernel_ulong_t)&max20086_chip_info },
-	{ "max20087", (kernel_ulong_t)&max20087_chip_info },
-	{ "max20088", (kernel_ulong_t)&max20088_chip_info },
-	{ "max20089", (kernel_ulong_t)&max20089_chip_info },
+	{ .name = "max20086", .driver_data = (kernel_ulong_t)&max20086_chip_info },
+	{ .name = "max20087", .driver_data = (kernel_ulong_t)&max20087_chip_info },
+	{ .name = "max20088", .driver_data = (kernel_ulong_t)&max20088_chip_info },
+	{ .name = "max20089", .driver_data = (kernel_ulong_t)&max20089_chip_info },
 	{ /* Sentinel */ }
 };
 MODULE_DEVICE_TABLE(i2c, max20086_i2c_id);

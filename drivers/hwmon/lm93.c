@@ -2605,7 +2605,7 @@ static int lm93_probe(struct i2c_client *client)
 		return -ENODEV;
 	}
 
-	data = devm_kzalloc(dev, sizeof(struct lm93_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct lm93_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -2624,8 +2624,8 @@ static int lm93_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id lm93_id[] = {
-	{ "lm93" },
-	{ "lm94" },
+	{ .name = "lm93" },
+	{ .name = "lm94" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, lm93_id);

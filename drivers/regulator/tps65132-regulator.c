@@ -230,7 +230,7 @@ static int tps65132_probe(struct i2c_client *client)
 	int id;
 	int ret;
 
-	tps = devm_kzalloc(dev, sizeof(*tps), GFP_KERNEL);
+	tps = devm_kzalloc_obj(dev, *tps);
 	if (!tps)
 		return -ENOMEM;
 
@@ -262,8 +262,8 @@ static int tps65132_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id tps65132_id[] = {
-	{.name = "tps65132",},
-	{},
+	{ .name = "tps65132" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tps65132_id);
 

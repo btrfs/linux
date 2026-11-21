@@ -32,6 +32,7 @@
 
 #include <net/ip.h>
 #include <net/ipv6.h>
+#include <net/ip6_route.h>
 #include <net/addrconf.h>
 #include <net/dst_metadata.h>
 #include <net/route.h>
@@ -53,6 +54,7 @@ static unsigned int brnf_net_id __read_mostly;
 
 struct brnf_net {
 	bool enabled;
+	bool in_userns;
 
 #ifdef CONFIG_SYSCTL
 	struct ctl_table_header *ctl_hdr;
@@ -296,7 +298,11 @@ int br_nf_pre_routing_finish_bridge(struct net *net, struct sock *sk, struct sk_
 				goto free_skb;
 			}
 
-			neigh_hh_bridge(&neigh->hh, skb);
+			if (neigh_hh_bridge(&neigh->hh, skb)) {
+				neigh_release(neigh);
+				goto free_skb;
+			}
+
 			skb->dev = br_indev;
 
 			ret = br_handle_frame_finish(net, sk, skb);
@@ -890,7 +896,6 @@ static int br_nf_dev_queue_xmit(struct net *net, struct sock *sk, struct sk_buff
 	}
 	if (IS_ENABLED(CONFIG_NF_DEFRAG_IPV6) &&
 	    skb->protocol == htons(ETH_P_IPV6)) {
-		const struct nf_ipv6_ops *v6ops = nf_get_ipv6_ops();
 		struct brnf_frag_data *data;
 
 		if (br_validate_ipv6(net, skb))
@@ -906,15 +911,9 @@ static int br_nf_dev_queue_xmit(struct net *net, struct sock *sk, struct sk_buff
 		skb_copy_from_linear_data_offset(skb, -data->size, data->mac,
 						 data->size);
 
-		if (v6ops) {
-			ret = v6ops->fragment(net, sk, skb, br_nf_push_frag_xmit);
-			local_unlock_nested_bh(&brnf_frag_data_storage.bh_lock);
-			return ret;
-		}
+		ret = ip6_fragment(net, sk, skb, br_nf_push_frag_xmit);
 		local_unlock_nested_bh(&brnf_frag_data_storage.bh_lock);
-
-		kfree_skb(skb);
-		return -EMSGSIZE;
+		return ret;
 	}
 	nf_bridge_info_free(skb);
 	return br_dev_queue_push_xmit(net, sk, skb);
@@ -1102,7 +1101,7 @@ static int brnf_device_event(struct notifier_block *unused, unsigned long event,
 
 	net = dev_net(dev);
 	brnet = net_generic(net, brnf_net_id);
-	if (brnet->enabled)
+	if (brnet->enabled || brnet->in_userns)
 		return NOTIFY_OK;
 
 	ret = nf_register_net_hooks(net, br_nf_ops, ARRAY_SIZE(br_nf_ops));
@@ -1231,9 +1230,11 @@ static inline void br_netfilter_sysctl_default(struct brnf_net *brnf)
 	brnf->filter_pppoe_tagged = 0;
 	brnf->pass_vlan_indev = 0;
 }
+#endif
 
 static int br_netfilter_sysctl_init_net(struct net *net)
 {
+#ifdef CONFIG_SYSCTL
 	struct ctl_table *table = brnf_table;
 	struct brnf_net *brnet;
 
@@ -1261,25 +1262,39 @@ static int br_netfilter_sysctl_init_net(struct net *net)
 
 		return -ENOMEM;
 	}
-
+#endif
 	return 0;
 }
 
 static void br_netfilter_sysctl_exit_net(struct net *net,
 					 struct brnf_net *brnet)
 {
-	const struct ctl_table *table = brnet->ctl_hdr->ctl_table_arg;
+#ifdef CONFIG_SYSCTL
+	struct ctl_table_header *header = brnet->ctl_hdr;
+	const struct ctl_table *table;
 
-	unregister_net_sysctl_table(brnet->ctl_hdr);
+	if (!header)
+		return;
+
+	table = header->ctl_table_arg;
+	unregister_net_sysctl_table(header);
 	if (!net_eq(net, &init_net))
 		kfree(table);
+#endif
 }
 
 static int __net_init brnf_init_net(struct net *net)
 {
+	if (net->user_ns != &init_user_ns) {
+		struct brnf_net *brnet = net_generic(net, brnf_net_id);
+
+		brnet->in_userns = true;
+		pr_warn_once("br_netfilter no longer supported in user namespaces\n");
+		return 0;
+	}
+
 	return br_netfilter_sysctl_init_net(net);
 }
-#endif
 
 static void __net_exit brnf_exit_net(struct net *net)
 {
@@ -1291,15 +1306,11 @@ static void __net_exit brnf_exit_net(struct net *net)
 		brnet->enabled = false;
 	}
 
-#ifdef CONFIG_SYSCTL
 	br_netfilter_sysctl_exit_net(net, brnet);
-#endif
 }
 
 static struct pernet_operations brnf_net_ops __read_mostly = {
-#ifdef CONFIG_SYSCTL
 	.init = brnf_init_net,
-#endif
 	.exit = brnf_exit_net,
 	.id   = &brnf_net_id,
 	.size = sizeof(struct brnf_net),
@@ -1320,7 +1331,7 @@ static int __init br_netfilter_init(void)
 	}
 
 	RCU_INIT_POINTER(nf_br_ops, &br_ops);
-	printk(KERN_NOTICE "Bridge firewalling registered\n");
+	pr_warn("br_netfilter is slated for removal in 2027.\n");
 	return 0;
 }
 

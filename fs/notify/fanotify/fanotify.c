@@ -14,6 +14,7 @@
 #include <linux/sched/mm.h>
 #include <linux/statfs.h>
 #include <linux/stringhash.h>
+#include <linux/pidfs.h>
 
 #include "fanotify.h"
 
@@ -120,10 +121,7 @@ static bool fanotify_error_event_equal(struct fanotify_error_event *fee1,
 				       struct fanotify_error_event *fee2)
 {
 	/* Error events against the same file system are always merged. */
-	if (!fanotify_fsid_equal(&fee1->fsid, &fee2->fsid))
-		return false;
-
-	return true;
+	return fanotify_fsid_equal(&fee1->fsid, &fee2->fsid);
 }
 
 static bool fanotify_should_merge(struct fanotify_event *old,
@@ -457,7 +455,7 @@ static int fanotify_encode_fh(struct fanotify_fh *fh, struct inode *inode,
 	/*
 	 * Unlike file_handle, type and len of struct fanotify_fh are u8.
 	 * Traditionally, filesystem return handle_type < 0xff, but there
-	 * is no enforecement for that in vfs.
+	 * is no enforcement for that in vfs.
 	 */
 	BUILD_BUG_ON(MAX_HANDLE_SZ > 0xff || FILEID_INVALID > 0xff);
 	if (type <= 0 || type >= FILEID_INVALID || fh_len != dwords << 2)
@@ -601,9 +599,9 @@ static struct fanotify_event *fanotify_alloc_perm_event(const void *data,
 	pevent->hdr.pad = 0;
 	pevent->hdr.len = 0;
 	pevent->state = FAN_EVENT_INIT;
+	pevent->watchdog_cnt = 0;
 	pevent->path = *path;
-	/* NULL ppos means no range info */
-	pevent->ppos = range ? &range->pos : NULL;
+	pevent->pos = range ? range->pos : FANOTIFY_NO_RANGE;
 	pevent->count = range ? range->count : 0;
 	path_get(path);
 
@@ -650,6 +648,9 @@ static struct fanotify_event *fanotify_alloc_name_event(struct inode *dir,
 	unsigned long name2_len = name2 ? name2->len : 0;
 	unsigned int len, size;
 
+	if (WARN_ON_ONCE(name_len >= PATH_MAX || name2_len >= PATH_MAX))
+		return NULL;
+
 	/* Reserve terminating null byte even for empty name */
 	size = sizeof(*fne) + name_len + name2_len + 2;
 	if (dir_fh_len)
@@ -658,7 +659,7 @@ static struct fanotify_event *fanotify_alloc_name_event(struct inode *dir,
 		size += FANOTIFY_FH_HDR_LEN + dir2_fh_len;
 	if (child_fh_len)
 		size += FANOTIFY_FH_HDR_LEN + child_fh_len;
-	fne = kmalloc(size, gfp);
+	fne = kvmalloc(size, gfp);
 	if (!fne)
 		return NULL;
 
@@ -842,6 +843,15 @@ static struct fanotify_event *fanotify_alloc_event(
 	/* Whoever is interested in the event, pays for the allocation. */
 	old_memcg = set_active_memcg(group->memcg);
 
+	if (FAN_GROUP_FLAG(group, FAN_REPORT_TID))
+		pid = task_pid(current);
+	else
+		pid = task_tgid(current);
+
+	if (FAN_GROUP_FLAG(group, FAN_REPORT_PIDFD) &&
+	    pidfs_register_pid_gfp(pid, gfp))
+		goto out;
+
 	if (fanotify_is_perm_event(mask)) {
 		event = fanotify_alloc_perm_event(data, data_type, gfp);
 	} else if (fanotify_is_error_event(mask)) {
@@ -863,15 +873,10 @@ static struct fanotify_event *fanotify_alloc_event(
 	if (!event)
 		goto out;
 
-	if (FAN_GROUP_FLAG(group, FAN_REPORT_TID))
-		pid = get_pid(task_pid(current));
-	else
-		pid = get_pid(task_tgid(current));
-
 	/* Mix event info, FAN_ONDIR flag and pid into event merge key */
 	hash ^= hash_long((unsigned long)pid | ondir, FANOTIFY_EVENT_HASH_BITS);
 	fanotify_init_event(event, hash, mask);
-	event->pid = pid;
+	event->pid = get_pid(pid);
 
 out:
 	set_active_memcg(old_memcg);
@@ -1048,7 +1053,7 @@ static void fanotify_free_fid_event(struct fanotify_event *event)
 
 static void fanotify_free_name_event(struct fanotify_event *event)
 {
-	kfree(FANOTIFY_NE(event));
+	kvfree(FANOTIFY_NE(event));
 }
 
 static void fanotify_free_error_event(struct fsnotify_group *group,

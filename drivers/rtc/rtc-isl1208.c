@@ -110,11 +110,11 @@ static const struct isl1208_config config_raa215300_a0 = {
 };
 
 static const struct i2c_device_id isl1208_id[] = {
-	{ "isl1208", .driver_data = (kernel_ulong_t)&config_isl1208 },
-	{ "isl1209", .driver_data = (kernel_ulong_t)&config_isl1209 },
-	{ "isl1218", .driver_data = (kernel_ulong_t)&config_isl1218 },
-	{ "isl1219", .driver_data = (kernel_ulong_t)&config_isl1219 },
-	{ "raa215300_a0", .driver_data = (kernel_ulong_t)&config_raa215300_a0 },
+	{ .name = "isl1208", .driver_data = (kernel_ulong_t)&config_isl1208 },
+	{ .name = "isl1209", .driver_data = (kernel_ulong_t)&config_isl1209 },
+	{ .name = "isl1218", .driver_data = (kernel_ulong_t)&config_isl1218 },
+	{ .name = "isl1219", .driver_data = (kernel_ulong_t)&config_isl1219 },
+	{ .name = "raa215300_a0", .driver_data = (kernel_ulong_t)&config_raa215300_a0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, isl1208_id);
@@ -615,8 +615,8 @@ static ssize_t timestamp0_show(struct device *dev,
 	if (sr)
 		return sr;
 
-	return sprintf(buf, "%llu\n",
-				(unsigned long long)rtc_tm_to_time64(&tm));
+	return sysfs_emit(buf, "%llu\n",
+			  (unsigned long long)rtc_tm_to_time64(&tm));
 };
 
 static DEVICE_ATTR_RW(timestamp0);
@@ -709,7 +709,7 @@ isl1208_sysfs_show_atrim(struct device *dev,
 	if (atr < 0)
 		return atr;
 
-	return sprintf(buf, "%d.%.2d pF\n", atr >> 2, (atr & 0x3) * 25);
+	return sysfs_emit(buf, "%d.%.2d pF\n", atr >> 2, (atr & 0x3) * 25);
 }
 
 static DEVICE_ATTR(atrim, S_IRUGO, isl1208_sysfs_show_atrim, NULL);
@@ -722,7 +722,7 @@ isl1208_sysfs_show_dtrim(struct device *dev,
 	if (dtr < 0)
 		return dtr;
 
-	return sprintf(buf, "%d ppm\n", dtr - 100);
+	return sysfs_emit(buf, "%d ppm\n", dtr - 100);
 }
 
 static DEVICE_ATTR(dtrim, S_IRUGO, isl1208_sysfs_show_dtrim, NULL);
@@ -735,7 +735,7 @@ isl1208_sysfs_show_usr(struct device *dev,
 	if (usr < 0)
 		return usr;
 
-	return sprintf(buf, "0x%.4x\n", usr);
+	return sysfs_emit(buf, "0x%.4x\n", usr);
 }
 
 static ssize_t
@@ -822,6 +822,11 @@ static const struct nvmem_config isl1208_nvmem_config = {
 	.reg_write = isl1208_nvmem_write,
 };
 
+static void isl1208_disable_irq_wake_action(void *data)
+{
+	disable_irq_wake((unsigned long)data);
+}
+
 static int isl1208_setup_irq(struct i2c_client *client, int irq)
 {
 	int rc = devm_request_threaded_irq(&client->dev, irq, NULL,
@@ -831,7 +836,15 @@ static int isl1208_setup_irq(struct i2c_client *client, int irq)
 					client);
 	if (!rc) {
 		device_init_wakeup(&client->dev, true);
-		enable_irq_wake(irq);
+		rc = enable_irq_wake(irq);
+		if (rc)
+			return rc;
+
+		rc = devm_add_action_or_reset(&client->dev,
+					      isl1208_disable_irq_wake_action,
+					      (void *)(unsigned long)irq);
+		if (rc)
+			return rc;
 	} else {
 		dev_err(&client->dev,
 			"Unable to request irq %d, no alarm support\n",
@@ -868,7 +881,7 @@ isl1208_probe(struct i2c_client *client)
 		return -ENODEV;
 
 	/* Allocate driver state, point i2c client data to it */
-	isl1208 = devm_kzalloc(&client->dev, sizeof(*isl1208), GFP_KERNEL);
+	isl1208 = devm_kzalloc_obj(&client->dev, *isl1208);
 	if (!isl1208)
 		return -ENOMEM;
 	i2c_set_clientdata(client, isl1208);

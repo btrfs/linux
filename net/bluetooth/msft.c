@@ -165,6 +165,11 @@ static bool read_supported_features(struct hci_dev *hdev,
 	if (rp->sub_opcode != MSFT_OP_READ_SUPPORTED_FEATURES)
 		goto failed;
 
+	if (skb->len < sizeof(*rp) + rp->evt_prefix_len) {
+		bt_dev_err(hdev, "MSFT event prefix length mismatch");
+		goto failed;
+	}
+
 	if (rp->evt_prefix_len > 0) {
 		msft->evt_prefix = kmemdup(rp->evt_prefix, rp->evt_prefix_len,
 					   GFP_KERNEL);
@@ -276,7 +281,7 @@ static int msft_le_monitor_advertisement_cb(struct hci_dev *hdev, u16 opcode,
 	if (status)
 		goto unlock;
 
-	handle_data = kmalloc(sizeof(*handle_data), GFP_KERNEL);
+	handle_data = kmalloc_obj(*handle_data);
 	if (!handle_data) {
 		status = HCI_ERROR_UNSPECIFIED;
 		goto unlock;
@@ -291,7 +296,7 @@ static int msft_le_monitor_advertisement_cb(struct hci_dev *hdev, u16 opcode,
 	monitor->state = ADV_MONITOR_STATE_OFFLOADED;
 
 unlock:
-	if (status)
+	if (status && msft->resuming)
 		hci_free_adv_monitor(hdev, monitor);
 
 	hci_dev_unlock(hdev);
@@ -649,8 +654,10 @@ void msft_do_open(struct hci_dev *hdev)
 	msft->features = 0;
 
 	if (!read_supported_features(hdev, msft)) {
+		hci_dev_lock(hdev);
 		hdev->msft_data = NULL;
 		kfree(msft);
+		hci_dev_unlock(hdev);
 		return;
 	}
 
@@ -676,6 +683,8 @@ void msft_do_close(struct hci_dev *hdev)
 
 	bt_dev_dbg(hdev, "Cleanup of MSFT extension");
 
+	hci_dev_lock(hdev);
+
 	/* The controller will silently remove all monitors on power off.
 	 * Therefore, remove handle_data mapping and reset monitor state.
 	 */
@@ -689,6 +698,8 @@ void msft_do_close(struct hci_dev *hdev)
 		list_del(&handle_data->list);
 		kfree(handle_data);
 	}
+
+	hci_dev_unlock(hdev);
 
 	mutex_lock(&msft->filter_lock);
 	list_for_each_entry_safe(address_filter, n, &msft->address_filters,
@@ -756,7 +767,7 @@ void msft_register(struct hci_dev *hdev)
 
 	bt_dev_dbg(hdev, "Register MSFT extension");
 
-	msft = kzalloc(sizeof(*msft), GFP_KERNEL);
+	msft = kzalloc_obj(*msft);
 	if (!msft) {
 		bt_dev_err(hdev, "Failed to register MSFT extension");
 		return;
@@ -764,8 +775,8 @@ void msft_register(struct hci_dev *hdev)
 
 	INIT_LIST_HEAD(&msft->handle_map);
 	INIT_LIST_HEAD(&msft->address_filters);
-	hdev->msft_data = msft;
 	mutex_init(&msft->filter_lock);
+	hdev->msft_data = msft;
 }
 
 void msft_release(struct hci_dev *hdev)
@@ -790,7 +801,7 @@ static void msft_device_found(struct hci_dev *hdev, bdaddr_t *bdaddr,
 {
 	struct monitored_device *dev;
 
-	dev = kmalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kmalloc_obj(*dev);
 	if (!dev) {
 		bt_dev_err(hdev, "MSFT vendor event %u: no memory",
 			   MSFT_EV_LE_MONITOR_DEVICE);
@@ -932,7 +943,7 @@ static struct msft_monitor_addr_filter_data *msft_add_address_filter
 	struct msft_data *msft = hdev->msft_data;
 	int err;
 
-	address_filter = kzalloc(sizeof(*address_filter), GFP_KERNEL);
+	address_filter = kzalloc_obj(*address_filter);
 	if (!address_filter)
 		return NULL;
 

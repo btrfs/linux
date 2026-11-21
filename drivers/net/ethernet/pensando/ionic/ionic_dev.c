@@ -35,7 +35,7 @@ static void ionic_watchdog_cb(struct timer_list *t)
 
 	if (test_bit(IONIC_LIF_F_FILTER_SYNC_NEEDED, lif->state) &&
 	    !test_bit(IONIC_LIF_F_FW_RESET, lif->state)) {
-		work = kzalloc(sizeof(*work), GFP_ATOMIC);
+		work = kzalloc_obj(*work, GFP_ATOMIC);
 		if (!work) {
 			netdev_err(lif->netdev, "rxmode change dropped\n");
 			return;
@@ -577,7 +577,7 @@ do_check_time:
 		if (trigger) {
 			struct ionic_deferred_work *work;
 
-			work = kzalloc(sizeof(*work), GFP_ATOMIC);
+			work = kzalloc_obj(*work, GFP_ATOMIC);
 			if (work) {
 				work->type = IONIC_DW_TYPE_LIF_RESET;
 				work->fw_status = fw_status_ready;
@@ -1075,4 +1075,14 @@ bool ionic_q_is_posted(struct ionic_queue *q, unsigned int pos)
 	head = q->head_idx;
 
 	return ((pos - tail) & mask) < ((head - tail) & mask);
+}
+
+void ionic_reset_link_down_count(struct ionic_dev *idev)
+{
+	if (!READ_ONCE(idev->link_down_count_init)) {
+		idev->link_down_count_total = 0;
+		idev->link_down_count_last =
+			le16_to_cpu(idev->port_info->status.link_down_count);
+		WRITE_ONCE(idev->link_down_count_init, true);
+	}
 }

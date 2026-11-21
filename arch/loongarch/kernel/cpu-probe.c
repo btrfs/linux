@@ -7,6 +7,7 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/ptrace.h>
+#include <linux/cpu.h>
 #include <linux/smp.h>
 #include <linux/stddef.h>
 #include <linux/export.h>
@@ -92,7 +93,7 @@ static int __init cpu_final_simd(void)
 	return 0;
 }
 
-arch_initcall(cpu_final_simd);
+pure_initcall(cpu_final_simd);
 
 static inline void set_elf_platform(int cpu, const char *plat)
 {
@@ -106,7 +107,11 @@ EXPORT_SYMBOL(vm_map_base);
 
 static void cpu_probe_addrbits(struct cpuinfo_loongarch *c)
 {
-#ifdef __NEED_ADDRBITS_PROBE
+#ifdef CONFIG_32BIT
+	c->pabits = cpu_pabits;
+	c->vabits = cpu_vabits;
+	vm_map_base = KVRANGE;
+#else
 	c->pabits = (read_cpucfg(LOONGARCH_CPUCFG1) & CPUCFG1_PABITS) >> 4;
 	c->vabits = (read_cpucfg(LOONGARCH_CPUCFG1) & CPUCFG1_VABITS) >> 12;
 	vm_map_base = 0UL - (1UL << c->vabits);
@@ -173,6 +178,18 @@ static void cpu_probe_common(struct cpuinfo_loongarch *c)
 		c->options |= LOONGARCH_CPU_LAM;
 		elf_hwcap |= HWCAP_LOONGARCH_LAM;
 	}
+	if (config & CPUCFG2_LAM_BH) {
+		c->options |= LOONGARCH_CPU_LAM_BH;
+		elf_hwcap |= HWCAP_LOONGARCH_LAM_BH;
+	}
+	if (config & CPUCFG2_LAMCAS) {
+		c->options |= LOONGARCH_CPU_LAMCAS;
+		elf_hwcap |= HWCAP_LOONGARCH_LAMCAS;
+	}
+	if (config & CPUCFG2_SCQ) {
+		c->options |= LOONGARCH_CPU_SCQ;
+		elf_hwcap |= HWCAP_LOONGARCH_SCQ;
+	}
 	if (config & CPUCFG2_FP) {
 		c->options |= LOONGARCH_CPU_FPU;
 		elf_hwcap |= HWCAP_LOONGARCH_FPU;
@@ -196,6 +213,10 @@ static void cpu_probe_common(struct cpuinfo_loongarch *c)
 	if (config & CPUCFG2_CRYPTO) {
 		c->options |= LOONGARCH_CPU_CRYPTO;
 		elf_hwcap |= HWCAP_LOONGARCH_CRYPTO;
+	}
+	if (config & CPUCFG2_DIV32) {
+		c->options |= LOONGARCH_CPU_DIV32;
+		elf_hwcap |= HWCAP_LOONGARCH_DIV32;
 	}
 	if (config & CPUCFG2_PTW) {
 		c->options |= LOONGARCH_CPU_PTW;
@@ -227,6 +248,10 @@ static void cpu_probe_common(struct cpuinfo_loongarch *c)
 	config = read_cpucfg(LOONGARCH_CPUCFG6);
 	if (config & CPUCFG6_PMP)
 		c->options |= LOONGARCH_CPU_PMP;
+
+	config = read_cpucfg(LOONGARCH_CPUCFG8);
+	if (config & CPUCFG8_S2TGID)
+		c->options |= LOONGARCH_CPU_GUESTID;
 
 	config = csr_read32(LOONGARCH_CSR_ASID);
 	config = (config & CSR_ASID_BIT) >> CSR_ASID_BIT_SHIFT;
@@ -298,8 +323,15 @@ static inline void cpu_probe_loongson(struct cpuinfo_loongarch *c, unsigned int 
 		return;
 	}
 
+#ifdef CONFIG_64BIT
 	*vendor = iocsr_read64(LOONGARCH_IOCSR_VENDOR);
 	*cpuname = iocsr_read64(LOONGARCH_IOCSR_CPUNAME);
+#else
+	*vendor = iocsr_read32(LOONGARCH_IOCSR_VENDOR) |
+		(u64)iocsr_read32(LOONGARCH_IOCSR_VENDOR + 4) << 32;
+	*cpuname = iocsr_read32(LOONGARCH_IOCSR_CPUNAME) |
+		(u64)iocsr_read32(LOONGARCH_IOCSR_CPUNAME + 4) << 32;
+#endif
 
 	if (!__cpu_full_name[cpu]) {
 		if (((char *)vendor)[0] == 0)
@@ -386,4 +418,10 @@ void cpu_probe(void)
 #endif
 
 	cpu_report();
+}
+
+ssize_t cpu_show_spectre_v1(struct device *dev,
+			    struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "Mitigation: __user pointer sanitization\n");
 }

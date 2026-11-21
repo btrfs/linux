@@ -1069,6 +1069,7 @@ static int s5c73m3_oif_get_fmt(struct v4l2_subdev *sd,
 }
 
 static int s5c73m3_set_fmt(struct v4l2_subdev *sd,
+			   const struct v4l2_subdev_client_info *ci,
 			   struct v4l2_subdev_state *sd_state,
 			   struct v4l2_subdev_format *fmt)
 {
@@ -1108,6 +1109,7 @@ static int s5c73m3_set_fmt(struct v4l2_subdev *sd,
 }
 
 static int s5c73m3_oif_set_fmt(struct v4l2_subdev *sd,
+			 const struct v4l2_subdev_client_info *ci,
 			 struct v4l2_subdev_state *sd_state,
 			 struct v4l2_subdev_format *fmt)
 {
@@ -1605,7 +1607,7 @@ static int s5c73m3_probe(struct i2c_client *client)
 	struct s5c73m3 *state;
 	int ret, i;
 
-	state = devm_kzalloc(dev, sizeof(*state), GFP_KERNEL);
+	state = devm_kzalloc_obj(dev, *state);
 	if (!state)
 		return -ENOMEM;
 
@@ -1728,7 +1730,7 @@ static void s5c73m3_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id s5c73m3_id[] = {
-	{ DRIVER_NAME },
+	{ .name = DRIVER_NAME },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, s5c73m3_id);

@@ -86,17 +86,13 @@ static ssize_t dm_attr_uuid_show(struct mapped_device *md, char *buf)
 
 static ssize_t dm_attr_suspended_show(struct mapped_device *md, char *buf)
 {
-	sprintf(buf, "%d\n", dm_suspended_md(md));
-
-	return strlen(buf);
+	return sysfs_emit(buf, "%d\n", dm_suspended_md(md));
 }
 
 static ssize_t dm_attr_use_blk_mq_show(struct mapped_device *md, char *buf)
 {
 	/* Purely for userspace compatibility */
-	sprintf(buf, "%d\n", true);
-
-	return strlen(buf);
+	return sysfs_emit(buf, "%d\n", true);
 }
 
 static DM_ATTR_RO(name);
@@ -132,9 +128,20 @@ static const struct kobj_type dm_ktype = {
  */
 int dm_sysfs_init(struct mapped_device *md)
 {
-	return kobject_init_and_add(dm_kobject(md), &dm_ktype,
-				    &disk_to_dev(dm_disk(md))->kobj,
-				    "%s", "dm");
+	struct kobject *kobj = dm_kobject(md);
+	int r;
+
+	/* The kobject must be zeroed before calling kobject_init */
+	memset(kobj, 0, sizeof(struct kobject));
+	r = kobject_init_and_add(kobj, &dm_ktype,
+				 &disk_to_dev(dm_disk(md))->kobj,
+				 "%s", "dm");
+	if (unlikely(r)) {
+		/* Weird semantics - we must call kobject_put on failure */
+		dm_sysfs_exit(md);
+		return r;
+	}
+	return 0;
 }
 
 /*

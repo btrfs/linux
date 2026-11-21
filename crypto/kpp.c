@@ -20,19 +20,15 @@
 static int __maybe_unused crypto_kpp_report(
 	struct sk_buff *skb, struct crypto_alg *alg)
 {
-	struct crypto_report_kpp rkpp;
-
-	memset(&rkpp, 0, sizeof(rkpp));
-
-	strscpy(rkpp.type, "kpp", sizeof(rkpp.type));
+	struct crypto_report_kpp rkpp = {
+		.type = "kpp",
+	};
 
 	return nla_put(skb, CRYPTOCFGA_REPORT_KPP, sizeof(rkpp), &rkpp);
 }
 
-static void crypto_kpp_show(struct seq_file *m, struct crypto_alg *alg)
-	__maybe_unused;
-
-static void crypto_kpp_show(struct seq_file *m, struct crypto_alg *alg)
+static void __maybe_unused crypto_kpp_show(struct seq_file *m,
+					   struct crypto_alg *alg)
 {
 	seq_puts(m, "type         : kpp\n");
 }

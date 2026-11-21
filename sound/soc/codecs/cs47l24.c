@@ -1124,7 +1124,7 @@ static irqreturn_t cs47l24_adsp2_irq(int irq, void *data)
 
 static int cs47l24_component_probe(struct snd_soc_component *component)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct cs47l24_priv *priv = snd_soc_component_get_drvdata(component);
 	struct arizona *arizona = priv->core.arizona;
 	int ret;
@@ -1153,7 +1153,7 @@ static int cs47l24_component_probe(struct snd_soc_component *component)
 	if (ret)
 		goto err_adsp2_codec_probe;
 
-	snd_soc_component_disable_pin(component, "HAPTICS");
+	snd_soc_dapm_disable_pin(dapm, "HAPTICS");
 
 	return 0;
 
@@ -1217,8 +1217,7 @@ static int cs47l24_probe(struct platform_device *pdev)
 
 	BUILD_BUG_ON(ARRAY_SIZE(cs47l24_dai) > ARIZONA_MAX_DAI);
 
-	cs47l24 = devm_kzalloc(&pdev->dev, sizeof(struct cs47l24_priv),
-			       GFP_KERNEL);
+	cs47l24 = devm_kzalloc_obj(&pdev->dev, struct cs47l24_priv);
 	if (!cs47l24)
 		return -ENOMEM;
 

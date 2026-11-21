@@ -11,9 +11,7 @@
  */
 
 #include <linux/module.h>
-#include <linux/param.h>
 #include <linux/delay.h>
-#include <linux/workqueue.h>
 #include <linux/platform_device.h>
 #include <linux/power_supply.h>
 #include <linux/slab.h>
@@ -189,8 +187,7 @@ static int twl4030_madc_battery_probe(struct platform_device *pdev)
 	struct twl4030_madc_bat_platform_data *pdata = pdev->dev.platform_data;
 	struct power_supply_config psy_cfg = {};
 
-	twl4030_madc_bat = devm_kzalloc(&pdev->dev, sizeof(*twl4030_madc_bat),
-				GFP_KERNEL);
+	twl4030_madc_bat = devm_kzalloc_obj(&pdev->dev, *twl4030_madc_bat);
 	if (!twl4030_madc_bat)
 		return -ENOMEM;
 
@@ -237,3 +234,4 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Lukas Märdian <lukas@goldelico.com>");
 MODULE_DESCRIPTION("twl4030_madc battery driver");
 MODULE_ALIAS("platform:twl4030_madc_battery");
+MODULE_IMPORT_NS("IIO_CONSUMER");

@@ -54,7 +54,7 @@
 #define PAT_GMMIO           2         /* > 4G MMIO Space */
 #define PAT_NPIOP           3         /* Non Postable I/O Port Space */
 #define PAT_PIOP            4         /* Postable I/O Port Space */
-#define PAT_AHPA            5         /* Addional HPA Space */
+#define PAT_AHPA            5         /* Additional HPA Space */
 #define PAT_UFO             6         /* HPA Space (UFO for Mariposa) */
 #define PAT_GNIP            7         /* GNI Reserved Space */
 
@@ -179,6 +179,7 @@
 #define PDC_PAT_PD		74L         /* Protection Domain Info   */
 #define PDC_PAT_PD_GET_ADDR_MAP		0L  /* Get Address Map          */
 #define PDC_PAT_PD_GET_PDC_INTERF_REV	1L  /* Get PDC Interface Revisions */
+#define PDC_PAT_PD_GET_PLATFORM_COUNTER	10L /* Get 64-bit free running counter */
 
 #define PDC_PAT_CAPABILITY_BIT_PDC_SERIALIZE	(1UL << 0)
 #define PDC_PAT_CAPABILITY_BIT_PDC_POLLING	(1UL << 1)
@@ -291,7 +292,7 @@ struct pdc_pat_pd_addr_map_entry {
 * ----------------------------------------------------------
 * Bit  0 to 51 - conf_base_addr
 * Bit 52 to 62 - reserved
-* Bit       63 - endianess bit
+* Bit       63 - endianness bit
 ********************************************************************/
 #define PAT_GET_CBA(value) ((value) & 0xfffffffffffff000UL)
 
@@ -373,9 +374,11 @@ extern int pdc_pat_pd_get_addr_map(unsigned long *actual_len, void *mem_addr,
 		unsigned long count, unsigned long offset);
 extern int pdc_pat_pd_get_pdc_revisions(unsigned long *legacy_rev,
 		unsigned long *pat_rev, unsigned long *pdc_cap);
+extern int pdc_pat_pd_get_platform_counter(uint64_t **addr,
+		unsigned long *freq, unsigned long *uniq);
 
-extern int pdc_pat_io_pci_cfg_read(unsigned long pci_addr, int pci_size, u32 *val); 
-extern int pdc_pat_io_pci_cfg_write(unsigned long pci_addr, int pci_size, u32 val); 
+extern int pdc_pat_io_pci_cfg_read(unsigned long pci_addr, int pci_size, u32 *val);
+extern int pdc_pat_io_pci_cfg_write(unsigned long pci_addr, int pci_size, u32 val);
 
 extern int pdc_pat_mem_pdt_info(struct pdc_pat_mem_retinfo *rinfo);
 extern int pdc_pat_mem_pdt_cell_info(struct pdc_pat_mem_cell_pdt_retinfo *rinfo,

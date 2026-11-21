@@ -2,6 +2,7 @@
 #ifndef __AF_UNIX_H
 #define __AF_UNIX_H
 
+#include <linux/pid_types.h>
 #include <linux/uidgid.h>
 
 #define UNIX_HASH_MOD	(256 - 1)
@@ -11,7 +12,7 @@
 struct sock *unix_peer_get(struct sock *sk);
 
 struct unix_skb_parms {
-	struct pid		*pid;		/* skb credentials	*/
+	DECLARE_PIDS(pid, PIDTYPE_TGID);	/* skb credentials by pid type */
 	kuid_t			uid;
 	kgid_t			gid;
 	struct scm_fp_list	*fp;		/* Passed files		*/
@@ -24,14 +25,13 @@ struct unix_skb_parms {
 #define UNIXCB(skb)	(*(struct unix_skb_parms *)&((skb)->cb))
 
 /* GC for SCM_RIGHTS */
-extern unsigned int unix_tot_inflight;
 void unix_add_edges(struct scm_fp_list *fpl, struct unix_sock *receiver);
 void unix_del_edges(struct scm_fp_list *fpl);
 void unix_update_edges(struct unix_sock *receiver);
 int unix_prepare_fpl(struct scm_fp_list *fpl);
 void unix_destroy_fpl(struct scm_fp_list *fpl);
-void unix_gc(void);
-void wait_for_unix_gc(struct scm_fp_list *fpl);
+void unix_peek_fpl(struct scm_fp_list *fpl);
+void unix_schedule_gc(struct user_struct *user);
 
 /* SOCK_DIAG */
 long unix_inq_len(struct sock *sk);

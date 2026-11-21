@@ -26,6 +26,7 @@
 #include <linux/reboot.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
+#include <linux/cpumask.h>
 #include <linux/cpu.h>
 #include <linux/elfcore.h>
 #include <linux/pm.h>
@@ -51,6 +52,7 @@
 #include <asm/fpsimd.h>
 #include <asm/gcs.h>
 #include <asm/mmu_context.h>
+#include <asm/mpam.h>
 #include <asm/mte.h>
 #include <asm/processor.h>
 #include <asm/pointer_auth.h>
@@ -292,6 +294,7 @@ static void flush_gcs(void)
 	current->thread.gcs_base = 0;
 	current->thread.gcs_size = 0;
 	current->thread.gcs_el0_mode = 0;
+	current->thread.gcs_el0_locked = 0;
 	write_sysreg_s(GCSCRE0_EL1_nTR, SYS_GCSCRE0_EL1);
 	write_sysreg_s(0, SYS_GCSPR_EL0);
 }
@@ -317,9 +320,18 @@ static int copy_thread_gcs(struct task_struct *p,
 	return 0;
 }
 
+static void gcs_reset_thread(struct task_struct *task)
+{
+	task->thread.gcs_base = 0;
+	task->thread.gcs_size = 0;
+	task->thread.gcspr_el0 = 0;
+}
+
 #else
 
 static void flush_gcs(void) { }
+static void gcs_reset_thread(struct task_struct *task) { }
+
 static int copy_thread_gcs(struct task_struct *p,
 			   const struct kernel_clone_args *args)
 {
@@ -336,6 +348,12 @@ void flush_thread(void)
 	flush_tagged_addr_state();
 	flush_poe();
 	flush_gcs();
+}
+
+void exit_thread(struct task_struct *tsk)
+{
+	/* Failed fork after copy_thread(); deactivate_mm() does not run. */
+	gcs_free(tsk);
 }
 
 void arch_release_task_struct(struct task_struct *tsk)
@@ -500,6 +518,8 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 
 		p->thread.cpu_context.x19 = (unsigned long)args->fn;
 		p->thread.cpu_context.x20 = (unsigned long)args->fn_arg;
+		/* Kernel threads sharing the parent's mm must not free its GCS. */
+		gcs_reset_thread(p);
 
 		if (system_supports_poe())
 			p->thread.por_el0 = POR_EL0_INIT;
@@ -698,6 +718,29 @@ void update_sctlr_el1(u64 sctlr)
 	isb();
 }
 
+static inline void debug_switch_state(void)
+{
+	if (system_uses_irq_prio_masking()) {
+		unsigned long daif_expected = 0;
+		unsigned long daif_actual = read_sysreg(daif);
+		unsigned long pmr_expected = GIC_PRIO_IRQOFF;
+		unsigned long pmr_actual = read_sysreg_s(SYS_ICC_PMR_EL1);
+
+		WARN_ONCE(daif_actual != daif_expected ||
+			  pmr_actual != pmr_expected,
+			  "Unexpected DAIF + PMR: 0x%lx + 0x%lx (expected 0x%lx + 0x%lx)\n",
+			  daif_actual, pmr_actual,
+			  daif_expected, pmr_expected);
+	} else {
+		unsigned long daif_expected = DAIF_PROCCTX_NOIRQ;
+		unsigned long daif_actual = read_sysreg(daif);
+
+		WARN_ONCE(daif_actual != daif_expected,
+			  "Unexpected DAIF value: 0x%lx (expected 0x%lx)\n",
+			  daif_actual, daif_expected);
+	}
+}
+
 /*
  * Thread switching.
  */
@@ -706,6 +749,8 @@ struct task_struct *__switch_to(struct task_struct *prev,
 				struct task_struct *next)
 {
 	struct task_struct *last;
+
+	debug_switch_state();
 
 	fpsimd_thread_switch(next);
 	tls_thread_switch(next);
@@ -736,6 +781,12 @@ struct task_struct *__switch_to(struct task_struct *prev,
 	/* avoid expensive SCTLR_EL1 accesses if no change */
 	if (prev->thread.sctlr_user != next->thread.sctlr_user)
 		update_sctlr_el1(next->thread.sctlr_user);
+
+	/*
+	 * MPAM thread switch happens after the DSB to ensure prev's accesses
+	 * use prev's MPAM settings.
+	 */
+	mpam_thread_switch(next);
 
 	/* the actual thread switch */
 	last = cpu_switch_to(prev, next);

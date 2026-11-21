@@ -276,7 +276,7 @@ static int max1668_probe(struct i2c_client *client)
 	if (!i2c_check_functionality(adapter, I2C_FUNC_SMBUS_BYTE_DATA))
 		return -ENODEV;
 
-	data = devm_kzalloc(dev, sizeof(struct max1668_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct max1668_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -293,9 +293,9 @@ static int max1668_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id max1668_id[] = {
-	{ "max1668", 5 },
-	{ "max1805", 3 },
-	{ "max1989", 5 },
+	{ .name = "max1668", .driver_data = 5 },
+	{ .name = "max1805", .driver_data = 3 },
+	{ .name = "max1989", .driver_data = 5 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max1668_id);

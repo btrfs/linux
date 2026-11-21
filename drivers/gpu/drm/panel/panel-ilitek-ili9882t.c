@@ -8,12 +8,17 @@
 #include <linux/of.h>
 #include <linux/regulator/consumer.h>
 
+#include <drm/display/drm_dsc.h>
+#include <drm/display/drm_dsc_helper.h>
 #include <drm/drm_connector.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_mipi_dsi.h>
+#include <drm/drm_of.h>
 #include <drm/drm_panel.h>
 
 #include <video/mipi_display.h>
+
+#define DSC_BPG_OFFSET(x)	((u8)((x) & DSC_RANGE_BPG_OFFSET_MASK))
 
 struct ili9882t;
 
@@ -23,6 +28,7 @@ struct ili9882t;
  */
 struct panel_desc {
 	const struct drm_display_mode *modes;
+	const struct drm_dsc_config *dsc;
 	unsigned int bpc;
 
 	/**
@@ -52,6 +58,8 @@ struct ili9882t {
 	struct regulator *avee;
 	struct regulator *avdd;
 	struct gpio_desc *enable_gpio;
+
+	struct drm_dsc_config dsc;
 };
 
 /* ILI9882-specific commands, add new commands as you decode them */
@@ -60,6 +68,271 @@ struct ili9882t {
 #define ili9882t_switch_page(ctx, page) \
 	mipi_dsi_dcs_write_seq_multi(ctx, ILI9882T_DCS_SWITCH_PAGE, \
 				     0x98, 0x82, (page))
+
+/* IL79900A-specific commands, add new commands as you decode them */
+#define IL79900A_DCS_SWITCH_PAGE	0xFF
+
+#define il79900a_switch_page(ctx, page) \
+	mipi_dsi_dcs_write_seq_multi(ctx, IL79900A_DCS_SWITCH_PAGE, \
+				     0x5a, 0xa5, (page))
+
+static const struct drm_dsc_config tianma_il79900a_dsc = {
+	.dsc_version_major = 1,
+	.dsc_version_minor = 2,
+	.slice_height = 8,
+	.slice_width = 800,
+	.slice_count = 2,
+	.bits_per_component = 8,
+	.bits_per_pixel = 8 << 4,
+	.block_pred_enable = true,
+	.native_420 = false,
+	.native_422 = false,
+	.simple_422 = false,
+	.vbr_enable = false,
+	.pic_width = 1600,
+	.pic_height = 2560,
+	.convert_rgb = 0,
+	.rc_buf_thresh = {14, 28, 42, 56, 70, 84, 98, 105, 112, 119, 121, 123, 125, 126},
+	.rc_model_size = DSC_RC_MODEL_SIZE_CONST,
+	.rc_edge_factor = DSC_RC_EDGE_FACTOR_CONST,
+	.rc_tgt_offset_high = DSC_RC_TGT_OFFSET_HI_CONST,
+	.rc_tgt_offset_low = DSC_RC_TGT_OFFSET_LO_CONST,
+	.mux_word_size = DSC_MUX_WORD_SIZE_8_10_BPC,
+	.line_buf_depth = 9,
+	.first_line_bpg_offset = 12,
+	.initial_xmit_delay = 512,
+	.initial_offset = 6144,
+	.rc_quant_incr_limit0 = 11,
+	.rc_quant_incr_limit1 = 11,
+	.rc_range_params = {
+		{ 0,  4, DSC_BPG_OFFSET(2)},
+		{ 0,  4, DSC_BPG_OFFSET(0)},
+		{ 1,  5, DSC_BPG_OFFSET(0)},
+		{ 1,  6, DSC_BPG_OFFSET(-2)},
+		{ 3,  7, DSC_BPG_OFFSET(-4)},
+		{ 3,  7, DSC_BPG_OFFSET(-6)},
+		{ 3,  7, DSC_BPG_OFFSET(-8)},
+		{ 3,  8, DSC_BPG_OFFSET(-8)},
+		{ 3,  9, DSC_BPG_OFFSET(-8)},
+		{ 3, 10, DSC_BPG_OFFSET(-10)},
+		{ 5, 10, DSC_BPG_OFFSET(-10)},
+		{ 5, 11, DSC_BPG_OFFSET(-12)},
+		{ 5, 11, DSC_BPG_OFFSET(-12)},
+		{ 9, 12, DSC_BPG_OFFSET(-12)},
+		{12, 13, DSC_BPG_OFFSET(-12)},
+	},
+	.slice_chunk_size = 800,
+	.initial_dec_delay = 657,
+	.final_offset = 4320,
+	.scale_increment_interval = 222,
+	.scale_decrement_interval = 11,
+	.initial_scale_value = 32,
+	.nfl_bpg_offset = 3511,
+	.slice_bpg_offset = 2179,
+	.flatness_max_qp = 12,
+	.flatness_min_qp = 3,
+};
+
+static int rpi_10inch_init(struct ili9882t *ili)
+{
+	struct mipi_dsi_multi_context ctx = { .dsi = ili->dsi };
+
+	mipi_dsi_usleep_range(&ctx, 5000, 5100);
+
+	il79900a_switch_page(&ctx, 0x01);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x00, 0x42);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x01, 0x11);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x02, 0x00);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x03, 0x00);
+
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x04, 0x01);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x05, 0x11);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x06, 0x00);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x07, 0x00);
+
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x08, 0x80);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x09, 0x01);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x0a, 0x71);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x0c, 0x00);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x0e, 0x00);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x0d, 0x00);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x0f, 0x00);
+
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x30, 0x07);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x31, 0x07);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x32, 0x07);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x33, 0x07);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x34, 0x07);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x35, 0x01);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x36, 0x00);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x37, 0x28);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x38, 0x29);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x39, 0x11);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x3A, 0x13);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x3B, 0x15);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x3C, 0x17);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x3D, 0x09);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x3E, 0x0D);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x3F, 0x02);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x40, 0x02);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x41, 0x02);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x42, 0x02);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x43, 0x02);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x44, 0x02);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x45, 0x02);
+
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x48, 0x07);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x49, 0x07);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x4A, 0x07);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x4B, 0x07);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x4C, 0x07);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x4D, 0x01);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x4E, 0x00);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x4F, 0x28);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x50, 0x29);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x51, 0x10);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x52, 0x12);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x53, 0x14);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x54, 0x16);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x55, 0x08);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x56, 0x0C);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x57, 0x02);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x58, 0x02);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x59, 0x02);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x5A, 0x02);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x5B, 0x02);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x5C, 0x02);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x5D, 0x02);
+
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x2C, 0xB0);
+
+	il79900a_switch_page(&ctx, 0x02);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x07, 0x00);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x06, 0xD2);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x53, 0x1F);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x5E, 0x40);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x84, 0x00);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x29, 0x3A);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x2A, 0x3B);
+
+	il79900a_switch_page(&ctx, 0x03);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x20, 0x01);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x21, 0x3C);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x22, 0xFA);
+
+	il79900a_switch_page(&ctx, 0x12);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x87, 0x2C);
+
+	il79900a_switch_page(&ctx, 0x05);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x61, 0x8F);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x6D, 0xBB);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x5A, 0x7C);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x67, 0x7C);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x54, 0x92);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x55, 0x92);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x40, 0xD2);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x46, 0x70);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x30, 0x47);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x7A, 0x89);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0xA4, 0x0B);
+
+	il79900a_switch_page(&ctx, 0x06);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0xC0, 0x80);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0xC1, 0x7);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0xCA, 0x58);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0xCB, 0x2);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0xCE, 0x58);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0xCF, 0x2);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x10, 0x0);
+
+	il79900a_switch_page(&ctx, 0x0b);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x76, 0x55);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x78, 0x68);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x77, 0x0D);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x79, 0x60);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x7A, 0x10);
+
+	il79900a_switch_page(&ctx, 0x08);
+	mipi_dsi_dcs_write_seq_multi(&ctx,
+				     0xE0, 0x00, 0x1E, 0x3F,
+				     0x68, 0x7D, 0x72, 0x86,
+				     0x89, 0x92, 0x8E, 0xA5,
+				     0xA8, 0xAA, 0xBD, 0xB8,
+				     0xBE, 0xC5, 0xD6, 0xCD,
+				     0xC3, 0xDA, 0xEB, 0xED);
+	mipi_dsi_dcs_write_seq_multi(&ctx,
+				     0xE1, 0x00, 0x1E, 0x3F,
+				     0x68, 0x7D, 0x72, 0x86,
+				     0x89, 0x92, 0x8E, 0xA5,
+				     0xA8, 0xAA, 0xBD, 0xB8,
+				     0xBE, 0xC5, 0xD6, 0xCD,
+				     0xC3, 0xDA, 0xEB, 0xED);
+
+	il79900a_switch_page(&ctx, 0x14);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x85, 0xCC);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x87, 0x91);
+
+	il79900a_switch_page(&ctx, 0x10);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x11, 0x3);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x12, 0x34);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x10, 0x1);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x13, 0x4);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x14, 0xBB);
+
+	il79900a_switch_page(&ctx, 0x0b);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x94, 0x88);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x95, 0x23);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x96, 0x0B);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x97, 0x0B);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x98, 0xC6);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x99, 0xC6);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0xA6, 0x47);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0xA7, 0x77);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0xA8, 0x5);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0xA9, 0x5);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0xAA, 0xBA);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0xAB, 0xBA);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0xBD, 0x92);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0xBE, 0xE0);
+
+	il79900a_switch_page(&ctx, 0x0e);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x0, 0x80);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x14, 0x3);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x12, 0x0);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x13, 0x4);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x11, 0x1);
+
+	il79900a_switch_page(&ctx, 0x02);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x80, 0x11);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x82, 0x11);
+	il79900a_switch_page(&ctx, 0x12);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x82, 0x2C);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x85, 0x2C);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x87, 0x2C);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x88, 0xEC);
+	il79900a_switch_page(&ctx, 0x10);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x4, 0x1);
+	il79900a_switch_page(&ctx, 0x11);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x0C, 0x80);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x3C, 0x80);
+
+	il79900a_switch_page(&ctx, 0x06);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x0E, 0x0);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x0E, 0x3F);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x10, 0x0);
+
+	il79900a_switch_page(&ctx, 0x00);
+	mipi_dsi_dcs_set_tear_on_multi(&ctx, MIPI_DSI_DCS_TEAR_MODE_VBLANK);
+	mipi_dsi_dcs_exit_sleep_mode_multi(&ctx);
+
+	mipi_dsi_msleep(&ctx, 120);
+
+	mipi_dsi_dcs_set_display_on_multi(&ctx);
+
+	mipi_dsi_msleep(&ctx, 20);
+
+	return ctx.accum_err;
+};
 
 static int starry_ili9882t_init(struct ili9882t *ili)
 {
@@ -413,6 +686,88 @@ static int starry_ili9882t_init(struct ili9882t *ili)
 	return ctx.accum_err;
 };
 
+static int tianma_il79900a_init(struct ili9882t *ili)
+{
+	struct mipi_dsi_multi_context ctx = { .dsi = ili->dsi };
+	struct drm_dsc_picture_parameter_set pps;
+
+	mipi_dsi_usleep_range(&ctx, 5000, 5100);
+
+	il79900a_switch_page(&ctx, 0x06);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x3e, 0x62);
+
+	il79900a_switch_page(&ctx, 0x01);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0xb0, 0x00);
+
+	il79900a_switch_page(&ctx, 0x02);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x1b, 0x00);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x5d, 0x00);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x5e, 0x40);
+
+	il79900a_switch_page(&ctx, 0x05);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0X9e, 0xe9);
+
+	il79900a_switch_page(&ctx, 0x07);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0X29, 0x01);
+
+	il79900a_switch_page(&ctx, 0x17);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x00,
+				     0x00, 0x89, 0x30, 0x80, 0x0a, 0x00, 0x06, 0x40, 0x00,
+				     0x08, 0x03, 0x20, 0x03, 0x20, 0x02, 0x00, 0x02, 0x91,
+				     0x00, 0x20, 0x00, 0xde, 0x00, 0x0b, 0x00, 0x0c, 0x0d,
+				     0xb7, 0x08, 0x83, 0x18, 0x00, 0x10, 0xe0, 0x03, 0x0c,
+				     0x20, 0x00, 0x06, 0x0b, 0x0b, 0x33, 0x0e, 0x1c, 0x2a,
+				     0x38, 0x46, 0x54, 0x62, 0x69, 0x70, 0x77, 0x79, 0x7b,
+				     0x7d, 0x7e, 0x01, 0x02, 0x01, 0x00, 0x09, 0x40, 0x09,
+				     0xbe, 0x19, 0xfc, 0x19, 0xfa, 0x19, 0xf8, 0x1a, 0x38,
+				     0x1a, 0x78, 0x1a, 0xb6, 0x2a, 0xb6, 0x2a, 0xf4, 0x2a,
+				     0xf4, 0x4b, 0x34, 0x63, 0x74);
+
+	il79900a_switch_page(&ctx, 0x06);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x91, 0x45);
+
+	il79900a_switch_page(&ctx, 0x16);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x03, 0x4b);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x04, 0x73);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x05, 0xdf);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x00, 0x01);
+
+	il79900a_switch_page(&ctx, 0x10);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x12, 0x8c);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x14, 0x3c);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x15, 0x3d);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x1d, 0xfc);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x25, 0x9d);
+
+	il79900a_switch_page(&ctx, 0x0e);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0xc0, 0x18);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x2a, 0x0e);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x38, 0xcd);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x80, 0x53);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x81, 0x0e);
+
+	il79900a_switch_page(&ctx, 0x1e);
+	mipi_dsi_dcs_write_seq_multi(&ctx, 0x61, 0x5c);
+
+	drm_dsc_pps_payload_pack(&pps, &tianma_il79900a_dsc);
+
+	mipi_dsi_picture_parameter_set_multi(&ctx, &pps);
+
+	mipi_dsi_compression_mode_ext_multi(&ctx, true,
+					    MIPI_DSI_COMPRESSION_DSC, 1);
+
+	il79900a_switch_page(&ctx, 0x00);
+	mipi_dsi_dcs_exit_sleep_mode_multi(&ctx);
+
+	mipi_dsi_msleep(&ctx, 120);
+
+	mipi_dsi_dcs_set_display_on_multi(&ctx);
+
+	mipi_dsi_msleep(&ctx, 20);
+
+	return ctx.accum_err;
+};
+
 static inline struct ili9882t *to_ili9882t(struct drm_panel *panel)
 {
 	return container_of(panel, struct ili9882t, base);
@@ -439,7 +794,7 @@ static int ili9882t_unprepare(struct drm_panel *panel)
 {
 	struct ili9882t *ili = to_ili9882t(panel);
 
-	gpiod_set_value(ili->enable_gpio, 0);
+	gpiod_set_value_cansleep(ili->enable_gpio, 0);
 	usleep_range(1000, 2000);
 	regulator_disable(ili->avee);
 	regulator_disable(ili->avdd);
@@ -455,7 +810,7 @@ static int ili9882t_prepare(struct drm_panel *panel)
 	struct ili9882t *ili = to_ili9882t(panel);
 	int ret;
 
-	gpiod_set_value(ili->enable_gpio, 0);
+	gpiod_set_value_cansleep(ili->enable_gpio, 0);
 	usleep_range(1000, 1500);
 
 	ret = regulator_enable(ili->pp3300);
@@ -485,11 +840,11 @@ static int ili9882t_prepare(struct drm_panel *panel)
 	}
 	usleep_range(1000, 2000);
 
-	gpiod_set_value(ili->enable_gpio, 1);
+	gpiod_set_value_cansleep(ili->enable_gpio, 1);
 	usleep_range(1000, 2000);
-	gpiod_set_value(ili->enable_gpio, 0);
+	gpiod_set_value_cansleep(ili->enable_gpio, 0);
 	msleep(50);
-	gpiod_set_value(ili->enable_gpio, 1);
+	gpiod_set_value_cansleep(ili->enable_gpio, 1);
 	usleep_range(6000, 10000);
 
 	ret = ili->desc->init(ili);
@@ -499,7 +854,7 @@ static int ili9882t_prepare(struct drm_panel *panel)
 	return 0;
 
 poweroff:
-	gpiod_set_value(ili->enable_gpio, 0);
+	gpiod_set_value_cansleep(ili->enable_gpio, 0);
 	regulator_disable(ili->avee);
 poweroffavdd:
 	regulator_disable(ili->avdd);
@@ -516,6 +871,19 @@ static int ili9882t_enable(struct drm_panel *panel)
 	return 0;
 }
 
+static const struct drm_display_mode rpi_10inch_default_mode = {
+	.clock = 166666,
+	.hdisplay = 1200,
+	.hsync_start = 1200 + 28,
+	.hsync_end = 1200 + 28 + 10,
+	.htotal = 1200 + 28 + 10 + 30,
+	.vdisplay = 1920,
+	.vsync_start = 1920 + 238,
+	.vsync_end = 1920 + 238 + 4,
+	.vtotal = 1920 + 238 + 4 + 28,
+	.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
+};
+
 static const struct drm_display_mode starry_ili9882t_default_mode = {
 	.clock = 165280,
 	.hdisplay = 1200,
@@ -527,6 +895,33 @@ static const struct drm_display_mode starry_ili9882t_default_mode = {
 	.vsync_end = 1920 + 68 + 2,
 	.vtotal = 1920 + 68 + 2 + 10,
 	.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
+};
+
+static const struct drm_display_mode tianma_il79900a_default_mode = {
+	.clock = 543850,
+	.hdisplay = 1600,
+	.hsync_start = 1600 + 20,
+	.hsync_end = 1600 + 20 + 2,
+	.htotal = 1600 + 20 + 2 + 20,
+	.vdisplay = 2560,
+	.vsync_start = 2560 + 62,
+	.vsync_end = 2560 + 62 + 2,
+	.vtotal = 2560 + 62 + 2 + 136,
+	.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
+};
+
+static const struct panel_desc rpi_10inch_desc = {
+	.modes = &rpi_10inch_default_mode,
+	.bpc = 8,
+	.size = {
+		.width_mm = 135,
+		.height_mm = 216,
+	},
+	.lanes = 4,
+	.format = MIPI_DSI_FMT_RGB888,
+	.mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_SYNC_PULSE |
+		      MIPI_DSI_MODE_LPM,
+	.init = rpi_10inch_init,
 };
 
 static const struct panel_desc starry_ili9882t_desc = {
@@ -541,6 +936,21 @@ static const struct panel_desc starry_ili9882t_desc = {
 	.mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_SYNC_PULSE |
 		      MIPI_DSI_MODE_LPM,
 	.init = starry_ili9882t_init,
+};
+
+static const struct panel_desc tianma_tl121bvms07_desc = {
+	.modes = &tianma_il79900a_default_mode,
+	.dsc = &tianma_il79900a_dsc,
+	.bpc = 8,
+	.size = {
+		.width_mm = 163,
+		.height_mm = 260,
+	},
+	.lanes = 3,
+	.format = MIPI_DSI_FMT_RGB888,
+	.mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_SYNC_PULSE |
+		      MIPI_DSI_MODE_LPM,
+	.init = tianma_il79900a_init,
 };
 
 static int ili9882t_get_modes(struct drm_panel *panel,
@@ -605,16 +1015,16 @@ static int ili9882t_add(struct ili9882t *ili)
 	if (IS_ERR(ili->pp1800))
 		return PTR_ERR(ili->pp1800);
 
-	ili->enable_gpio = devm_gpiod_get(dev, "enable", GPIOD_OUT_LOW);
+	ili->enable_gpio = devm_gpiod_get_optional(dev, "enable", GPIOD_OUT_LOW);
 	if (IS_ERR(ili->enable_gpio)) {
 		dev_err(dev, "cannot get enable-gpios %ld\n",
 			PTR_ERR(ili->enable_gpio));
 		return PTR_ERR(ili->enable_gpio);
 	}
 
-	gpiod_set_value(ili->enable_gpio, 0);
+	gpiod_set_value_cansleep(ili->enable_gpio, 0);
 
-	err = of_drm_get_panel_orientation(dev->of_node, &ili->orientation);
+	err = drm_of_get_panel_orientation(dev->of_node, &ili->orientation);
 	if (err < 0) {
 		dev_err(dev, "%pOF: failed to get orientation %d\n", dev->of_node, err);
 		return err;
@@ -626,10 +1036,9 @@ static int ili9882t_add(struct ili9882t *ili)
 
 	ili->base.funcs = &ili9882t_funcs;
 	ili->base.dev = &ili->dsi->dev;
+	ili->base.prepare_prev_first = true;
 
-	drm_panel_add(&ili->base);
-
-	return 0;
+	return devm_drm_panel_add(dev, &ili->base);
 }
 
 static int ili9882t_probe(struct mipi_dsi_device *dsi)
@@ -650,35 +1059,30 @@ static int ili9882t_probe(struct mipi_dsi_device *dsi)
 	dsi->mode_flags = desc->mode_flags;
 	ili->desc = desc;
 	ili->dsi = dsi;
+
+	if (desc->dsc) {
+		ili->dsc = *desc->dsc;
+		dsi->dsc = &ili->dsc;
+	}
+
 	ret = ili9882t_add(ili);
 	if (ret < 0)
 		return ret;
 
 	mipi_dsi_set_drvdata(dsi, ili);
 
-	ret = mipi_dsi_attach(dsi);
-	if (ret)
-		drm_panel_remove(&ili->base);
-
-	return ret;
-}
-
-static void ili9882t_remove(struct mipi_dsi_device *dsi)
-{
-	struct ili9882t *ili = mipi_dsi_get_drvdata(dsi);
-	int ret;
-
-	ret = mipi_dsi_detach(dsi);
-	if (ret < 0)
-		dev_err(&dsi->dev, "failed to detach from DSI host: %d\n", ret);
-
-	if (ili->base.dev)
-		drm_panel_remove(&ili->base);
+	return devm_mipi_dsi_attach(&dsi->dev, dsi);
 }
 
 static const struct of_device_id ili9882t_of_match[] = {
+	{ .compatible = "raspberrypi,dsi-10inch",
+	  .data = &rpi_10inch_desc
+	},
 	{ .compatible = "starry,ili9882t",
 	  .data = &starry_ili9882t_desc
+	},
+	{ .compatible = "tianma,tl121bvms07-00",
+	  .data = &tianma_tl121bvms07_desc
 	},
 	{ /* sentinel */ }
 };
@@ -690,7 +1094,6 @@ static struct mipi_dsi_driver ili9882t_driver = {
 		.of_match_table = ili9882t_of_match,
 	},
 	.probe = ili9882t_probe,
-	.remove = ili9882t_remove,
 };
 module_mipi_dsi_driver(ili9882t_driver);
 

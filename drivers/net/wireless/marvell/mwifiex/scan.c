@@ -104,11 +104,23 @@ has_vendor_hdr(struct ieee_types_vendor_specific *ie, u8 key)
  * a given oui in PTK.
  */
 static u8
-mwifiex_search_oui_in_ie(struct ie_body *iebody, u8 *oui)
+mwifiex_search_oui_in_ie(struct ie_body *iebody, u8 *oui, int ie_len)
 {
+	const size_t ptk_body_offset = offsetof(struct ie_body, ptk_body);
 	u8 count;
 
+	/* ie_len is the number of bytes available at iebody. Keep it signed
+	 * and reject a negative (underflowed) length before the unsigned
+	 * comparisons below, so a small or zero IE length cannot wrap.
+	 */
+	if (ie_len < 0 || (size_t)ie_len < ptk_body_offset)
+		return MWIFIEX_OUI_NOT_PRESENT;
+
 	count = iebody->ptk_cnt[0];
+
+	/* Reject an OUI count whose list would run past the element. */
+	if (ptk_body_offset + count * sizeof(iebody->ptk_body) > (size_t)ie_len)
+		return MWIFIEX_OUI_NOT_PRESENT;
 
 	/* There could be multiple OUIs for PTK hence
 	   1) Take the length.
@@ -143,11 +155,14 @@ mwifiex_is_rsn_oui_present(struct mwifiex_bssdescriptor *bss_desc, u32 cipher)
 	u8 ret = MWIFIEX_OUI_NOT_PRESENT;
 
 	if (has_ieee_hdr(bss_desc->bcn_rsn_ie, WLAN_EID_RSN)) {
+		int ie_len = (int)bss_desc->bcn_rsn_ie->ieee_hdr.len -
+			RSN_GTK_OUI_OFFSET;
+
 		iebody = (struct ie_body *)
 			 (((u8 *) bss_desc->bcn_rsn_ie->data) +
 			  RSN_GTK_OUI_OFFSET);
 		oui = &mwifiex_rsn_oui[cipher][0];
-		ret = mwifiex_search_oui_in_ie(iebody, oui);
+		ret = mwifiex_search_oui_in_ie(iebody, oui, ie_len);
 		if (ret)
 			return ret;
 	}
@@ -169,10 +184,14 @@ mwifiex_is_wpa_oui_present(struct mwifiex_bssdescriptor *bss_desc, u32 cipher)
 	u8 ret = MWIFIEX_OUI_NOT_PRESENT;
 
 	if (has_vendor_hdr(bss_desc->bcn_wpa_ie, WLAN_EID_VENDOR_SPECIFIC)) {
+		int ie_len = (int)bss_desc->bcn_wpa_ie->vend_hdr.len -
+			(int)sizeof(bss_desc->bcn_wpa_ie->vend_hdr.oui) -
+			WPA_GTK_OUI_OFFSET;
+
 		iebody = (struct ie_body *)((u8 *)bss_desc->bcn_wpa_ie->data +
 					    WPA_GTK_OUI_OFFSET);
 		oui = &mwifiex_wpa_oui[cipher][0];
-		ret = mwifiex_search_oui_in_ie(iebody, oui);
+		ret = mwifiex_search_oui_in_ie(iebody, oui, ie_len);
 		if (ret)
 			return ret;
 	}
@@ -1503,16 +1522,14 @@ int mwifiex_scan_networks(struct mwifiex_private *priv,
 	adapter->scan_processing = true;
 	spin_unlock_bh(&adapter->mwifiex_cmd_lock);
 
-	scan_cfg_out = kzalloc(sizeof(union mwifiex_scan_cmd_config_tlv),
-			       GFP_KERNEL);
+	scan_cfg_out = kzalloc_obj(union mwifiex_scan_cmd_config_tlv);
 	if (!scan_cfg_out) {
 		ret = -ENOMEM;
 		goto done;
 	}
 
-	scan_chan_list = kcalloc(MWIFIEX_USER_SCAN_CHAN_MAX,
-				 sizeof(struct mwifiex_chan_scan_param_set),
-				 GFP_KERNEL);
+	scan_chan_list = kzalloc_objs(struct mwifiex_chan_scan_param_set,
+				      MWIFIEX_USER_SCAN_CHAN_MAX);
 	if (!scan_chan_list) {
 		kfree(scan_cfg_out);
 		ret = -ENOMEM;
@@ -1650,7 +1667,7 @@ static int mwifiex_save_hidden_ssid_channels(struct mwifiex_private *priv,
 	int chid;
 
 	/* Allocate and fill new bss descriptor */
-	bss_desc = kzalloc(sizeof(*bss_desc), GFP_KERNEL);
+	bss_desc = kzalloc_obj(*bss_desc);
 	if (!bss_desc)
 		return -ENOMEM;
 
@@ -1693,7 +1710,7 @@ static int mwifiex_update_curr_bss_params(struct mwifiex_private *priv,
 	int ret;
 
 	/* Allocate and fill new bss descriptor */
-	bss_desc = kzalloc(sizeof(struct mwifiex_bssdescriptor), GFP_KERNEL);
+	bss_desc = kzalloc_obj(struct mwifiex_bssdescriptor);
 	if (!bss_desc)
 		return -ENOMEM;
 
@@ -1932,7 +1949,7 @@ mwifiex_active_scan_req_for_passive_chan(struct mwifiex_private *priv)
 		mwifiex_dbg(adapter, INFO, "No BSS with hidden SSID found on DFS channels\n");
 		return 0;
 	}
-	user_scan_cfg = kzalloc(sizeof(*user_scan_cfg), GFP_KERNEL);
+	user_scan_cfg = kzalloc_obj(*user_scan_cfg);
 
 	if (!user_scan_cfg)
 		return -ENOMEM;
@@ -2098,6 +2115,7 @@ int mwifiex_ret_802_11_scan(struct mwifiex_private *priv,
 	u32 bytes_left;
 	u32 idx;
 	u32 tlv_buf_size;
+	size_t fixed_size;
 	struct mwifiex_ie_types_chan_band_list_param_set *chan_band_tlv;
 	struct chan_band_param_set *chan_band;
 	u8 is_bgscan_resp;
@@ -2113,6 +2131,14 @@ int mwifiex_ret_802_11_scan(struct mwifiex_private *priv,
 	else
 		scan_rsp = &resp->params.scan_resp;
 
+	scan_resp_size = le16_to_cpu(resp->size);
+	fixed_size = scan_rsp->bss_desc_and_tlv_buffer - (u8 *)resp;
+	if (scan_resp_size < fixed_size) {
+		mwifiex_dbg(adapter, ERROR,
+			    "SCAN_RESP: response is too short\n");
+		ret = -1;
+		goto check_next_scan;
+	}
 
 	if (scan_rsp->number_of_sets > MWIFIEX_MAX_AP) {
 		mwifiex_dbg(adapter, ERROR,
@@ -2130,8 +2156,6 @@ int mwifiex_ret_802_11_scan(struct mwifiex_private *priv,
 		    "info: SCAN_RESP: bss_descript_size %d\n",
 		    bytes_left);
 
-	scan_resp_size = le16_to_cpu(resp->size);
-
 	mwifiex_dbg(adapter, INFO,
 		    "info: SCAN_RESP: returned %d APs before parsing\n",
 		    scan_rsp->number_of_sets);
@@ -2139,15 +2163,17 @@ int mwifiex_ret_802_11_scan(struct mwifiex_private *priv,
 	bss_info = scan_rsp->bss_desc_and_tlv_buffer;
 
 	/*
-	 * The size of the TLV buffer is equal to the entire command response
-	 *   size (scan_resp_size) minus the fixed fields (sizeof()'s), the
-	 *   BSS Descriptions (bss_descript_size as bytesLef) and the command
-	 *   response header (S_DS_GEN)
+	 * The TLV buffer follows the command-specific fixed fields and the BSS
+	 * descriptions. Background-scan responses have an additional fixed
+	 * field before scan_rsp, which is included in fixed_size.
 	 */
-	tlv_buf_size = scan_resp_size - (bytes_left
-					 + sizeof(scan_rsp->bss_descript_size)
-					 + sizeof(scan_rsp->number_of_sets)
-					 + S_DS_GEN);
+	if (bytes_left > scan_resp_size - fixed_size) {
+		mwifiex_dbg(adapter, ERROR,
+			    "SCAN_RESP: BSS data exceeds response\n");
+		ret = -1;
+		goto check_next_scan;
+	}
+	tlv_buf_size = scan_resp_size - fixed_size - bytes_left;
 
 	tlv_data = (struct mwifiex_ie_types_data *) (scan_rsp->
 						 bss_desc_and_tlv_buffer +
@@ -2174,9 +2200,8 @@ int mwifiex_ret_802_11_scan(struct mwifiex_private *priv,
 
 	if (nd_config) {
 		adapter->nd_info =
-			kzalloc(struct_size(adapter->nd_info, matches,
-					    scan_rsp->number_of_sets),
-				GFP_ATOMIC);
+			kzalloc_flex(*adapter->nd_info, matches,
+				     scan_rsp->number_of_sets, GFP_ATOMIC);
 
 		if (adapter->nd_info)
 			adapter->nd_info->n_matches = scan_rsp->number_of_sets;
@@ -2452,7 +2477,7 @@ int mwifiex_stop_bg_scan(struct mwifiex_private *priv)
 		return 0;
 	}
 
-	bgscan_cfg = kzalloc(sizeof(*bgscan_cfg), GFP_KERNEL);
+	bgscan_cfg = kzalloc_obj(*bgscan_cfg);
 	if (!bgscan_cfg)
 		return -ENOMEM;
 
@@ -2779,7 +2804,7 @@ static int mwifiex_scan_specific_ssid(struct mwifiex_private *priv,
 		return -EBUSY;
 	}
 
-	scan_cfg = kzalloc(sizeof(struct mwifiex_user_scan_cfg), GFP_KERNEL);
+	scan_cfg = kzalloc_obj(struct mwifiex_user_scan_cfg);
 	if (!scan_cfg)
 		return -ENOMEM;
 

@@ -1146,8 +1146,7 @@ static int pata_macio_attach(struct macio_dev *mdev,
 	macio_enable_devres(mdev);
 
 	/* Allocate and init private data structure */
-	priv = devm_kzalloc(&mdev->ofdev.dev,
-			    sizeof(struct pata_macio_priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&mdev->ofdev.dev, struct pata_macio_priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -1288,8 +1287,7 @@ static int pata_macio_pci_attach(struct pci_dev *pdev,
 	}
 
 	/* Allocate and init private data structure */
-	priv = devm_kzalloc(&pdev->dev,
-			    sizeof(struct pata_macio_priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&pdev->dev, struct pata_macio_priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -1368,12 +1366,12 @@ static struct macio_driver pata_macio_driver =
 };
 
 static const struct pci_device_id pata_macio_pci_match[] = {
-	{ PCI_VDEVICE(APPLE, PCI_DEVICE_ID_APPLE_UNI_N_ATA),	0 },
-	{ PCI_VDEVICE(APPLE, PCI_DEVICE_ID_APPLE_IPID_ATA100),	0 },
-	{ PCI_VDEVICE(APPLE, PCI_DEVICE_ID_APPLE_K2_ATA100),	0 },
-	{ PCI_VDEVICE(APPLE, PCI_DEVICE_ID_APPLE_SH_ATA),	0 },
-	{ PCI_VDEVICE(APPLE, PCI_DEVICE_ID_APPLE_IPID2_ATA),	0 },
-	{},
+	{ PCI_VDEVICE(APPLE, PCI_DEVICE_ID_APPLE_UNI_N_ATA) },
+	{ PCI_VDEVICE(APPLE, PCI_DEVICE_ID_APPLE_IPID_ATA100) },
+	{ PCI_VDEVICE(APPLE, PCI_DEVICE_ID_APPLE_K2_ATA100) },
+	{ PCI_VDEVICE(APPLE, PCI_DEVICE_ID_APPLE_SH_ATA) },
+	{ PCI_VDEVICE(APPLE, PCI_DEVICE_ID_APPLE_IPID2_ATA) },
+	{ }
 };
 
 static struct pci_driver pata_macio_pci_driver = {

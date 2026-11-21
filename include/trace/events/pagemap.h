@@ -22,7 +22,7 @@
 	(folio_test_swapcache(folio)	? PAGEMAP_SWAPCACHE  : 0) | \
 	(folio_test_swapbacked(folio)	? PAGEMAP_SWAPBACKED : 0) | \
 	(folio_test_mappedtodisk(folio)	? PAGEMAP_MAPPEDDISK : 0) | \
-	(folio_test_private(folio)	? PAGEMAP_BUFFERS    : 0) \
+	(folio_has_attached_private(folio)	? PAGEMAP_BUFFERS    : 0) \
 	)
 
 TRACE_EVENT(mm_lru_insertion,
@@ -76,6 +76,14 @@ TRACE_EVENT(mm_lru_activate,
 
 	TP_printk("folio=%p pfn=0x%lx", __entry->folio, __entry->pfn)
 );
+
+DECLARE_TRACE(mm_lru_add_drain,
+	      TP_PROTO(int cpu, unsigned int nr_folios),
+	      TP_ARGS(cpu, nr_folios));
+
+DECLARE_TRACE(mm_lru_add_drain_all,
+	      TP_PROTO(bool force_all_cpus),
+	      TP_ARGS(force_all_cpus));
 
 #endif /* _TRACE_PAGEMAP_H */
 

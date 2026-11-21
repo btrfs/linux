@@ -191,7 +191,7 @@ static ssize_t meson_ddr_perf_cpumask_show(struct device *dev,
 {
 	struct ddr_pmu *pmu = dev_get_drvdata(dev);
 
-	return cpumap_print_to_pagebuf(true, buf, cpumask_of(pmu->cpu));
+	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(cpumask_of(pmu->cpu)));
 }
 
 static struct device_attribute meson_ddr_perf_cpumask_attr =
@@ -485,7 +485,7 @@ int meson_ddr_pmu_create(struct platform_device *pdev)
 	char *name;
 	struct ddr_pmu *pmu;
 
-	pmu = devm_kzalloc(&pdev->dev, sizeof(struct ddr_pmu), GFP_KERNEL);
+	pmu = devm_kzalloc_obj(&pdev->dev, struct ddr_pmu);
 	if (!pmu)
 		return -ENOMEM;
 

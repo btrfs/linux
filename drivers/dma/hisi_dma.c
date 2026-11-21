@@ -485,7 +485,7 @@ hisi_dma_prep_dma_memcpy(struct dma_chan *c, dma_addr_t dst, dma_addr_t src,
 	struct hisi_dma_chan *chan = to_hisi_dma_chan(c);
 	struct hisi_dma_desc *desc;
 
-	desc = kzalloc(sizeof(*desc), GFP_NOWAIT);
+	desc = kzalloc_obj(*desc, GFP_NOWAIT);
 	if (!desc)
 		return NULL;
 
@@ -853,8 +853,7 @@ static struct debugfs_reg32 *hisi_dma_get_ch_regs(struct hisi_dma_dev *hdma_dev,
 	else
 		*regs_sz = regs_sz_comm + ARRAY_SIZE(hisi_dma_hip09_chan_regs);
 
-	regs = devm_kcalloc(dev, *regs_sz, sizeof(struct debugfs_reg32),
-			    GFP_KERNEL);
+	regs = devm_kzalloc_objs(dev, struct debugfs_reg32, *regs_sz);
 	if (!regs)
 		return NULL;
 	memcpy(regs, hisi_dma_comm_chan_regs, sizeof(hisi_dma_comm_chan_regs));
@@ -882,8 +881,7 @@ static int hisi_dma_create_chan_dir(struct hisi_dma_dev *hdma_dev)
 
 	dev = &hdma_dev->pdev->dev;
 
-	regsets = devm_kcalloc(dev, hdma_dev->chan_num,
-			       sizeof(*regsets), GFP_KERNEL);
+	regsets = devm_kzalloc_objs(dev, *regsets, hdma_dev->chan_num);
 	if (!regsets)
 		return -ENOMEM;
 
@@ -921,7 +919,7 @@ static void hisi_dma_create_debugfs(struct hisi_dma_dev *hdma_dev)
 	if (hdma_dev->dma_dev.dbg_dev_root == NULL)
 		return;
 
-	regset = devm_kzalloc(dev, sizeof(*regset), GFP_KERNEL);
+	regset = devm_kzalloc_obj(dev, *regset);
 	if (!regset)
 		return;
 
@@ -980,10 +978,9 @@ static int hisi_dma_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		return ret;
 
 	chan_num = hisi_dma_get_chan_num(pdev);
-	hdma_dev = devm_kzalloc(dev, struct_size(hdma_dev, chan, chan_num),
-				GFP_KERNEL);
+	hdma_dev = devm_kzalloc_flex(dev, *hdma_dev, chan, chan_num);
 	if (!hdma_dev)
-		return -EINVAL;
+		return -ENOMEM;
 
 	hdma_dev->base = pcim_iomap_table(pdev)[PCI_BAR_2];
 	hdma_dev->pdev = pdev;
@@ -1037,6 +1034,7 @@ static const struct pci_device_id hisi_dma_pci_tbl[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_HUAWEI, 0xa122) },
 	{ 0, }
 };
+MODULE_DEVICE_TABLE(pci, hisi_dma_pci_tbl);
 
 static struct pci_driver hisi_dma_pci_driver = {
 	.name		= "hisi_dma",
@@ -1050,4 +1048,3 @@ MODULE_AUTHOR("Zhou Wang <wangzhou1@hisilicon.com>");
 MODULE_AUTHOR("Zhenfa Qiu <qiuzhenfa@hisilicon.com>");
 MODULE_DESCRIPTION("HiSilicon Kunpeng DMA controller driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(pci, hisi_dma_pci_tbl);

@@ -10,7 +10,6 @@
 #include <linux/device/driver.h>
 #include <linux/err.h>
 #include <linux/mfd/max77759.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/nvmem-provider.h>
 #include <linux/overflow.h>
@@ -104,7 +103,7 @@ static int max77759_nvmem_probe(struct platform_device *pdev)
 	};
 	struct max77759_nvmem *nvmem;
 
-	nvmem = devm_kzalloc(&pdev->dev, sizeof(*nvmem), GFP_KERNEL);
+	nvmem = devm_kzalloc_obj(&pdev->dev, *nvmem);
 	if (!nvmem)
 		return -ENOMEM;
 

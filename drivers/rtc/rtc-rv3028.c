@@ -147,8 +147,8 @@ static ssize_t timestamp0_show(struct device *dev,
 	if (ret)
 		return ret;
 
-	return sprintf(buf, "%llu\n",
-		       (unsigned long long)rtc_tm_to_time64(&tm));
+	return sysfs_emit(buf, "%llu\n",
+			  (unsigned long long)rtc_tm_to_time64(&tm));
 };
 
 static DEVICE_ATTR_RW(timestamp0);
@@ -164,7 +164,7 @@ static ssize_t timestamp0_count_show(struct device *dev,
 	if (ret)
 		return ret;
 
-	return sprintf(buf, "%u\n", count);
+	return sysfs_emit(buf, "%u\n", count);
 };
 
 static DEVICE_ATTR_RO(timestamp0_count);
@@ -816,7 +816,7 @@ static int rv3028_clkout_register_clk(struct rv3028_data *rv3028,
 {
 	int ret;
 	struct clk *clk;
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	struct device_node *node = client->dev.of_node;
 
 	ret = regmap_update_bits(rv3028->regmap, RV3028_STATUS,
@@ -943,8 +943,7 @@ static int rv3028_probe(struct i2c_client *client)
 		.reg_write = rv3028_eeprom_write,
 	};
 
-	rv3028 = devm_kzalloc(&client->dev, sizeof(struct rv3028_data),
-			      GFP_KERNEL);
+	rv3028 = devm_kzalloc_obj(&client->dev, struct rv3028_data);
 	if (!rv3028)
 		return -ENOMEM;
 
@@ -1022,8 +1021,6 @@ static int rv3028_probe(struct i2c_client *client)
 	devm_rtc_nvmem_register(rv3028->rtc, &nvmem_cfg);
 	eeprom_cfg.priv = rv3028;
 	devm_rtc_nvmem_register(rv3028->rtc, &eeprom_cfg);
-
-	rv3028->rtc->max_user_freq = 1;
 
 #ifdef CONFIG_COMMON_CLK
 	rv3028_clkout_register_clk(rv3028, client);

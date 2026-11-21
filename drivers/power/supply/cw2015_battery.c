@@ -13,7 +13,6 @@
 #include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/gfp.h>
-#include <linux/gpio/consumer.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/power_supply.h>
@@ -643,7 +642,7 @@ static int cw_bat_probe(struct i2c_client *client)
 	struct cw_battery *cw_bat;
 	struct power_supply_config psy_cfg = { 0 };
 
-	cw_bat = devm_kzalloc(&client->dev, sizeof(*cw_bat), GFP_KERNEL);
+	cw_bat = devm_kzalloc_obj(&client->dev, *cw_bat);
 	if (!cw_bat)
 		return -ENOMEM;
 
@@ -686,20 +685,26 @@ static int cw_bat_probe(struct i2c_client *client)
 	ret = power_supply_get_battery_info(cw_bat->rk_bat, &cw_bat->battery);
 	if (ret) {
 		/* Allocate an empty battery */
-		cw_bat->battery = devm_kzalloc(&client->dev,
-					       sizeof(*cw_bat->battery),
-					       GFP_KERNEL);
+		cw_bat->battery = devm_kzalloc_obj(&client->dev,
+						   *cw_bat->battery);
 		if (!cw_bat->battery)
 			return -ENOMEM;
 		dev_warn(cw_bat->dev,
 			 "No monitored battery, some properties will be missing\n");
 	}
 
-	cw_bat->battery_workqueue = create_singlethread_workqueue("rk_battery");
+	cw_bat->battery_workqueue = devm_alloc_ordered_workqueue(&client->dev,
+								 "rk_battery", 0);
 	if (!cw_bat->battery_workqueue)
 		return -ENOMEM;
 
-	devm_delayed_work_autocancel(&client->dev, &cw_bat->battery_delay_work, cw_bat_work);
+	ret = devm_delayed_work_autocancel(&client->dev, &cw_bat->battery_delay_work, cw_bat_work);
+	if (ret) {
+		dev_err_probe(&client->dev, ret,
+			"Failed to register delayed work\n");
+		return ret;
+	}
+
 	queue_delayed_work(cw_bat->battery_workqueue,
 			   &cw_bat->battery_delay_work, msecs_to_jiffies(10));
 	return 0;
@@ -727,9 +732,10 @@ static int __maybe_unused cw_bat_resume(struct device *dev)
 static SIMPLE_DEV_PM_OPS(cw_bat_pm_ops, cw_bat_suspend, cw_bat_resume);
 
 static const struct i2c_device_id cw_bat_id_table[] = {
-	{ "cw2015" },
+	{ .name = "cw2015" },
 	{ }
 };
+MODULE_DEVICE_TABLE(i2c, cw_bat_id_table);
 
 static const struct of_device_id cw2015_of_match[] = {
 	{ .compatible = "cellwise,cw2015" },

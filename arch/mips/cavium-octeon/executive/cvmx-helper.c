@@ -95,7 +95,7 @@ EXPORT_SYMBOL_GPL(cvmx_helper_ports_on_interface);
  * @INTERNAL
  * Return interface mode for CN68xx.
  */
-static cvmx_helper_interface_mode_t __cvmx_get_mode_cn68xx(int interface)
+static enum cvmx_helper_interface_mode __cvmx_get_mode_cn68xx(int interface)
 {
 	union cvmx_mio_qlmx_cfg qlm_cfg;
 	switch (interface) {
@@ -147,7 +147,7 @@ static cvmx_helper_interface_mode_t __cvmx_get_mode_cn68xx(int interface)
  * @INTERNAL
  * Return interface mode for an Octeon II
  */
-static cvmx_helper_interface_mode_t __cvmx_get_mode_octeon2(int interface)
+static enum cvmx_helper_interface_mode __cvmx_get_mode_octeon2(int interface)
 {
 	union cvmx_gmxx_inf_mode mode;
 
@@ -247,7 +247,7 @@ static cvmx_helper_interface_mode_t __cvmx_get_mode_octeon2(int interface)
  * @INTERNAL
  * Return interface mode for CN7XXX.
  */
-static cvmx_helper_interface_mode_t __cvmx_get_mode_cn7xxx(int interface)
+static enum cvmx_helper_interface_mode __cvmx_get_mode_cn7xxx(int interface)
 {
 	union cvmx_gmxx_inf_mode mode;
 
@@ -289,7 +289,7 @@ static cvmx_helper_interface_mode_t __cvmx_get_mode_cn7xxx(int interface)
  * Returns Mode of the interface. Unknown or unsupported interfaces return
  *	   DISABLED.
  */
-cvmx_helper_interface_mode_t cvmx_helper_interface_get_mode(int interface)
+enum cvmx_helper_interface_mode cvmx_helper_interface_get_mode(int interface)
 {
 	union cvmx_gmxx_inf_mode mode;
 
@@ -1014,7 +1014,6 @@ int cvmx_helper_initialize_packet_io_global(void)
 {
 	int result = 0;
 	int interface;
-	union cvmx_l2c_cfg l2c_cfg;
 	const int num_interfaces = cvmx_helper_get_number_of_interfaces();
 
 	/*
@@ -1029,10 +1028,21 @@ int cvmx_helper_initialize_packet_io_global(void)
 	 * to the cores. This avoids conditions where IO blocks might
 	 * be starved under very high L2 loads.
 	 */
-	l2c_cfg.u64 = cvmx_read_csr(CVMX_L2C_CFG);
-	l2c_cfg.s.lrf_arb_mode = 0;
-	l2c_cfg.s.rfb_arb_mode = 0;
-	cvmx_write_csr(CVMX_L2C_CFG, l2c_cfg.u64);
+	if (OCTEON_IS_MODEL(OCTEON_CN6XXX)) {
+		union cvmx_l2c_ctl l2c_ctl;
+
+		l2c_ctl.u64 = cvmx_read_csr(CVMX_L2C_CTL);
+		l2c_ctl.s.rsp_arb_mode = 1;
+		l2c_ctl.s.xmc_arb_mode = 0;
+		cvmx_write_csr(CVMX_L2C_CTL, l2c_ctl.u64);
+	} else {
+		union cvmx_l2c_cfg l2c_cfg;
+
+		l2c_cfg.u64 = cvmx_read_csr(CVMX_L2C_CFG);
+		l2c_cfg.s.lrf_arb_mode = 0;
+		l2c_cfg.s.rfb_arb_mode = 0;
+		cvmx_write_csr(CVMX_L2C_CFG, l2c_cfg.u64);
+	}
 
 	cvmx_pko_initialize_global();
 	for (interface = 0; interface < num_interfaces; interface++) {

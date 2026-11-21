@@ -194,6 +194,17 @@ alternative_cb_end
 #endif
 	.endm
 
+	.macro pcpu_gprs_entry, tsk:req, regs:req, tmp:req
+	ldrh	w\tmp, [\tsk, #TSK_TI_PCPU_GPRS]
+	strh	w\tmp, [\regs, #S_PCPU_GPRS]
+	strh	wzr, [\tsk, #TSK_TI_PCPU_GPRS]
+	.endm
+
+	.macro pcpu_gprs_exit, tsk:req, regs:req, tmp:req
+	ldrh	w\tmp, [\regs, #S_PCPU_GPRS]
+	strh	w\tmp, [\tsk, #TSK_TI_PCPU_GPRS]
+	.endm
+
 	.macro	kernel_entry, el, regsize = 64
 	.if	\el == 0
 	alternative_insn nop, SET_PSTATE_DIT(1), ARM64_HAS_DIT
@@ -273,10 +284,11 @@ alternative_if ARM64_HAS_ADDRESS_AUTH
 alternative_else_nop_endif
 1:
 
-	scs_load_current
+	scs_load_current_base
 	.else
 	add	x21, sp, #PT_REGS_SIZE
 	get_current_task tsk
+	pcpu_gprs_entry	tsk, sp, x0
 	.endif /* \el == 0 */
 	mrs	x22, elr_el1
 	mrs	x23, spsr_el1
@@ -334,7 +346,7 @@ alternative_else_nop_endif
 
 	.macro	kernel_exit, el
 	.if	\el != 0
-	disable_daif
+	pcpu_gprs_exit	tsk, sp, x0
 	.endif
 
 #ifdef CONFIG_ARM64_PSEUDO_NMI
@@ -378,8 +390,6 @@ alternative_if ARM64_WORKAROUND_845719
 alternative_else_nop_endif
 #endif
 3:
-	scs_save tsk
-
 	/* Ignore asynchronous tag check faults in the uaccess routines */
 	ldr	x0, [tsk, THREAD_SCTLR_USER]
 	clear_mte_async_tcf x0
@@ -473,7 +483,7 @@ alternative_else_nop_endif
 	 */
 SYM_CODE_START_LOCAL(__swpan_entry_el1)
 	mrs	x21, ttbr0_el1
-	tst	x21, #TTBR_ASID_MASK		// Check for the reserved ASID
+	tst	x21, #TTBRx_EL1_ASID_MASK	// Check for the reserved ASID
 	orr	x23, x23, #PSR_PAN_BIT		// Set the emulated PAN in the saved SPSR
 	b.eq	1f				// TTBR0 access already disabled
 	and	x23, x23, #~PSR_PAN_BIT		// Clear the emulated PAN in the saved SPSR
@@ -1029,11 +1039,12 @@ SYM_CODE_START(__sdei_asm_handler)
 
 	/*
 	 * We may have interrupted userspace, or a guest, or exit-from or
-	 * return-to either of these. We can't trust sp_el0, restore it.
+	 * return-to either of these. Preserve the interrupted sp_el0, and
+	 * initialize sp_el0 to the current task.
 	 */
-	mrs	x28, sp_el0
-	ldr_this_cpu	dst=x0, sym=__entry_task, tmp=x1
-	msr	sp_el0, x0
+	mrs	x20, sp_el0
+	ldr_this_cpu    dst=tsk, sym=__entry_task, tmp=x1
+	msr	sp_el0, tsk
 
 	/* If we interrupted the kernel point to the previous stack/frame. */
 	and     x0, x3, #0xc
@@ -1045,15 +1056,25 @@ SYM_CODE_START(__sdei_asm_handler)
 	stp	x29, x4, [sp, #-16]!
 	mov	x29, sp
 
+	add	x16, x19, #SDEI_EVENT_INTREGS
+	pcpu_gprs_entry tsk, x16, x17
+
 	add	x0, x19, #SDEI_EVENT_INTREGS
 	mov	x1, x19
 	bl	__sdei_handler
 
-	msr	sp_el0, x28
-	/* restore regs >x17 that we clobbered */
+	add	x16, x19, #SDEI_EVENT_INTREGS
+	pcpu_gprs_exit tsk, x16, x17
+
+	msr	sp_el0, x20
+	/* restore regs >x17 that firmware won't restore */
 	mov	x4, x19         // keep x4 for __sdei_asm_exit_trampoline
-	ldp	x28, x29, [x4, #SDEI_EVENT_INTREGS + 16 * 14]
 	ldp	x18, x19, [x4, #SDEI_EVENT_INTREGS + 16 * 9]
+	ldp	x20, x21, [x4, #SDEI_EVENT_INTREGS + 16 * 10]
+	ldp	x22, x23, [x4, #SDEI_EVENT_INTREGS + 16 * 11]
+	ldp	x24, x25, [x4, #SDEI_EVENT_INTREGS + 16 * 12]
+	ldp	x26, x27, [x4, #SDEI_EVENT_INTREGS + 16 * 13]
+	ldp	x28, x29, [x4, #SDEI_EVENT_INTREGS + 16 * 14]
 	ldp	lr, x1, [x4, #SDEI_EVENT_INTREGS + S_LR]
 	mov	sp, x1
 

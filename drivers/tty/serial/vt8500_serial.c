@@ -638,8 +638,7 @@ static int vt8500_serial_probe(struct platform_device *pdev)
 		return -EBUSY;
 	}
 
-	vt8500_port = devm_kzalloc(&pdev->dev, sizeof(struct vt8500_port),
-				   GFP_KERNEL);
+	vt8500_port = devm_kzalloc_obj(&pdev->dev, struct vt8500_port);
 	if (!vt8500_port)
 		return -ENOMEM;
 
@@ -656,6 +655,7 @@ static int vt8500_serial_probe(struct platform_device *pdev)
 	ret = clk_prepare_enable(vt8500_port->clk);
 	if (ret) {
 		dev_err(&pdev->dev, "failed to enable clock\n");
+		clk_put(vt8500_port->clk);
 		return ret;
 	}
 

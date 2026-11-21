@@ -163,7 +163,7 @@ static struct viortc_msg *viortc_msg_init(struct viortc_dev *viortc,
 	struct virtio_rtc_req_head *req_head;
 	struct viortc_msg *msg;
 
-	msg = devm_kzalloc(dev, sizeof(*msg), GFP_KERNEL);
+	msg = devm_kzalloc_obj(dev, *msg);
 	if (!msg)
 		return NULL;
 
@@ -574,8 +574,8 @@ static int viortc_msg_xfer(struct viortc_vq *vq, struct viortc_msg *msg,
  * read requests
  */
 
-/** timeout for clock readings, where timeouts are considered non-fatal */
-#define VIORTC_MSG_READ_TIMEOUT secs_to_jiffies(60)
+/** timeout for runtime requests, where timeouts are considered non-fatal */
+#define VIORTC_MSG_TIMEOUT secs_to_jiffies(60)
 
 /**
  * viortc_read() - VIRTIO_RTC_REQ_READ wrapper
@@ -600,7 +600,7 @@ int viortc_read(struct viortc_dev *viortc, u16 vio_clk_id, u64 *reading)
 	VIORTC_MSG_WRITE(hdl, clock_id, &vio_clk_id);
 
 	ret = viortc_msg_xfer(&viortc->vqs[VIORTC_REQUESTQ], VIORTC_MSG(hdl),
-			      VIORTC_MSG_READ_TIMEOUT);
+			      VIORTC_MSG_TIMEOUT);
 	if (ret) {
 		dev_dbg(&viortc->vdev->dev, "%s: xfer returned %d\n", __func__,
 			ret);
@@ -642,7 +642,7 @@ int viortc_read_cross(struct viortc_dev *viortc, u16 vio_clk_id, u8 hw_counter,
 	VIORTC_MSG_WRITE(hdl, hw_counter, &hw_counter);
 
 	ret = viortc_msg_xfer(&viortc->vqs[VIORTC_REQUESTQ], VIORTC_MSG(hdl),
-			      VIORTC_MSG_READ_TIMEOUT);
+			      VIORTC_MSG_TIMEOUT);
 	if (ret) {
 		dev_dbg(&viortc->vdev->dev, "%s: xfer returned %d\n", __func__,
 			ret);
@@ -809,7 +809,7 @@ int viortc_read_alarm(struct viortc_dev *viortc, u16 vio_clk_id,
 	VIORTC_MSG_WRITE(hdl, clock_id, &vio_clk_id);
 
 	ret = viortc_msg_xfer(&viortc->vqs[VIORTC_REQUESTQ], VIORTC_MSG(hdl),
-			      0);
+			      VIORTC_MSG_TIMEOUT);
 	if (ret) {
 		dev_dbg(&viortc->vdev->dev, "%s: xfer returned %d\n", __func__,
 			ret);
@@ -858,7 +858,7 @@ int viortc_set_alarm(struct viortc_dev *viortc, u16 vio_clk_id, u64 alarm_time,
 	VIORTC_MSG_WRITE(hdl, flags, &flags);
 
 	ret = viortc_msg_xfer(&viortc->vqs[VIORTC_REQUESTQ], VIORTC_MSG(hdl),
-			      0);
+			      VIORTC_MSG_TIMEOUT);
 	if (ret) {
 		dev_dbg(&viortc->vdev->dev, "%s: xfer returned %d\n", __func__,
 			ret);
@@ -900,7 +900,7 @@ int viortc_set_alarm_enabled(struct viortc_dev *viortc, u16 vio_clk_id,
 	VIORTC_MSG_WRITE(hdl, flags, &flags);
 
 	ret = viortc_msg_xfer(&viortc->vqs[VIORTC_REQUESTQ], VIORTC_MSG(hdl),
-			      0);
+			      VIORTC_MSG_TIMEOUT);
 	if (ret) {
 		dev_dbg(&viortc->vdev->dev, "%s: xfer returned %d\n", __func__,
 			ret);
@@ -1099,8 +1099,8 @@ static int viortc_clocks_init(struct viortc_dev *viortc)
 	viortc->num_clocks = num_clocks;
 
 	viortc->clocks_to_unregister =
-		devm_kcalloc(&viortc->vdev->dev, num_clocks,
-			     sizeof(*viortc->clocks_to_unregister), GFP_KERNEL);
+		devm_kzalloc_objs(&viortc->vdev->dev,
+				  *viortc->clocks_to_unregister, num_clocks);
 	if (!viortc->clocks_to_unregister)
 		return -ENOMEM;
 
@@ -1182,7 +1182,7 @@ static int viortc_alloc_vq_bufs(struct viortc_dev *viortc,
 	unsigned int i;
 	void *buf;
 
-	buf_list = devm_kcalloc(dev, num_elems, sizeof(*buf_list), GFP_KERNEL);
+	buf_list = devm_kzalloc_objs(dev, *buf_list, num_elems);
 	if (!buf_list)
 		return -ENOMEM;
 
@@ -1257,6 +1257,15 @@ static int viortc_init_vqs(struct viortc_dev *viortc)
 	return 0;
 }
 
+static void __viortc_remove(struct viortc_dev *viortc)
+{
+	struct virtio_device *vdev = viortc->vdev;
+
+	viortc_clocks_deinit(viortc);
+	virtio_reset_device(vdev);
+	vdev->config->del_vqs(vdev);
+}
+
 /**
  * viortc_probe() - probe a virtio_rtc virtio device
  * @vdev: virtio device
@@ -1273,7 +1282,7 @@ static int viortc_probe(struct virtio_device *vdev)
 	bool notify;
 	int ret;
 
-	viortc = devm_kzalloc(&vdev->dev, sizeof(*viortc), GFP_KERNEL);
+	viortc = devm_kzalloc_obj(&vdev->dev, *viortc);
 	if (!viortc)
 		return -ENOMEM;
 
@@ -1282,7 +1291,7 @@ static int viortc_probe(struct virtio_device *vdev)
 
 	ret = viortc_init_vqs(viortc);
 	if (ret)
-		return ret;
+		goto err_reset_vdev;
 
 	virtio_device_ready(vdev);
 
@@ -1329,10 +1338,7 @@ static void viortc_remove(struct virtio_device *vdev)
 {
 	struct viortc_dev *viortc = vdev->priv;
 
-	viortc_clocks_deinit(viortc);
-
-	virtio_reset_device(vdev);
-	vdev->config->del_vqs(vdev);
+	__viortc_remove(viortc);
 }
 
 static int viortc_freeze(struct virtio_device *dev)
@@ -1353,9 +1359,11 @@ static int viortc_restore(struct virtio_device *dev)
 	bool notify = false;
 	int ret;
 
+	dev->config->del_vqs(dev);
+
 	ret = viortc_init_vqs(viortc);
 	if (ret)
-		return ret;
+		goto err_remove;
 
 	alarm_viortc_vq = &viortc->vqs[VIORTC_ALARMQ];
 	alarm_vq = alarm_viortc_vq->vq;
@@ -1364,7 +1372,7 @@ static int viortc_restore(struct virtio_device *dev)
 		ret = viortc_populate_vq(viortc, alarm_viortc_vq,
 					 VIORTC_ALARMQ_BUF_CAP, false);
 		if (ret)
-			return ret;
+			goto err_remove;
 
 		notify = virtqueue_kick_prepare(alarm_vq);
 	}
@@ -1372,8 +1380,12 @@ static int viortc_restore(struct virtio_device *dev)
 	virtio_device_ready(dev);
 
 	if (notify && !virtqueue_notify(alarm_vq))
-		ret = -EIO;
+		return -EIO;
 
+	return 0;
+
+err_remove:
+	__viortc_remove(viortc);
 	return ret;
 }
 

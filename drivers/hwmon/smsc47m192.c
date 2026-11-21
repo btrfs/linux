@@ -594,7 +594,7 @@ static int smsc47m192_probe(struct i2c_client *client)
 	struct smsc47m192_data *data;
 	int config;
 
-	data = devm_kzalloc(dev, sizeof(struct smsc47m192_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct smsc47m192_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -618,7 +618,7 @@ static int smsc47m192_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id smsc47m192_id[] = {
-	{ "smsc47m192" },
+	{ .name = "smsc47m192" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, smsc47m192_id);

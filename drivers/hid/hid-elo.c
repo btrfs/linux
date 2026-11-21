@@ -85,6 +85,9 @@ static int elo_raw_event(struct hid_device *hdev, struct hid_report *report,
 	if (!(hdev->claimed & HID_CLAIMED_INPUT) || list_empty(&hdev->inputs))
 		return 0;
 
+	if (size < ELO_SMARTSET_PACKET_SIZE)
+		return 0;
+
 	hidinput = list_first_entry(&hdev->inputs, struct hid_input, list);
 
 	switch (report->id) {
@@ -232,7 +235,7 @@ static int elo_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	if (!hid_is_usb(hdev))
 		return -EINVAL;
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 

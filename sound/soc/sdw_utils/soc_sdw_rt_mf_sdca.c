@@ -33,6 +33,11 @@ static const struct snd_soc_dapm_route rt722_spk_map[] = {
 	{ "Speaker", NULL, "rt722 SPK" },
 };
 
+static const struct snd_soc_dapm_route rt766_spk_map[] = {
+	{ "Speaker", NULL, "rt766 SPOL" },
+	{ "Speaker", NULL, "rt766 SPOR" },
+};
+
 /* Structure to map codec names to respective route arrays and sizes */
 struct codec_route_map {
 	const char *codec_name;
@@ -45,6 +50,7 @@ static const struct codec_route_map codec_routes[] = {
 	{ "rt712", rt712_spk_map, ARRAY_SIZE(rt712_spk_map) },
 	{ "rt721", rt721_spk_map, ARRAY_SIZE(rt721_spk_map) },
 	{ "rt722", rt722_spk_map, ARRAY_SIZE(rt722_spk_map) },
+	{ "rt766", rt766_spk_map, ARRAY_SIZE(rt766_spk_map) },
 };
 
 static const struct codec_route_map *get_codec_route_map(const char *codec_name)
@@ -59,6 +65,7 @@ static const struct codec_route_map *get_codec_route_map(const char *codec_name)
 int asoc_sdw_rt_mf_sdca_spk_rtd_init(struct snd_soc_pcm_runtime *rtd, struct snd_soc_dai *dai)
 {
 	struct snd_soc_card *card = rtd->card;
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(card);
 	char codec_name[CODEC_NAME_SIZE];
 	int ret;
 
@@ -74,7 +81,7 @@ int asoc_sdw_rt_mf_sdca_spk_rtd_init(struct snd_soc_pcm_runtime *rtd, struct snd
 	}
 
 	/* Add routes */
-	ret = snd_soc_dapm_add_routes(&card->dapm, route_map->route_map, route_map->route_size);
+	ret = snd_soc_dapm_add_routes(dapm, route_map->route_map, route_map->route_size);
 	if (ret)
 		dev_err(rtd->dev, "failed to add rt sdca spk map: %d\n", ret);
 

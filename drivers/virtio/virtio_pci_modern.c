@@ -137,11 +137,11 @@ int vp_modern_admin_cmd_exec(struct virtio_device *vdev,
 	if (!virtio_has_feature(vdev, VIRTIO_F_ADMIN_VQ))
 		return -EOPNOTSUPP;
 
-	va_status = kzalloc(sizeof(*va_status), GFP_KERNEL);
+	va_status = kzalloc_obj(*va_status);
 	if (!va_status)
 		return -ENOMEM;
 
-	va_hdr = kzalloc(sizeof(*va_hdr), GFP_KERNEL);
+	va_hdr = kzalloc_obj(*va_hdr);
 	if (!va_hdr) {
 		ret = -ENOMEM;
 		goto err_alloc;
@@ -204,7 +204,7 @@ static void virtio_pci_admin_cmd_list_init(struct virtio_device *virtio_dev)
 	__le64 *data;
 	int ret;
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data)
 		return;
 
@@ -246,11 +246,11 @@ virtio_pci_admin_cmd_dev_parts_objects_enable(struct virtio_device *virtio_dev)
 	u16 set_data_size;
 	int ret;
 
-	get_data = kzalloc(sizeof(*get_data), GFP_KERNEL);
+	get_data = kzalloc_obj(*get_data);
 	if (!get_data)
 		return;
 
-	result = kzalloc(sizeof(*result), GFP_KERNEL);
+	result = kzalloc_obj(*result);
 	if (!result)
 		goto end;
 
@@ -310,7 +310,7 @@ static void virtio_pci_admin_cmd_cap_init(struct virtio_device *virtio_dev)
 	struct scatterlist result_sg;
 	int ret;
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data)
 		return;
 
@@ -362,6 +362,12 @@ static void vp_modern_avq_cleanup(struct virtio_device *vdev)
 		cmd->ret = -EIO;
 		complete(&cmd->completion);
 	}
+}
+
+static void vp_modern_del_vqs(struct virtio_device *vdev)
+{
+	vp_modern_avq_cleanup(vdev);
+	vp_del_vqs(vdev);
 }
 
 static void vp_transport_features(struct virtio_device *vdev, u64 features)
@@ -557,11 +563,6 @@ static void vp_reset(struct virtio_device *vdev)
 	 */
 	while (vp_modern_get_status(mdev))
 		msleep(1);
-
-	vp_modern_avq_cleanup(vdev);
-
-	/* Flush pending VQ/configuration callbacks. */
-	vp_synchronize_vectors(vdev);
 }
 
 static int vp_active_vq(struct virtqueue *vq, u16 msix_vec)
@@ -929,7 +930,7 @@ int virtio_pci_admin_mode_set(struct pci_dev *pdev, u8 flags)
 	if (vf_id < 0)
 		return vf_id;
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data)
 		return -ENOMEM;
 
@@ -1054,7 +1055,7 @@ int virtio_pci_admin_obj_destroy(struct pci_dev *pdev, u16 obj_type, u32 id)
 	if (obj_type != VIRTIO_RESOURCE_OBJ_DEV_PARTS)
 		return -EINVAL;
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data)
 		return -ENOMEM;
 
@@ -1109,11 +1110,11 @@ int virtio_pci_admin_dev_parts_metadata_get(struct pci_dev *pdev, u16 obj_type,
 	if (vf_id < 0)
 		return vf_id;
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data)
 		return -ENOMEM;
 
-	result = kzalloc(sizeof(*result), GFP_KERNEL);
+	result = kzalloc_obj(*result);
 	if (!result) {
 		ret = -ENOMEM;
 		goto end;
@@ -1173,7 +1174,7 @@ int virtio_pci_admin_dev_parts_get(struct pci_dev *pdev, u16 obj_type, u32 id,
 	if (vf_id < 0)
 		return vf_id;
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data)
 		return -ENOMEM;
 
@@ -1232,7 +1233,7 @@ static const struct virtio_config_ops virtio_pci_config_nodev_ops = {
 	.set_status	= vp_set_status,
 	.reset		= vp_reset,
 	.find_vqs	= vp_modern_find_vqs,
-	.del_vqs	= vp_del_vqs,
+	.del_vqs	= vp_modern_del_vqs,
 	.synchronize_cbs = vp_synchronize_vectors,
 	.get_extended_features = vp_get_features,
 	.finalize_features = vp_finalize_features,
@@ -1252,7 +1253,7 @@ static const struct virtio_config_ops virtio_pci_config_ops = {
 	.set_status	= vp_set_status,
 	.reset		= vp_reset,
 	.find_vqs	= vp_modern_find_vqs,
-	.del_vqs	= vp_del_vqs,
+	.del_vqs	= vp_modern_del_vqs,
 	.synchronize_cbs = vp_synchronize_vectors,
 	.get_extended_features = vp_get_features,
 	.finalize_features = vp_finalize_features,

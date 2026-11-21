@@ -1836,7 +1836,7 @@ print_errlog1_2(struct seq_file *file, struct tegra194_cbb *cbb,
 }
 
 /*
- * Print transcation type, error code and description from ErrLog0 for all
+ * Print transaction type, error code and description from ErrLog0 for all
  * errors. For NOC target errors, all relevant error info is printed using
  * ErrLog0 only. But additional information is printed for errors from
  * APB targets because for them:
@@ -1912,7 +1912,7 @@ static bool print_errlog0(struct seq_file *file, struct tegra194_cbb *cbb)
 
 /*
  * Print debug information about failed transaction using
- * ErrLog registers of error loggger having ErrVld set
+ * ErrLog registers of error logger having ErrVld set
  */
 static bool print_errloggerX_info(struct seq_file *file, struct tegra194_cbb *cbb,
 				  int errloggerX)
@@ -2072,20 +2072,15 @@ static int tegra194_cbb_interrupt_enable(struct tegra_cbb *cbb)
 	if (priv->sec_irq) {
 		err = devm_request_irq(dev, priv->sec_irq, tegra194_cbb_err_isr, 0, dev_name(dev),
 				       priv);
-		if (err) {
-			dev_err(dev, "failed to register interrupt %u: %d\n", priv->sec_irq, err);
+		if (err)
 			return err;
-		}
 	}
 
 	if (priv->nonsec_irq) {
 		err = devm_request_irq(dev, priv->nonsec_irq, tegra194_cbb_err_isr, 0,
 				       dev_name(dev), priv);
-		if (err) {
-			dev_err(dev, "failed to register interrupt %u: %d\n", priv->nonsec_irq,
-				err);
+		if (err)
 			return err;
-		}
 	}
 
 	return 0;
@@ -2209,8 +2204,8 @@ static int tegra194_cbb_get_bridges(struct tegra194_cbb *cbb, struct device_node
 	if (!cbb->bridges) {
 		cbb->num_bridges = of_address_count(np);
 
-		cbb->bridges = devm_kcalloc(cbb->base.dev, cbb->num_bridges,
-					    sizeof(*cbb->bridges), GFP_KERNEL);
+		cbb->bridges = devm_kzalloc_objs(cbb->base.dev, *cbb->bridges,
+						 cbb->num_bridges);
 		if (!cbb->bridges)
 			return -ENOMEM;
 
@@ -2259,7 +2254,7 @@ static int tegra194_cbb_probe(struct platform_device *pdev)
 		}
 	}
 
-	cbb = devm_kzalloc(&pdev->dev, sizeof(*cbb), GFP_KERNEL);
+	cbb = devm_kzalloc_obj(&pdev->dev, *cbb);
 	if (!cbb)
 		return -ENOMEM;
 
@@ -2342,7 +2337,7 @@ static int __init tegra194_cbb_init(void)
 {
 	return platform_driver_register(&tegra194_cbb_driver);
 }
-pure_initcall(tegra194_cbb_init);
+core_initcall(tegra194_cbb_init);
 
 static void __exit tegra194_cbb_exit(void)
 {

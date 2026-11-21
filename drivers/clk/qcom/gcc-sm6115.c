@@ -120,7 +120,7 @@ static const struct alpha_pll_config gpll10_config = {
 	.vco_mask = GENMASK(21, 20),
 	.main_output_mask = BIT(0),
 	.config_ctl_val = 0x4001055b,
-	.test_ctl_hi1_val = 0x1,
+	.test_ctl_hi_val = 0x1,
 	.test_ctl_hi_mask = 0x1,
 };
 
@@ -173,7 +173,7 @@ static const struct alpha_pll_config gpll11_config = {
 	.vco_val = 0x2 << 20,
 	.vco_mask = GENMASK(21, 20),
 	.config_ctl_val = 0x4001055b,
-	.test_ctl_hi1_val = 0x1,
+	.test_ctl_hi_val = 0x1,
 	.test_ctl_hi_mask = 0x1,
 };
 
@@ -367,7 +367,7 @@ static const struct alpha_pll_config gpll8_config = {
 	.post_div_val = 0x1 << 8,
 	.post_div_mask = GENMASK(11, 8),
 	.config_ctl_val = 0x4001055b,
-	.test_ctl_hi1_val = 0x1,
+	.test_ctl_hi_val = 0x1,
 	.test_ctl_hi_mask = 0x1,
 };
 
@@ -3218,6 +3218,7 @@ static struct gdsc gcc_vcodec0_gdsc = {
 	.pd = {
 		.name = "gcc_vcodec0",
 	},
+	.flags = HW_CTRL_TRIGGER,
 	.pwrsts = PWRSTS_OFF_ON,
 };
 
@@ -3524,17 +3525,7 @@ static struct platform_driver gcc_sm6115_driver = {
 	},
 };
 
-static int __init gcc_sm6115_init(void)
-{
-	return platform_driver_register(&gcc_sm6115_driver);
-}
-subsys_initcall(gcc_sm6115_init);
-
-static void __exit gcc_sm6115_exit(void)
-{
-	platform_driver_unregister(&gcc_sm6115_driver);
-}
-module_exit(gcc_sm6115_exit);
+subsys_platform_driver(gcc_sm6115_driver);
 
 MODULE_DESCRIPTION("QTI GCC SM6115 and SM4250 Driver");
 MODULE_LICENSE("GPL v2");

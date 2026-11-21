@@ -17,11 +17,12 @@
  */
 
 #include <linux/dma-buf.h>
+#include <linux/overflow.h>
 
 #include <drm/drm_fourcc.h>
+#include <drm/drm_print.h>
 
 #include "vc4_drv.h"
-#include "uapi/drm/vc4_drm.h"
 
 static const struct drm_gem_object_funcs vc4_gem_object_funcs;
 
@@ -204,8 +205,7 @@ static struct list_head *vc4_get_cache_list_for_size(struct drm_device *dev,
 		struct list_head *new_list;
 		uint32_t i;
 
-		new_list = kmalloc_array(new_size, sizeof(struct list_head),
-					 GFP_KERNEL);
+		new_list = kvmalloc_objs(struct list_head, new_size);
 		if (!new_list)
 			return NULL;
 
@@ -225,7 +225,7 @@ static struct list_head *vc4_get_cache_list_for_size(struct drm_device *dev,
 		for (i = vc4->bo_cache.size_list_size; i < new_size; i++)
 			INIT_LIST_HEAD(&new_list[i]);
 
-		kfree(vc4->bo_cache.size_list);
+		kvfree(vc4->bo_cache.size_list);
 		vc4->bo_cache.size_list = new_list;
 		vc4->bo_cache.size_list_size = new_size;
 	}
@@ -304,7 +304,8 @@ static void vc4_bo_purge(struct drm_gem_object *obj)
 
 	drm_vma_node_unmap(&obj->vma_node, dev->anon_inode->i_mapping);
 
-	dma_free_wc(dev->dev, obj->size, bo->base.vaddr, bo->base.dma_addr);
+	dma_free_wc(drm_dev_dma_dev(dev), obj->size, bo->base.vaddr,
+		    bo->base.dma_addr);
 	bo->base.vaddr = NULL;
 	bo->madv = __VC4_MADV_PURGED;
 }
@@ -399,7 +400,7 @@ struct drm_gem_object *vc4_create_object(struct drm_device *dev, size_t size)
 	if (WARN_ON_ONCE(vc4->gen > VC4_GEN_4))
 		return ERR_PTR(-ENODEV);
 
-	bo = kzalloc(sizeof(*bo), GFP_KERNEL);
+	bo = kzalloc_obj(*bo);
 	if (!bo)
 		return ERR_PTR(-ENOMEM);
 
@@ -556,7 +557,7 @@ static void vc4_free_object(struct drm_gem_object *gem_bo)
 	mutex_lock(&vc4->bo_lock);
 	/* If the object references someone else's memory, we can't cache it.
 	 */
-	if (gem_bo->import_attach) {
+	if (drm_gem_is_imported(gem_bo)) {
 		vc4_bo_destroy(bo);
 		goto out;
 	}
@@ -733,17 +734,24 @@ static int vc4_gem_object_mmap(struct drm_gem_object *obj, struct vm_area_struct
 {
 	struct vc4_bo *bo = to_vc4_bo(obj);
 
-	if (bo->validated_shader && (vma->vm_flags & VM_WRITE)) {
-		DRM_DEBUG("mmapping of shader BOs for writing not allowed.\n");
-		return -EINVAL;
+	if (bo->validated_shader) {
+		if (vma->vm_flags & VM_WRITE) {
+			DRM_DEBUG("mmapping of shader BOs for writing not allowed.\n");
+			return -EINVAL;
+		}
+
+		vm_flags_clear(vma, VM_MAYWRITE);
 	}
 
+	mutex_lock(&bo->madv_lock);
 	if (bo->madv != VC4_MADV_WILLNEED) {
 		DRM_DEBUG("mmapping of %s BO not allowed\n",
 			  bo->madv == VC4_MADV_DONTNEED ?
 			  "purgeable" : "purged");
+		mutex_unlock(&bo->madv_lock);
 		return -EINVAL;
 	}
+	mutex_unlock(&bo->madv_lock);
 
 	return drm_gem_dma_mmap(&bo->base, vma);
 }
@@ -829,6 +837,19 @@ int vc4_mmap_bo_ioctl(struct drm_device *dev, void *data,
 	return 0;
 }
 
+/*
+ * QPUs sharing a slice's instruction cache can livelock evicting each
+ * other's fills. Considering that shader BOs are page aligned, any code
+ * at offset 0 maps every shader to the same cache sets. This makes a
+ * livelock more likely to happen due to GFXH-16.
+ *
+ * Start each shader at one of four offsets, cycled per client, to spread
+ * them across sets. The use of four different offsets is motivated by the
+ * number of QPUs per slice (4 QPUs).
+ */
+#define VC4_SHADER_OFFSET_STEP	256
+#define VC4_SHADER_OFFSET_NUM	4
+
 int
 vc4_create_shader_bo_ioctl(struct drm_device *dev, void *data,
 			   struct drm_file *file_priv)
@@ -837,6 +858,7 @@ vc4_create_shader_bo_ioctl(struct drm_device *dev, void *data,
 	struct vc4_file *vc4file = file_priv->driver_priv;
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
 	struct vc4_bo *bo = NULL;
+	u32 offset, size;
 	int ret;
 
 	if (WARN_ON_ONCE(vc4->gen > VC4_GEN_4))
@@ -858,29 +880,37 @@ vc4_create_shader_bo_ioctl(struct drm_device *dev, void *data,
 		return -EINVAL;
 	}
 
+	offset = ((u32)atomic_inc_return(&vc4file->shader_offset_idx) %
+		  VC4_SHADER_OFFSET_NUM) * VC4_SHADER_OFFSET_STEP;
+
+	if (check_add_overflow(offset, args->size, &size))
+		return -EINVAL;
+
 	ret = vc4_grab_bin_bo(vc4, vc4file);
 	if (ret)
 		return ret;
 
-	bo = vc4_bo_create(dev, args->size, true, VC4_BO_TYPE_V3D_SHADER);
+	bo = vc4_bo_create(dev, size, true, VC4_BO_TYPE_V3D_SHADER);
 	if (IS_ERR(bo))
 		return PTR_ERR(bo);
 
 	bo->madv = VC4_MADV_WILLNEED;
+	bo->shader_offset = offset;
 
-	if (copy_from_user(bo->base.vaddr,
-			     (void __user *)(uintptr_t)args->data,
-			     args->size)) {
+	/* Clear the memory around the code, which may come from the BO
+	 * cache.
+	 */
+	memset(bo->base.vaddr, 0, offset);
+	if (copy_from_user(bo->base.vaddr + offset,
+			   (void __user *)(uintptr_t)args->data,
+			   args->size)) {
 		ret = -EFAULT;
 		goto fail;
 	}
-	/* Clear the rest of the memory from allocating from the BO
-	 * cache.
-	 */
-	memset(bo->base.vaddr + args->size, 0,
-	       bo->base.base.size - args->size);
+	memset(bo->base.vaddr + offset + args->size, 0,
+	       bo->base.base.size - offset - args->size);
 
-	bo->validated_shader = vc4_validate_shader(&bo->base);
+	bo->validated_shader = vc4_validate_shader(&bo->base, offset);
 	if (!bo->validated_shader) {
 		ret = -EINVAL;
 		goto fail;
@@ -1014,8 +1044,7 @@ int vc4_bo_cache_init(struct drm_device *dev)
 	 * use.  This lets us avoid a bunch of string reallocation in
 	 * the kernel's draw and BO allocation paths.
 	 */
-	vc4->bo_labels = kcalloc(VC4_BO_TYPE_COUNT, sizeof(*vc4->bo_labels),
-				 GFP_KERNEL);
+	vc4->bo_labels = kzalloc_objs(*vc4->bo_labels, VC4_BO_TYPE_COUNT);
 	if (!vc4->bo_labels)
 		return -ENOMEM;
 	vc4->num_labels = VC4_BO_TYPE_COUNT;
@@ -1043,10 +1072,11 @@ static void vc4_bo_cache_destroy(struct drm_device *dev, void *unused)
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
 	int i;
 
-	timer_delete(&vc4->bo_cache.time_timer);
+	timer_shutdown_sync(&vc4->bo_cache.time_timer);
 	cancel_work_sync(&vc4->bo_cache.time_work);
 
 	vc4_bo_cache_purge(dev);
+	kvfree(vc4->bo_cache.size_list);
 
 	for (i = 0; i < vc4->num_labels; i++) {
 		if (vc4->bo_labels[i].num_allocated) {

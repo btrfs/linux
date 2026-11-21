@@ -1037,8 +1037,7 @@ static const struct hubbub_funcs hubbub32_funcs = {
 	.force_usr_retraining_allow = hubbub32_force_usr_retraining_allow,
 	.set_request_limit = hubbub32_set_request_limit,
 	.get_mall_en = hubbub32_get_mall_en,
-	.get_det_sizes = hubbub3_get_det_sizes,
-	.compbuf_config_error = hubbub3_compbuf_config_error,
+	.hubbub_read_reg_state = hubbub3_read_reg_state
 };
 
 void hubbub32_construct(struct dcn20_hubbub *hubbub2,
@@ -1051,6 +1050,8 @@ void hubbub32_construct(struct dcn20_hubbub *hubbub2,
 	int config_return_buffer_size_kb)
 {
 	hubbub2->base.ctx = ctx;
+
+	hubbub2->base.inst = 0;
 	hubbub2->base.funcs = &hubbub32_funcs;
 	hubbub2->regs = hubbub_regs;
 	hubbub2->shifts = hubbub_shift;

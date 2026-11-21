@@ -175,49 +175,10 @@ config DEBUG_PAGE_REF
 	  nil until the tracepoints are actually enabled.
 
 config DEBUG_RODATA_TEST
-    bool "Testcase for the marking rodata read-only"
-    depends on STRICT_KERNEL_RWX
+	bool "Testcase for the marking rodata read-only"
+	depends on STRICT_KERNEL_RWX
 	help
-      This option enables a testcase for the setting rodata read-only.
-
-config ARCH_HAS_DEBUG_WX
-	bool
-
-config DEBUG_WX
-	bool "Warn on W+X mappings at boot"
-	depends on ARCH_HAS_DEBUG_WX
-	depends on ARCH_HAS_PTDUMP
-	depends on MMU
-	select PTDUMP
-	help
-	  Generate a warning if any W+X mappings are found at boot.
-
-	  This is useful for discovering cases where the kernel is leaving W+X
-	  mappings after applying NX, as such mappings are a security risk.
-
-	  Look for a message in dmesg output like this:
-
-	    <arch>/mm: Checked W+X mappings: passed, no W+X pages found.
-
-	  or like this, if the check failed:
-
-	    <arch>/mm: Checked W+X mappings: failed, <N> W+X pages found.
-
-	  Note that even if the check fails, your kernel is possibly
-	  still fine, as W+X mappings are not a security hole in
-	  themselves, what they do is that they make the exploitation
-	  of other unfixed kernel bugs easier.
-
-	  There is no runtime or memory usage effect of this option
-	  once the kernel has booted up - it's a one time check.
-
-	  If in doubt, say "Y".
-
-config ARCH_HAS_PTDUMP
-	bool
-
-config PTDUMP
-	bool
+	  This option enables a testcase for the setting rodata read-only.
 
 config PTDUMP_DEBUGFS
 	bool "Export kernel pagetable layout to userspace via debugfs"
@@ -297,9 +258,19 @@ config DEBUG_KMEMLEAK_AUTO_SCAN
 
 	  If unsure, say Y.
 
+config DEBUG_KMEMLEAK_VERBOSE
+	bool "Default kmemleak to verbose mode"
+	depends on DEBUG_KMEMLEAK_AUTO_SCAN
+	help
+	  Say Y here to have kmemleak print unreferenced object details
+	  (backtrace, hex dump, address) to dmesg when new memory leaks are
+	  detected during automatic scanning. This can also be toggled at
+	  runtime via /sys/module/kmemleak/parameters/verbose.
+
+	  If unsure, say N.
+
 config PER_VMA_LOCK_STATS
 	bool "Statistics for per-vma locks"
-	depends on PER_VMA_LOCK
 	help
 	  Say Y here to enable success, retry and failure counters of page
 	  faults handled under protection of per-vma locks. When enabled, the
@@ -309,3 +280,30 @@ config PER_VMA_LOCK_STATS
 	  overhead in the page fault path.
 
 	  If in doubt, say N.
+
+config MEM_ALLOC_PROFILING
+	bool "Enable memory allocation profiling"
+	default n
+	depends on MMU
+	depends on PROC_FS
+	select CODE_TAGGING
+	select PAGE_EXTENSION
+	select SLAB_OBJ_EXT
+	help
+	  Track allocation source code and record total allocation size
+	  initiated at that code location. The mechanism can be used to track
+	  memory leaks with a low performance and memory impact.
+
+config MEM_ALLOC_PROFILING_ENABLED_BY_DEFAULT
+	bool "Enable memory allocation profiling by default"
+	default y
+	depends on MEM_ALLOC_PROFILING
+
+config MEM_ALLOC_PROFILING_DEBUG
+	bool "Memory allocation profiler debugging"
+	default n
+	depends on MEM_ALLOC_PROFILING
+	select MEM_ALLOC_PROFILING_ENABLED_BY_DEFAULT
+	help
+	  Adds warnings with helpful error messages for memory allocation
+	  profiling.

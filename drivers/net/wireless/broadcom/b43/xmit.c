@@ -7,7 +7,7 @@
 
   Copyright (C) 2005 Martin Langer <martin-langer@gmx.de>
   Copyright (C) 2005 Stefano Brivio <stefano.brivio@polimi.it>
-  Copyright (C) 2005, 2006 Michael Buesch <m@bues.ch>
+  Copyright (C) 2005, 2006 Michael Buesch
   Copyright (C) 2005 Danny van Dyk <kugelfang@gentoo.org>
   Copyright (C) 2005 Andreas Jaggi <andreas.jaggi@waterwave.ch>
 
@@ -702,7 +702,8 @@ void b43_rx(struct b43_wldev *dev, struct sk_buff *skb, const void *_rxhdr)
 		 * key index, but the ucode passed it slightly different.
 		 */
 		keyidx = b43_kidx_to_raw(dev, keyidx);
-		B43_WARN_ON(keyidx >= ARRAY_SIZE(dev->key));
+		if (B43_WARN_ON(keyidx >= ARRAY_SIZE(dev->key)))
+			goto drop;
 
 		if (dev->key[keyidx].algorithm != B43_SEC_ALGO_NONE) {
 			wlhdr_len = ieee80211_hdrlen(fctl);

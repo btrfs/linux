@@ -3,13 +3,13 @@
  * Copyright © 2021-2024 Intel Corporation
  */
 
-#ifndef _XE_GUC_CAPTURE_H
-#define _XE_GUC_CAPTURE_H
+#ifndef _XE_GUC_CAPTURE_H_
+#define _XE_GUC_CAPTURE_H_
 
 #include <linux/types.h>
 #include "abi/guc_capture_abi.h"
+#include "abi/guc_scheduler_abi.h"
 #include "xe_guc.h"
-#include "xe_guc_fwif.h"
 
 struct xe_exec_queue;
 struct xe_guc;
@@ -28,6 +28,8 @@ static inline enum guc_capture_list_class_type xe_guc_class_to_capture_class(u16
 	case GUC_VIDEOENHANCE_CLASS:
 	case GUC_BLITTER_CLASS:
 		return class;
+	case GUC_PAGING_CLASS:
+		return GUC_CAPTURE_LIST_CLASS_PAGING;
 	default:
 		XE_WARN_ON(class);
 		return GUC_CAPTURE_LIST_CLASS_MAX;
@@ -35,9 +37,9 @@ static inline enum guc_capture_list_class_type xe_guc_class_to_capture_class(u16
 }
 
 static inline enum guc_capture_list_class_type
-xe_engine_class_to_guc_capture_class(enum xe_engine_class class)
+xe_hwe_to_guc_capture_class(struct xe_hw_engine *hwe)
 {
-	return xe_guc_class_to_capture_class(xe_engine_class_to_guc_class(class));
+	return xe_guc_class_to_capture_class(xe_hwe_to_guc_class(hwe));
 }
 
 void xe_guc_capture_process(struct xe_guc *guc);

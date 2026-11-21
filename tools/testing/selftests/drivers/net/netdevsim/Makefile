@@ -8,11 +8,9 @@ TEST_PROGS := \
 	ethtool-features.sh \
 	ethtool-fec.sh \
 	ethtool-pause.sh \
-	ethtool-ring.sh \
 	fib.sh \
 	fib_notifications.sh \
 	hw_stats_l3.sh \
-	macsec-offload.sh \
 	nexthop.sh \
 	peer.sh \
 	psample.sh \
@@ -23,5 +21,13 @@ TEST_PROGS := \
 TEST_FILES := \
 	ethtool-common.sh
 # end of TEST_FILES
+
+TEST_INCLUDES := \
+	$(wildcard ../../../net/lib/sh/*.sh) \
+	../../../net/forwarding/devlink_lib.sh \
+	../../../net/forwarding/fib_offload_lib.sh \
+	../../../net/forwarding/lib.sh \
+	../../../net/lib.sh \
+# end of TEST_INCLUDES
 
 include ../../../lib.mk

@@ -469,7 +469,7 @@ static int vpx3220_probe(struct i2c_client *client)
 		I2C_FUNC_SMBUS_BYTE_DATA | I2C_FUNC_SMBUS_WORD_DATA))
 		return -ENODEV;
 
-	decoder = devm_kzalloc(&client->dev, sizeof(*decoder), GFP_KERNEL);
+	decoder = devm_kzalloc_obj(&client->dev, *decoder);
 	if (decoder == NULL)
 		return -ENOMEM;
 	sd = &decoder->sd;
@@ -535,9 +535,9 @@ static void vpx3220_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id vpx3220_id[] = {
-	{ "vpx3220a" },
-	{ "vpx3216b" },
-	{ "vpx3214c" },
+	{ .name = "vpx3220a" },
+	{ .name = "vpx3216b" },
+	{ .name = "vpx3214c" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, vpx3220_id);

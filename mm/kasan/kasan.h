@@ -191,7 +191,10 @@ static inline bool kasan_requires_meta(void)
 #define KASAN_STACK_DEPTH 64
 
 struct kasan_track {
-	u32 pid;
+#define KASAN_PID_BITS const_ilog2(PID_MAX_LIMIT)
+	u32 pid:KASAN_PID_BITS;
+	u32 rcu_free:1;
+	u32 unused:32 - (KASAN_PID_BITS + 1);
 	depot_stack_handle_t stack;
 #ifdef CONFIG_KASAN_EXTRA_INFO
 	u64 cpu:20;
@@ -390,8 +393,37 @@ struct kasan_alloc_meta *kasan_get_alloc_meta(struct kmem_cache *cache,
 struct kasan_free_meta *kasan_get_free_meta(struct kmem_cache *cache,
 						const void *object);
 void kasan_init_object_meta(struct kmem_cache *cache, const void *object);
+
+static inline bool kasan_check_rcu_free(struct kmem_cache *cache,
+					const void *object,
+					bool after_rcu_delay)
+{
+	struct kasan_alloc_meta *alloc_meta;
+
+	alloc_meta = kasan_get_alloc_meta(cache, object);
+	if (!alloc_meta)
+		return false;
+
+	return alloc_meta->alloc_track.rcu_free != after_rcu_delay;
+}
+
+static inline void kasan_clear_rcu_free(struct kmem_cache *cache,
+					const void *object)
+{
+	struct kasan_alloc_meta *alloc_meta;
+
+	alloc_meta = kasan_get_alloc_meta(cache, object);
+	if (alloc_meta)
+		alloc_meta->alloc_track.rcu_free = 0;
+}
 #else
 static inline void kasan_init_object_meta(struct kmem_cache *cache, const void *object) { }
+static inline bool kasan_check_rcu_free(struct kmem_cache *cache, const void *object,
+					bool after_rcu_delay)
+{
+	return false;
+}
+static inline void kasan_clear_rcu_free(struct kmem_cache *cache, const void *object) { }
 #endif
 
 depot_stack_handle_t kasan_save_stack(gfp_t flags, depot_flags_t depot_flags);
@@ -399,12 +431,7 @@ void kasan_set_track(struct kasan_track *track, depot_stack_handle_t stack);
 void kasan_save_track(struct kasan_track *track, gfp_t flags);
 void kasan_save_alloc_info(struct kmem_cache *cache, void *object, gfp_t flags);
 
-void __kasan_save_free_info(struct kmem_cache *cache, void *object);
-static inline void kasan_save_free_info(struct kmem_cache *cache, void *object)
-{
-	if (kasan_enabled())
-		__kasan_save_free_info(cache, object);
-}
+void kasan_save_free_info(struct kmem_cache *cache, void *object);
 
 #ifdef CONFIG_KASAN_GENERIC
 bool kasan_quarantine_put(struct kmem_cache *cache, void *object);

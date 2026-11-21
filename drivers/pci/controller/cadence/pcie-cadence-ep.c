@@ -655,6 +655,7 @@ void cdns_pcie_ep_disable(struct cdns_pcie_ep *ep)
 	struct device *dev = ep->pcie.dev;
 	struct pci_epc *epc = to_pci_epc(dev);
 
+	cdns_pcie_debugfs_deinit(&ep->pcie);
 	pci_epc_deinit_notify(epc);
 	pci_epc_mem_free_addr(epc, ep->irq_phys_addr, ep->irq_cpu_addr,
 			      SZ_128K);
@@ -692,9 +693,7 @@ int cdns_pcie_ep_setup(struct cdns_pcie_ep *ep)
 	ep->max_regions = CDNS_PCIE_MAX_OB;
 	of_property_read_u32(np, "cdns,max-outbound-regions", &ep->max_regions);
 
-	ep->ob_addr = devm_kcalloc(dev,
-				   ep->max_regions, sizeof(*ep->ob_addr),
-				   GFP_KERNEL);
+	ep->ob_addr = devm_kzalloc_objs(dev, *ep->ob_addr, ep->max_regions);
 	if (!ep->ob_addr)
 		return -ENOMEM;
 
@@ -712,8 +711,7 @@ int cdns_pcie_ep_setup(struct cdns_pcie_ep *ep)
 	if (of_property_read_u8(np, "max-functions", &epc->max_functions) < 0)
 		epc->max_functions = 1;
 
-	ep->epf = devm_kcalloc(dev, epc->max_functions, sizeof(*ep->epf),
-			       GFP_KERNEL);
+	ep->epf = devm_kzalloc_objs(dev, *ep->epf, epc->max_functions);
 	if (!ep->epf)
 		return -ENOMEM;
 
@@ -729,8 +727,8 @@ int cdns_pcie_ep_setup(struct cdns_pcie_ep *ep)
 			epf = &ep->epf[i];
 			if (epc->max_vfs[i] == 0)
 				continue;
-			epf->epf = devm_kcalloc(dev, epc->max_vfs[i],
-						sizeof(*ep->epf), GFP_KERNEL);
+			epf->epf = devm_kzalloc_objs(dev, *ep->epf,
+						     epc->max_vfs[i]);
 			if (!epf->epf)
 				return -ENOMEM;
 		}
@@ -760,6 +758,8 @@ int cdns_pcie_ep_setup(struct cdns_pcie_ep *ep)
 	spin_lock_init(&ep->lock);
 
 	pci_epc_init_notify(epc);
+
+	cdns_pcie_debugfs_init(pcie);
 
 	return 0;
 

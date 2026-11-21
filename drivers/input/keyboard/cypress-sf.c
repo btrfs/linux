@@ -74,7 +74,7 @@ static int cypress_sf_probe(struct i2c_client *client)
 	struct cypress_sf_data *touchkey;
 	int key, error;
 
-	touchkey = devm_kzalloc(&client->dev, sizeof(*touchkey), GFP_KERNEL);
+	touchkey = devm_kzalloc_obj(&client->dev, *touchkey);
 	if (!touchkey)
 		return -ENOMEM;
 
@@ -100,10 +100,9 @@ static int cypress_sf_probe(struct i2c_client *client)
 		touchkey->num_keys = 2;
 	}
 
-	touchkey->keycodes = devm_kcalloc(&client->dev,
-					  touchkey->num_keys,
-					  sizeof(*touchkey->keycodes),
-					  GFP_KERNEL);
+	touchkey->keycodes = devm_kzalloc_objs(&client->dev,
+					       *touchkey->keycodes,
+					       touchkey->num_keys);
 	if (!touchkey->keycodes)
 		return -ENOMEM;
 
@@ -209,7 +208,7 @@ static DEFINE_SIMPLE_DEV_PM_OPS(cypress_sf_pm_ops,
 				cypress_sf_suspend, cypress_sf_resume);
 
 static const struct i2c_device_id cypress_sf_id_table[] = {
-	{ CYPRESS_SF_DEV_NAME },
+	{ .name = CYPRESS_SF_DEV_NAME },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, cypress_sf_id_table);

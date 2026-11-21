@@ -3,7 +3,6 @@
  * Copyright (C) 2022 Rafał Miłecki <rafal@milecki.pl>
  */
 
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mtd/mtd.h>
 #include <linux/nvmem-provider.h>
@@ -53,7 +52,7 @@ static int u_boot_env_probe(struct platform_device *pdev)
 	struct device_node *np = dev->of_node;
 	struct u_boot_env *priv;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 	priv->dev = dev;

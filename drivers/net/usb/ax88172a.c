@@ -114,7 +114,7 @@ static const struct net_device_ops ax88172a_netdev_ops = {
 };
 
 static const struct ethtool_ops ax88172a_ethtool_ops = {
-	.get_drvinfo		= asix_get_drvinfo,
+	.get_drvinfo		= usbnet_get_drvinfo,
 	.get_link		= usbnet_get_link,
 	.get_msglevel		= usbnet_get_msglevel,
 	.set_msglevel		= usbnet_set_msglevel,
@@ -165,7 +165,7 @@ static int ax88172a_bind(struct usbnet *dev, struct usb_interface *intf)
 	if (ret)
 		return ret;
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -173,9 +173,8 @@ static int ax88172a_bind(struct usbnet *dev, struct usb_interface *intf)
 
 	/* Get the MAC address */
 	ret = asix_read_cmd(dev, AX_CMD_READ_NODE_ID, 0, 0, ETH_ALEN, buf, 0);
-	if (ret < ETH_ALEN) {
+	if (ret < 0) {
 		netdev_err(dev->net, "Failed to read MAC address: %d\n", ret);
-		ret = -EIO;
 		goto free;
 	}
 	eth_hw_addr_set(dev->net, buf);
@@ -210,11 +209,7 @@ static int ax88172a_bind(struct usbnet *dev, struct usb_interface *intf)
 	ret = asix_read_phy_addr(dev, priv->use_embdphy);
 	if (ret < 0)
 		goto free;
-	if (ret >= PHY_MAX_ADDR) {
-		netdev_err(dev->net, "Invalid PHY address %#x\n", ret);
-		ret = -ENODEV;
-		goto free;
-	}
+
 	priv->phy_addr = ret;
 
 	ax88172a_reset_phy(dev, priv->use_embdphy);

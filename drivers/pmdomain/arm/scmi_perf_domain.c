@@ -33,7 +33,7 @@ scmi_pd_set_perf_state(struct generic_pm_domain *genpd, unsigned int state)
 		return 0;
 
 	if (!state)
-		return -EINVAL;
+		return 0;
 
 	ret = pd->perf_ops->level_set(pd->ph, pd->domain_id, state, false);
 	if (ret)
@@ -105,15 +105,15 @@ static int scmi_perf_domain_probe(struct scmi_device *sdev)
 		return 0;
 	}
 
-	scmi_pd = devm_kcalloc(dev, num_domains, sizeof(*scmi_pd), GFP_KERNEL);
+	scmi_pd = devm_kzalloc_objs(dev, *scmi_pd, num_domains);
 	if (!scmi_pd)
 		return -ENOMEM;
 
-	scmi_pd_data = devm_kzalloc(dev, sizeof(*scmi_pd_data), GFP_KERNEL);
+	scmi_pd_data = devm_kzalloc_obj(dev, *scmi_pd_data);
 	if (!scmi_pd_data)
 		return -ENOMEM;
 
-	domains = devm_kcalloc(dev, num_domains, sizeof(*domains), GFP_KERNEL);
+	domains = devm_kzalloc_objs(dev, *domains, num_domains);
 	if (!domains)
 		return -ENOMEM;
 

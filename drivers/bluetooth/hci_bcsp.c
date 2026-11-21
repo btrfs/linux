@@ -25,6 +25,7 @@
 #include <linux/ioctl.h>
 #include <linux/skbuff.h>
 #include <linux/bitrev.h>
+#include <linux/crc-ccitt.h>
 #include <linux/unaligned.h>
 
 #include <net/bluetooth/bluetooth.h>
@@ -75,34 +76,13 @@ struct bcsp_struct {
 
 /* ---- BCSP CRC calculation ---- */
 
-/* Table for calculating CRC for polynomial 0x1021, LSB processed first,
- * initial value 0xffff, bits shifted in reverse order.
- */
-
-static const u16 crc_table[] = {
-	0x0000, 0x1081, 0x2102, 0x3183,
-	0x4204, 0x5285, 0x6306, 0x7387,
-	0x8408, 0x9489, 0xa50a, 0xb58b,
-	0xc60c, 0xd68d, 0xe70e, 0xf78f
-};
-
 /* Initialise the crc calculator */
 #define BCSP_CRC_INIT(x) x = 0xffff
 
-/* Update crc with next data byte
- *
- * Implementation note
- *     The data byte is treated as two nibbles.  The crc is generated
- *     in reverse, i.e., bits are fed into the register from the top.
- */
+/* Update crc with next data byte */
 static void bcsp_crc_update(u16 *crc, u8 d)
 {
-	u16 reg = *crc;
-
-	reg = (reg >> 4) ^ crc_table[(reg ^ d) & 0x000f];
-	reg = (reg >> 4) ^ crc_table[(reg ^ (d >> 4)) & 0x000f];
-
-	*crc = reg;
+	*crc = crc_ccitt_byte(*crc, d);
 }
 
 /* ---- BCSP core ---- */
@@ -194,7 +174,7 @@ static struct sk_buff *bcsp_prepare_pkt(struct bcsp_struct *bcsp, u8 *data,
 		return NULL;
 	}
 
-	if (hciextn && chan == 5) {
+	if (hciextn && chan == 5 && len > HCI_COMMAND_HDR_SIZE) {
 		__le16 opcode = ((struct hci_command_hdr *)data)->opcode;
 
 		/* Vendor specific commands */
@@ -402,6 +382,9 @@ static void bcsp_handle_le_pkt(struct hci_uart *hu)
 	u8 sync_pkt[4]     = { 0xda, 0xdc, 0xed, 0xed };
 
 	/* spot "conf" pkts and reply with a "conf rsp" pkt */
+	if (bcsp->rx_skb->len < 8)
+		return;
+
 	if (bcsp->rx_skb->data[1] >> 4 == 4 && bcsp->rx_skb->data[2] == 0 &&
 	    !memcmp(&bcsp->rx_skb->data[4], conf_pkt, 4)) {
 		struct sk_buff *nskb = alloc_skb(4, GFP_ATOMIC);
@@ -585,6 +568,9 @@ static int bcsp_recv(struct hci_uart *hu, const void *data, int count)
 	if (!test_bit(HCI_UART_REGISTERED, &hu->flags))
 		return -EUNATCH;
 
+	if (!bcsp)
+		return -ENODEV;
+
 	BT_DBG("hu %p count %d rx_state %d rx_count %ld",
 	       hu, count, bcsp->rx_state, bcsp->rx_count);
 
@@ -716,7 +702,7 @@ static int bcsp_open(struct hci_uart *hu)
 
 	BT_DBG("hu %p", hu);
 
-	bcsp = kzalloc(sizeof(*bcsp), GFP_KERNEL);
+	bcsp = kzalloc_obj(*bcsp);
 	if (!bcsp)
 		return -ENOMEM;
 

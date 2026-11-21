@@ -423,7 +423,8 @@ struct bnx2fc_cmd {
 	struct scsi_cmnd *sc_cmd;
 	struct bnx2fc_cmd_mgr *cmd_mgr;
 	struct bnx2fc_mp_req mp_req;
-	void (*cb_func)(struct bnx2fc_els_cb_arg *cb_arg);
+	void (*cb_func)(struct bnx2fc_rport *tgt,
+			struct bnx2fc_els_cb_arg *cb_arg);
 	struct bnx2fc_els_cb_arg *cb_arg;
 	struct delayed_work timeout_work; /* timer for ULP timeouts */
 	struct completion abts_done;
@@ -498,7 +499,8 @@ static inline struct bnx2fc_priv *bnx2fc_priv(struct scsi_cmnd *cmd)
 struct bnx2fc_cmd *bnx2fc_cmd_alloc(struct bnx2fc_rport *tgt);
 struct bnx2fc_cmd *bnx2fc_elstm_alloc(struct bnx2fc_rport *tgt, int type);
 void bnx2fc_cmd_release(struct kref *ref);
-int bnx2fc_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *sc_cmd);
+enum scsi_qc_status bnx2fc_queuecommand(struct Scsi_Host *host,
+					struct scsi_cmnd *sc_cmd);
 int bnx2fc_send_fw_fcoe_init_msg(struct bnx2fc_hba *hba);
 int bnx2fc_send_fw_fcoe_destroy_msg(struct bnx2fc_hba *hba);
 int bnx2fc_send_session_ofld_req(struct fcoe_port *port,
@@ -591,9 +593,11 @@ int bnx2fc_send_stat_req(struct bnx2fc_hba *hba);
 int bnx2fc_post_io_req(struct bnx2fc_rport *tgt, struct bnx2fc_cmd *io_req);
 int bnx2fc_send_rec(struct bnx2fc_cmd *orig_io_req);
 int bnx2fc_send_srr(struct bnx2fc_cmd *orig_io_req, u32 offset, u8 r_ctl);
-void bnx2fc_process_seq_cleanup_compl(struct bnx2fc_cmd *seq_clnup_req,
+void bnx2fc_process_seq_cleanup_compl(struct bnx2fc_rport *tgt,
+				      struct bnx2fc_cmd *seq_clnp_req,
 				      struct fcoe_task_ctx_entry *task,
-				      u8 rx_state);
+				      u8 rx_state)
+	__must_hold(&tgt->tgt_lock);
 int bnx2fc_initiate_seq_cleanup(struct bnx2fc_cmd *orig_io_req, u32 offset,
 				enum fc_rctl r_ctl);
 

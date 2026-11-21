@@ -71,8 +71,8 @@ enum rx_model {
 };
 
 static const struct i2c_device_id rx8025_id[] = {
-	{ "rx8025", model_rx_8025 },
-	{ "rx8035", model_rx_8035 },
+	{ .name = "rx8025", .driver_data = model_rx_8025 },
+	{ .name = "rx8035", .driver_data = model_rx_8035 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rx8025_id);
@@ -180,10 +180,11 @@ static irqreturn_t rx8025_handle_irq(int irq, void *dev_id)
 	struct rx8025_data *rx8025 = i2c_get_clientdata(client);
 	int status, xstp;
 
-	rtc_lock(rx8025->rtc);
+	guard(rtc_ops)(rx8025->rtc);
+
 	status = rx8025_read_reg(client, RX8025_REG_CTRL2);
 	if (status < 0)
-		goto out;
+		return IRQ_HANDLED;
 
 	xstp = rx8025_is_osc_stopped(rx8025->model, status);
 	if (xstp)
@@ -201,12 +202,9 @@ static irqreturn_t rx8025_handle_irq(int irq, void *dev_id)
 		status &= RX8025_BIT_CTRL2_DAFG;
 		if (rx8025_write_reg(client, RX8025_REG_CTRL1,
 				     rx8025->ctrl1 & ~RX8025_BIT_CTRL1_DALE))
-			goto out;
+			return IRQ_HANDLED;
 		rtc_update_irq(rx8025->rtc, 1, RTC_AF | RTC_IRQF);
 	}
-
-out:
-	rtc_unlock(rx8025->rtc);
 
 	return IRQ_HANDLED;
 }
@@ -488,7 +486,7 @@ static ssize_t rx8025_sysfs_show_clock_adjust(struct device *dev,
 	if (err)
 		return err;
 
-	return sprintf(buf, "%ld\n", -adj);
+	return sysfs_emit(buf, "%ld\n", -adj);
 }
 
 static ssize_t rx8025_sysfs_store_clock_adjust(struct device *dev,
@@ -522,7 +520,6 @@ static const struct attribute_group rx8025_attr_group = {
 
 static int rx8025_probe(struct i2c_client *client)
 {
-	const struct i2c_device_id *id = i2c_match_id(rx8025_id, client);
 	struct i2c_adapter *adapter = client->adapter;
 	struct rx8025_data *rx8025;
 	int err = 0;
@@ -534,14 +531,13 @@ static int rx8025_probe(struct i2c_client *client)
 		return -EIO;
 	}
 
-	rx8025 = devm_kzalloc(&client->dev, sizeof(*rx8025), GFP_KERNEL);
+	rx8025 = devm_kzalloc_obj(&client->dev, *rx8025);
 	if (!rx8025)
 		return -ENOMEM;
 
 	i2c_set_clientdata(client, rx8025);
 
-	if (id)
-		rx8025->model = id->driver_data;
+	rx8025->model = (uintptr_t)i2c_get_match_data(client);
 
 	err = rx8025_init_client(client);
 	if (err)
@@ -564,8 +560,6 @@ static int rx8025_probe(struct i2c_client *client)
 		if (err)
 			clear_bit(RTC_FEATURE_ALARM, rx8025->rtc->features);
 	}
-
-	rx8025->rtc->max_user_freq = 1;
 
 	set_bit(RTC_FEATURE_ALARM_RES_MINUTE, rx8025->rtc->features);
 	clear_bit(RTC_FEATURE_UPDATE_INTERRUPT, rx8025->rtc->features);

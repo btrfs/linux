@@ -43,6 +43,7 @@ ccflags-y := -fno-common -fno-builtin -DBUILD_VDSO
 ccflags-y += $(DISABLE_LATENT_ENTROPY_PLUGIN)
 ccflags-y += $(call cc-option, -fno-stack-protector)
 ccflags-y += -DDISABLE_BRANCH_PROFILING
+ccflags-y += $(CONFIG_CC_OPT_INLINE_MEMSET)
 ccflags-y += -ffreestanding -fasynchronous-unwind-tables
 ccflags-remove-y := $(CC_FLAGS_FTRACE)
 ldflags-y := -Wl,--hash-style=both -nostdlib -shared -z noexecstack $(CLANG_FLAGS)
@@ -62,6 +63,12 @@ CC32FLAGSREMOVE += -fno-stack-clash-protection
 # 32-bit one. clang validates the values passed to these arguments during
 # parsing, even when -fno-stack-protector is passed afterwards.
 CC32FLAGSREMOVE += -mstack-protector-guard%
+# ftrace is disabled for the vdso but arch/powerpc/Makefile adds this define to
+# KBUILD_CPPFLAGS, which enables use of the 'patchable_function_entry'
+# attribute in the 'inline' define via 'notrace'. This attribute is not
+# supported for the powerpcle target, resulting in many instances of
+# -Wunknown-attributes.
+CC32FLAGSREMOVE += -DCC_USING_PATCHABLE_FUNCTION_ENTRY
 endif
 LD32FLAGS := -Wl,-soname=linux-vdso32.so.1
 AS32FLAGS := -D__VDSO32__

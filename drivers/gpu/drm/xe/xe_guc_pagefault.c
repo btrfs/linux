@@ -1,0 +1,175 @@
+// SPDX-License-Identifier: MIT
+/*
+ * Copyright © 2025 Intel Corporation
+ */
+
+#include "abi/guc_actions_abi.h"
+#include "xe_gt_printk.h"
+#include "xe_guc.h"
+#include "xe_guc_ct.h"
+#include "xe_guc_pagefault.h"
+#include "xe_hw_engine.h"
+#include "xe_pagefault.h"
+#include "xe_pagefault_types.h"
+
+#define XE_GUC_PAGEFAULT_FLUSH_PERIOD	BIT(4)	/* Sixteen */
+
+static void guc_ack_fault_begin(void *private)
+{
+	struct xe_guc *guc = private;
+
+	xe_guc_ct_lock(&guc->ct);
+
+	BUILD_BUG_ON(((XE_GUC_PAGEFAULT_FLUSH_PERIOD - 1) &
+		     XE_GUC_PAGEFAULT_FLUSH_PERIOD) != 0);
+
+	/* Ack the 2nd, then 18th, etc... */
+	guc->pagefault_ack_counter =
+		XE_GUC_PAGEFAULT_FLUSH_PERIOD - 1;
+}
+
+static void guc_ack_fault(struct xe_pagefault *pf, int err)
+{
+	u32 vfid = FIELD_GET(PFD_VFID, pf->producer.msg[2]);
+	u32 prefetch = FIELD_GET(PFD_PREFETCH, pf->producer.msg[2]);
+	u32 engine_instance = FIELD_GET(PFD_ENG_INSTANCE, pf->producer.msg[0]);
+	u32 engine_class = FIELD_GET(PFD_ENG_CLASS, pf->producer.msg[0]);
+	u32 pdata = FIELD_GET(PFD_PDATA_LO, pf->producer.msg[0]) |
+		(FIELD_GET(PFD_PDATA_HI, pf->producer.msg[1]) <<
+		 PFD_PDATA_HI_SHIFT);
+	u32 asid = FIELD_GET(PFD_ASID, pf->producer.msg[1]);
+	u32 action[] = {
+		XE_GUC_ACTION_PAGE_FAULT_RES_DESC,
+
+		FIELD_PREP(PFR_VALID, 1) |
+		FIELD_PREP(PFR_SUCCESS, !!err) |
+		FIELD_PREP(PFR_REPLY, PFR_ACCESS) |
+		FIELD_PREP(PFR_DESC_TYPE, FAULT_RESPONSE_DESC) |
+		FIELD_PREP(PFR_ASID, asid),
+
+		FIELD_PREP(PFR_VFID, vfid) |
+		FIELD_PREP(PFR_PREFETCH, err ? prefetch : 0) |
+		FIELD_PREP(PFR_ENG_INSTANCE, engine_instance) |
+		FIELD_PREP(PFR_ENG_CLASS, engine_class) |
+		FIELD_PREP(PFR_PDATA, pdata),
+	};
+	struct xe_guc *guc = pf->producer.private;
+	bool write_only = guc->pagefault_ack_counter++ &
+		(XE_GUC_PAGEFAULT_FLUSH_PERIOD - 1);
+
+	/* Pagefault acks are fire-and-forget, no G2H reply expected. */
+	xe_guc_ct_send_locked(&guc->ct, action, ARRAY_SIZE(action), 0, 0,
+			      write_only);
+}
+
+static void guc_ack_fault_end(void *private)
+{
+	struct xe_guc *guc = private;
+
+	if ((guc->pagefault_ack_counter & (XE_GUC_PAGEFAULT_FLUSH_PERIOD - 1)) != 1)
+		xe_guc_ct_send_flush(&guc->ct);
+	xe_guc_ct_unlock(&guc->ct);
+}
+
+static void xe_guc_pagefault_print(struct xe_pagefault *pf,
+				   const char *err_str)
+{
+	const u32 *msg = pf->producer.msg;
+	u32 engine_class = FIELD_GET(PFD_ENG_CLASS, msg[0]);
+
+	xe_gt_info(pf->gt, "\n\tASID: %lu\n"
+		   "\tFaulted Address: 0x%08lx%08lx\n"
+		   "\tFaultType: %lu\n"
+		   "\tAccessType: %lu\n"
+		   "\tFaultLevel: %lu\n"
+		   "\tEngineClass: %u %s\n"
+		   "\tEngineInstance: %lu\n"
+		   "\tSRCID: 0x%02lx\n"
+		   "\tError: %s\n",
+		   FIELD_GET(PFD_ASID, msg[1]),
+		   FIELD_GET(PFD_VIRTUAL_ADDR_HI, msg[3]),
+		   FIELD_GET(PFD_VIRTUAL_ADDR_LO, msg[2]) <<
+		   PFD_VIRTUAL_ADDR_LO_SHIFT,
+		   FIELD_GET(PFD_FAULT_TYPE, msg[2]),
+		   FIELD_GET(PFD_ACCESS_TYPE, msg[2]),
+		   FIELD_GET(PFD_FAULT_LEVEL, msg[0]),
+		   engine_class,
+		   xe_hw_engine_class_to_str(engine_class),
+		   FIELD_GET(PFD_ENG_INSTANCE, msg[0]),
+		   FIELD_GET(PFD_SRC_ID, msg[0]),
+		   err_str);
+}
+
+static const struct xe_pagefault_ops guc_pagefault_ops = {
+	.ack_fault_begin = guc_ack_fault_begin,
+	.ack_fault = guc_ack_fault,
+	.ack_fault_end = guc_ack_fault_end,
+	.print = xe_guc_pagefault_print,
+};
+
+/**
+ * xe_guc_pagefault_handler() - G2H page fault handler
+ * @guc: GuC object
+ * @msg: G2H message
+ * @len: Length of G2H message
+ *
+ * Parse GuC to host (G2H) message into a struct xe_pagefault and forward onto
+ * the Xe page fault layer.
+ *
+ * Return: 0 on success, errno on failure
+ */
+int xe_guc_pagefault_handler(struct xe_guc *guc, u32 *msg, u32 len)
+{
+	struct xe_pagefault pf;
+	int i;
+
+#define GUC_PF_MSG_LEN_DW	\
+	(sizeof(struct xe_guc_pagefault_desc) / sizeof(u32))
+
+	BUILD_BUG_ON(GUC_PF_MSG_LEN_DW > XE_PAGEFAULT_PRODUCER_MSG_LEN_DW);
+
+	if (len != GUC_PF_MSG_LEN_DW)
+		return -EPROTO;
+
+	pf.gt = guc_to_gt(guc);
+
+	/*
+	 * XXX: These values happen to match the enum in xe_pagefault_types.h.
+	 * If that changes, we’ll need to remap them here.
+	 */
+	pf.consumer.page_addr = ((u64)FIELD_GET(PFD_VIRTUAL_ADDR_HI, msg[3])
+				      << PFD_VIRTUAL_ADDR_HI_SHIFT) |
+		(FIELD_GET(PFD_VIRTUAL_ADDR_LO, msg[2]) <<
+		 PFD_VIRTUAL_ADDR_LO_SHIFT);
+
+	BUILD_BUG_ON(XE_MAX_ASID > XE_PAGEFAULT_ASID_MASK);
+
+	pf.consumer.id = FIELD_PREP(XE_PAGEFAULT_ASID_MASK,
+				    FIELD_GET(PFD_ASID, msg[1])) |
+			 FIELD_PREP(XE_PAGEFAULT_SRCID_MASK,
+				    FIELD_GET(PFD_SRC_ID, msg[0]));
+	pf.consumer.access_type = FIELD_GET(PFD_ACCESS_TYPE, msg[2]) |
+		(FIELD_GET(PFD_PREFETCH, msg[2]) ? XE_PAGEFAULT_ACCESS_PREFETCH : 0);
+	if (FIELD_GET(XE2_PFD_TRVA_FAULT, msg[0]))
+		pf.consumer.fault_type_level = XE_PAGEFAULT_TYPE_LEVEL_NACK;
+	else
+		pf.consumer.fault_type_level =
+			FIELD_PREP(XE_PAGEFAULT_LEVEL_MASK,
+				   FIELD_GET(PFD_FAULT_LEVEL, msg[0])) |
+			FIELD_PREP(XE_PAGEFAULT_TYPE_MASK,
+				   FIELD_GET(PFD_FAULT_TYPE, msg[2]));
+	pf.consumer.engine_class_instance =
+		FIELD_PREP(XE_PAGEFAULT_ENGINE_CLASS_MASK,
+			   FIELD_GET(PFD_ENG_CLASS, msg[0])) |
+		FIELD_PREP(XE_PAGEFAULT_ENGINE_INSTANCE_MASK,
+			   FIELD_GET(PFD_ENG_INSTANCE, msg[0]));
+
+	pf.producer.private = guc;
+	pf.producer.ops = &guc_pagefault_ops;
+	for (i = 0; i < GUC_PF_MSG_LEN_DW; ++i)
+		pf.producer.msg[i] = msg[i];
+
+#undef GUC_PF_MSG_LEN_DW
+
+	return xe_pagefault_handler(guc_to_xe(guc), &pf);
+}

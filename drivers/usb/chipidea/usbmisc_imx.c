@@ -1224,6 +1224,14 @@ static const struct usbmisc_ops imx7ulp_usbmisc_ops = {
 	.power_lost_check = usbmisc_imx7d_power_lost_check,
 };
 
+static const struct usbmisc_ops imx94_usbmisc_ops = {
+	.init = usbmisc_imx7d_init,
+	.set_wakeup = usbmisc_imx95_set_wakeup,
+	.charger_detection = imx7d_charger_detection,
+	.power_lost_check = usbmisc_imx7d_power_lost_check,
+	.vbus_comparator_on = usbmisc_imx7d_vbus_comparator_on,
+};
+
 static const struct usbmisc_ops imx95_usbmisc_ops = {
 	.init = usbmisc_imx7d_init,
 	.set_wakeup = usbmisc_imx95_set_wakeup,
@@ -1482,6 +1490,10 @@ static const struct of_device_id usbmisc_imx_dt_ids[] = {
 		.data = &imx7ulp_usbmisc_ops,
 	},
 	{
+		.compatible = "fsl,imx94-usbmisc",
+		.data = &imx94_usbmisc_ops,
+	},
+	{
 		.compatible = "fsl,imx95-usbmisc",
 		.data = &imx95_usbmisc_ops,
 	},
@@ -1502,7 +1514,7 @@ static int usbmisc_imx_probe(struct platform_device *pdev)
 	struct imx_usbmisc *data;
 	struct resource *res;
 
-	data = devm_kzalloc(&pdev->dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(&pdev->dev, *data);
 	if (!data)
 		return -ENOMEM;
 

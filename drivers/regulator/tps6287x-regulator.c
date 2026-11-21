@@ -8,7 +8,6 @@
 
 #include <linux/err.h>
 #include <linux/i2c.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
 #include <linux/regulator/of_regulator.h>
@@ -188,7 +187,7 @@ static int tps6287x_i2c_probe(struct i2c_client *i2c)
 	struct tps6287x_reg_data *reg_data;
 	struct regulator_dev *rdev;
 
-	reg_data = devm_kzalloc(dev, sizeof(struct tps6287x_reg_data), GFP_KERNEL);
+	reg_data = devm_kzalloc_obj(dev, struct tps6287x_reg_data);
 
 	if (!reg_data)
 		return -ENOMEM;
@@ -229,11 +228,11 @@ static const struct of_device_id tps6287x_dt_ids[] = {
 MODULE_DEVICE_TABLE(of, tps6287x_dt_ids);
 
 static const struct i2c_device_id tps6287x_i2c_id[] = {
-	{ "tps62870" },
-	{ "tps62871" },
-	{ "tps62872" },
-	{ "tps62873" },
-	{}
+	{ .name = "tps62870" },
+	{ .name = "tps62871" },
+	{ .name = "tps62872" },
+	{ .name = "tps62873" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, tps6287x_i2c_id);

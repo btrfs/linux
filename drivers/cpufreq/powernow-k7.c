@@ -29,6 +29,7 @@
 #include <asm/timer.h>		/* Needed for recalibrate_cpu_khz() */
 #include <asm/msr.h>
 #include <asm/cpu_device_id.h>
+#include <asm/cpuid/api.h>
 
 #ifdef CONFIG_X86_POWERNOW_K7_ACPI
 #include <linux/acpi.h>
@@ -304,7 +305,7 @@ static int powernow_acpi_init(void)
 		goto err0;
 	}
 
-	acpi_processor_perf = kzalloc(sizeof(*acpi_processor_perf), GFP_KERNEL);
+	acpi_processor_perf = kzalloc_obj(*acpi_processor_perf);
 	if (!acpi_processor_perf) {
 		retval = -ENOMEM;
 		goto err0;

@@ -590,7 +590,7 @@ static int wcd939x_usbss_probe(struct i2c_client *client)
 	struct wcd939x_usbss *usbss;
 	int ret;
 
-	usbss = devm_kzalloc(dev, sizeof(*usbss), GFP_KERNEL);
+	usbss = devm_kzalloc_obj(dev, *usbss);
 	if (!usbss)
 		return -ENOMEM;
 
@@ -753,7 +753,7 @@ static void wcd939x_usbss_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id wcd939x_usbss_table[] = {
-	{ "wcd9390-usbss" },
+	{ .name = "wcd9390-usbss" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wcd939x_usbss_table);

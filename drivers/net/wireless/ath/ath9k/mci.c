@@ -53,7 +53,7 @@ static bool ath_mci_add_profile(struct ath_common *common,
 	    (info->type != MCI_GPM_COEX_PROFILE_VOICE))
 		return false;
 
-	entry = kzalloc(sizeof(*entry), GFP_ATOMIC);
+	entry = kzalloc_obj(*entry, GFP_ATOMIC);
 	if (!entry)
 		return false;
 
@@ -348,10 +348,7 @@ static u8 ath_mci_process_status(struct ath_softc *sc,
 	if (status->conn_handle >= ATH_MCI_MAX_PROFILE)
 		return 0;
 
-	if (status->is_critical)
-		__set_bit(status->conn_handle, mci->status);
-	else
-		__clear_bit(status->conn_handle, mci->status);
+	__assign_bit(status->conn_handle, mci->status, status->is_critical);
 
 	mci->num_mgmt = 0;
 	do {

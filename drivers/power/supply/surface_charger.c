@@ -237,7 +237,7 @@ static int surface_ac_probe(struct ssam_device *sdev)
 	if (!p)
 		return -ENODEV;
 
-	ac = devm_kzalloc(&sdev->dev, sizeof(*ac), GFP_KERNEL);
+	ac = devm_kzalloc_obj(&sdev->dev, *ac);
 	if (!ac)
 		return -ENOMEM;
 
@@ -260,8 +260,11 @@ static const struct spwr_psy_properties spwr_psy_props_adp1 = {
 };
 
 static const struct ssam_device_id surface_ac_match[] = {
-	{ SSAM_SDEV(BAT, SAM, 0x01, 0x01), (unsigned long)&spwr_psy_props_adp1 },
-	{ },
+	{
+		SSAM_SDEV(BAT, SAM, 0x01, 0x01),
+		.driver_data = (unsigned long)&spwr_psy_props_adp1,
+	},
+	{ }
 };
 MODULE_DEVICE_TABLE(ssam, surface_ac_match);
 

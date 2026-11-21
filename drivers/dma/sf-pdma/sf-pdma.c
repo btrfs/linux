@@ -17,7 +17,6 @@
 #include <linux/device.h>
 #include <linux/kernel.h>
 #include <linux/platform_device.h>
-#include <linux/mod_devicetable.h>
 #include <linux/dma-mapping.h>
 #include <linux/of.h>
 #include <linux/of_dma.h>
@@ -56,7 +55,7 @@ static struct sf_pdma_desc *sf_pdma_alloc_desc(struct sf_pdma_chan *chan)
 {
 	struct sf_pdma_desc *desc;
 
-	desc = kzalloc(sizeof(*desc), GFP_NOWAIT);
+	desc = kzalloc_obj(*desc, GFP_NOWAIT);
 	if (!desc)
 		return NULL;
 
@@ -514,8 +513,7 @@ static int sf_pdma_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	pdma = devm_kzalloc(&pdev->dev, struct_size(pdma, chans, n_chans),
-			    GFP_KERNEL);
+	pdma = devm_kzalloc_flex(&pdev->dev, *pdma, chans, n_chans);
 	if (!pdma)
 		return -ENOMEM;
 

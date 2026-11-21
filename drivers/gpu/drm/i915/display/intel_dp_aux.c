@@ -5,12 +5,14 @@
 
 #include <drm/drm_print.h>
 
-#include "i915_utils.h"
 #include "intel_de.h"
+#include "intel_display_jiffies.h"
 #include "intel_display_types.h"
+#include "intel_display_utils.h"
 #include "intel_dp.h"
 #include "intel_dp_aux.h"
 #include "intel_dp_aux_regs.h"
+#include "intel_parent.h"
 #include "intel_pps.h"
 #include "intel_quirks.h"
 #include "intel_tc.h"
@@ -57,16 +59,28 @@ static u32
 intel_dp_aux_wait_done(struct intel_dp *intel_dp)
 {
 	struct intel_display *display = to_intel_display(intel_dp);
-	i915_reg_t ch_ctl = intel_dp->aux_ch_ctl_reg(intel_dp);
+	intel_reg_t ch_ctl = intel_dp->aux_ch_ctl_reg(intel_dp);
 	const unsigned int timeout_ms = 10;
+	bool done = true;
 	u32 status;
 	int ret;
 
-	ret = intel_de_wait_custom(display, ch_ctl, DP_AUX_CH_CTL_SEND_BUSY,
-				   0,
-				   2, timeout_ms, &status);
+	if (intel_parent_irq_enabled(display)) {
+#define C (((status = intel_de_read_notrace(display, ch_ctl)) & DP_AUX_CH_CTL_SEND_BUSY) == 0)
+		done = wait_event_timeout(display->gmbus.wait_queue, C,
+					  msecs_to_jiffies_timeout(timeout_ms));
 
-	if (ret == -ETIMEDOUT)
+#undef C
+	} else {
+		ret = intel_de_wait_ms(display, ch_ctl,
+				       DP_AUX_CH_CTL_SEND_BUSY, 0,
+				       timeout_ms, &status);
+
+		if (ret == -ETIMEDOUT)
+			done = false;
+	}
+
+	if (!done)
 		drm_err(display->drm,
 			"%s: did not complete or timeout within %ums (status 0x%08x)\n",
 			intel_dp->aux.name, timeout_ms, status);
@@ -242,11 +256,11 @@ intel_dp_aux_xfer(struct intel_dp *intel_dp,
 	struct intel_display *display = to_intel_display(intel_dp);
 	struct intel_digital_port *dig_port = dp_to_dig_port(intel_dp);
 	struct intel_encoder *encoder = &dig_port->base;
-	i915_reg_t ch_ctl, ch_data[5];
+	intel_reg_t ch_ctl, ch_data[5];
 	u32 aux_clock_divider;
 	enum intel_display_power_domain aux_domain;
-	intel_wakeref_t aux_wakeref;
-	intel_wakeref_t pps_wakeref = NULL;
+	struct ref_tracker *aux_wakeref;
+	struct ref_tracker *pps_wakeref = NULL;
 	int i, ret, recv_bytes;
 	int try, clock = 0;
 	u32 status;
@@ -255,22 +269,6 @@ intel_dp_aux_xfer(struct intel_dp *intel_dp,
 	ch_ctl = intel_dp->aux_ch_ctl_reg(intel_dp);
 	for (i = 0; i < ARRAY_SIZE(ch_data); i++)
 		ch_data[i] = intel_dp->aux_ch_data_reg(intel_dp, i);
-
-	intel_digital_port_lock(encoder);
-	/*
-	 * Abort transfers on a disconnected port as required by
-	 * DP 1.4a link CTS 4.2.1.5, also avoiding the long AUX
-	 * timeouts that would otherwise happen.
-	 */
-	if (!intel_dp_is_edp(intel_dp) &&
-	    !intel_digital_port_connected_locked(&dig_port->base)) {
-		ret = -ENXIO;
-		goto out_unlock;
-	}
-
-	aux_domain = intel_aux_power_domain(dig_port);
-
-	aux_wakeref = intel_display_power_get(display, aux_domain);
 
 	/*
 	 * The PPS state needs to be locked for:
@@ -293,6 +291,21 @@ intel_dp_aux_xfer(struct intel_dp *intel_dp,
 	 * ourselves.
 	 */
 	vdd = intel_pps_vdd_on_unlocked(intel_dp);
+
+	intel_digital_port_lock(encoder);
+	/*
+	 * Abort transfers on a disconnected port as required by
+	 * DP 1.4a link CTS 4.2.1.5, also avoiding the long AUX
+	 * timeouts that would otherwise happen.
+	 */
+	if (!intel_dp_is_edp(intel_dp) &&
+	    !intel_digital_port_connected_locked(&dig_port->base)) {
+		ret = -ENXIO;
+		goto out_unlock;
+	}
+
+	aux_domain = intel_aux_power_domain(dig_port);
+	aux_wakeref = intel_display_power_get(display, aux_domain);
 
 	/*
 	 * dp aux is extremely sensitive to irq latency, hence request the
@@ -439,15 +452,15 @@ done:
 out:
 	cpu_latency_qos_update_request(&intel_dp->pm_qos, PM_QOS_DEFAULT_VALUE);
 
+	intel_display_power_put_async(display, aux_domain, aux_wakeref);
+out_unlock:
+	intel_digital_port_unlock(encoder);
+
 	if (vdd)
 		intel_pps_vdd_off_unlocked(intel_dp, false);
 
 	if (pps_wakeref)
 		intel_pps_unlock(intel_dp, pps_wakeref);
-
-	intel_display_power_put_async(display, aux_domain, aux_wakeref);
-out_unlock:
-	intel_digital_port_unlock(encoder);
 
 	return ret;
 }
@@ -552,7 +565,7 @@ intel_dp_aux_transfer(struct drm_dp_aux *aux, struct drm_dp_aux_msg *msg)
 	return ret;
 }
 
-static i915_reg_t vlv_aux_ctl_reg(struct intel_dp *intel_dp)
+static intel_reg_t vlv_aux_ctl_reg(struct intel_dp *intel_dp)
 {
 	struct intel_digital_port *dig_port = dp_to_dig_port(intel_dp);
 	enum aux_ch aux_ch = dig_port->aux_ch;
@@ -568,7 +581,7 @@ static i915_reg_t vlv_aux_ctl_reg(struct intel_dp *intel_dp)
 	}
 }
 
-static i915_reg_t vlv_aux_data_reg(struct intel_dp *intel_dp, int index)
+static intel_reg_t vlv_aux_data_reg(struct intel_dp *intel_dp, int index)
 {
 	struct intel_digital_port *dig_port = dp_to_dig_port(intel_dp);
 	enum aux_ch aux_ch = dig_port->aux_ch;
@@ -584,7 +597,7 @@ static i915_reg_t vlv_aux_data_reg(struct intel_dp *intel_dp, int index)
 	}
 }
 
-static i915_reg_t g4x_aux_ctl_reg(struct intel_dp *intel_dp)
+static intel_reg_t g4x_aux_ctl_reg(struct intel_dp *intel_dp)
 {
 	struct intel_digital_port *dig_port = dp_to_dig_port(intel_dp);
 	enum aux_ch aux_ch = dig_port->aux_ch;
@@ -600,7 +613,7 @@ static i915_reg_t g4x_aux_ctl_reg(struct intel_dp *intel_dp)
 	}
 }
 
-static i915_reg_t g4x_aux_data_reg(struct intel_dp *intel_dp, int index)
+static intel_reg_t g4x_aux_data_reg(struct intel_dp *intel_dp, int index)
 {
 	struct intel_digital_port *dig_port = dp_to_dig_port(intel_dp);
 	enum aux_ch aux_ch = dig_port->aux_ch;
@@ -616,7 +629,7 @@ static i915_reg_t g4x_aux_data_reg(struct intel_dp *intel_dp, int index)
 	}
 }
 
-static i915_reg_t ilk_aux_ctl_reg(struct intel_dp *intel_dp)
+static intel_reg_t ilk_aux_ctl_reg(struct intel_dp *intel_dp)
 {
 	struct intel_digital_port *dig_port = dp_to_dig_port(intel_dp);
 	enum aux_ch aux_ch = dig_port->aux_ch;
@@ -634,7 +647,7 @@ static i915_reg_t ilk_aux_ctl_reg(struct intel_dp *intel_dp)
 	}
 }
 
-static i915_reg_t ilk_aux_data_reg(struct intel_dp *intel_dp, int index)
+static intel_reg_t ilk_aux_data_reg(struct intel_dp *intel_dp, int index)
 {
 	struct intel_digital_port *dig_port = dp_to_dig_port(intel_dp);
 	enum aux_ch aux_ch = dig_port->aux_ch;
@@ -652,7 +665,7 @@ static i915_reg_t ilk_aux_data_reg(struct intel_dp *intel_dp, int index)
 	}
 }
 
-static i915_reg_t skl_aux_ctl_reg(struct intel_dp *intel_dp)
+static intel_reg_t skl_aux_ctl_reg(struct intel_dp *intel_dp)
 {
 	struct intel_digital_port *dig_port = dp_to_dig_port(intel_dp);
 	enum aux_ch aux_ch = dig_port->aux_ch;
@@ -671,7 +684,7 @@ static i915_reg_t skl_aux_ctl_reg(struct intel_dp *intel_dp)
 	}
 }
 
-static i915_reg_t skl_aux_data_reg(struct intel_dp *intel_dp, int index)
+static intel_reg_t skl_aux_data_reg(struct intel_dp *intel_dp, int index)
 {
 	struct intel_digital_port *dig_port = dp_to_dig_port(intel_dp);
 	enum aux_ch aux_ch = dig_port->aux_ch;
@@ -690,7 +703,7 @@ static i915_reg_t skl_aux_data_reg(struct intel_dp *intel_dp, int index)
 	}
 }
 
-static i915_reg_t tgl_aux_ctl_reg(struct intel_dp *intel_dp)
+static intel_reg_t tgl_aux_ctl_reg(struct intel_dp *intel_dp)
 {
 	struct intel_digital_port *dig_port = dp_to_dig_port(intel_dp);
 	enum aux_ch aux_ch = dig_port->aux_ch;
@@ -712,7 +725,7 @@ static i915_reg_t tgl_aux_ctl_reg(struct intel_dp *intel_dp)
 	}
 }
 
-static i915_reg_t tgl_aux_data_reg(struct intel_dp *intel_dp, int index)
+static intel_reg_t tgl_aux_data_reg(struct intel_dp *intel_dp, int index)
 {
 	struct intel_digital_port *dig_port = dp_to_dig_port(intel_dp);
 	enum aux_ch aux_ch = dig_port->aux_ch;
@@ -734,7 +747,7 @@ static i915_reg_t tgl_aux_data_reg(struct intel_dp *intel_dp, int index)
 	}
 }
 
-static i915_reg_t xelpdp_aux_ctl_reg(struct intel_dp *intel_dp)
+static intel_reg_t xelpdp_aux_ctl_reg(struct intel_dp *intel_dp)
 {
 	struct intel_display *display = to_intel_display(intel_dp);
 	struct intel_digital_port *dig_port = dp_to_dig_port(intel_dp);
@@ -754,7 +767,7 @@ static i915_reg_t xelpdp_aux_ctl_reg(struct intel_dp *intel_dp)
 	}
 }
 
-static i915_reg_t xelpdp_aux_data_reg(struct intel_dp *intel_dp, int index)
+static intel_reg_t xelpdp_aux_data_reg(struct intel_dp *intel_dp, int index)
 {
 	struct intel_display *display = to_intel_display(intel_dp);
 	struct intel_digital_port *dig_port = dp_to_dig_port(intel_dp);

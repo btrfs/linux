@@ -314,8 +314,13 @@ static int mpxy_get_notifications(u32 channel_id,
 			 channel_id, 0, 0, 0, 0, 0);
 	if (sret.error)
 		goto err_put_cpu;
+	if (sret.value < 0 || mpxy_shmem_size < sizeof(*notif_data) ||
+	    sret.value > mpxy_shmem_size - sizeof(*notif_data)) {
+		put_cpu();
+		return -EOVERFLOW;
+	}
 
-	memcpy(notif_data, mpxy->shmem, sret.value + 16);
+	memcpy(notif_data, mpxy->shmem, sret.value + sizeof(*notif_data));
 	*events_data_len = sret.value;
 
 err_put_cpu:
@@ -480,11 +485,14 @@ static void mpxy_mbox_peek_rpmi_data(struct mbox_chan *chan,
 	struct rpmi_mbox_message msg;
 	unsigned long pos = 0;
 
-	while (pos < events_data_len && (events_data_len - pos) <= sizeof(*event)) {
+	while (events_data_len - pos >= sizeof(*event)) {
 		event = (struct rpmi_notification_event *)(notif->events_data + pos);
 
 		msg.type = RPMI_MBOX_MSG_TYPE_NOTIFICATION_EVENT;
 		msg.notif.event_datalen = le16_to_cpu(event->event_datalen);
+		if (msg.notif.event_datalen >
+		    events_data_len - pos - sizeof(*event))
+			break;
 		msg.notif.event_id = event->event_id;
 		msg.notif.event_data = event->event_data;
 		msg.error = 0;
@@ -775,7 +783,7 @@ static int mpxy_mbox_populate_channels(struct mpxy_mbox *mbox)
 		return dev_err_probe(mbox->dev, -ENODEV, "no MPXY channels available\n");
 
 	/* Allocate and fetch all channel IDs */
-	channel_ids = kcalloc(mbox->channel_count, sizeof(*channel_ids), GFP_KERNEL);
+	channel_ids = kzalloc_objs(*channel_ids, mbox->channel_count);
 	if (!channel_ids)
 		return -ENOMEM;
 	rc = mpxy_get_channel_ids(mbox->channel_count, channel_ids);
@@ -783,8 +791,8 @@ static int mpxy_mbox_populate_channels(struct mpxy_mbox *mbox)
 		return dev_err_probe(mbox->dev, rc, "failed to get MPXY channel IDs\n");
 
 	/* Populate all channels */
-	mbox->channels = devm_kcalloc(mbox->dev, mbox->channel_count,
-				      sizeof(*mbox->channels), GFP_KERNEL);
+	mbox->channels = devm_kzalloc_objs(mbox->dev, *mbox->channels,
+					   mbox->channel_count);
 	if (!mbox->channels)
 		return -ENOMEM;
 	for (i = 0; i < mbox->channel_count; i++) {
@@ -874,7 +882,7 @@ static int mpxy_mbox_probe(struct platform_device *pdev)
 	mpxy_shmem_init_done = true;
 
 	/* Allocate mailbox instance */
-	mbox = devm_kzalloc(dev, sizeof(*mbox), GFP_KERNEL);
+	mbox = devm_kzalloc_obj(dev, *mbox);
 	if (!mbox)
 		return -ENOMEM;
 	mbox->dev = dev;
@@ -892,9 +900,8 @@ static int mpxy_mbox_probe(struct platform_device *pdev)
 	mbox->controller.dev = dev;
 	mbox->controller.num_chans = mbox->channel_count;
 	mbox->controller.fw_xlate = mpxy_mbox_fw_xlate;
-	mbox->controller.chans = devm_kcalloc(dev, mbox->channel_count,
-					      sizeof(*mbox->controller.chans),
-					      GFP_KERNEL);
+	mbox->controller.chans = devm_kzalloc_objs(dev, *mbox->controller.chans,
+						   mbox->channel_count);
 	if (!mbox->controller.chans)
 		return -ENOMEM;
 	for (i = 0; i < mbox->channel_count; i++)
@@ -931,9 +938,9 @@ static int mpxy_mbox_probe(struct platform_device *pdev)
 				return -EPROBE_DEFER;
 		}
 
-		mbox->msi_index_to_channel = devm_kcalloc(dev, mbox->msi_count,
-							  sizeof(*mbox->msi_index_to_channel),
-							  GFP_KERNEL);
+		mbox->msi_index_to_channel = devm_kzalloc_objs(dev,
+							       *mbox->msi_index_to_channel,
+							       mbox->msi_count);
 		if (!mbox->msi_index_to_channel)
 			return -ENOMEM;
 
@@ -998,8 +1005,8 @@ static const struct of_device_id mpxy_mbox_of_match[] = {
 MODULE_DEVICE_TABLE(of, mpxy_mbox_of_match);
 
 static const struct acpi_device_id mpxy_mbox_acpi_match[] = {
-	{ "RSCV0005" },
-	{}
+	{ .id = "RSCV0005" },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, mpxy_mbox_acpi_match);
 
