@@ -127,7 +127,7 @@ static const struct ata_port_info *ahci_seattle_get_port_info(
 	struct seattle_plat_data *plat_data;
 	u32 val;
 
-	plat_data = devm_kzalloc(dev, sizeof(*plat_data), GFP_KERNEL);
+	plat_data = devm_kzalloc_obj(dev, *plat_data);
 	if (!plat_data)
 		return &ahci_port_info;
 
@@ -178,8 +178,8 @@ static SIMPLE_DEV_PM_OPS(ahci_pm_ops, ahci_platform_suspend,
 			 ahci_platform_resume);
 
 static const struct acpi_device_id ahci_acpi_match[] = {
-	{ "AMDI0600", 0 },
-	{}
+	{ .id = "AMDI0600" },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, ahci_acpi_match);
 

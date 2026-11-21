@@ -427,7 +427,7 @@ static int bcm_kona_i2c_write_fifo_single(struct bcm_kona_i2c_dev *dev,
 		return -EREMOTEIO;
 	}
 
-	/* Check if a timeout occured */
+	/* Check if a timeout occurred */
 	if (!time_left) {
 		dev_err(dev->device, "completion timed out\n");
 		return -EREMOTEIO;
@@ -741,7 +741,7 @@ static int bcm_kona_i2c_probe(struct platform_device *pdev)
 	struct i2c_adapter *adap;
 
 	/* Allocate memory for private data structure */
-	dev = devm_kzalloc(&pdev->dev, sizeof(*dev), GFP_KERNEL);
+	dev = devm_kzalloc_obj(&pdev->dev, *dev);
 	if (!dev)
 		return -ENOMEM;
 

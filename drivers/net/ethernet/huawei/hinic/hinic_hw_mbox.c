@@ -128,6 +128,7 @@ enum hinic_mbox_tx_status {
 
 #define SEQ_ID_START_VAL			0
 #define SEQ_ID_MAX_VAL				42
+#define MBOX_LAST_SEG_MAX_LEN			(MBOX_MAX_BUF_SZ - SEQ_ID_MAX_VAL * MBOX_SEG_LEN)
 
 #define NO_DMA_ATTRIBUTE_VAL			0
 
@@ -372,7 +373,8 @@ recv_pf_from_vf_mbox_handler(struct hinic_mbox_func_to_func *func_to_func,
 static bool check_mbox_seq_id_and_seg_len(struct hinic_recv_mbox *recv_mbox,
 					  u8 seq_id, u8 seg_len)
 {
-	if (seq_id > SEQ_ID_MAX_VAL || seg_len > MBOX_SEG_LEN)
+	if (seq_id > SEQ_ID_MAX_VAL || seg_len > MBOX_SEG_LEN ||
+	    (seq_id == SEQ_ID_MAX_VAL && seg_len > MBOX_LAST_SEG_MAX_LEN))
 		return false;
 
 	if (seq_id == 0) {
@@ -487,7 +489,7 @@ static void recv_mbox_handler(struct hinic_mbox_func_to_func *func_to_func,
 	if (!rcv_mbox_temp->buf_out)
 		goto err_alloc_rcv_mbox_buf;
 
-	mbox_work = kzalloc(sizeof(*mbox_work), GFP_KERNEL);
+	mbox_work = kzalloc_obj(*mbox_work);
 	if (!mbox_work)
 		goto err_alloc_mbox_work;
 
@@ -603,7 +605,7 @@ static bool check_vf_mbox_random_id(struct hinic_mbox_func_to_func *func_to_func
 		 "The mailbox random id(0x%x) of func_id(0x%x) doesn't match with pf reservation(0x%x)\n",
 		 random_id, src, func_to_func->vf_mbx_rand_id[src]);
 
-	mbox_work = kzalloc(sizeof(*mbox_work), GFP_KERNEL);
+	mbox_work = kzalloc_obj(*mbox_work);
 	if (!mbox_work)
 		return false;
 
@@ -1402,7 +1404,7 @@ int hinic_func_to_func_init(struct hinic_hwdev *hwdev)
 	int err;
 
 	pfhwdev =  container_of(hwdev, struct hinic_pfhwdev, hwdev);
-	func_to_func = kzalloc(sizeof(*func_to_func), GFP_KERNEL);
+	func_to_func = kzalloc_obj(*func_to_func);
 	if (!func_to_func)
 		return -ENOMEM;
 

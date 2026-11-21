@@ -388,7 +388,7 @@ static snd_pcm_uframes_t kmb_pcm_pointer(struct snd_soc_component *component,
 
 static const struct snd_soc_component_driver kmb_component = {
 	.name			= "kmb",
-	.pcm_construct		= kmb_platform_pcm_new,
+	.pcm_new		= kmb_platform_pcm_new,
 	.open			= kmb_pcm_open,
 	.trigger		= kmb_pcm_trigger,
 	.pointer		= kmb_pcm_pointer,
@@ -826,7 +826,7 @@ static int kmb_plat_dai_probe(struct platform_device *pdev)
 	int ret, irq;
 	u32 comp1_reg;
 
-	kmb_i2s = devm_kzalloc(dev, sizeof(*kmb_i2s), GFP_KERNEL);
+	kmb_i2s = devm_kzalloc_obj(dev, *kmb_i2s);
 	if (!kmb_i2s)
 		return -ENOMEM;
 
@@ -873,6 +873,8 @@ static int kmb_plat_dai_probe(struct platform_device *pdev)
 
 	if (kmb_i2s->use_pio) {
 		irq = platform_get_irq_optional(pdev, 0);
+		if (irq == -EPROBE_DEFER)
+			return irq;
 		if (irq > 0) {
 			ret = devm_request_irq(dev, irq, kmb_i2s_irq_handler, 0,
 					       pdev->name, kmb_i2s);

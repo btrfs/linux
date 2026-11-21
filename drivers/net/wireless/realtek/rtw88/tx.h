@@ -7,7 +7,11 @@
 
 #define RTK_TX_MAX_AGG_NUM_MASK		0x1f
 
-#define RTW_TX_PROBE_TIMEOUT		msecs_to_jiffies(500)
+#define RTW_TX_PROBE_TIMEOUT_SHORT	msecs_to_jiffies(500)
+#define RTW_TX_PROBE_TIMEOUT_LONG	msecs_to_jiffies(2500)
+
+#define RTW_TX_HIQ_REFILL_INTERVAL	(HZ / 10)
+#define RTW_TX_HIQ_BUDGET_MAX		16
 
 struct rtw_tx_desc {
 	__le32 w0;
@@ -114,6 +118,7 @@ rtw_tx_write_data_h2c_get(struct rtw_dev *rtwdev,
 
 enum rtw_tx_queue_type rtw_tx_ac_to_hwq(enum ieee80211_ac_numbers ac);
 enum rtw_tx_queue_type rtw_tx_queue_mapping(struct sk_buff *skb);
+bool rtw_tx_bmc_use_hiq(struct rtw_dev *rtwdev, struct sk_buff *skb);
 
 static inline
 void fill_txdesc_checksum_common(u8 *txdesc, size_t words)

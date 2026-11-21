@@ -19,8 +19,7 @@ static int mpu3050_i2c_bypass_select(struct i2c_mux_core *mux, u32 chan_id)
 	struct mpu3050 *mpu3050 = i2c_mux_priv(mux);
 
 	/* Just power up the device, that is all that is needed */
-	pm_runtime_get_sync(mpu3050->dev);
-	return 0;
+	return pm_runtime_resume_and_get(mpu3050->dev);
 }
 
 static int mpu3050_i2c_bypass_deselect(struct i2c_mux_core *mux, u32 chan_id)
@@ -93,7 +92,7 @@ static void mpu3050_i2c_remove(struct i2c_client *client)
  * supported by this driver
  */
 static const struct i2c_device_id mpu3050_i2c_id[] = {
-	{ "mpu3050" },
+	{ .name = "mpu3050" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mpu3050_i2c_id);

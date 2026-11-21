@@ -113,8 +113,7 @@ static void process_recv(struct ishtp_cl *hid_ishtp_cl, void *recv_buf,
 
 		switch (recv_msg->hdr.command & CMD_MASK) {
 		case HOSTIF_DM_ENUM_DEVICES:
-			if ((!(recv_msg->hdr.command & ~CMD_MASK) ||
-					client_data->init_done)) {
+			if (!(recv_msg->hdr.command & ~CMD_MASK)) {
 				++client_data->bad_recv_cnt;
 				report_bad_packet(hid_ishtp_cl, recv_msg,
 						  cur_pos,
@@ -122,13 +121,13 @@ static void process_recv(struct ishtp_cl *hid_ishtp_cl, void *recv_buf,
 				ish_hw_reset(ishtp_get_ishtp_device(hid_ishtp_cl));
 				break;
 			}
+			if (client_data->init_done)
+				break;
 			client_data->hid_dev_count = (unsigned int)*payload;
 			if (!client_data->hid_devices)
-				client_data->hid_devices = devm_kcalloc(
-						cl_data_to_dev(client_data),
-						client_data->hid_dev_count,
-						sizeof(struct device_info),
-						GFP_KERNEL);
+				client_data->hid_devices = devm_kzalloc_objs(cl_data_to_dev(client_data),
+									     struct device_info,
+									     client_data->hid_dev_count);
 			if (!client_data->hid_devices) {
 				dev_err(cl_data_to_dev(client_data),
 				"Mem alloc failed for hid device info\n");
@@ -495,6 +494,7 @@ static int ishtp_enum_enum_devices(struct ishtp_cl *hid_ishtp_cl)
 	int rv;
 
 	/* Send HOSTIF_DM_ENUM_DEVICES */
+	client_data->enum_devices_done = false;
 	memset(&msg, 0, sizeof(struct hostif_msg));
 	msg.hdr.command = HOSTIF_DM_ENUM_DEVICES;
 	rv = ishtp_cl_send(hid_ishtp_cl, (unsigned char *)&msg,
@@ -757,8 +757,15 @@ static void hid_ishtp_cl_resume_handler(struct work_struct *work)
 	struct ishtp_cl *hid_ishtp_cl = client_data->hid_ishtp_cl;
 
 	if (ishtp_wait_resume(ishtp_get_ishtp_device(hid_ishtp_cl))) {
-		client_data->suspended = false;
-		wake_up_interruptible(&client_data->ishtp_resume_wait);
+		/*
+		 * Clear the suspended flag only when the connection is established.
+		 * If the connection is not established, the suspended flag will be cleared after
+		 * the connection is made.
+		 */
+		if (ishtp_get_connection_state(hid_ishtp_cl) == ISHTP_CL_CONNECTED) {
+			client_data->suspended = false;
+			wake_up_interruptible(&client_data->ishtp_resume_wait);
+		}
 	} else {
 		hid_ishtp_trace(client_data, "hid client: wait for resume timed out");
 		dev_err(cl_data_to_dev(client_data), "wait for resume timed out");
@@ -784,9 +791,7 @@ static int hid_ishtp_cl_probe(struct ishtp_cl_device *cl_device)
 	if (!cl_device)
 		return	-ENODEV;
 
-	client_data = devm_kzalloc(ishtp_device(cl_device),
-				   sizeof(*client_data),
-				   GFP_KERNEL);
+	client_data = devm_kzalloc_obj(ishtp_device(cl_device), *client_data);
 	if (!client_data)
 		return -ENOMEM;
 
@@ -860,7 +865,7 @@ static int hid_ishtp_cl_reset(struct ishtp_cl_device *cl_device)
 	hid_ishtp_trace(client_data, "%s hid_ishtp_cl %p\n", __func__,
 			hid_ishtp_cl);
 
-	schedule_work(&client_data->work);
+	queue_work(ishtp_get_workqueue(cl_device), &client_data->work);
 
 	return 0;
 }
@@ -902,7 +907,7 @@ static int hid_ishtp_cl_resume(struct device *device)
 
 	hid_ishtp_trace(client_data, "%s hid_ishtp_cl %p\n", __func__,
 			hid_ishtp_cl);
-	schedule_work(&client_data->resume_work);
+	queue_work(ishtp_get_workqueue(cl_device), &client_data->resume_work);
 	return 0;
 }
 

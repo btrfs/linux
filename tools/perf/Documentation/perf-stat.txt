@@ -162,6 +162,9 @@ null run - Don't start any counters.
 This can be useful to measure just elapsed wall-clock time - or to assess the
 raw overhead of perf stat itself, without running any counters.
 
+--hide-zero-events::
+Do not show events with a zero count.
+
 -v::
 --verbose::
         be more verbose (show counter open errors, etc)
@@ -382,6 +385,11 @@ color the metric's computed value.
 Don't print output, warnings or messages. This is useful with perf stat
 record below to only write data to the perf.data file.
 
+--no-affinity::
+Don't change scheduler CPU affinities when iterating over
+CPUs. Disables an optimization aimed at minimizing interprocessor
+interrupts.
+
 STAT RECORD
 -----------
 Stores stat data into perf data file.
@@ -573,6 +581,10 @@ $ perf config stat.no-csv-summary=true
 Only enable events on applying cpu with this type for hybrid platform
 (e.g. core or atom)"
 
+--pmu-filter::
+Only enable events on applying pmu with specified for multiple
+pmus with same type (e.g. hisi_sicl2_cpa0 or hisi_sicl0_cpa0)
+
 EXAMPLES
 --------
 
@@ -608,6 +620,16 @@ user/system lands:
          8.739217000 seconds sys
 
 Those times are the very same as displayed by the 'time' tool.
+
+We also display a clock-based timing metric that depends on the
+target being monitored:
+
+        83723.452481      task-clock (msec)       #    1.004 CPUs utilized
+
+For a single task, task-clock reports a clock count specific to that
+task. When the target is a CPU or the whole system (-a or -C),
+cpu-clock is reported instead. cpu-clock is a high-resolution per-CPU
+timer. See perf_event_open(2) for more details.
 
 CSV FORMAT
 ----------
@@ -659,4 +681,4 @@ that can be used for parsing.
 
 SEE ALSO
 --------
-linkperf:perf-top[1], linkperf:perf-list[1]
+linkperf:perf-top[1], linkperf:perf-list[1], perf_event_open(2)

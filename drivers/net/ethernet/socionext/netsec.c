@@ -1263,7 +1263,7 @@ static int netsec_alloc_dring(struct netsec_priv *priv, enum ring_id id)
 	if (!dring->vaddr)
 		goto err;
 
-	dring->desc = kcalloc(DESC_NUM, sizeof(*dring->desc), GFP_KERNEL);
+	dring->desc = kzalloc_objs(*dring->desc, DESC_NUM);
 	if (!dring->desc)
 		goto err;
 
@@ -2149,6 +2149,7 @@ pm_disable:
 	pm_runtime_put_sync(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
 free_ndev:
+	of_node_put(priv->phy_np);
 	free_netdev(ndev);
 	dev_err(&pdev->dev, "init failed\n");
 
@@ -2166,6 +2167,7 @@ static void netsec_remove(struct platform_device *pdev)
 	netif_napi_del(&priv->napi);
 
 	pm_runtime_disable(&pdev->dev);
+	of_node_put(priv->phy_np);
 	free_netdev(priv->ndev);
 }
 

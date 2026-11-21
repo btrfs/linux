@@ -220,12 +220,18 @@ static int loongson_i2s_dai_probe(struct snd_soc_dai *cpu_dai)
 	return 0;
 }
 
+static const u64 loongson_i2s_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J;
+
 static const struct snd_soc_dai_ops loongson_i2s_dai_ops = {
 	.probe		= loongson_i2s_dai_probe,
 	.trigger	= loongson_i2s_trigger,
 	.hw_params	= loongson_i2s_hw_params,
 	.set_sysclk	= loongson_i2s_set_dai_sysclk,
 	.set_fmt	= loongson_i2s_set_fmt,
+	.auto_selectable_formats	= &loongson_i2s_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 struct snd_soc_dai_driver loongson_i2s_dai = {
@@ -254,6 +260,7 @@ static int i2s_suspend(struct device *dev)
 	struct loongson_i2s *i2s = dev_get_drvdata(dev);
 
 	regcache_cache_only(i2s->regmap, true);
+	regcache_mark_dirty(i2s->regmap);
 
 	return 0;
 }
@@ -263,7 +270,7 @@ static int i2s_resume(struct device *dev)
 	struct loongson_i2s *i2s = dev_get_drvdata(dev);
 
 	regcache_cache_only(i2s->regmap, false);
-	regcache_mark_dirty(i2s->regmap);
+
 	return regcache_sync(i2s->regmap);
 }
 
@@ -271,6 +278,59 @@ const struct dev_pm_ops loongson_i2s_pm = {
 	SYSTEM_SLEEP_PM_OPS(i2s_suspend, i2s_resume)
 };
 EXPORT_SYMBOL_GPL(loongson_i2s_pm);
+
+static bool loongson_i2s_rd_reg(struct device *dev, unsigned int reg)
+{
+	switch (reg) {
+	case LS_I2S_VER:
+	case LS_I2S_CFG:
+	case LS_I2S_CTRL:
+	case LS_I2S_RX_DATA:
+	case LS_I2S_TX_DATA:
+	case LS_I2S_CFG1:
+		return true;
+	default:
+		return false;
+	};
+}
+
+static bool loongson_i2s_wr_reg(struct device *dev, unsigned int reg)
+{
+	switch (reg) {
+	case LS_I2S_CFG:
+	case LS_I2S_CTRL:
+	case LS_I2S_RX_DATA:
+	case LS_I2S_TX_DATA:
+	case LS_I2S_CFG1:
+		return true;
+	default:
+		return false;
+	};
+}
+
+static bool loongson_i2s_volatile_reg(struct device *dev, unsigned int reg)
+{
+	switch (reg) {
+	case LS_I2S_CTRL:
+	case LS_I2S_RX_DATA:
+	case LS_I2S_TX_DATA:
+		return true;
+	default:
+		return false;
+	};
+}
+
+const struct regmap_config loongson_i2s_regmap_config = {
+	.reg_bits = 32,
+	.reg_stride = 4,
+	.val_bits = 32,
+	.max_register = LS_I2S_CFG1,
+	.readable_reg = loongson_i2s_rd_reg,
+	.writeable_reg = loongson_i2s_wr_reg,
+	.volatile_reg = loongson_i2s_volatile_reg,
+	.cache_type = REGCACHE_MAPLE,
+};
+EXPORT_SYMBOL_GPL(loongson_i2s_regmap_config);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Common functions for loongson I2S controller driver");

@@ -5,7 +5,7 @@
  * SDIO over Sonics Silicon Backplane bus glue for b43.
  *
  * Copyright (C) 2009 Albert Herranz
- * Copyright (C) 2009 Michael Buesch <m@bues.ch>
+ * Copyright (C) 2009 Michael Buesch
  */
 
 #include <linux/kernel.h>
@@ -139,7 +139,7 @@ static int b43_sdio_probe(struct sdio_func *func,
 	}
 	sdio_release_host(func);
 
-	sdio = kzalloc(sizeof(*sdio), GFP_KERNEL);
+	sdio = kzalloc_obj(*sdio);
 	if (!sdio) {
 		error = -ENOMEM;
 		dev_err(&func->dev, "failed to allocate ssb bus\n");

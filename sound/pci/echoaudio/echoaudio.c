@@ -265,12 +265,12 @@ static int pcm_open(struct snd_pcm_substream *substream,
 	chip = snd_pcm_substream_chip(substream);
 	runtime = substream->runtime;
 
-	pipe = kzalloc(sizeof(struct audiopipe), GFP_KERNEL);
+	pipe = kzalloc_obj(struct audiopipe);
 	if (!pipe)
 		return -ENOMEM;
 	pipe->index = -1;		/* Not configured yet */
 
-	/* Set up hw capabilities and contraints */
+	/* Set up hw capabilities and constraints */
 	memcpy(&pipe->hw, &pcm_hardware_skel, sizeof(struct snd_pcm_hardware));
 	dev_dbg(chip->card->dev, "max_channels=%d\n", max_channels);
 	pipe->constr.list = channels_list;
@@ -1720,7 +1720,7 @@ static const struct snd_kcontrol_new snd_echo_vumeters = {
 
 
 
-/*** Channels info - it exports informations about the number of channels ***/
+/*** Channels info - it exports information about the number of channels ***/
 static int snd_echo_channels_info_info(struct snd_kcontrol *kcontrol,
 				       struct snd_ctl_elem_info *uinfo)
 {
@@ -1934,11 +1934,11 @@ static int snd_echo_create(struct snd_card *card,
 }
 
 /* constructor */
-static int __snd_echo_probe(struct pci_dev *pci,
-			    const struct pci_device_id *pci_id)
+static int snd_echo_probe(struct pci_dev *pci,
+			  const struct pci_device_id *pci_id)
 {
 	static int dev;
-	struct snd_card *card;
+	struct snd_card *card __free(snd_card_free) = NULL;
 	struct echoaudio *chip;
 	char *dsp;
 	int err;
@@ -2097,16 +2097,10 @@ static int __snd_echo_probe(struct pci_dev *pci,
 	dev_info(card->dev, "Card registered: %s\n", card->longname);
 
 	pci_set_drvdata(pci, chip);
+	card = NULL; /* probe succeeded, don't release as error */
 	dev++;
 	return 0;
 }
-
-static int snd_echo_probe(struct pci_dev *pci,
-			  const struct pci_device_id *pci_id)
-{
-	return snd_card_free_on_error(&pci->dev, __snd_echo_probe(pci, pci_id));
-}
-
 
 static int snd_echo_suspend(struct device *dev)
 {
@@ -2159,7 +2153,7 @@ static int snd_echo_resume(struct device *dev)
 	 */
 	pipe_alloc_mask = chip->pipe_alloc_mask;
 	chip->pipe_alloc_mask = 0;
-	err = restore_dsp_rettings(chip);
+	err = restore_dsp_settings(chip);
 	chip->pipe_alloc_mask = pipe_alloc_mask;
 	if (err < 0) {
 		kfree(commpage_bak);

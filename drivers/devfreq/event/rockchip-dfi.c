@@ -354,7 +354,7 @@ static ssize_t ddr_perf_cpumask_show(struct device *dev,
 	struct pmu *pmu = dev_get_drvdata(dev);
 	struct rockchip_dfi *dfi = container_of(pmu, struct rockchip_dfi, pmu);
 
-	return cpumap_print_to_pagebuf(true, buf, cpumask_of(dfi->cpu));
+	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(cpumask_of(dfi->cpu)));
 }
 
 static struct device_attribute ddr_perf_cpumask_attr =
@@ -829,7 +829,7 @@ static int rockchip_dfi_probe(struct platform_device *pdev)
 	if (!soc_init)
 		return -EINVAL;
 
-	dfi = devm_kzalloc(dev, sizeof(*dfi), GFP_KERNEL);
+	dfi = devm_kzalloc_obj(dev, *dfi);
 	if (!dfi)
 		return -ENOMEM;
 

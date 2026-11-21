@@ -30,6 +30,7 @@
 #define pr_fmt(fmt)	KBUILD_MODNAME ": " fmt
 
 #include <linux/init.h>
+#include <linux/kstrtox.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -111,7 +112,7 @@ static int create_packet(void *data, size_t length) __must_hold(&rbu_data.lock)
 
 	spin_unlock(&rbu_data.lock);
 
-	newpacket = kzalloc(sizeof (struct packet_data), GFP_KERNEL);
+	newpacket = kzalloc_obj(struct packet_data);
 
 	if (!newpacket) {
 		pr_warn("failed to allocate new packet\n");
@@ -561,9 +562,9 @@ static ssize_t image_type_write(struct file *filp, struct kobject *kobj,
 		buffer[count] = '\0';
 
 	if (strstr(buffer, "mono"))
-		strcpy(image_type, "mono");
+		strscpy(image_type, "mono");
 	else if (strstr(buffer, "packet"))
-		strcpy(image_type, "packet");
+		strscpy(image_type, "packet");
 	else if (strstr(buffer, "init")) {
 		/*
 		 * If due to the user error the driver gets in a bad
@@ -619,9 +620,12 @@ static ssize_t packet_size_write(struct file *filp, struct kobject *kobj,
 				 char *buffer, loff_t pos, size_t count)
 {
 	unsigned long temp;
+
+	if (kstrtoul(buffer, 10, &temp))
+		return -EINVAL;
+
 	spin_lock(&rbu_data.lock);
 	packet_empty_list();
-	sscanf(buffer, "%lu", &temp);
 	if (temp < 0xffffffff)
 		rbu_data.packetsize = temp;
 

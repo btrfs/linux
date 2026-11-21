@@ -126,8 +126,7 @@ static int mcp3021_probe(struct i2c_client *client)
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C))
 		return -ENODEV;
 
-	data = devm_kzalloc(&client->dev, sizeof(struct mcp3021_data),
-			    GFP_KERNEL);
+	data = devm_kzalloc_obj(&client->dev, struct mcp3021_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -177,8 +176,8 @@ static int mcp3021_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id mcp3021_id[] = {
-	{ "mcp3021", mcp3021 },
-	{ "mcp3221", mcp3221 },
+	{ .name = "mcp3021", .driver_data = mcp3021 },
+	{ .name = "mcp3221", .driver_data = mcp3221 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mcp3021_id);

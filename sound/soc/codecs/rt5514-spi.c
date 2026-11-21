@@ -6,6 +6,7 @@
  * Author: Oder Chiou <oder_chiou@realtek.com>
  */
 
+#include <linux/cleanup.h>
 #include <linux/module.h>
 #include <linux/input.h>
 #include <linux/spi/spi.h>
@@ -42,6 +43,7 @@ struct rt5514_dsp {
 	struct snd_pcm_substream *substream;
 	unsigned int buf_base, buf_limit, buf_rp;
 	size_t buf_size, get_size, dma_offset;
+	int irq;
 };
 
 static const struct snd_pcm_hardware rt5514_spi_pcm_hardware = {
@@ -79,17 +81,17 @@ static void rt5514_spi_copy_work(struct work_struct *work)
 	unsigned int cur_wp, remain_data;
 	u8 buf[8];
 
-	mutex_lock(&rt5514_dsp->dma_lock);
+	guard(mutex)(&rt5514_dsp->dma_lock);
 	if (!rt5514_dsp->substream) {
 		dev_err(rt5514_dsp->dev, "No pcm substream\n");
-		goto done;
+		return;
 	}
 
 	runtime = rt5514_dsp->substream->runtime;
 	period_bytes = snd_pcm_lib_period_bytes(rt5514_dsp->substream);
 	if (!period_bytes) {
 		schedule_delayed_work(&rt5514_dsp->copy_work, 5);
-		goto done;
+		return;
 	}
 
 	if (rt5514_dsp->buf_size % period_bytes)
@@ -111,7 +113,7 @@ static void rt5514_spi_copy_work(struct work_struct *work)
 
 		if (remain_data < period_bytes) {
 			schedule_delayed_work(&rt5514_dsp->copy_work, 5);
-			goto done;
+			return;
 		}
 	}
 
@@ -146,9 +148,6 @@ static void rt5514_spi_copy_work(struct work_struct *work)
 	snd_pcm_period_elapsed(rt5514_dsp->substream);
 
 	schedule_delayed_work(&rt5514_dsp->copy_work, 5);
-
-done:
-	mutex_unlock(&rt5514_dsp->dma_lock);
 }
 
 static void rt5514_schedule_copy(struct rt5514_dsp *rt5514_dsp)
@@ -216,7 +215,7 @@ static int rt5514_spi_hw_params(struct snd_soc_component *component,
 		snd_soc_component_get_drvdata(component);
 	u8 buf[8];
 
-	mutex_lock(&rt5514_dsp->dma_lock);
+	guard(mutex)(&rt5514_dsp->dma_lock);
 	rt5514_dsp->substream = substream;
 	rt5514_dsp->dma_offset = 0;
 
@@ -224,8 +223,6 @@ static int rt5514_spi_hw_params(struct snd_soc_component *component,
 	rt5514_spi_burst_read(RT5514_IRQ_CTRL, (u8 *)&buf, sizeof(buf));
 	if (buf[0] & RT5514_IRQ_STATUS_BIT)
 		rt5514_schedule_copy(rt5514_dsp);
-
-	mutex_unlock(&rt5514_dsp->dma_lock);
 
 	return 0;
 }
@@ -236,9 +233,8 @@ static int rt5514_spi_hw_free(struct snd_soc_component *component,
 	struct rt5514_dsp *rt5514_dsp =
 		snd_soc_component_get_drvdata(component);
 
-	mutex_lock(&rt5514_dsp->dma_lock);
-	rt5514_dsp->substream = NULL;
-	mutex_unlock(&rt5514_dsp->dma_lock);
+	scoped_guard(mutex, &rt5514_dsp->dma_lock)
+		rt5514_dsp->substream = NULL;
 
 	cancel_delayed_work_sync(&rt5514_dsp->copy_work);
 
@@ -262,8 +258,7 @@ static int rt5514_spi_pcm_probe(struct snd_soc_component *component)
 	struct rt5514_dsp *rt5514_dsp;
 	int ret;
 
-	rt5514_dsp = devm_kzalloc(component->dev, sizeof(*rt5514_dsp),
-			GFP_KERNEL);
+	rt5514_dsp = kzalloc_obj(*rt5514_dsp);
 	if (!rt5514_dsp)
 		return -ENOMEM;
 
@@ -273,19 +268,39 @@ static int rt5514_spi_pcm_probe(struct snd_soc_component *component)
 	snd_soc_component_set_drvdata(component, rt5514_dsp);
 
 	if (rt5514_spi->irq) {
-		ret = devm_request_threaded_irq(&rt5514_spi->dev,
-			rt5514_spi->irq, NULL, rt5514_spi_irq,
-			IRQF_TRIGGER_RISING | IRQF_ONESHOT, "rt5514-spi",
-			rt5514_dsp);
-		if (ret)
+		ret = request_threaded_irq(rt5514_spi->irq, NULL,
+					   rt5514_spi_irq,
+					   IRQF_TRIGGER_RISING | IRQF_ONESHOT,
+					   "rt5514-spi", rt5514_dsp);
+		if (ret) {
 			dev_err(&rt5514_spi->dev,
 				"%s Failed to request IRQ: %d\n", __func__,
 				ret);
-		else
+		} else {
+			rt5514_dsp->irq = rt5514_spi->irq;
 			device_init_wakeup(rt5514_dsp->dev, true);
+		}
 	}
 
 	return 0;
+}
+
+static void rt5514_spi_pcm_remove(struct snd_soc_component *component)
+{
+	struct rt5514_dsp *rt5514_dsp =
+		snd_soc_component_get_drvdata(component);
+
+	snd_soc_component_set_drvdata(component, NULL);
+
+	if (rt5514_dsp->irq) {
+		free_irq(rt5514_dsp->irq, rt5514_dsp);
+		device_init_wakeup(rt5514_dsp->dev, false);
+	}
+
+	cancel_delayed_work_sync(&rt5514_dsp->copy_work);
+
+	mutex_destroy(&rt5514_dsp->dma_lock);
+	kfree(rt5514_dsp);
 }
 
 static int rt5514_spi_pcm_new(struct snd_soc_component *component,
@@ -299,11 +314,12 @@ static int rt5514_spi_pcm_new(struct snd_soc_component *component,
 static const struct snd_soc_component_driver rt5514_spi_component = {
 	.name			= DRV_NAME,
 	.probe			= rt5514_spi_pcm_probe,
+	.remove			= rt5514_spi_pcm_remove,
 	.open			= rt5514_spi_pcm_open,
 	.hw_params		= rt5514_spi_hw_params,
 	.hw_free		= rt5514_spi_hw_free,
 	.pointer		= rt5514_spi_pcm_pointer,
-	.pcm_construct		= rt5514_spi_pcm_new,
+	.pcm_new		= rt5514_spi_pcm_new,
 	.legacy_dai_naming	= 1,
 };
 

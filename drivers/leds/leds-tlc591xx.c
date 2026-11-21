@@ -164,7 +164,7 @@ tlc591xx_probe(struct i2c_client *client)
 	if (!count || count > tlc591xx->max_leds)
 		return -EINVAL;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -214,9 +214,9 @@ tlc591xx_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id tlc591xx_id[] = {
-	{ "tlc59116" },
-	{ "tlc59108" },
-	{},
+	{ .name = "tlc59116" },
+	{ .name = "tlc59108" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tlc591xx_id);
 

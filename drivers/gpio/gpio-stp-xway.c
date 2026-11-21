@@ -102,7 +102,7 @@ static int xway_stp_get(struct gpio_chip *gc, unsigned int gpio)
 {
 	struct xway_stp *chip = gpiochip_get_data(gc);
 
-	return (xway_stp_r32(chip->virt, XWAY_STP_CPU0) & BIT(gpio));
+	return !!(xway_stp_r32(chip->virt, XWAY_STP_CPU0) & BIT(gpio));
 }
 
 /**
@@ -237,7 +237,7 @@ static int xway_stp_probe(struct platform_device *pdev)
 	struct clk *clk;
 	int ret = 0;
 
-	chip = devm_kzalloc(&pdev->dev, sizeof(*chip), GFP_KERNEL);
+	chip = devm_kzalloc_obj(&pdev->dev, *chip);
 	if (!chip)
 		return -ENOMEM;
 

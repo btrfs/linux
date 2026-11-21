@@ -434,7 +434,7 @@ static int adc128_probe(struct i2c_client *client)
 	bool external_vref;
 	int err, vref;
 
-	data = devm_kzalloc(dev, sizeof(struct adc128_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct adc128_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -480,7 +480,7 @@ static int adc128_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id adc128_id[] = {
-	{ "adc128d818" },
+	{ .name = "adc128d818" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, adc128_id);

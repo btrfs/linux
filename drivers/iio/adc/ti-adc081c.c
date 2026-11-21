@@ -18,7 +18,6 @@
 #include <linux/err.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/property.h>
 
 #include <linux/iio/iio.h>
@@ -190,18 +189,16 @@ static int adc081c_probe(struct i2c_client *client)
 
 	err = devm_iio_triggered_buffer_setup(&client->dev, iio, NULL,
 					      adc081c_trigger_handler, NULL);
-	if (err < 0) {
-		dev_err(&client->dev, "iio triggered buffer setup failed\n");
-		return err;
-	}
+	if (err < 0)
+		return dev_err_probe(&client->dev, err, "iio triggered buffer setup failed\n");
 
 	return devm_iio_device_register(&client->dev, iio);
 }
 
 static const struct i2c_device_id adc081c_id[] = {
-	{ "adc081c", (kernel_ulong_t)&adc081c_model },
-	{ "adc101c", (kernel_ulong_t)&adc101c_model },
-	{ "adc121c", (kernel_ulong_t)&adc121c_model },
+	{ .name = "adc081c", .driver_data = (kernel_ulong_t)&adc081c_model },
+	{ .name = "adc101c", .driver_data = (kernel_ulong_t)&adc101c_model },
+	{ .name = "adc121c", .driver_data = (kernel_ulong_t)&adc121c_model },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, adc081c_id);

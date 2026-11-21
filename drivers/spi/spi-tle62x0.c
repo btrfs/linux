@@ -141,7 +141,7 @@ static ssize_t tle62x0_gpio_show(struct device *dev,
 	value = (st->gpio_state >> gpio_num) & 1;
 	mutex_unlock(&st->lock);
 
-	return sysfs_emit(buf, "%d", value);
+	return sysfs_emit(buf, "%d\n", value);
 }
 
 static ssize_t tle62x0_gpio_store(struct device *dev,
@@ -151,10 +151,10 @@ static ssize_t tle62x0_gpio_store(struct device *dev,
 	struct tle62x0_state *st = dev_get_drvdata(dev);
 	int gpio_num = to_gpio_num(attr);
 	unsigned long val;
-	char *endp;
+	int ret;
 
-	val = simple_strtoul(buf, &endp, 0);
-	if (buf == endp)
+	ret = kstrtoul(buf, 0, &val);
+	if (ret)
 		return -EINVAL;
 
 	dev_dbg(dev, "setting gpio %d to %ld\n", gpio_num, val);
@@ -249,7 +249,7 @@ static int tle62x0_probe(struct spi_device *spi)
 		return -EINVAL;
 	}
 
-	st = kzalloc(sizeof(struct tle62x0_state), GFP_KERNEL);
+	st = kzalloc_obj(struct tle62x0_state);
 	if (st == NULL)
 		return -ENOMEM;
 

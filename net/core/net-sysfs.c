@@ -37,12 +37,6 @@ static const char fmt_uint[] = "%u\n";
 static const char fmt_ulong[] = "%lu\n";
 static const char fmt_u64[] = "%llu\n";
 
-/* Caller holds RTNL, netdev->lock or RCU */
-static inline int dev_isalive(const struct net_device *dev)
-{
-	return READ_ONCE(dev->reg_state) <= NETREG_REGISTERED;
-}
-
 /* There is a possible ABBA deadlock between rtnl_lock and kernfs_node->active,
  * when unregistering a net device and accessing associated sysfs files. The
  * potential deadlock is as follow:
@@ -106,7 +100,7 @@ static int sysfs_rtnl_lock(struct kobject *kobj, struct attribute *attr,
 	/* Check dismantle on the device hasn't started, otherwise deny the
 	 * operation.
 	 */
-	if (!dev_isalive(ndev)) {
+	if (!netif_is_alive(ndev)) {
 		rtnl_unlock();
 		ret = -ENODEV;
 		goto unbreak;
@@ -124,6 +118,49 @@ unbreak:
 	return ret;
 }
 
+static int sysfs_get_link_ksettings(struct device *dev,
+				    struct device_attribute *attr,
+				    struct ethtool_link_ksettings *cmd)
+{
+	struct net_device *netdev = to_net_dev(dev);
+	bool need_rtnl;
+	int ret;
+
+	/*
+	 * The check is also done in netif_get_link_ksettings; this helps
+	 * returning early without hitting the locking section below.
+	 */
+	if (!netdev->ethtool_ops->get_link_ksettings)
+		return -EINVAL;
+
+	need_rtnl = !netdev_need_ops_lock(netdev) ||
+		    (netdev->ethtool_ops->op_needs_rtnl &
+		     ETHTOOL_OP_NEEDS_RTNL_LINKSETTINGS);
+	if (need_rtnl) {
+		ret = sysfs_rtnl_lock(&dev->kobj, &attr->attr, netdev);
+		if (ret)
+			return ret;
+	}
+	netdev_lock_ops(netdev);
+
+	if (!netif_is_alive(netdev)) {
+		ret = -ENODEV;
+		goto unlock;
+	}
+
+	ret = -EINVAL;
+	if (netif_running(netdev)) {
+		if (!netif_get_link_ksettings(netdev, cmd))
+			ret = 0;
+	}
+
+unlock:
+	netdev_unlock_ops(netdev);
+	if (need_rtnl)
+		rtnl_unlock();
+	return ret;
+}
+
 /* use same locking rules as GIF* ioctl's */
 static ssize_t netdev_show(const struct device *dev,
 			   struct device_attribute *attr, char *buf,
@@ -133,7 +170,7 @@ static ssize_t netdev_show(const struct device *dev,
 	ssize_t ret = -EINVAL;
 
 	rcu_read_lock();
-	if (dev_isalive(ndev))
+	if (netif_is_alive(ndev))
 		ret = (*format)(ndev, buf);
 	rcu_read_unlock();
 
@@ -210,7 +247,7 @@ netdev_lock_store(struct device *dev, struct device_attribute *attr,
 
 	netdev_lock(netdev);
 
-	if (dev_isalive(netdev)) {
+	if (netif_is_alive(netdev)) {
 		ret = (*set)(netdev, new);
 		if (ret == 0)
 			ret = len;
@@ -266,7 +303,7 @@ static ssize_t address_show(struct device *dev, struct device_attribute *attr,
 	down_read(&dev_addr_sem);
 
 	rcu_read_lock();
-	if (dev_isalive(ndev))
+	if (netif_is_alive(ndev))
 		ret = sysfs_format_mac(buf, ndev->dev_addr, ndev->addr_len);
 	rcu_read_unlock();
 
@@ -282,7 +319,7 @@ static ssize_t broadcast_show(struct device *dev,
 	int ret = -EINVAL;
 
 	rcu_read_lock();
-	if (dev_isalive(ndev))
+	if (netif_is_alive(ndev))
 		ret = sysfs_format_mac(buf, ndev->broadcast, ndev->addr_len);
 	rcu_read_unlock();
 	return ret;
@@ -338,70 +375,41 @@ static DEVICE_ATTR_RW(carrier);
 static ssize_t speed_show(struct device *dev,
 			  struct device_attribute *attr, char *buf)
 {
-	struct net_device *netdev = to_net_dev(dev);
-	int ret = -EINVAL;
+	struct ethtool_link_ksettings cmd;
+	int ret;
 
-	/* The check is also done in __ethtool_get_link_ksettings; this helps
-	 * returning early without hitting the locking section below.
-	 */
-	if (!netdev->ethtool_ops->get_link_ksettings)
-		return ret;
-
-	ret = sysfs_rtnl_lock(&dev->kobj, &attr->attr, netdev);
+	ret = sysfs_get_link_ksettings(dev, attr, &cmd);
 	if (ret)
 		return ret;
 
-	ret = -EINVAL;
-	if (netif_running(netdev)) {
-		struct ethtool_link_ksettings cmd;
-
-		if (!__ethtool_get_link_ksettings(netdev, &cmd))
-			ret = sysfs_emit(buf, fmt_dec, cmd.base.speed);
-	}
-	rtnl_unlock();
-	return ret;
+	return sysfs_emit(buf, fmt_dec, cmd.base.speed);
 }
 static DEVICE_ATTR_RO(speed);
 
 static ssize_t duplex_show(struct device *dev,
 			   struct device_attribute *attr, char *buf)
 {
-	struct net_device *netdev = to_net_dev(dev);
-	int ret = -EINVAL;
+	struct ethtool_link_ksettings cmd;
+	const char *duplex;
+	int ret;
 
-	/* The check is also done in __ethtool_get_link_ksettings; this helps
-	 * returning early without hitting the locking section below.
-	 */
-	if (!netdev->ethtool_ops->get_link_ksettings)
-		return ret;
-
-	ret = sysfs_rtnl_lock(&dev->kobj, &attr->attr, netdev);
+	ret = sysfs_get_link_ksettings(dev, attr, &cmd);
 	if (ret)
 		return ret;
 
-	ret = -EINVAL;
-	if (netif_running(netdev)) {
-		struct ethtool_link_ksettings cmd;
-
-		if (!__ethtool_get_link_ksettings(netdev, &cmd)) {
-			const char *duplex;
-
-			switch (cmd.base.duplex) {
-			case DUPLEX_HALF:
-				duplex = "half";
-				break;
-			case DUPLEX_FULL:
-				duplex = "full";
-				break;
-			default:
-				duplex = "unknown";
-				break;
-			}
-			ret = sysfs_emit(buf, "%s\n", duplex);
-		}
+	switch (cmd.base.duplex) {
+	case DUPLEX_HALF:
+		duplex = "half";
+		break;
+	case DUPLEX_FULL:
+		duplex = "full";
+		break;
+	default:
+		duplex = "unknown";
+		break;
 	}
-	rtnl_unlock();
-	return ret;
+
+	return sysfs_emit(buf, "%s\n", duplex);
 }
 static DEVICE_ATTR_RO(duplex);
 
@@ -739,7 +747,7 @@ static ssize_t threaded_show(struct device *dev,
 
 	rcu_read_lock();
 
-	if (dev_isalive(netdev))
+	if (netif_is_alive(netdev))
 		ret = sysfs_emit(buf, fmt_dec, READ_ONCE(netdev->threaded));
 
 	rcu_read_unlock();
@@ -749,6 +757,7 @@ static ssize_t threaded_show(struct device *dev,
 
 static int modify_napi_threaded(struct net_device *dev, unsigned long val)
 {
+	struct napi_struct *napi;
 	int ret;
 
 	if (list_empty(&dev->napi_list))
@@ -756,6 +765,13 @@ static int modify_napi_threaded(struct net_device *dev, unsigned long val)
 
 	if (val != 0 && val != 1)
 		return -EOPNOTSUPP;
+
+	if (val) {
+		list_for_each_entry(napi, &dev->napi_list, dev_list) {
+			if (test_bit(NAPI_STATE_PERCPU, &napi->state))
+				return -EOPNOTSUPP;
+		}
+	}
 
 	ret = netif_set_threaded(dev, val);
 
@@ -816,7 +832,7 @@ static ssize_t netstat_show(const struct device *d,
 		offset % sizeof(u64) != 0);
 
 	rcu_read_lock();
-	if (dev_isalive(dev)) {
+	if (netif_is_alive(dev)) {
 		struct rtnl_link_stats64 temp;
 		const struct rtnl_link_stats64 *stats = dev_get_stats(dev, &temp);
 
@@ -1022,7 +1038,7 @@ static int netdev_rx_queue_set_rps_mask(struct netdev_rx_queue *queue,
 int rps_cpumask_housekeeping(struct cpumask *mask)
 {
 	if (!cpumask_empty(mask)) {
-		cpumask_and(mask, mask, housekeeping_cpumask(HK_TYPE_DOMAIN));
+		cpumask_and(mask, mask, housekeeping_cpumask(HK_TYPE_DOMAIN_BOOT));
 		cpumask_and(mask, mask, housekeeping_cpumask(HK_TYPE_WQ));
 		if (cpumask_empty(mask))
 			return -EINVAL;
@@ -1060,31 +1076,23 @@ out:
 static ssize_t show_rps_dev_flow_table_cnt(struct netdev_rx_queue *queue,
 					   char *buf)
 {
-	struct rps_dev_flow_table *flow_table;
 	unsigned long val = 0;
+	rps_tag_ptr tag_ptr;
 
-	rcu_read_lock();
-	flow_table = rcu_dereference(queue->rps_flow_table);
-	if (flow_table)
-		val = 1UL << flow_table->log;
-	rcu_read_unlock();
+	tag_ptr = READ_ONCE(queue->rps_flow_table);
+	if (tag_ptr)
+		val = 1UL << rps_tag_to_log(tag_ptr);
 
 	return sysfs_emit(buf, "%lu\n", val);
-}
-
-static void rps_dev_flow_table_release(struct rcu_head *rcu)
-{
-	struct rps_dev_flow_table *table = container_of(rcu,
-	    struct rps_dev_flow_table, rcu);
-	vfree(table);
 }
 
 static ssize_t store_rps_dev_flow_table_cnt(struct netdev_rx_queue *queue,
 					    const char *buf, size_t len)
 {
+	rps_tag_ptr otag, tag_ptr = 0UL;
+	struct rps_dev_flow *table;
 	unsigned long mask, count;
-	struct rps_dev_flow_table *table, *old_table;
-	static DEFINE_SPINLOCK(rps_dev_flow_lock);
+	size_t sz;
 	int rc;
 
 	if (!capable(CAP_NET_ADMIN))
@@ -1101,41 +1109,43 @@ static ssize_t store_rps_dev_flow_table_cnt(struct netdev_rx_queue *queue,
 		 */
 		while ((mask | (mask >> 1)) != mask)
 			mask |= (mask >> 1);
-		/* On 64 bit arches, must check mask fits in table->mask (u32),
-		 * and on 32bit arches, must check
-		 * RPS_DEV_FLOW_TABLE_SIZE(mask + 1) doesn't overflow.
+
+		/* Require at least two entries. A one-entry table rounds up
+		 * to mask == 0, which encodes log == 0 in the tag.
+		 * get_rps_cpu() then computes hash_32(hash, 0), a shift by 32.
 		 */
-#if BITS_PER_LONG > 32
-		if (mask > (unsigned long)(u32)mask)
+		if (!mask)
 			return -EINVAL;
-#else
-		if (mask > (ULONG_MAX - RPS_DEV_FLOW_TABLE_SIZE(1))
-				/ sizeof(struct rps_dev_flow)) {
-			/* Enforce a limit to prevent overflow */
+
+		/* Do not accept too large tables. */
+		if (mask > (INT_MAX / sizeof(*table) - 1))
 			return -EINVAL;
-		}
-#endif
-		table = vmalloc(RPS_DEV_FLOW_TABLE_SIZE(mask + 1));
+
+		sz = max_t(size_t, sizeof(*table) * (mask + 1),
+			   PAGE_SIZE);
+		if (sz <= (PAGE_SIZE << PAGE_ALLOC_COSTLY_ORDER) ||
+		    is_power_of_2(sizeof(*table)))
+			table = kvmalloc(sz, GFP_KERNEL);
+		else
+			table = vmalloc(sz);
 		if (!table)
 			return -ENOMEM;
-
-		table->log = ilog2(mask) + 1;
-		for (count = 0; count <= mask; count++) {
-			table->flows[count].cpu = RPS_NO_CPU;
-			table->flows[count].filter = RPS_NO_FILTER;
+		tag_ptr = (rps_tag_ptr)table;
+		if (rps_tag_to_log(tag_ptr)) {
+			pr_err_once("store_rps_dev_flow_table_cnt() got a non page aligned allocation.\n");
+			kvfree(table);
+			return -ENOMEM;
 		}
-	} else {
-		table = NULL;
+		tag_ptr |= (ilog2(mask) + 1);
+		for (count = 0; count <= mask; count++) {
+			table[count].cpu = RPS_NO_CPU;
+			table[count].filter = RPS_NO_FILTER;
+		}
 	}
 
-	spin_lock(&rps_dev_flow_lock);
-	old_table = rcu_dereference_protected(queue->rps_flow_table,
-					      lockdep_is_held(&rps_dev_flow_lock));
-	rcu_assign_pointer(queue->rps_flow_table, table);
-	spin_unlock(&rps_dev_flow_lock);
-
-	if (old_table)
-		call_rcu(&old_table->rcu, rps_dev_flow_table_release);
+	otag = xchg(&queue->rps_flow_table, tag_ptr);
+	if (otag)
+		kvfree_rcu_mightsleep(rps_tag_to_table(otag));
 
 	return len;
 }
@@ -1161,8 +1171,8 @@ static void rx_queue_release(struct kobject *kobj)
 {
 	struct netdev_rx_queue *queue = to_rx_queue(kobj);
 #ifdef CONFIG_RPS
+	rps_tag_ptr tag_ptr;
 	struct rps_map *map;
-	struct rps_dev_flow_table *flow_table;
 
 	map = rcu_dereference_protected(queue->rps_map, 1);
 	if (map) {
@@ -1170,35 +1180,36 @@ static void rx_queue_release(struct kobject *kobj)
 		kfree_rcu(map, rcu);
 	}
 
-	flow_table = rcu_dereference_protected(queue->rps_flow_table, 1);
-	if (flow_table) {
-		RCU_INIT_POINTER(queue->rps_flow_table, NULL);
-		call_rcu(&flow_table->rcu, rps_dev_flow_table_release);
-	}
+	tag_ptr = xchg(&queue->rps_flow_table, 0UL);
+	if (tag_ptr)
+		kvfree_rcu_mightsleep(rps_tag_to_table(tag_ptr));
 #endif
 
+	netdev_tracker_free(queue->dev, &queue->dev_tracker);
+	/* Pairs with the smp_mb() in rx_queue_add_kobject(). */
+	smp_mb();
 	memset(kobj, 0, sizeof(*kobj));
-	netdev_put(queue->dev, &queue->dev_tracker);
+	__dev_put(queue->dev);
 }
 
-static const void *rx_queue_namespace(const struct kobject *kobj)
+static const struct ns_common *rx_queue_namespace(const struct kobject *kobj)
 {
 	struct netdev_rx_queue *queue = to_rx_queue(kobj);
 	struct device *dev = &queue->dev->dev;
-	const void *ns = NULL;
 
 	if (dev->class && dev->class->namespace)
-		ns = dev->class->namespace(dev);
+		return dev->class->namespace(dev);
 
-	return ns;
+	return NULL;
 }
 
 static void rx_queue_get_ownership(const struct kobject *kobj,
 				   kuid_t *uid, kgid_t *gid)
 {
-	const struct net *net = rx_queue_namespace(kobj);
+	const struct ns_common *ns = rx_queue_namespace(kobj);
 
-	net_ns_get_ownership(net, uid, gid);
+	net_ns_get_ownership(ns ? container_of(ns, struct net, ns) : NULL,
+			     uid, gid);
 }
 
 static const struct kobj_type rx_queue_ktype = {
@@ -1250,6 +1261,9 @@ static int rx_queue_add_kobject(struct net_device *dev, int index)
 		netdev_warn_once(dev, "Cannot re-add rx queues before their removal completed");
 		return -EAGAIN;
 	}
+
+	/* Pairs with the smp_mb() in rx_queue_release(). */
+	smp_mb();
 
 	/* Kobject_put later will trigger rx_queue_release call which
 	 * decreases dev refcount: Take that reference here
@@ -1453,7 +1467,7 @@ static ssize_t traffic_class_show(struct kobject *kobj, struct attribute *attr,
 	/* If queue belongs to subordinate dev use its TC mapping */
 	dev = netdev_get_tx_queue(dev, index)->sb_dev ? : dev;
 
-	num_tc = dev->num_tc;
+	num_tc = READ_ONCE(dev->num_tc);
 	tc = netdev_txq_to_tc(dev, index);
 
 	rtnl_unlock();
@@ -1754,7 +1768,7 @@ static ssize_t xps_queue_show(struct net_device *dev, unsigned int index,
 out_no_maps:
 	rcu_read_unlock();
 
-	len = bitmap_print_to_pagebuf(false, buf, mask, nr_ids);
+	len = sysfs_emit(buf, "%*pb\n", nr_ids, mask);
 	bitmap_free(mask);
 
 	return len < PAGE_SIZE ? len : -EINVAL;
@@ -1927,28 +1941,31 @@ static void netdev_queue_release(struct kobject *kobj)
 {
 	struct netdev_queue *queue = to_netdev_queue(kobj);
 
+	netdev_tracker_free(queue->dev, &queue->dev_tracker);
+	/* Pairs with the smp_mb() in netdev_queue_add_kobject(). */
+	smp_mb();
 	memset(kobj, 0, sizeof(*kobj));
-	netdev_put(queue->dev, &queue->dev_tracker);
+	__dev_put(queue->dev);
 }
 
-static const void *netdev_queue_namespace(const struct kobject *kobj)
+static const struct ns_common *netdev_queue_namespace(const struct kobject *kobj)
 {
 	struct netdev_queue *queue = to_netdev_queue(kobj);
 	struct device *dev = &queue->dev->dev;
-	const void *ns = NULL;
 
 	if (dev->class && dev->class->namespace)
-		ns = dev->class->namespace(dev);
+		return dev->class->namespace(dev);
 
-	return ns;
+	return NULL;
 }
 
 static void netdev_queue_get_ownership(const struct kobject *kobj,
 				       kuid_t *uid, kgid_t *gid)
 {
-	const struct net *net = netdev_queue_namespace(kobj);
+	const struct ns_common *ns = netdev_queue_namespace(kobj);
 
-	net_ns_get_ownership(net, uid, gid);
+	net_ns_get_ownership(ns ? container_of(ns, struct net, ns) : NULL,
+			     uid, gid);
 }
 
 static const struct kobj_type netdev_queue_ktype = {
@@ -1987,6 +2004,9 @@ static int netdev_queue_add_kobject(struct net_device *dev, int index)
 		netdev_warn_once(dev, "Cannot re-add tx queues before their removal completed");
 		return -EAGAIN;
 	}
+
+	/* Pairs with the smp_mb() in netdev_queue_release(). */
+	smp_mb();
 
 	/* Kobject_put later will trigger netdev_queue_release call
 	 * which decreases dev refcount: Take that reference here
@@ -2185,24 +2205,24 @@ static bool net_current_may_mount(void)
 	return ns_capable(net->user_ns, CAP_SYS_ADMIN);
 }
 
-static void *net_grab_current_ns(void)
+static struct ns_common *net_grab_current_ns(void)
 {
-	struct net *ns = current->nsproxy->net_ns;
+	struct net *net = current->nsproxy->net_ns;
 #ifdef CONFIG_NET_NS
-	if (ns)
-		refcount_inc(&ns->passive);
+	if (net)
+		refcount_inc(&net->passive);
 #endif
-	return ns;
+	return net ? to_ns_common(net) : NULL;
 }
 
-static const void *net_initial_ns(void)
+static const struct ns_common *net_initial_ns(void)
 {
-	return &init_net;
+	return to_ns_common(&init_net);
 }
 
-static const void *net_netlink_ns(struct sock *sk)
+static const struct ns_common *net_netlink_ns(struct sock *sk)
 {
-	return sock_net(sk);
+	return to_ns_common(sock_net(sk));
 }
 
 const struct kobj_ns_type_operations net_ns_type_operations = {
@@ -2252,11 +2272,11 @@ static void netdev_release(struct device *d)
 	kvfree(dev);
 }
 
-static const void *net_namespace(const struct device *d)
+static const struct ns_common *net_namespace(const struct device *d)
 {
 	const struct net_device *dev = to_net_dev(d);
 
-	return dev_net(dev);
+	return to_ns_common(dev_net(dev));
 }
 
 static void net_get_ownership(const struct device *d, kuid_t *uid, kgid_t *gid)
@@ -2355,6 +2375,9 @@ int netdev_register_kobject(struct net_device *ndev)
 		*groups++ = &wireless_group;
 #endif /* CONFIG_SYSFS */
 
+	/* Hold back the KOBJ_ADD uevent until the device is listed. */
+	dev_set_uevent_suppress(dev, 1);
+
 	error = device_add(dev);
 	if (error)
 		return error;
@@ -2368,6 +2391,17 @@ int netdev_register_kobject(struct net_device *ndev)
 	pm_runtime_set_memalloc_noio(dev, true);
 
 	return error;
+}
+
+/* Announce a fully registered device to userspace. This pairs with the uevent
+ * suppression from netdev_register_kobject().
+ */
+void netdev_uevent_add(struct net_device *ndev)
+{
+	struct device *dev = &ndev->dev;
+
+	dev_set_uevent_suppress(dev, 0);
+	kobject_uevent(&dev->kobj, KOBJ_ADD);
 }
 
 /* Change owner for sysfs entries when moving network devices across network
@@ -2402,14 +2436,14 @@ int netdev_change_owner(struct net_device *ndev, const struct net *net_old,
 }
 
 int netdev_class_create_file_ns(const struct class_attribute *class_attr,
-				const void *ns)
+				const struct ns_common *ns)
 {
 	return class_create_file_ns(&net_class, class_attr, ns);
 }
 EXPORT_SYMBOL(netdev_class_create_file_ns);
 
 void netdev_class_remove_file_ns(const struct class_attribute *class_attr,
-				 const void *ns)
+				 const struct ns_common *ns)
 {
 	class_remove_file_ns(&net_class, class_attr, ns);
 }

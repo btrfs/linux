@@ -100,9 +100,6 @@ static int gr2d_exit(struct host1x_client *client)
 	if (err < 0)
 		return err;
 
-	pm_runtime_dont_use_autosuspend(client->dev);
-	pm_runtime_force_suspend(client->dev);
-
 	host1x_client_iommu_detach(client);
 	host1x_syncpt_put(client->syncpts[0]);
 	host1x_channel_put(gr2d->channel);
@@ -239,7 +236,7 @@ static int gr2d_probe(struct platform_device *pdev)
 	unsigned int i;
 	int err;
 
-	gr2d = devm_kzalloc(dev, sizeof(*gr2d), GFP_KERNEL);
+	gr2d = devm_kzalloc_obj(dev, *gr2d);
 	if (!gr2d)
 		return -ENOMEM;
 
@@ -247,7 +244,7 @@ static int gr2d_probe(struct platform_device *pdev)
 
 	gr2d->soc = of_device_get_match_data(dev);
 
-	syncpts = devm_kzalloc(dev, sizeof(*syncpts), GFP_KERNEL);
+	syncpts = devm_kzalloc_obj(dev, *syncpts);
 	if (!syncpts)
 		return -ENOMEM;
 
@@ -276,15 +273,21 @@ static int gr2d_probe(struct platform_device *pdev)
 	if (err)
 		return err;
 
+	/* initialize address register map */
+	for (i = 0; i < ARRAY_SIZE(gr2d_addr_regs); i++)
+		set_bit(gr2d_addr_regs[i], gr2d->addr_regs);
+
+	pm_runtime_enable(dev);
+
 	err = host1x_client_register(&gr2d->client.base);
 	if (err < 0) {
+		pm_runtime_disable(dev);
 		dev_err(dev, "failed to register host1x client: %d\n", err);
 		return err;
 	}
 
-	/* initialize address register map */
-	for (i = 0; i < ARRAY_SIZE(gr2d_addr_regs); i++)
-		set_bit(gr2d_addr_regs[i], gr2d->addr_regs);
+	pm_runtime_use_autosuspend(dev);
+	pm_runtime_set_autosuspend_delay(dev, 500);
 
 	return 0;
 }
@@ -366,10 +369,6 @@ static int __maybe_unused gr2d_runtime_resume(struct device *dev)
 		dev_err(dev, "failed to deassert reset: %d\n", err);
 		goto disable_clk;
 	}
-
-	pm_runtime_enable(dev);
-	pm_runtime_use_autosuspend(dev);
-	pm_runtime_set_autosuspend_delay(dev, 500);
 
 	return 0;
 

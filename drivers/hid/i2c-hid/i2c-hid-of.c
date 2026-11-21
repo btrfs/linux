@@ -83,7 +83,7 @@ static int i2c_hid_of_probe(struct i2c_client *client)
 	int ret;
 	u32 val;
 
-	ihid_of = devm_kzalloc(dev, sizeof(*ihid_of), GFP_KERNEL);
+	ihid_of = devm_kzalloc_obj(dev, *ihid_of);
 	if (!ihid_of)
 		return -ENOMEM;
 
@@ -144,8 +144,8 @@ MODULE_DEVICE_TABLE(of, i2c_hid_of_match);
 #endif
 
 static const struct i2c_device_id i2c_hid_of_id_table[] = {
-	{ "hid" },
-	{ "hid-over-i2c" },
+	{ .name = "hid" },
+	{ .name = "hid-over-i2c" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, i2c_hid_of_id_table);

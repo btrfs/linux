@@ -385,15 +385,15 @@ static int aqr105_setup_forced(struct phy_device *phydev)
 			vend |= MDIO_AN_VEND_PROV_1000BASET_HALF;
 		break;
 	case SPEED_2500:
-		adv |= (ADVERTISE_NPAGE | ADVERTISE_RESV);
+		adv |= (ADVERTISE_NPAGE | ADVERTISE_XNP);
 		vend |= MDIO_AN_VEND_PROV_2500BASET_FULL;
 		break;
 	case SPEED_5000:
-		adv |= (ADVERTISE_NPAGE | ADVERTISE_RESV);
+		adv |= (ADVERTISE_NPAGE | ADVERTISE_XNP);
 		vend |= MDIO_AN_VEND_PROV_5000BASET_FULL;
 		break;
 	case SPEED_10000:
-		adv |= (ADVERTISE_NPAGE | ADVERTISE_RESV);
+		adv |= (ADVERTISE_NPAGE | ADVERTISE_XNP);
 		ctrl10 |= MDIO_AN_10GBT_CTRL_ADV10G;
 		break;
 	default:
@@ -544,7 +544,7 @@ static int aqr_gen1_read_status(struct phy_device *phydev)
 	if (ret)
 		return ret;
 
-	if (!phydev->link || phydev->autoneg == AUTONEG_DISABLE)
+	if (!phydev->link)
 		return 0;
 
 	/* The status register is not immediately correct on line side link up.
@@ -593,6 +593,9 @@ static int aqr_gen1_read_status(struct phy_device *phydev)
 	}
 
 	phydev->interface = aqr_translate_interface(phydev, interface);
+
+	if (phydev->autoneg == AUTONEG_DISABLE)
+		return 0;
 
 	/* Read rate from vendor register */
 	return aqr_gen1_read_rate(phydev);
@@ -1165,8 +1168,7 @@ static int aqr107_probe(struct phy_device *phydev)
 {
 	int ret;
 
-	phydev->priv = devm_kzalloc(&phydev->mdio.dev,
-				    sizeof(struct aqr107_priv), GFP_KERNEL);
+	phydev->priv = devm_kzalloc_obj(&phydev->mdio.dev, struct aqr107_priv);
 	if (!phydev->priv)
 		return -ENOMEM;
 

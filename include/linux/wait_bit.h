@@ -32,6 +32,7 @@ int out_of_line_wait_on_bit_timeout(unsigned long *word, int, wait_bit_action_f 
 int out_of_line_wait_on_bit_lock(unsigned long *word, int, wait_bit_action_f *action, unsigned int mode);
 struct wait_queue_head *bit_waitqueue(unsigned long *word, int bit);
 extern void __init wait_bit_init(void);
+extern struct wait_bit_key *__var_wake_key(struct wait_queue_entry *wq_entry, void *arg);
 
 int wake_bit_function(struct wait_queue_entry *wq_entry, unsigned mode, int sync, void *key);
 
@@ -406,7 +407,7 @@ do {									\
 			  schedule())
 
 /**
- * wait_var_event_killable - wait for a variable to be updated and notified
+ * wait_var_event_interruptible - wait for a variable to be updated and notified
  * @var: the address of variable being waited on
  * @condition: the condition to wait for
  *
@@ -429,6 +430,32 @@ do {									\
 	if (!(condition))						\
 		__ret = __wait_var_event_interruptible(var, condition);	\
 	__ret;								\
+})
+
+/**
+ * wait_var_event_state - wait for a variable to be updated and notified
+ * @var: the address of variable being waited on
+ * @condition: the condition to wait for
+ * @state: the task state to sleep in, %TASK_UNINTERRUPTIBLE etc.
+ *
+ * Wait for a @condition to be true, only re-checking when a wake up is
+ * received for the given @var (an arbitrary kernel address which need
+ * not be directly related to the given condition, but usually is).
+ *
+ * Returns 0 if the condition became true, or %-ERESTARTSYS if a signal
+ * arrived which @state allows to interrupt.
+ *
+ * The condition should normally use smp_load_acquire() or a similarly
+ * ordered access to ensure that any changes to memory made before the
+ * condition became true will be visible after the wait completes.
+ */
+#define wait_var_event_state(var, condition, state)					\
+({											\
+	int __ret = 0;									\
+	might_sleep();									\
+	if (!(condition))								\
+		__ret = ___wait_var_event(var, condition, (state), 0, 0, schedule());	\
+	__ret;										\
 })
 
 /**
@@ -492,7 +519,7 @@ do {									\
  * wait_var_event_mutex - wait for a variable to be updated under a mutex
  * @var: the address of the variable being waited on
  * @condition: condition to wait for
- * @mutex: the mutex which protects updates to the variable
+ * @lock: the mutex which protects updates to the variable
  *
  * Wait for a condition which can only be reliably tested while holding
  * a mutex.  The variables assessed in the condition will normal be

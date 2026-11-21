@@ -2,6 +2,7 @@
 #ifndef __MFD_88PM886_H
 #define __MFD_88PM886_H
 
+#include <linux/bits.h>
 #include <linux/i2c.h>
 #include <linux/regmap.h>
 
@@ -11,6 +12,7 @@
 
 #define PM886_PAGE_OFFSET_REGULATORS	1
 #define PM886_PAGE_OFFSET_GPADC		2
+#define PM886_PAGE_OFFSET_BATTERY	3
 
 #define PM886_REG_ID			0x00
 
@@ -128,9 +130,19 @@
 #define PM886_GPADC_BIAS_LEVELS		16
 #define PM886_GPADC_INDEX_TO_BIAS_uA(i)	(1 + (i) * 5)
 
+/* Battery block register definitions */
+#define PM886_REG_BATTERY_CONFIG1	0x28
+#define PM886_REG_VBUS_EN		BIT(7)
+
+#define PM886_REG_BOOST_CONFIG1		0x6b
+#define PM886_REG_BOOST_MASK		GENMASK(2, 0)
+
+#define PM886_REG_CLS_CONFIG1		0x71
+
 struct pm886_chip {
 	struct i2c_client *client;
 	unsigned int chip_id;
 	struct regmap *regmap;
+	struct regmap *regmap_battery;
 };
 #endif /* __MFD_88PM886_H */

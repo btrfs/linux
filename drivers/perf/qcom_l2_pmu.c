@@ -638,7 +638,7 @@ static ssize_t l2_cache_pmu_cpumask_show(struct device *dev,
 {
 	struct l2cache_pmu *l2cache_pmu = to_l2cache_pmu(dev_get_drvdata(dev));
 
-	return cpumap_print_to_pagebuf(true, buf, &l2cache_pmu->cpumask);
+	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(&l2cache_pmu->cpumask));
 }
 
 static struct device_attribute l2_cache_pmu_cpumask_attr =
@@ -850,7 +850,7 @@ static int l2_cache_pmu_probe_cluster(struct device *dev, void *data)
 		return err;
 	}
 
-	cluster = devm_kzalloc(&pdev->dev, sizeof(*cluster), GFP_KERNEL);
+	cluster = devm_kzalloc_obj(&pdev->dev, *cluster);
 	if (!cluster)
 		return -ENOMEM;
 
@@ -869,11 +869,8 @@ static int l2_cache_pmu_probe_cluster(struct device *dev, void *data)
 			       IRQF_NOBALANCING | IRQF_NO_THREAD |
 			       IRQF_NO_AUTOEN,
 			       "l2-cache-pmu", cluster);
-	if (err) {
-		dev_err(&pdev->dev,
-			"Unable to request IRQ%d for L2 PMU counters\n", irq);
+	if (err)
 		return err;
-	}
 
 	dev_info(&pdev->dev,
 		 "Registered L2 cache PMU cluster %lld\n", fw_cluster_id);
@@ -891,8 +888,7 @@ static int l2_cache_pmu_probe(struct platform_device *pdev)
 	int err;
 	struct l2cache_pmu *l2cache_pmu;
 
-	l2cache_pmu =
-		devm_kzalloc(&pdev->dev, sizeof(*l2cache_pmu), GFP_KERNEL);
+	l2cache_pmu = devm_kzalloc_obj(&pdev->dev, *l2cache_pmu);
 	if (!l2cache_pmu)
 		return -ENOMEM;
 

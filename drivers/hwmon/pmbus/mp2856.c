@@ -54,9 +54,9 @@ static const int mp2856_max_phases[][MP2856_PAGE_NUM] = {
 };
 
 static const struct i2c_device_id mp2856_id[] = {
-	{"mp2856", mp2856},
-	{"mp2857", mp2857},
-	{}
+	{ .name = "mp2856", .driver_data = mp2856 },
+	{ .name = "mp2857", .driver_data = mp2857 },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, mp2856_id);
@@ -399,8 +399,7 @@ static int mp2856_probe(struct i2c_client *client)
 	enum chips chip_id;
 	int ret;
 
-	data = devm_kzalloc(&client->dev, sizeof(struct mp2856_data),
-			    GFP_KERNEL);
+	data = devm_kzalloc_obj(&client->dev, struct mp2856_data);
 	if (!data)
 		return -ENOMEM;
 

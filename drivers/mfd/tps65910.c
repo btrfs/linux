@@ -21,6 +21,9 @@
 #include <linux/of.h>
 #include <linux/property.h>
 
+/* Dummy I2C transfer length for SWCZ010 workaround */
+#define TPS65910_DUMMY_XFER_LEN 1
+
 static const struct resource rtc_resources[] = {
 	{
 		.start  = TPS65910_IRQ_RTC_ALARM,
@@ -378,8 +381,7 @@ static struct tps65910_board *tps65910_parse_dt(struct i2c_client *client,
 
 	*chip_id  = (unsigned long)device_get_match_data(&client->dev);
 
-	board_info = devm_kzalloc(&client->dev, sizeof(*board_info),
-			GFP_KERNEL);
+	board_info = devm_kzalloc_obj(&client->dev, *board_info);
 	if (!board_info)
 		return NULL;
 
@@ -454,11 +456,11 @@ static int tps65910_i2c_probe(struct i2c_client *i2c)
 	if (!pmic_plat_data)
 		return -EINVAL;
 
-	init_data = devm_kzalloc(&i2c->dev, sizeof(*init_data), GFP_KERNEL);
+	init_data = devm_kzalloc_obj(&i2c->dev, *init_data);
 	if (init_data == NULL)
 		return -ENOMEM;
 
-	tps65910 = devm_kzalloc(&i2c->dev, sizeof(*tps65910), GFP_KERNEL);
+	tps65910 = devm_kzalloc_obj(&i2c->dev, *tps65910);
 	if (tps65910 == NULL)
 		return -ENOMEM;
 
@@ -472,7 +474,18 @@ static int tps65910_i2c_probe(struct i2c_client *i2c)
 	 * first I2C transfer. So issue a dummy transfer before the first
 	 * real transfer.
 	 */
-	i2c_master_send(i2c, "", 1);
+	ret = i2c_master_send(i2c, "", TPS65910_DUMMY_XFER_LEN);
+	if (ret != TPS65910_DUMMY_XFER_LEN) {
+		int err;
+
+		if (ret < 0)
+			err = ret;
+		else
+			err = -EIO;
+
+		return dev_err_probe(&i2c->dev, err, "dummy transfer failed\n");
+	}
+
 	tps65910->regmap = devm_regmap_init_i2c(i2c, &tps65910_regmap_config);
 	if (IS_ERR(tps65910->regmap)) {
 		ret = PTR_ERR(tps65910->regmap);

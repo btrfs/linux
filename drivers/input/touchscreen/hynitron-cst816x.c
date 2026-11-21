@@ -194,7 +194,7 @@ static int cst816x_probe(struct i2c_client *client)
 	struct cst816x_priv *priv;
 	int error;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -226,7 +226,7 @@ static int cst816x_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id cst816x_id[] = {
-	{ .name = "cst816s", 0 },
+	{ .name = "cst816s" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, cst816x_id);

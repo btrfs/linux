@@ -17,7 +17,7 @@ static int cs35l56_hda_i2c_probe(struct i2c_client *clt)
 	struct cs35l56_hda *cs35l56;
 	int ret;
 
-	cs35l56 = devm_kzalloc(&clt->dev, sizeof(*cs35l56), GFP_KERNEL);
+	cs35l56 = devm_kzalloc_obj(&clt->dev, *cs35l56);
 	if (!cs35l56)
 		return -ENOMEM;
 
@@ -51,10 +51,10 @@ static void cs35l56_hda_i2c_remove(struct i2c_client *clt)
 }
 
 static const struct i2c_device_id cs35l56_hda_i2c_id[] = {
-	{ "cs35l54-hda", 0x3554 },
-	{ "cs35l56-hda", 0x3556 },
-	{ "cs35l57-hda", 0x3557 },
-	{}
+	{ .name = "cs35l54-hda", .driver_data = 0x3554 },
+	{ .name = "cs35l56-hda", .driver_data = 0x3556 },
+	{ .name = "cs35l57-hda", .driver_data = 0x3557 },
+	{ }
 };
 
 static const struct acpi_device_id cs35l56_acpi_hda_match[] = {

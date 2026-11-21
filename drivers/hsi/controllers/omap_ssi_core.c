@@ -342,7 +342,7 @@ static int ssi_add_controller(struct hsi_controller *ssi,
 	struct omap_ssi_controller *omap_ssi;
 	int err;
 
-	omap_ssi = devm_kzalloc(&ssi->device, sizeof(*omap_ssi), GFP_KERNEL);
+	omap_ssi = devm_kzalloc_obj(&ssi->device, *omap_ssi);
 	if (!omap_ssi)
 		return -ENOMEM;
 
@@ -370,14 +370,11 @@ static int ssi_add_controller(struct hsi_controller *ssi,
 							(unsigned long)ssi);
 	err = devm_request_irq(&ssi->device, omap_ssi->gdd_irq, ssi_gdd_isr,
 						0, "gdd_mpu", ssi);
-	if (err < 0) {
-		dev_err(&ssi->device, "Request GDD IRQ %d failed (%d)",
-							omap_ssi->gdd_irq, err);
+	if (err < 0)
 		goto out_err;
-	}
 
-	omap_ssi->port = devm_kcalloc(&ssi->device, ssi->num_ports,
-				      sizeof(*omap_ssi->port), GFP_KERNEL);
+	omap_ssi->port = devm_kzalloc_objs(&ssi->device, *omap_ssi->port,
+					   ssi->num_ports);
 	if (!omap_ssi->port) {
 		err = -ENOMEM;
 		goto out_err;
@@ -502,6 +499,12 @@ static int ssi_probe(struct platform_device *pd)
 
 	pm_runtime_enable(&pd->dev);
 
+	ssi->device.dma_mask = &ssi->device.coherent_dma_mask;
+
+	err = dma_set_mask_and_coherent(&ssi->device, DMA_BIT_MASK(32));
+	if (err)
+		goto out2;
+
 	err = ssi_hw_init(ssi);
 	if (err < 0)
 		goto out2;
@@ -529,6 +532,9 @@ static int ssi_probe(struct platform_device *pd)
 	return err;
 out3:
 	device_for_each_child(&pd->dev, NULL, ssi_remove_ports);
+#ifdef CONFIG_DEBUG_FS
+	ssi_debug_remove_ctrl(ssi);
+#endif
 out2:
 	ssi_remove_controller(ssi);
 	pm_runtime_disable(&pd->dev);

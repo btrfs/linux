@@ -8,7 +8,6 @@
 #include <linux/bitops.h>
 #include <linux/gpio/driver.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/seq_file.h>
@@ -150,7 +149,7 @@ static int xra1403_probe(struct spi_device *spi)
 	struct gpio_desc *reset_gpio;
 	int ret;
 
-	xra = devm_kzalloc(&spi->dev, sizeof(*xra), GFP_KERNEL);
+	xra = devm_kzalloc_obj(&spi->dev, *xra);
 	if (!xra)
 		return -ENOMEM;
 

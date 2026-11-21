@@ -12,6 +12,9 @@
 struct ksmbd_conn;
 struct ksmbd_session;
 struct ksmbd_tree_connect;
+struct ksmbd_file;
+
+#define KSMBD_WORK_INLINE_IOVS	4
 
 enum {
 	KSMBD_WORK_ACTIVE = 0,
@@ -42,6 +45,7 @@ struct ksmbd_work {
 	int				iov_alloc_cnt;
 	int				iov_cnt;
 	int				iov_idx;
+	struct kvec			iov_inline[KSMBD_WORK_INLINE_IOVS];
 
 	/* Next cmd hdr in compound req buf*/
 	int                             next_smb2_rcv_hdr_off;
@@ -50,32 +54,49 @@ struct ksmbd_work {
 	/* Current cmd hdr in compound rsp buf*/
 	int                             curr_smb2_rsp_hdr_off;
 
-	/*
-	 * Current Local FID assigned compound response if SMB2 CREATE
-	 * command is present in compound request
-	 */
+	/* FileId generated or used by the previous operation in a compound. */
 	u64				compound_fid;
 	u64				compound_pfid;
 	u64				compound_sid;
+	__le32				compound_status;
 
 	const struct cred		*saved_cred;
 
 	/* Number of granted credits */
 	unsigned int			credits_granted;
 
+	/*
+	 * Credit charge added to conn->outstanding_credits at receive time
+	 * for the SMB2 PDU currently being processed, pending release.  Zero
+	 * once the charge has been returned (on the response or error path).
+	 */
+	unsigned short			credit_charge;
+
 	/* response smb header size */
 	unsigned int                    response_sz;
 
 	void				*tr_buf;
+	/* Contiguous SMB2 compression transform owned by this work item. */
+	void				*compress_buf;
 
-	unsigned char			state;
+	unsigned int			state;
 	/* No response for cancelled request */
 	bool                            send_no_response:1;
 	/* Request is encrypted */
 	bool                            encrypted:1;
+	/* READ response should be wrapped in a compression transform. */
+	bool                            compress_response:1;
 	/* Is this SYNC or ASYNC ksmbd_work */
 	bool                            asynchronous:1;
 	bool                            need_invalidate_rkey:1;
+	bool				request_open_chseq_tracked:1;
+	/* The previous command carries a FileId or is a CREATE. */
+	bool				compound_fid_present:1;
+	/* A related command failed because there was no FileId to inherit. */
+	bool				compound_fid_missing:1;
+	bool				session_setup_reauth:1;
+	/* Retain the binding decision for response signing and preauth hashing. */
+	bool				session_setup_binding:1;
 
 	unsigned int                    remote_key;
 	/* cancel works */
@@ -83,11 +104,19 @@ struct ksmbd_work {
 	void                            **cancel_argv;
 	void                            (*cancel_fn)(void **argv);
 
+	/*
+	 * Refcounted open associated with the SMB2 command currently being
+	 * processed.
+	 */
+	struct ksmbd_file		*request_open;
+	__le16				request_open_chseq;
+
 	struct work_struct              work;
 	/* List head at conn->requests */
 	struct list_head                request_entry;
 	/* List head at conn->async_requests */
 	struct list_head                async_request_entry;
+	/* List head at ksmbd_file->blocked_works */
 	struct list_head                fp_entry;
 };
 
@@ -127,6 +156,8 @@ int ksmbd_work_pool_init(void);
 int ksmbd_workqueue_init(void);
 void ksmbd_workqueue_destroy(void);
 bool ksmbd_queue_work(struct ksmbd_work *work);
+void ksmbd_queue_io_work(struct work_struct *work);
+void ksmbd_queue_break_work(struct work_struct *work);
 int ksmbd_iov_pin_rsp_read(struct ksmbd_work *work, void *ib, int len,
 			   void *aux_buf, unsigned int aux_size);
 int ksmbd_iov_pin_rsp(struct ksmbd_work *work, void *ib, int len);

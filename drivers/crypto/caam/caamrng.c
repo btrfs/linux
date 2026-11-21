@@ -181,7 +181,9 @@ static inline void test_len(struct hwrng *rng, size_t len, bool wait)
 	struct device *dev = ctx->ctrldev;
 
 	buf = kcalloc(CAAM_RNG_MAX_FIFO_STORE_SIZE, sizeof(u8), GFP_KERNEL);
-
+	if (!buf) {
+		return;
+	}
 	while (len > 0) {
 		read_len = rng->read(rng, buf, len, wait);
 
@@ -282,7 +284,7 @@ int caam_rng_init(struct device *ctrldev)
 	if (!devres_open_group(ctrldev, caam_rng_init, GFP_KERNEL))
 		return -ENOMEM;
 
-	ctx = devm_kzalloc(ctrldev, sizeof(*ctx), GFP_KERNEL);
+	ctx = devm_kzalloc_obj(ctrldev, *ctx);
 	if (!ctx)
 		return -ENOMEM;
 

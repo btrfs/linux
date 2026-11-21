@@ -200,7 +200,7 @@ static int at91_twi_probe(struct platform_device *pdev)
 	int rc;
 	u32 phy_addr;
 
-	dev = devm_kzalloc(&pdev->dev, sizeof(*dev), GFP_KERNEL);
+	dev = devm_kzalloc_obj(&pdev->dev, *dev);
 	if (!dev)
 		return -ENOMEM;
 
@@ -255,6 +255,7 @@ static int at91_twi_probe(struct platform_device *pdev)
 	if (rc) {
 		pm_runtime_disable(dev->dev);
 		pm_runtime_set_suspended(dev->dev);
+		at91_twi_dma_release(dev);
 
 		return rc;
 	}
@@ -269,6 +270,8 @@ static void at91_twi_remove(struct platform_device *pdev)
 	struct at91_twi_dev *dev = platform_get_drvdata(pdev);
 
 	i2c_del_adapter(&dev->adapter);
+
+	at91_twi_dma_release(dev);
 
 	pm_runtime_disable(dev->dev);
 	pm_runtime_set_suspended(dev->dev);

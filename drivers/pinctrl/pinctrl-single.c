@@ -485,7 +485,8 @@ static int pcs_pinconf_get(struct pinctrl_dev *pctldev,
 	struct pcs_device *pcs = pinctrl_dev_get_drvdata(pctldev);
 	struct pcs_function *func;
 	enum pin_config_param param;
-	unsigned offset = 0, data = 0, i, j, ret;
+	unsigned offset = 0, data = 0, i, j;
+	int ret;
 
 	ret = pcs_get_function(pctldev, pin, &func);
 	if (ret)
@@ -549,9 +550,9 @@ static int pcs_pinconf_set(struct pinctrl_dev *pctldev,
 {
 	struct pcs_device *pcs = pinctrl_dev_get_drvdata(pctldev);
 	struct pcs_function *func;
-	unsigned offset = 0, shift = 0, i, data, ret;
+	unsigned offset = 0, shift = 0, i, data;
 	u32 arg;
-	int j;
+	int j, ret;
 	enum pin_config_param param;
 
 	ret = pcs_get_function(pctldev, pin, &func);
@@ -618,8 +619,9 @@ static int pcs_pinconf_set(struct pinctrl_dev *pctldev,
 static int pcs_pinconf_group_get(struct pinctrl_dev *pctldev,
 				unsigned group, unsigned long *config)
 {
+	unsigned long old = 0;
 	const unsigned *pins;
-	unsigned npins, old = 0;
+	unsigned npins;
 	int i, ret;
 
 	ret = pinctrl_generic_get_group_pins(pctldev, group, &pins, &npins);
@@ -742,9 +744,7 @@ static int pcs_allocate_pin_table(struct pcs_device *pcs)
 	}
 
 	dev_dbg(pcs->dev, "allocating %i pins\n", nr_pins);
-	pcs->pins.pa = devm_kcalloc(pcs->dev,
-				nr_pins, sizeof(*pcs->pins.pa),
-				GFP_KERNEL);
+	pcs->pins.pa = devm_kzalloc_objs(pcs->dev, *pcs->pins.pa, nr_pins);
 	if (!pcs->pins.pa)
 		return -ENOMEM;
 
@@ -789,7 +789,7 @@ static int pcs_add_function(struct pcs_device *pcs,
 	struct pcs_function *function;
 	int selector;
 
-	function = devm_kzalloc(pcs->dev, sizeof(*function), GFP_KERNEL);
+	function = devm_kzalloc_obj(pcs->dev, *function);
 	if (!function)
 		return -ENOMEM;
 
@@ -954,16 +954,13 @@ static int pcs_parse_pinconf(struct pcs_device *pcs, struct device_node *np,
 	if (!nconfs)
 		return -ENOTSUPP;
 
-	func->conf = devm_kcalloc(pcs->dev,
-				  nconfs, sizeof(struct pcs_conf_vals),
-				  GFP_KERNEL);
+	func->conf = devm_kzalloc_objs(pcs->dev, struct pcs_conf_vals, nconfs);
 	if (!func->conf)
 		return -ENOMEM;
 	func->nconfs = nconfs;
 	conf = &(func->conf[0]);
 	m++;
-	settings = devm_kcalloc(pcs->dev, nconfs, sizeof(unsigned long),
-				GFP_KERNEL);
+	settings = devm_kzalloc_objs(pcs->dev, unsigned long, nconfs);
 	if (!settings)
 		return -ENOMEM;
 	s = &settings[0];
@@ -1017,11 +1014,11 @@ static int pcs_parse_one_pinctrl_entry(struct pcs_device *pcs,
 		return -EINVAL;
 	}
 
-	vals = devm_kcalloc(pcs->dev, rows, sizeof(*vals), GFP_KERNEL);
+	vals = devm_kzalloc_objs(pcs->dev, *vals, rows);
 	if (!vals)
 		return -ENOMEM;
 
-	pins = devm_kcalloc(pcs->dev, rows, sizeof(*pins), GFP_KERNEL);
+	pins = devm_kzalloc_objs(pcs->dev, *pins, rows);
 	if (!pins)
 		goto free_vals;
 
@@ -1266,13 +1263,13 @@ static int pcs_dt_node_to_map(struct pinctrl_dev *pctldev,
 	pcs = pinctrl_dev_get_drvdata(pctldev);
 
 	/* create 2 maps. One is for pinmux, and the other is for pinconf. */
-	*map = devm_kcalloc(pcs->dev, 2, sizeof(**map), GFP_KERNEL);
+	*map = devm_kzalloc_objs(pcs->dev, **map, 2);
 	if (!*map)
 		return -ENOMEM;
 
 	*num_maps = 0;
 
-	pgnames = devm_kzalloc(pcs->dev, sizeof(*pgnames), GFP_KERNEL);
+	pgnames = devm_kzalloc_obj(pcs->dev, *pgnames);
 	if (!pgnames) {
 		ret = -ENOMEM;
 		goto free_map;
@@ -1356,8 +1353,9 @@ static int pcs_add_gpio_func(struct device_node *node, struct pcs_device *pcs)
 			ret = 0;
 			break;
 		}
-		range = devm_kzalloc(pcs->dev, sizeof(*range), GFP_KERNEL);
+		range = devm_kzalloc_obj(pcs->dev, *range);
 		if (!range) {
+			of_node_put(gpiospec.np);
 			ret = -ENOMEM;
 			break;
 		}
@@ -1367,6 +1365,7 @@ static int pcs_add_gpio_func(struct device_node *node, struct pcs_device *pcs)
 		mutex_lock(&pcs->mutex);
 		list_add_tail(&range->node, &pcs->gpiofuncs);
 		mutex_unlock(&pcs->mutex);
+		of_node_put(gpiospec.np);
 	}
 	return ret;
 }
@@ -1543,7 +1542,7 @@ static int pcs_irqdomain_map(struct irq_domain *d, unsigned int irq,
 	struct pcs_interrupt *pcswi;
 
 	pcs = container_of(pcs_soc, struct pcs_device, socdata);
-	pcswi = devm_kzalloc(pcs->dev, sizeof(*pcswi), GFP_KERNEL);
+	pcswi = devm_kzalloc_obj(pcs->dev, *pcswi);
 	if (!pcswi)
 		return -ENOMEM;
 
@@ -1624,7 +1623,8 @@ static int pcs_irq_init_chained_handler(struct pcs_device *pcs,
 					       &pcs_irqdomain_ops,
 					       pcs_soc);
 	if (!pcs->domain) {
-		irq_set_chained_handler(pcs_soc->irq, NULL);
+		pcs_irq_free(pcs);
+		pcs_soc->irq = -1;
 		return -EINVAL;
 	}
 
@@ -1750,12 +1750,12 @@ static int pcs_quirk_missing_pinctrl_cells(struct pcs_device *pcs,
 	dev_warn(pcs->dev, "please update dts to use %s = <%i>\n",
 		 name, cells);
 
-	p = devm_kzalloc(pcs->dev, sizeof(*p), GFP_KERNEL);
+	p = devm_kzalloc_obj(pcs->dev, *p);
 	if (!p)
 		return -ENOMEM;
 
 	p->length = sizeof(__be32);
-	p->value = devm_kzalloc(pcs->dev, sizeof(__be32), GFP_KERNEL);
+	p->value = devm_kzalloc_obj(pcs->dev, __be32);
 	if (!p->value)
 		return -ENOMEM;
 	*(__be32 *)p->value = cpu_to_be32(cells);
@@ -1786,7 +1786,7 @@ static int pcs_probe(struct platform_device *pdev)
 	if (WARN_ON(!soc))
 		return -EINVAL;
 
-	pcs = devm_kzalloc(&pdev->dev, sizeof(*pcs), GFP_KERNEL);
+	pcs = devm_kzalloc_obj(&pdev->dev, *pcs);
 	if (!pcs)
 		return -ENOMEM;
 
@@ -1957,7 +1957,7 @@ static const struct pcs_soc_data pinctrl_single_am654 = {
 	.irq_status_mask = (1 << 30),   /* WKUP_EVT */
 };
 
-static const struct pcs_soc_data pinctrl_single_j7200 = {
+static const struct pcs_soc_data pinctrl_single_loss_off = {
 	.flags = PCS_CONTEXT_LOSS_OFF,
 };
 
@@ -1969,6 +1969,7 @@ static const struct pcs_soc_data pinconf_single = {
 };
 
 static const struct of_device_id pcs_of_match[] = {
+	{ .compatible = "brcm,bcm7038-padconf", .data = &pinctrl_single_loss_off },
 	{ .compatible = "marvell,pxa1908-padconf", .data = &pinconf_single },
 	{ .compatible = "ti,am437-padconf", .data = &pinctrl_single_am437x },
 	{ .compatible = "ti,am654-padconf", .data = &pinctrl_single_am654 },
@@ -1976,7 +1977,8 @@ static const struct of_device_id pcs_of_match[] = {
 	{ .compatible = "ti,omap3-padconf", .data = &pinctrl_single_omap_wkup },
 	{ .compatible = "ti,omap4-padconf", .data = &pinctrl_single_omap_wkup },
 	{ .compatible = "ti,omap5-padconf", .data = &pinctrl_single_omap_wkup },
-	{ .compatible = "ti,j7200-padconf", .data = &pinctrl_single_j7200 },
+	{ .compatible = "ti,j7200-padconf", .data = &pinctrl_single_loss_off },
+	{ .compatible = "ti,am62l-padconf", .data = &pinctrl_single_loss_off },
 	{ .compatible = "pinctrl-single", .data = &pinctrl_single },
 	{ .compatible = "pinconf-single", .data = &pinconf_single },
 	{ },

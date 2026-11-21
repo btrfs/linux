@@ -80,7 +80,7 @@ static int amdisp_get_group_pins(struct pinctrl_dev *pctldev,
 	return 0;
 }
 
-const struct pinctrl_ops amdisp_pinctrl_ops = {
+static const struct pinctrl_ops amdisp_pinctrl_ops = {
 	.get_groups_count	= amdisp_get_groups_count,
 	.get_group_name		= amdisp_get_group_name,
 	.get_group_pins		= amdisp_get_group_pins,
@@ -178,7 +178,7 @@ static int amdisp_pinctrl_probe(struct platform_device *pdev)
 	struct resource *res;
 	int ret;
 
-	pctrl = devm_kzalloc(&pdev->dev, sizeof(*pctrl), GFP_KERNEL);
+	pctrl = devm_kzalloc_obj(&pdev->dev, *pctrl);
 	if (!pctrl)
 		return -ENOMEM;
 

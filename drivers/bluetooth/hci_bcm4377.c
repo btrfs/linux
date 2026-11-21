@@ -1558,9 +1558,8 @@ static int bcm4377_alloc_transfer_ring(struct bcm4377_data *bcm4377,
 		return -ENOMEM;
 
 	if (ring->allow_wait) {
-		ring->events = devm_kcalloc(&bcm4377->pdev->dev,
-					    ring->n_entries,
-					    sizeof(*ring->events), GFP_KERNEL);
+		ring->events = devm_kzalloc_objs(&bcm4377->pdev->dev,
+						 *ring->events, ring->n_entries);
 		if (!ring->events)
 			return -ENOMEM;
 	}
@@ -2283,7 +2282,7 @@ static int bcm4377_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (ret)
 		return ret;
 
-	bcm4377 = devm_kzalloc(&pdev->dev, sizeof(*bcm4377), GFP_KERNEL);
+	bcm4377 = devm_kzalloc_obj(&pdev->dev, *bcm4377);
 	if (!bcm4377)
 		return -ENOMEM;
 
@@ -2416,8 +2415,9 @@ static int bcm4377_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 					hdev);
 }
 
-static int bcm4377_suspend(struct pci_dev *pdev, pm_message_t state)
+static int bcm4377_suspend(struct device *dev)
 {
+	struct pci_dev *pdev = to_pci_dev(dev);
 	struct bcm4377_data *bcm4377 = pci_get_drvdata(pdev);
 	int ret;
 
@@ -2431,8 +2431,9 @@ static int bcm4377_suspend(struct pci_dev *pdev, pm_message_t state)
 	return 0;
 }
 
-static int bcm4377_resume(struct pci_dev *pdev)
+static int bcm4377_resume(struct device *dev)
 {
+	struct pci_dev *pdev = to_pci_dev(dev);
 	struct bcm4377_data *bcm4377 = pci_get_drvdata(pdev);
 
 	iowrite32(BCM4377_BAR0_SLEEP_CONTROL_UNQUIESCE,
@@ -2440,6 +2441,8 @@ static int bcm4377_resume(struct pci_dev *pdev)
 
 	return hci_resume_dev(bcm4377->hdev);
 }
+
+static DEFINE_SIMPLE_DEV_PM_OPS(bcm4377_ops, bcm4377_suspend, bcm4377_resume);
 
 static const struct dmi_system_id bcm4377_dmi_board_table[] = {
 	{
@@ -2486,6 +2489,7 @@ static const struct bcm4377_hw bcm4377_hw_variants[] = {
 		.has_bar0_core2_window2 = true,
 		.broken_mws_transport_config = true,
 		.broken_le_coded = true,
+		.broken_le_ext_adv_report_phy = true,
 		.send_calibration = bcm4378_send_calibration,
 		.send_ptb = bcm4378_send_ptb,
 	},
@@ -2541,8 +2545,7 @@ static struct pci_driver bcm4377_pci_driver = {
 	.name = "hci_bcm4377",
 	.id_table = bcm4377_devid_table,
 	.probe = bcm4377_probe,
-	.suspend = bcm4377_suspend,
-	.resume = bcm4377_resume,
+	.driver.pm = &bcm4377_ops,
 };
 module_pci_driver(bcm4377_pci_driver);
 

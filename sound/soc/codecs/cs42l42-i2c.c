@@ -20,7 +20,7 @@ static int cs42l42_i2c_probe(struct i2c_client *i2c_client)
 	struct regmap *regmap;
 	int ret;
 
-	cs42l42 = devm_kzalloc(dev, sizeof(*cs42l42), GFP_KERNEL);
+	cs42l42 = devm_kzalloc_obj(dev, *cs42l42);
 	if (!cs42l42)
 		return -ENOMEM;
 
@@ -78,8 +78,8 @@ static const struct acpi_device_id __maybe_unused cs42l42_acpi_match[] = {
 MODULE_DEVICE_TABLE(acpi, cs42l42_acpi_match);
 
 static const struct i2c_device_id cs42l42_id[] = {
-	{"cs42l42"},
-	{}
+	{ .name = "cs42l42" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, cs42l42_id);

@@ -17,7 +17,7 @@
 #include <linux/wmi.h>
 
 #include "wmi-events.h"
-#include "wmi-gamezone.h"
+#include "wmi-helpers.h"
 
 #define THERMAL_MODE_EVENT_GUID "D320289E-8FEA-41E0-86F9-911D83151B5F"
 
@@ -161,7 +161,7 @@ static int lwmi_events_probe(struct wmi_device *wdev, const void *context)
 	if (!context)
 		return -EINVAL;
 
-	priv = devm_kzalloc(&wdev->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&wdev->dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -183,6 +183,7 @@ static struct wmi_driver lwmi_events_driver = {
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 	.id_table = lwmi_events_id_table,
+	.min_event_size = sizeof(u32),
 	.probe = lwmi_events_probe,
 	.notify = lwmi_events_notify,
 	.no_singleton = true,

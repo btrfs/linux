@@ -201,6 +201,7 @@ static int csi2tx_get_pad_format(struct v4l2_subdev *subdev,
 }
 
 static int csi2tx_set_pad_format(struct v4l2_subdev *subdev,
+				 const struct v4l2_subdev_client_info *ci,
 				 struct v4l2_subdev_state *sd_state,
 				 struct v4l2_subdev_format *fmt)
 {
@@ -573,7 +574,7 @@ static int csi2tx_probe(struct platform_device *pdev)
 	unsigned int i;
 	int ret;
 
-	csi2tx = kzalloc(sizeof(*csi2tx), GFP_KERNEL);
+	csi2tx = kzalloc_obj(*csi2tx);
 	if (!csi2tx)
 		return -ENOMEM;
 	platform_set_drvdata(pdev, csi2tx);

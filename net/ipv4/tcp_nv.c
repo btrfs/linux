@@ -146,7 +146,7 @@ static void tcpnv_init(struct sock *sk)
 	 * within a datacenter, where we have reasonable estimates of
 	 * RTTs
 	 */
-	base_rtt = tcp_call_bpf(sk, BPF_SOCK_OPS_BASE_RTT, 0, NULL);
+	base_rtt = tcp_call_bpf(sk, BPF_SOCK_OPS_BASE_RTT);
 	if (base_rtt > 0) {
 		ca->nv_base_rtt = base_rtt;
 		ca->nv_lower_bound_rtt = (base_rtt * 205) >> 8; /* 80% */
@@ -396,8 +396,8 @@ static void tcpnv_acked(struct sock *sk, const struct ack_sample *sample)
 
 			/* We have enough data to determine we are congested */
 			ca->nv_allow_cwnd_growth = 0;
-			tp->snd_ssthresh =
-				(nv_ssthresh_factor * max_win) >> 3;
+			WRITE_ONCE(tp->snd_ssthresh,
+				   (nv_ssthresh_factor * max_win) >> 3);
 			if (tcp_snd_cwnd(tp) - max_win > 2) {
 				/* gap > 2, we do exponential cwnd decrease */
 				int dec;

@@ -16,7 +16,6 @@
 #include <linux/err.h>
 #include <linux/framer/framer.h>
 #include <linux/hdlc.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/platform_device.h>
@@ -713,7 +712,7 @@ static int qmc_hdlc_probe(struct platform_device *pdev)
 	hdlc_device *hdlc;
 	int ret;
 
-	qmc_hdlc = devm_kzalloc(dev, sizeof(*qmc_hdlc), GFP_KERNEL);
+	qmc_hdlc = devm_kzalloc_obj(dev, *qmc_hdlc);
 	if (!qmc_hdlc)
 		return -ENOMEM;
 

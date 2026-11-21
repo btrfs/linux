@@ -492,10 +492,8 @@ static int qede_set_priv_flags(struct net_device *dev, u32 flags)
 	if (dflags & ~BIT(QEDE_PRI_FLAG_RECOVER_ON_ERROR))
 		return -EINVAL;
 
-	if (flags & BIT(QEDE_PRI_FLAG_RECOVER_ON_ERROR))
-		set_bit(QEDE_ERR_IS_RECOVERABLE, &edev->err_flags);
-	else
-		clear_bit(QEDE_ERR_IS_RECOVERABLE, &edev->err_flags);
+	assign_bit(QEDE_ERR_IS_RECOVERABLE, &edev->err_flags,
+		   flags & BIT(QEDE_PRI_FLAG_RECOVER_ON_ERROR));
 
 	return 0;
 }
@@ -1199,6 +1197,13 @@ static int qede_get_rxfh_fields(struct net_device *dev,
 	return 0;
 }
 
+static u32 qede_get_rx_ring_count(struct net_device *dev)
+{
+	struct qede_dev *edev = netdev_priv(dev);
+
+	return QEDE_RSS_COUNT(edev);
+}
+
 static int qede_get_rxnfc(struct net_device *dev, struct ethtool_rxnfc *info,
 			  u32 *rule_locs)
 {
@@ -1206,9 +1211,6 @@ static int qede_get_rxnfc(struct net_device *dev, struct ethtool_rxnfc *info,
 	int rc = 0;
 
 	switch (info->cmd) {
-	case ETHTOOL_GRXRINGS:
-		info->data = QEDE_RSS_COUNT(edev);
-		break;
 	case ETHTOOL_GRXCLSRLCNT:
 		info->rule_cnt = qede_get_arfs_filter_count(edev);
 		info->data = QEDE_RFS_MAX_FLTR;
@@ -2289,6 +2291,7 @@ static const struct ethtool_ops qede_ethtool_ops = {
 	.get_sset_count			= qede_get_sset_count,
 	.get_rxnfc			= qede_get_rxnfc,
 	.set_rxnfc			= qede_set_rxnfc,
+	.get_rx_ring_count		= qede_get_rx_ring_count,
 	.get_rxfh_indir_size		= qede_get_rxfh_indir_size,
 	.get_rxfh_key_size		= qede_get_rxfh_key_size,
 	.get_rxfh			= qede_get_rxfh,
@@ -2333,6 +2336,7 @@ static const struct ethtool_ops qede_vf_ethtool_ops = {
 	.get_sset_count			= qede_get_sset_count,
 	.get_rxnfc			= qede_get_rxnfc,
 	.set_rxnfc			= qede_set_rxnfc,
+	.get_rx_ring_count		= qede_get_rx_ring_count,
 	.get_rxfh_indir_size		= qede_get_rxfh_indir_size,
 	.get_rxfh_key_size		= qede_get_rxfh_key_size,
 	.get_rxfh			= qede_get_rxfh,

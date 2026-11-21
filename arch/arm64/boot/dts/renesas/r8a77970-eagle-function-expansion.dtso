@@ -112,7 +112,7 @@
 		reg = <0x70 0x71 0x72 0x73 0x74 0x75
 		       0x60 0x61 0x62 0x63 0x64 0x65>;
 		reg-names = "main", "dpll", "cp", "hdmi", "edid", "repeater",
-			    "infoframe", "cbus", "cec", "sdp", "txa", "txb" ;
+			    "infoframe", "cbus", "cec", "sdp", "txa", "txb";
 		interrupts-extended = <&gpio3 3 IRQ_TYPE_LEVEL_LOW>,
 				      <&gpio3 4 IRQ_TYPE_LEVEL_LOW>;
 		interrupt-names = "intrq1", "intrq2";
@@ -170,7 +170,24 @@
 	};
 };
 
+&mmc0 {
+	pinctrl-0 = <&mmc_pins>;
+	pinctrl-names = "default";
+
+	vmmc-supply = <&d3p3>;
+	vqmmc-supply = <&d1p8>;
+	bus-width = <8>;
+	non-removable;
+	status = "okay";
+};
+
 &pfc {
+	mmc_pins: mmc {
+		groups = "mmc_data8", "mmc_ctrl";
+		function = "mmc";
+		power-source = <1800>;
+	};
+
 	vin0_pins_parallel: vin0 {
 		groups = "vin0_data12", "vin0_sync", "vin0_clk", "vin0_clkenb";
 		function = "vin0";

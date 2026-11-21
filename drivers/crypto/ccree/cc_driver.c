@@ -316,7 +316,7 @@ static int init_cc_resources(struct platform_device *plat_dev)
 	int irq;
 	int rc = 0;
 
-	new_drvdata = devm_kzalloc(dev, sizeof(*new_drvdata), GFP_KERNEL);
+	new_drvdata = devm_kzalloc_obj(dev, *new_drvdata);
 	if (!new_drvdata)
 		return -ENOMEM;
 
@@ -471,10 +471,8 @@ static int init_cc_resources(struct platform_device *plat_dev)
 	/* register the driver isr function */
 	rc = devm_request_irq(dev, irq, cc_isr, IRQF_SHARED, "ccree",
 			      new_drvdata);
-	if (rc) {
-		dev_err(dev, "Could not register to interrupt %d\n", irq);
+	if (rc)
 		goto post_pm_err;
-	}
 	dev_dbg(dev, "Registered to IRQ: %d\n", irq);
 
 	init_cc_cache_params(new_drvdata);

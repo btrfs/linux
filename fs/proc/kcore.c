@@ -143,7 +143,7 @@ static int kcore_ram_list(struct list_head *head)
 {
 	struct kcore_list *ent;
 
-	ent = kmalloc(sizeof(*ent), GFP_KERNEL);
+	ent = kmalloc_obj(*ent);
 	if (!ent)
 		return -ENOMEM;
 	ent->addr = (unsigned long)__va(0);
@@ -178,7 +178,7 @@ get_sparsemem_vmemmap_info(struct kcore_list *ent, struct list_head *head)
 				end = tmp->addr;
 	}
 	if (start < end) {
-		vmm = kmalloc(sizeof(*vmm), GFP_KERNEL);
+		vmm = kmalloc_obj(*vmm);
 		if (!vmm)
 			return 0;
 		vmm->addr = start;
@@ -210,7 +210,7 @@ kclist_add_private(unsigned long pfn, unsigned long nr_pages, void *arg)
 
 	p = pfn_to_page(pfn);
 
-	ent = kmalloc(sizeof(*ent), GFP_KERNEL);
+	ent = kmalloc_obj(*ent);
 	if (!ent)
 		return -ENOMEM;
 	ent->addr = (unsigned long)page_to_virt(p);
@@ -531,12 +531,14 @@ static ssize_t read_kcore_iter(struct kiocb *iocb, struct iov_iter *iter)
 			 * again until we are done.
 			 */
 			while (true) {
-				read += vread_iter(iter, src, left);
+				size_t n = vread_iter(iter, src, left);
+
+				read += n;
 				if (read == tsz)
 					break;
 
-				src += read;
-				left -= read;
+				src += n;
+				left -= n;
 
 				if (fault_in_iov_iter_writeable(iter, left)) {
 					ret = -EFAULT;

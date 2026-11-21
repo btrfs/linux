@@ -205,7 +205,7 @@ static int cy8ctma140_probe(struct i2c_client *client)
 	struct device *dev = &client->dev;
 	int error;
 
-	ts = devm_kzalloc(dev, sizeof(*ts), GFP_KERNEL);
+	ts = devm_kzalloc_obj(dev, *ts);
 	if (!ts)
 		return -ENOMEM;
 
@@ -322,7 +322,7 @@ static DEFINE_SIMPLE_DEV_PM_OPS(cy8ctma140_pm,
 				cy8ctma140_suspend, cy8ctma140_resume);
 
 static const struct i2c_device_id cy8ctma140_idtable[] = {
-	{ CY8CTMA140_NAME },
+	{ .name = CY8CTMA140_NAME },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(i2c, cy8ctma140_idtable);

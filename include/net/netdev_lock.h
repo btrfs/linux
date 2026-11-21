@@ -64,7 +64,7 @@ static inline void netdev_unlock_full_to_ops(struct net_device *dev)
 		netdev_unlock(dev);
 }
 
-static inline void netdev_ops_assert_locked(const struct net_device *dev)
+static inline void netdev_assert_locked_ops_compat(const struct net_device *dev)
 {
 	if (netdev_need_ops_lock(dev))
 		lockdep_assert_held(&dev->lock);
@@ -73,11 +73,17 @@ static inline void netdev_ops_assert_locked(const struct net_device *dev)
 }
 
 static inline void
-netdev_ops_assert_locked_or_invisible(const struct net_device *dev)
+netdev_assert_locked_ops_compat_or_invisible(const struct net_device *dev)
 {
 	if (dev->reg_state == NETREG_REGISTERED ||
 	    dev->reg_state == NETREG_UNREGISTERING)
-		netdev_ops_assert_locked(dev);
+		netdev_assert_locked_ops_compat(dev);
+}
+
+static inline void netdev_assert_locked_ops(const struct net_device *dev)
+{
+	if (netdev_need_ops_lock(dev))
+		netdev_assert_locked(dev);
 }
 
 static inline void netdev_lock_ops_compat(struct net_device *dev)
@@ -96,34 +102,28 @@ static inline void netdev_unlock_ops_compat(struct net_device *dev)
 		rtnl_unlock();
 }
 
-static inline int netdev_lock_cmp_fn(const struct lockdep_map *a,
-				     const struct lockdep_map *b)
+/* Matching "ops protected" category from netdevice.h */
+static inline int netdev_is_locked_ops_compat(const struct net_device *dev)
 {
-	if (a == b)
-		return 0;
-
-	/* Allow locking multiple devices only under rtnl_lock,
-	 * the exact order doesn't matter.
-	 * Note that upper devices don't lock their ops, so nesting
-	 * mostly happens in batched device removal for now.
-	 */
-	return lockdep_rtnl_is_held() ? -1 : 1;
+	if (netdev_need_ops_lock(dev))
+		return lockdep_is_held(&dev->lock);
+	return lockdep_rtnl_is_held();
 }
+
+void netdev_set_instance_lock_class(struct net_device *dev);
 
 #define netdev_lockdep_set_classes(dev)				\
 {								\
 	static struct lock_class_key qdisc_tx_busylock_key;	\
 	static struct lock_class_key qdisc_xmit_lock_key;	\
 	static struct lock_class_key dev_addr_list_lock_key;	\
-	static struct lock_class_key dev_instance_lock_key;	\
 	unsigned int i;						\
 								\
 	(dev)->qdisc_tx_busylock = &qdisc_tx_busylock_key;	\
 	lockdep_set_class(&(dev)->addr_list_lock,		\
 			  &dev_addr_list_lock_key);		\
-	lockdep_set_class(&(dev)->lock,				\
-			  &dev_instance_lock_key);		\
-	lock_set_cmp_fn(&dev->lock, netdev_lock_cmp_fn, NULL);	\
+	if (IS_ENABLED(CONFIG_PROVE_LOCKING))			\
+		netdev_set_instance_lock_class(dev);		\
 	for (i = 0; i < (dev)->num_tx_queues; i++)		\
 		lockdep_set_class(&(dev)->_tx[i]._xmit_lock,	\
 				  &qdisc_xmit_lock_key);	\
@@ -131,6 +131,9 @@ static inline int netdev_lock_cmp_fn(const struct lockdep_map *a,
 
 #define netdev_lock_dereference(p, dev)				\
 	rcu_dereference_protected(p, lockdep_is_held(&(dev)->lock))
+
+#define netdev_ops_lock_dereference(p, dev)				\
+	rcu_dereference_protected(p, netdev_is_locked_ops_compat(dev))
 
 int netdev_debug_event(struct notifier_block *nb, unsigned long event,
 		       void *ptr);

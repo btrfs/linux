@@ -8,7 +8,6 @@
 #include <linux/clk.h>
 #include <linux/component.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/reset.h>
@@ -25,7 +24,7 @@ static int sun6i_drc_bind(struct device *dev, struct device *master,
 	struct sun6i_drc *drc;
 	int ret;
 
-	drc = devm_kzalloc(dev, sizeof(*drc), GFP_KERNEL);
+	drc = devm_kzalloc_obj(dev, *drc);
 	if (!drc)
 		return -ENOMEM;
 	dev_set_drvdata(dev, drc);

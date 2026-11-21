@@ -142,7 +142,7 @@ static int lm8333_probe(struct i2c_client *client)
 		return -EINVAL;
 	}
 
-	lm8333 = devm_kzalloc(&client->dev, sizeof(*lm8333), GFP_KERNEL);
+	lm8333 = devm_kzalloc_obj(&client->dev, *lm8333);
 	if (!lm8333)
 		return -ENOMEM;
 
@@ -194,7 +194,7 @@ static int lm8333_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id lm8333_id[] = {
-	{ "lm8333" },
+	{ .name = "lm8333" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, lm8333_id);

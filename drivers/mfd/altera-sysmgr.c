@@ -117,6 +117,8 @@ struct regmap *altr_sysmgr_regmap_lookup_by_phandle(struct device_node *np,
 
 	sysmgr = dev_get_drvdata(dev);
 
+	put_device(dev);
+
 	return sysmgr->regmap;
 }
 EXPORT_SYMBOL_GPL(altr_sysmgr_regmap_lookup_by_phandle);
@@ -131,7 +133,7 @@ static int sysmgr_probe(struct platform_device *pdev)
 	struct device_node *np = dev->of_node;
 	void __iomem *base;
 
-	sysmgr = devm_kzalloc(dev, sizeof(*sysmgr), GFP_KERNEL);
+	sysmgr = devm_kzalloc_obj(dev, *sysmgr);
 	if (!sysmgr)
 		return -ENOMEM;
 

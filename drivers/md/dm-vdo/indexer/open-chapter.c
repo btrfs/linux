@@ -68,9 +68,7 @@ int uds_make_open_chapter(const struct index_geometry *geometry, unsigned int zo
 	size_t capacity = geometry->records_per_chapter / zone_count;
 	size_t slot_count = (1 << bits_per(capacity * LOAD_RATIO));
 
-	result = vdo_allocate_extended(struct open_chapter_zone, slot_count,
-				       struct open_chapter_zone_slot, "open chapter",
-				       &open_chapter);
+	result = vdo_allocate_extended(slot_count, slots, "open chapter", &open_chapter);
 	if (result != VDO_SUCCESS)
 		return result;
 
@@ -345,7 +343,7 @@ int uds_save_open_chapter(struct uds_index *index, struct buffered_writer *write
 	return uds_flush_buffered_writer(writer);
 }
 
-u64 uds_compute_saved_open_chapter_size(struct index_geometry *geometry)
+u64 uds_compute_saved_open_chapter_size(const struct index_geometry *geometry)
 {
 	unsigned int records_per_chapter = geometry->records_per_chapter;
 

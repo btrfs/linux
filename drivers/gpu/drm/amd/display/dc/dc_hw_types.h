@@ -205,9 +205,32 @@ enum surface_pixel_format {
 	SURFACE_PIXEL_FORMAT_VIDEO_420_YCrCb,
 	SURFACE_PIXEL_FORMAT_VIDEO_420_10bpc_YCbCr,
 	SURFACE_PIXEL_FORMAT_VIDEO_420_10bpc_YCrCb,
+	/* Planar 422 Formats*/
+	SURFACE_PIXEL_FORMAT_VIDEO_422_CrCb_P208, // 8 bpc
+	SURFACE_PIXEL_FORMAT_VIDEO_422_CbCr_P208, // 8 bpc
+	SURFACE_PIXEL_FORMAT_VIDEO_422_CrCb_P210, // 10 bpc
+	SURFACE_PIXEL_FORMAT_VIDEO_422_CbCr_P210, // 10 bpc
+	SURFACE_PIXEL_FORMAT_VIDEO_422_CrCb_P212, // 12 bpc
+	SURFACE_PIXEL_FORMAT_VIDEO_422_CbCr_P212, // 12 bpc
 	SURFACE_PIXEL_FORMAT_SUBSAMPLE_END,
 	SURFACE_PIXEL_FORMAT_VIDEO_ACrYCb2101010 =
 		SURFACE_PIXEL_FORMAT_SUBSAMPLE_END,
+	/* packed 422 formats, they should reside here as the necessity for programming chroma parameters are determined wrt SURFACE_PIXEL_FORMAT_SUBSAMPLE_END*/
+	/* Packed 422 Format, 8bpc*/
+	SURFACE_PIXEL_FORMAT_VIDEO_422_YCrYCb,
+	SURFACE_PIXEL_FORMAT_VIDEO_422_YCbYCr,
+	SURFACE_PIXEL_FORMAT_VIDEO_422_CrYCbY,
+	SURFACE_PIXEL_FORMAT_VIDEO_422_CbYCrY,
+	/* Packed 422 Format, 10bpc*/
+	SURFACE_PIXEL_FORMAT_VIDEO_422_10bpc_YCrYCb,
+	SURFACE_PIXEL_FORMAT_VIDEO_422_10bpc_YCbYCr,
+	SURFACE_PIXEL_FORMAT_VIDEO_422_10bpc_CrYCbY,
+	SURFACE_PIXEL_FORMAT_VIDEO_422_10bpc_CbYCrY,
+	/* Packed 422 Format, 12bpc*/
+	SURFACE_PIXEL_FORMAT_VIDEO_422_12bpc_YCrYCb,
+	SURFACE_PIXEL_FORMAT_VIDEO_422_12bpc_YCbYCr,
+	SURFACE_PIXEL_FORMAT_VIDEO_422_12bpc_CrYCbY,
+	SURFACE_PIXEL_FORMAT_VIDEO_422_12bpc_CbYCrY,
 	SURFACE_PIXEL_FORMAT_VIDEO_CrYCbA1010102,
 	SURFACE_PIXEL_FORMAT_VIDEO_AYCrCb8888,
 	SURFACE_PIXEL_FORMAT_INVALID
@@ -218,7 +241,7 @@ enum surface_pixel_format {
 
 
 /* Pixel format */
-enum pixel_format {
+enum dc_pixel_format {
 	/*graph*/
 	PIXEL_FORMAT_UNINITIALIZED,
 	PIXEL_FORMAT_INDEX8,
@@ -230,14 +253,28 @@ enum pixel_format {
 	/*video*/
 	PIXEL_FORMAT_420BPP8,
 	PIXEL_FORMAT_420BPP10,
+	// Align with SPL formats
+	PIXEL_FORMAT_422BPP8,
+	PIXEL_FORMAT_422BPP10,
+	PIXEL_FORMAT_422BPP12,
+	PIXEL_FORMAT_444BPP8,
+	PIXEL_FORMAT_444BPP10,
 	/*end of pixel format definition*/
 	PIXEL_FORMAT_INVALID,
 
 	PIXEL_FORMAT_GRPH_BEGIN = PIXEL_FORMAT_INDEX8,
 	PIXEL_FORMAT_GRPH_END = PIXEL_FORMAT_FP16,
 	PIXEL_FORMAT_VIDEO_BEGIN = PIXEL_FORMAT_420BPP8,
-	PIXEL_FORMAT_VIDEO_END = PIXEL_FORMAT_420BPP10,
+	PIXEL_FORMAT_VIDEO_END = PIXEL_FORMAT_444BPP10,
 	PIXEL_FORMAT_UNKNOWN
+};
+
+#define MAX_TG_COLOR_VALUE 0x3FF
+struct tg_color {
+	/* Maximum 10 bits color value */
+	uint16_t color_r_cr;
+	uint16_t color_g_y;
+	uint16_t color_b_cb;
 };
 
 /*
@@ -254,6 +291,7 @@ struct dc_flip_addrs {
 	bool triplebuffer_flips;
 	unsigned int dirty_rect_count;
 	struct rect dirty_rects[DC_MAX_DIRTY_RECTS];
+	struct tg_color visual_confirm_color; /* DM passthrough visual confirm color, applied in VISUAL_CONFIRM_DM_PASSTHROUGH mode */
 };
 
 enum tile_split_values {
@@ -269,6 +307,15 @@ enum tripleBuffer_enable {
 };
 enum tile_split_values_new {
 	DC_SURF_TILE_SPLIT_1KB = 0x4,
+};
+
+enum otg_pwa_sync_mode {
+	DC_OTG_PWA_FRAME_SYNC_MODE_VSYNC = 0x0,
+	DC_OTG_PWA_FRAME_SYNC_MODE_VSTARTUP = 0x1,
+};
+struct otc_pwa_frame_sync {
+	enum otg_pwa_sync_mode pwa_sync_mode;
+	uint32_t pwa_frame_sync_line_offset;
 };
 
 /* TODO: These values come from hardware spec. We need to readdress this
@@ -337,7 +384,9 @@ enum swizzle_mode_addr3_values {
 	DC_ADDR3_SW_4KB_3D = 5,
 	DC_ADDR3_SW_64KB_3D = 6,
 	DC_ADDR3_SW_256KB_3D = 7,
-	DC_ADDR3_SW_MAX = 8,
+	DC_ADDR3_SW_64KB_2D_Z = 8,
+	DC_ADDR3_SW_256KB_2D_Z = 9,
+	DC_ADDR3_SW_MAX = 10,
 	DC_ADDR3_SW_UNKNOWN = DC_ADDR3_SW_MAX
 };
 
@@ -436,6 +485,10 @@ enum dc_gfxversion {
 			enum swizzle_mode_addr3_values swizzle;
 		} gfx_addr3;/*gfx with addr3 and above*/
 	};
+
+	struct {
+		bool avoid_full_update_on_tiling_change;
+	} flags;
 };
 
 /* Rotation angle */
@@ -491,6 +544,12 @@ struct dc_cursor_position {
 	 * for each plane.
 	 */
 	bool translate_by_source;
+
+	/**
+	 * @use_viewport_for_clip: Use viewport position for clip_x calculation
+	 * instead of clip_rect. Required to protect against clip being overwritten
+	 */
+	bool use_viewport_for_clip;
 };
 
 struct dc_cursor_mi_param {
@@ -503,6 +562,9 @@ struct dc_cursor_mi_param {
 	enum dc_rotation_angle rotation;
 	bool mirror;
 	struct dc_stream_state *stream;
+	int dst_x_offset;
+	int cur_rect_x;
+	int cur_rect_y;
 };
 
 /* IPP related types */
@@ -630,6 +692,7 @@ struct dc_cursor_attributes {
 	enum dc_rotation_angle rotation_angle;
 
 	union dc_cursor_attribute_flags attribute_flags;
+	bool force_cursor_to_disp_pref;
 };
 
 struct dpp_cursor_attributes {
@@ -867,6 +930,8 @@ struct dc_dsc_config {
 	bool ycbcr422_simple; /* Tell DSC engine to convert YCbCr 4:2:2 to 'YCbCr 4:2:2 simple'. */
 	int32_t rc_buffer_size; /* DSC RC buffer block size in bytes */
 	bool is_frl; /* indicate if DSC is applied based on HDMI FRL sink's capability */
+	bool is_vic_all_bpp; /* indicate of DSC_ALL_BPP = 1 */
+	uint32_t total_chunk_kbytes; /* total chunk kbytes in EDID */
 	bool is_dp; /* indicate if DSC is applied based on DP's capability */
 	uint32_t mst_pbn; /* pbn of display on dsc mst hub */
 	const struct dc_dsc_rc_params_override *rc_params_ovrd; /* DM owned memory. If not NULL, apply custom dsc rc params */
@@ -1021,6 +1086,15 @@ struct dc_crtc_timing_adjust {
 	uint8_t timing_adjust_pending;
 };
 
+struct dtbclk_dto_params {
+	const struct dc_crtc_timing *timing;
+	int otg_inst;
+	int pixclk_khz;
+	int req_audio_dtbclk_khz;
+	int num_odm_segments;
+	int ref_dtbclk_khz;
+	bool is_hdmi;
+};
 
 /* Passed on init */
 enum vram_type {
@@ -1131,15 +1205,13 @@ struct mcif_buf_params {
 	unsigned int		warmup_pitch;
 	unsigned int		swlock;
 	unsigned int		p_vmid;
+	uint8_t				tmz_id;
 };
 
-
-#define MAX_TG_COLOR_VALUE 0x3FF
-struct tg_color {
-	/* Maximum 10 bits color value */
-	uint16_t color_r_cr;
-	uint16_t color_g_y;
-	uint16_t color_b_cb;
+struct fva_adj {
+	unsigned int pixel_clock_100hz;
+	unsigned int max_pixel_clock_100hz;
+	unsigned int fva_factor;
 };
 
 enum symclk_state {
@@ -1156,5 +1228,89 @@ struct phy_state {
 	enum symclk_state symclk_state;
 };
 
+enum cm_hist_tap_point {
+	CM_HIST_TAP_POINT_1,
+	CM_HIST_TAP_POINT_2,
+	CM_HIST_TAP_POINT_3,
+	CM_HIST_TAP_POINT_4,
+};
+
+enum cm_hist_src {
+	CM_HIST_SRC1,
+	CM_HIST_SRC2,
+	CM_HIST_SRC3,
+};
+
+enum cm_hist_format {
+	CM_HIST_FORMAT_FIXED_POINT,
+	CM_HIST_FORMAT_FP16_POS,
+	CM_HIST_FORMAT_FP16_POS_AND_NEG,
+};
+
+enum cm_hist_read_channel_mask {
+	CM_HIST_READ_DISABLED,
+	CM_HIST_READ_CH1,
+	CM_HIST_READ_CH2,
+	CM_HIST_READ_CH1_CH2,
+	CM_HIST_READ_CH3,
+	CM_HIST_READ_CH1_CH3,
+	CM_HIST_READ_CH2_CH3,
+	CM_HIST_READ_ALL,
+};
+
+enum cm_hist_src1_mode {
+	CM_HIST_SRC1_MODE_R_OR_CR,
+	CM_HIST_SRC1_MODE_MAX_RGB,
+};
+
+enum cm_hist_src2_mode {
+	CM_HIST_SRC2_MODE_G_OR_Y,
+	CM_HIST_SRC2_MODE_RGB_TO_Y,
+};
+
+enum cm_hist_src3_mode {
+	CM_HIST_SRC3_MODE_B_OR_CB,
+	CM_HIST_SRC3_MODE_MIN_RGB,
+};
+
+struct cm_hist_control {
+	enum cm_hist_tap_point tap_point;
+	uint32_t channels_enabled;
+	enum cm_hist_src1_mode src_1_select;
+	enum cm_hist_src2_mode src_2_select;
+	enum cm_hist_src3_mode src_3_select;
+	enum cm_hist_src ch1_src;
+	enum cm_hist_src ch2_src;
+	enum cm_hist_src ch3_src;
+	enum cm_hist_format format;
+	enum cm_hist_read_channel_mask read_channel_mask;
+};
+
+struct cm_hist {
+	uint32_t ch1[256];
+	uint32_t ch2[256];
+	uint32_t ch3[256];
+};
+
+enum pregam_mode {
+	PREGAM_BYPASS = 0,
+	PREGAM_DEGAM,
+	PREGAM_REGAM
+};
+
+enum degam_lut {
+	DEGAM_SRGB = 0,
+	DEGAM_GAMMA_22,
+	DEGAM_GAMMA_24,
+	DEGAM_GAMMA_26,
+	DEGAM_BT2020,
+	DEGAM_BT2100PQ,
+	DEGAM_BT2100HLG
+};
+
+enum regam_lut {
+	REGAM_20 = 0,
+	REGAM_24
+};
 #endif /* DC_HW_TYPES_H */
 

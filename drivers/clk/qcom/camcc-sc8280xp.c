@@ -5,7 +5,6 @@
  */
 
 #include <linux/clk-provider.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -1754,24 +1753,6 @@ static struct clk_branch camcc_csiphy3_clk = {
 	},
 };
 
-static struct clk_branch camcc_gdsc_clk = {
-	.halt_reg = 0xc1e4,
-	.halt_check = BRANCH_HALT,
-	.clkr = {
-		.enable_reg = 0xc1e4,
-		.enable_mask = BIT(0),
-		.hw.init = &(struct clk_init_data){
-			.name = "camcc_gdsc_clk",
-			.parent_hws = (const struct clk_hw*[]){
-				&camcc_xo_clk_src.clkr.hw,
-			},
-			.num_parents = 1,
-			.flags = CLK_SET_RATE_PARENT,
-			.ops = &clk_branch2_ops,
-		},
-	},
-};
-
 static struct clk_branch camcc_icp_ahb_clk = {
 	.halt_reg = 0xc0d8,
 	.halt_check = BRANCH_HALT,
@@ -2840,7 +2821,6 @@ static struct clk_regmap *camcc_sc8280xp_clocks[] = {
 	[CAMCC_CSIPHY2_CLK] = &camcc_csiphy2_clk.clkr,
 	[CAMCC_CSIPHY3_CLK] = &camcc_csiphy3_clk.clkr,
 	[CAMCC_FAST_AHB_CLK_SRC] = &camcc_fast_ahb_clk_src.clkr,
-	[CAMCC_GDSC_CLK] = &camcc_gdsc_clk.clkr,
 	[CAMCC_ICP_AHB_CLK] = &camcc_icp_ahb_clk.clkr,
 	[CAMCC_ICP_CLK] = &camcc_icp_clk.clkr,
 	[CAMCC_ICP_CLK_SRC] = &camcc_icp_clk_src.clkr,
@@ -2987,7 +2967,17 @@ static const struct regmap_config camcc_sc8280xp_regmap_config = {
 	.fast_io = true,
 };
 
+static const u32 camcc_sc8280xp_critical_cbcrs[] = {
+	0xc1e4, /* CAMCC_GDSC_CLK */
+};
+
+static const struct qcom_cc_driver_data camcc_sc8280xp_driver_data = {
+	.clk_cbcrs = camcc_sc8280xp_critical_cbcrs,
+	.num_clk_cbcrs = ARRAY_SIZE(camcc_sc8280xp_critical_cbcrs),
+};
+
 static const struct qcom_cc_desc camcc_sc8280xp_desc = {
+	.driver_data = &camcc_sc8280xp_driver_data,
 	.config = &camcc_sc8280xp_regmap_config,
 	.clks = camcc_sc8280xp_clocks,
 	.num_clks = ARRAY_SIZE(camcc_sc8280xp_clocks),
@@ -3030,9 +3020,6 @@ static int camcc_sc8280xp_probe(struct platform_device *pdev)
 	clk_lucid_pll_configure(&camcc_pll5, regmap, &camcc_pll5_config);
 	clk_lucid_pll_configure(&camcc_pll6, regmap, &camcc_pll6_config);
 	clk_lucid_pll_configure(&camcc_pll7, regmap, &camcc_pll7_config);
-
-	/* Keep some clocks always-on */
-	qcom_branch_set_clk_en(regmap, 0xc1e4); /* CAMCC_GDSC_CLK */
 
 	ret = qcom_cc_really_probe(&pdev->dev, &camcc_sc8280xp_desc, regmap);
 	if (ret)

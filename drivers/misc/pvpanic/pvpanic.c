@@ -15,7 +15,6 @@
 #include <linux/kstrtox.h>
 #include <linux/limits.h>
 #include <linux/list.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/panic_notifier.h>
 #include <linux/platform_device.h>
@@ -189,7 +188,7 @@ int devm_pvpanic_probe(struct device *dev, void __iomem *base)
 	if (!base)
 		return -EINVAL;
 
-	pi = devm_kmalloc(dev, sizeof(*pi), GFP_KERNEL);
+	pi = devm_kmalloc_obj(dev, *pi);
 	if (!pi)
 		return -ENOMEM;
 

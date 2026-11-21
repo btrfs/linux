@@ -99,7 +99,7 @@ static int tea6420_probe(struct i2c_client *client)
 	v4l_info(client, "chip found @ 0x%x (%s)\n",
 			client->addr << 1, client->adapter->name);
 
-	sd = devm_kzalloc(&client->dev, sizeof(*sd), GFP_KERNEL);
+	sd = devm_kzalloc_obj(&client->dev, *sd);
 	if (sd == NULL)
 		return -ENOMEM;
 	v4l2_i2c_subdev_init(sd, client, &tea6420_ops);
@@ -123,7 +123,7 @@ static void tea6420_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id tea6420_id[] = {
-	{ "tea6420" },
+	{ .name = "tea6420" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tea6420_id);

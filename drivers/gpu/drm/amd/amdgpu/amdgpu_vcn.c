@@ -34,6 +34,7 @@
 #include "amdgpu.h"
 #include "amdgpu_pm.h"
 #include "amdgpu_vcn.h"
+#include "amdgpu_reset.h"
 #include "soc15d.h"
 
 /* Firmware Names */
@@ -63,6 +64,8 @@
 #define FIRMWARE_VCN4_0_6_1		"amdgpu/vcn_4_0_6_1.bin"
 #define FIRMWARE_VCN5_0_0		"amdgpu/vcn_5_0_0.bin"
 #define FIRMWARE_VCN5_0_1		"amdgpu/vcn_5_0_1.bin"
+#define FIRMWARE_VCN5_0_2		"amdgpu/vcn_5_0_2.bin"
+#define FIRMWARE_VCN5_3_0		"amdgpu/vcn_5_3_0.bin"
 
 MODULE_FIRMWARE(FIRMWARE_RAVEN);
 MODULE_FIRMWARE(FIRMWARE_PICASSO);
@@ -90,6 +93,8 @@ MODULE_FIRMWARE(FIRMWARE_VCN4_0_6);
 MODULE_FIRMWARE(FIRMWARE_VCN4_0_6_1);
 MODULE_FIRMWARE(FIRMWARE_VCN5_0_0);
 MODULE_FIRMWARE(FIRMWARE_VCN5_0_1);
+MODULE_FIRMWARE(FIRMWARE_VCN5_0_2);
+MODULE_FIRMWARE(FIRMWARE_VCN5_3_0);
 
 static void amdgpu_vcn_idle_work_handler(struct work_struct *work);
 static void amdgpu_vcn_reg_dump_fini(struct amdgpu_device *adev);
@@ -294,6 +299,26 @@ void amdgpu_vcn_sw_fini(struct amdgpu_device *adev, int i)
 	mutex_destroy(&adev->vcn.inst[i].vcn1_jpeg1_workaround);
 }
 
+int amdgpu_vcn_early_fini(struct amdgpu_ip_block *ip_block)
+{
+	struct amdgpu_device *adev = ip_block->adev;
+	int i;
+
+	/* Called on teardown even if sw_init never ran */
+	if (!ip_block->status.sw)
+		return 0;
+
+	/* hw_fini may not wait while a peer in the reset domain resets */
+	for (i = 0; i < adev->vcn.num_vcn_inst; ++i) {
+		if (adev->vcn.harvest_config & (1 << i))
+			continue;
+
+		cancel_delayed_work_sync(&adev->vcn.inst[i].idle_work);
+	}
+
+	return 0;
+}
+
 bool amdgpu_vcn_is_disabled_vcn(struct amdgpu_device *adev, enum vcn_ring_type type, uint32_t vcn_instance)
 {
 	bool ret = false;
@@ -357,7 +382,7 @@ int amdgpu_vcn_suspend(struct amdgpu_device *adev, int i)
 
 	/* err_event_athub and dpc recovery will corrupt VCPU buffer, so we need to
 	 * restore fw data and clear buffer in amdgpu_vcn_resume() */
-	if (in_ras_intr || adev->pcie_reset_ctx.in_link_reset)
+	if (in_ras_intr || amdgpu_reset_in_dpc(adev))
 		return 0;
 
 	return amdgpu_vcn_save_vcpu_bo_inst(adev, i);
@@ -454,6 +479,15 @@ void amdgpu_vcn_put_profile(struct amdgpu_device *adev)
 	mutex_unlock(&adev->vcn.workload_profile_mutex);
 }
 
+void amdgpu_vcn_cancel_idle_work(struct amdgpu_vcn_inst *vcn_inst)
+{
+	/* The reset mustn't wait for the idle work, which waits for the reset */
+	if (amdgpu_in_reset(vcn_inst->adev))
+		cancel_delayed_work(&vcn_inst->idle_work);
+	else
+		cancel_delayed_work_sync(&vcn_inst->idle_work);
+}
+
 static void amdgpu_vcn_idle_work_handler(struct work_struct *work)
 {
 	struct amdgpu_vcn_inst *vcn_inst =
@@ -464,6 +498,9 @@ static void amdgpu_vcn_idle_work_handler(struct work_struct *work)
 
 	if (adev->vcn.harvest_config & (1 << i))
 		return;
+
+	/* Nothing holding the reset semaphore waits for this work */
+	down_read(&adev->reset_domain->sem);
 
 	for (j = 0; j < adev->vcn.inst[i].num_enc_rings; ++j)
 		fence[i] += amdgpu_fence_count_emitted(&vcn_inst->ring_enc[j]);
@@ -494,6 +531,8 @@ static void amdgpu_vcn_idle_work_handler(struct work_struct *work)
 	} else {
 		schedule_delayed_work(&vcn_inst->idle_work, VCN_IDLE_TIMEOUT);
 	}
+
+	up_read(&adev->reset_domain->sem);
 }
 
 void amdgpu_vcn_ring_begin_use(struct amdgpu_ring *ring)
@@ -501,9 +540,8 @@ void amdgpu_vcn_ring_begin_use(struct amdgpu_ring *ring)
 	struct amdgpu_device *adev = ring->adev;
 	struct amdgpu_vcn_inst *vcn_inst = &adev->vcn.inst[ring->me];
 
-	atomic_inc(&vcn_inst->total_submission_cnt);
-
-	cancel_delayed_work_sync(&vcn_inst->idle_work);
+	if (!atomic_fetch_inc(&vcn_inst->total_submission_cnt))
+		amdgpu_vcn_cancel_idle_work(vcn_inst);
 
 	mutex_lock(&vcn_inst->vcn_pg_lock);
 	vcn_inst->set_pg_state(vcn_inst, AMD_PG_STATE_UNGATE);
@@ -545,10 +583,9 @@ void amdgpu_vcn_ring_end_use(struct amdgpu_ring *ring)
 	    !adev->vcn.inst[ring->me].using_unified_queue)
 		atomic_dec(&ring->adev->vcn.inst[ring->me].dpg_enc_submission_cnt);
 
-	atomic_dec(&ring->adev->vcn.inst[ring->me].total_submission_cnt);
-
-	schedule_delayed_work(&ring->adev->vcn.inst[ring->me].idle_work,
-			      VCN_IDLE_TIMEOUT);
+	if (atomic_dec_and_test(&ring->adev->vcn.inst[ring->me].total_submission_cnt))
+		schedule_delayed_work(&ring->adev->vcn.inst[ring->me].idle_work,
+				      VCN_IDLE_TIMEOUT);
 }
 
 int amdgpu_vcn_dec_ring_test_ring(struct amdgpu_ring *ring)
@@ -626,7 +663,8 @@ static int amdgpu_vcn_dec_send_msg(struct amdgpu_ring *ring,
 
 	r = amdgpu_job_alloc_with_ib(ring->adev, NULL, NULL,
 				     64, AMDGPU_IB_POOL_DIRECT,
-				     &job, AMDGPU_KERNEL_JOB_ID_VCN_RING_TEST);
+				     AMDGPU_KERNEL_JOB_ID_VCN_RING_TEST,
+				     &job);
 	if (r)
 		goto err;
 
@@ -806,7 +844,8 @@ static int amdgpu_vcn_dec_sw_send_msg(struct amdgpu_ring *ring,
 
 	r = amdgpu_job_alloc_with_ib(ring->adev, NULL, NULL,
 				     ib_size_dw * 4, AMDGPU_IB_POOL_DIRECT,
-				     &job, AMDGPU_KERNEL_JOB_ID_VCN_RING_TEST);
+				     AMDGPU_KERNEL_JOB_ID_VCN_RING_TEST,
+				     &job);
 	if (r)
 		goto err;
 
@@ -936,7 +975,8 @@ static int amdgpu_vcn_enc_get_create_msg(struct amdgpu_ring *ring, uint32_t hand
 
 	r = amdgpu_job_alloc_with_ib(ring->adev, NULL, NULL,
 				     ib_size_dw * 4, AMDGPU_IB_POOL_DIRECT,
-				     &job, AMDGPU_KERNEL_JOB_ID_VCN_RING_TEST);
+				     AMDGPU_KERNEL_JOB_ID_VCN_RING_TEST,
+				     &job);
 	if (r)
 		return r;
 
@@ -1003,7 +1043,8 @@ static int amdgpu_vcn_enc_get_destroy_msg(struct amdgpu_ring *ring, uint32_t han
 
 	r = amdgpu_job_alloc_with_ib(ring->adev, NULL, NULL,
 				     ib_size_dw * 4, AMDGPU_IB_POOL_DIRECT,
-				     &job, AMDGPU_KERNEL_JOB_ID_VCN_RING_TEST);
+				     AMDGPU_KERNEL_JOB_ID_VCN_RING_TEST,
+				     &job);
 	if (r)
 		return r;
 
@@ -1093,7 +1134,8 @@ int amdgpu_vcn_unified_ring_test_ib(struct amdgpu_ring *ring, long timeout)
 	long r;
 
 	if ((amdgpu_ip_version(adev, UVD_HWIP, 0) != IP_VERSION(4, 0, 3)) &&
-	    (amdgpu_ip_version(adev, UVD_HWIP, 0) != IP_VERSION(5, 0, 1))) {
+	    (amdgpu_ip_version(adev, UVD_HWIP, 0) != IP_VERSION(5, 0, 1)) &&
+	    (amdgpu_ip_version(adev, UVD_HWIP, 0) != IP_VERSION(5, 0, 2))) {
 		r = amdgpu_vcn_enc_ring_test_ib(ring, timeout);
 		if (r)
 			goto error;
@@ -1130,7 +1172,8 @@ void amdgpu_vcn_setup_ucode(struct amdgpu_device *adev, int i)
 			return;
 
 		if ((amdgpu_ip_version(adev, UVD_HWIP, 0) == IP_VERSION(4, 0, 3) ||
-		     amdgpu_ip_version(adev, UVD_HWIP, 0) == IP_VERSION(5, 0, 1))
+		     amdgpu_ip_version(adev, UVD_HWIP, 0) == IP_VERSION(5, 0, 1) ||
+		     amdgpu_ip_version(adev, UVD_HWIP, 0) == IP_VERSION(5, 0, 2))
 		    && (i > 0))
 			return;
 
@@ -1478,56 +1521,35 @@ int vcn_set_powergating_state(struct amdgpu_ip_block *ip_block,
 	return ret;
 }
 
-/**
- * amdgpu_vcn_reset_engine - Reset a specific VCN engine
- * @adev: Pointer to the AMDGPU device
- * @instance_id: VCN engine instance to reset
- *
- * Returns: 0 on success, or a negative error code on failure.
- */
-static int amdgpu_vcn_reset_engine(struct amdgpu_device *adev,
-				   uint32_t instance_id)
+static struct amdgpu_fence *
+amdgpu_vcn_ring_reset_begin_helper(struct amdgpu_ring *ring,
+				   struct amdgpu_ring *guilty_ring,
+				   struct amdgpu_fence *timedout_fence)
 {
-	struct amdgpu_vcn_inst *vinst = &adev->vcn.inst[instance_id];
-	int r, i;
+	struct amdgpu_fence *fence;
 
-	mutex_lock(&vinst->engine_reset_mutex);
-	/* Stop the scheduler's work queue for the dec and enc rings if they are running.
-	 * This ensures that no new tasks are submitted to the queues while
-	 * the reset is in progress.
-	 */
-	drm_sched_wqueue_stop(&vinst->ring_dec.sched);
-	for (i = 0; i < vinst->num_enc_rings; i++)
-		drm_sched_wqueue_stop(&vinst->ring_enc[i].sched);
+	drm_sched_wqueue_stop(&ring->sched);
+	if (ring == guilty_ring)
+		fence = timedout_fence;
+	else
+		fence = amdgpu_ring_find_guilty_fence(ring);
+	amdgpu_ring_reset_helper_begin(ring, fence);
 
-	/* Perform the VCN reset for the specified instance */
-	r = vinst->reset(vinst);
+	return fence;
+}
+
+static int
+amdgpu_vcn_ring_reset_end_helper(struct amdgpu_ring *ring,
+				 struct amdgpu_fence *fence)
+{
+	int r;
+
+	r = amdgpu_ring_reset_helper_end(ring, fence);
 	if (r)
-		goto unlock;
-	r = amdgpu_ring_test_ring(&vinst->ring_dec);
-	if (r)
-		goto unlock;
-	for (i = 0; i < vinst->num_enc_rings; i++) {
-		r = amdgpu_ring_test_ring(&vinst->ring_enc[i]);
-		if (r)
-			goto unlock;
-	}
-	amdgpu_fence_driver_force_completion(&vinst->ring_dec);
-	for (i = 0; i < vinst->num_enc_rings; i++)
-		amdgpu_fence_driver_force_completion(&vinst->ring_enc[i]);
+		return r;
 
-	/* Restart the scheduler's work queue for the dec and enc rings
-	 * if they were stopped by this function. This allows new tasks
-	 * to be submitted to the queues after the reset is complete.
-	 */
-	drm_sched_wqueue_start(&vinst->ring_dec.sched);
-	for (i = 0; i < vinst->num_enc_rings; i++)
-		drm_sched_wqueue_start(&vinst->ring_enc[i].sched);
-
-unlock:
-	mutex_unlock(&vinst->engine_reset_mutex);
-
-	return r;
+	drm_sched_wqueue_start(&ring->sched);
+	return 0;
 }
 
 /**
@@ -1546,18 +1568,45 @@ int amdgpu_vcn_ring_reset(struct amdgpu_ring *ring,
 			  struct amdgpu_fence *timedout_fence)
 {
 	struct amdgpu_device *adev = ring->adev;
+	struct amdgpu_vcn_inst *vinst = &adev->vcn.inst[ring->me];
+	struct amdgpu_fence *dec_fence;
+	struct amdgpu_fence *enc_fence[AMDGPU_VCN_MAX_ENC_RINGS];
+	int r, i;
 
 	if (adev->vcn.inst[ring->me].using_unified_queue)
 		return -EINVAL;
 
-	return amdgpu_vcn_reset_engine(adev, ring->me);
+	mutex_lock(&vinst->engine_reset_mutex);
+	dec_fence = amdgpu_vcn_ring_reset_begin_helper(&vinst->ring_dec, ring,
+						       timedout_fence);
+	for (i = 0; i < vinst->num_enc_rings; i++)
+		enc_fence[i] = amdgpu_vcn_ring_reset_begin_helper(&vinst->ring_enc[i], ring,
+								  timedout_fence);
+
+	/* Perform the VCN reset for the specified instance */
+	r = vinst->reset(vinst);
+	if (r)
+		goto unlock;
+
+	r = amdgpu_vcn_ring_reset_end_helper(&vinst->ring_dec, dec_fence);
+	if (r)
+		goto unlock;
+	for (i = 0; i < vinst->num_enc_rings; i++) {
+		r = amdgpu_vcn_ring_reset_end_helper(&vinst->ring_enc[i], enc_fence[i]);
+		if (r)
+			goto unlock;
+	}
+unlock:
+	mutex_unlock(&vinst->engine_reset_mutex);
+
+	return r;
 }
 
 int amdgpu_vcn_reg_dump_init(struct amdgpu_device *adev,
 			     const struct amdgpu_hwip_reg_entry *reg, u32 count)
 {
-	adev->vcn.ip_dump = kcalloc(adev->vcn.num_vcn_inst * count,
-				     sizeof(uint32_t), GFP_KERNEL);
+	adev->vcn.ip_dump = kzalloc_objs(*adev->vcn.ip_dump,
+					 adev->vcn.num_vcn_inst * count);
 	if (!adev->vcn.ip_dump)
 		return -ENOMEM;
 	adev->vcn.reg_list = reg;

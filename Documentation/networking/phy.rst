@@ -511,45 +511,28 @@ Board Fixups
 Sometimes the specific interaction between the platform and the PHY requires
 special handling.  For instance, to change where the PHY's clock input is,
 or to add a delay to account for latency issues in the data path.  In order
-to support such contingencies, the PHY Layer allows platform code to register
-fixups to be run when the PHY is brought up (or subsequently reset).
+to support such contingencies, the PHY Layer allows platform init code to
+register fixups to be run when the PHY is brought up (or subsequently reset).
+
+Note: This is legacy functionality and not supposed to be used in new code.
+      Fixup's should be handled in the PHY driver.
 
 When the PHY Layer brings up a PHY it checks to see if there are any fixups
 registered for it, matching based on UID (contained in the PHY device's phy_id
 field) and the bus identifier (contained in phydev->dev.bus_id).  Both must
-match, however two constants, PHY_ANY_ID and PHY_ANY_UID, are provided as
-wildcards for the bus ID and UID, respectively.
+match, however NULL for the bus identifier and 0 for phy_uid_mask can be
+used to disable the respective type of matching.
 
 When a match is found, the PHY layer will invoke the run function associated
 with the fixup.  This function is passed a pointer to the phy_device of
-interest.  It should therefore only operate on that PHY.
+interest. It should therefore only operate on that PHY.
 
-The platform code can either register the fixup using phy_register_fixup()::
+The platform code can register the fixup using one of::
 
-	int phy_register_fixup(const char *phy_id,
-		u32 phy_uid, u32 phy_uid_mask,
+ void __init phy_register_fixup_for_uid(u32 phy_uid, u32 phy_uid_mask,
 		int (*run)(struct phy_device *));
-
-Or using one of the two stubs, phy_register_fixup_for_uid() and
-phy_register_fixup_for_id()::
-
- int phy_register_fixup_for_uid(u32 phy_uid, u32 phy_uid_mask,
+ void __init phy_register_fixup_for_id(const char *phy_id,
 		int (*run)(struct phy_device *));
- int phy_register_fixup_for_id(const char *phy_id,
-		int (*run)(struct phy_device *));
-
-The stubs set one of the two matching criteria, and set the other one to
-match anything.
-
-When phy_register_fixup() or \*_for_uid()/\*_for_id() is called at module load
-time, the module needs to unregister the fixup and free allocated memory when
-it's unloaded.
-
-Call one of following function before unloading module::
-
- int phy_unregister_fixup(const char *phy_id, u32 phy_uid, u32 phy_uid_mask);
- int phy_unregister_fixup_for_uid(u32 phy_uid, u32 phy_uid_mask);
- int phy_register_fixup_for_id(const char *phy_id);
 
 Standards
 =========

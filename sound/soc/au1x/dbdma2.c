@@ -319,16 +319,14 @@ static const struct snd_soc_component_driver au1xpsc_soc_component = {
 	.prepare	= au1xpsc_pcm_prepare,
 	.trigger	= au1xpsc_pcm_trigger,
 	.pointer	= au1xpsc_pcm_pointer,
-	.pcm_construct	= au1xpsc_pcm_new,
+	.pcm_new	= au1xpsc_pcm_new,
 };
 
 static int au1xpsc_pcm_drvprobe(struct platform_device *pdev)
 {
 	struct au1xpsc_audio_dmadata *dmadata;
 
-	dmadata = devm_kcalloc(&pdev->dev,
-			       2, sizeof(struct au1xpsc_audio_dmadata),
-			       GFP_KERNEL);
+	dmadata = devm_kzalloc_objs(&pdev->dev, struct au1xpsc_audio_dmadata, 2);
 	if (!dmadata)
 		return -ENOMEM;
 

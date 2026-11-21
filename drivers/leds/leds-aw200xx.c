@@ -13,7 +13,6 @@
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/leds.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/regmap.h>
@@ -553,8 +552,7 @@ static int aw200xx_probe(struct i2c_client *client)
 		return dev_err_probe(&client->dev, -EINVAL,
 				     "Incorrect number of leds (%d)", count);
 
-	chip = devm_kzalloc(&client->dev, struct_size(chip, leds, count),
-			    GFP_KERNEL);
+	chip = devm_kzalloc_flex(&client->dev, *chip, leds, count);
 	if (!chip)
 		return -ENOMEM;
 
@@ -637,11 +635,11 @@ static const struct aw200xx_chipdef aw20108_cdef = {
 };
 
 static const struct i2c_device_id aw200xx_id[] = {
-	{ "aw20036" },
-	{ "aw20054" },
-	{ "aw20072" },
-	{ "aw20108" },
-	{}
+	{ .name = "aw20036" },
+	{ .name = "aw20054" },
+	{ .name = "aw20072" },
+	{ .name = "aw20108" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, aw200xx_id);
 

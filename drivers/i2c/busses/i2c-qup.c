@@ -1657,10 +1657,21 @@ static const struct i2c_adapter_quirks qup_i2c_quirks_v2 = {
 	.flags = I2C_AQ_NO_ZERO_LEN,
 };
 
-static void qup_i2c_enable_clocks(struct qup_i2c_dev *qup)
+static int qup_i2c_enable_clocks(struct qup_i2c_dev *qup)
 {
-	clk_prepare_enable(qup->clk);
-	clk_prepare_enable(qup->pclk);
+	int ret;
+
+	ret = clk_prepare_enable(qup->clk);
+	if (ret)
+		return ret;
+
+	ret = clk_prepare_enable(qup->pclk);
+	if (ret) {
+		clk_disable_unprepare(qup->clk);
+		return ret;
+	}
+
+	return 0;
 }
 
 static void qup_i2c_disable_clocks(struct qup_i2c_dev *qup)
@@ -1677,7 +1688,7 @@ static void qup_i2c_disable_clocks(struct qup_i2c_dev *qup)
 }
 
 static const struct acpi_device_id qup_i2c_acpi_match[] = {
-	{ "QCOM8010"},
+	{ .id = "QCOM8010" },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, qup_i2c_acpi_match);
@@ -1694,7 +1705,7 @@ static int qup_i2c_probe(struct platform_device *pdev)
 	int blocks;
 	bool is_qup_v1;
 
-	qup = devm_kzalloc(&pdev->dev, sizeof(*qup), GFP_KERNEL);
+	qup = devm_kzalloc_obj(&pdev->dev, *qup);
 	if (!qup)
 		return -ENOMEM;
 
@@ -1733,18 +1744,16 @@ static int qup_i2c_probe(struct platform_device *pdev)
 
 		qup->max_xfer_sg_len = (MX_BLOCKS << 1);
 		blocks = (MX_DMA_BLOCKS << 1) + 1;
-		qup->btx.sg = devm_kcalloc(&pdev->dev,
-					   blocks, sizeof(*qup->btx.sg),
-					   GFP_KERNEL);
+		qup->btx.sg = devm_kzalloc_objs(&pdev->dev, *qup->btx.sg,
+						blocks);
 		if (!qup->btx.sg) {
 			ret = -ENOMEM;
 			goto fail_dma;
 		}
 		sg_init_table(qup->btx.sg, blocks);
 
-		qup->brx.sg = devm_kcalloc(&pdev->dev,
-					   blocks, sizeof(*qup->brx.sg),
-					   GFP_KERNEL);
+		qup->brx.sg = devm_kzalloc_objs(&pdev->dev, *qup->brx.sg,
+						blocks);
 		if (!qup->brx.sg) {
 			ret = -ENOMEM;
 			goto fail_dma;
@@ -1823,7 +1832,9 @@ nodma:
 			ret = PTR_ERR(qup->pclk);
 			goto fail_dma;
 		}
-		qup_i2c_enable_clocks(qup);
+		ret = qup_i2c_enable_clocks(qup);
+		if (ret)
+			goto fail_dma;
 		src_clk_freq = clk_get_rate(qup->clk);
 	}
 	qup->src_clk_freq = src_clk_freq;
@@ -1975,8 +1986,7 @@ static int qup_i2c_pm_resume_runtime(struct device *device)
 	struct qup_i2c_dev *qup = dev_get_drvdata(device);
 
 	dev_dbg(device, "pm_runtime: resuming...\n");
-	qup_i2c_enable_clocks(qup);
-	return 0;
+	return qup_i2c_enable_clocks(qup);
 }
 
 static int qup_i2c_suspend(struct device *device)
@@ -1988,7 +1998,12 @@ static int qup_i2c_suspend(struct device *device)
 
 static int qup_i2c_resume(struct device *device)
 {
-	qup_i2c_pm_resume_runtime(device);
+	int ret;
+
+	ret = qup_i2c_pm_resume_runtime(device);
+	if (ret)
+		return ret;
+
 	pm_request_autosuspend(device);
 	return 0;
 }

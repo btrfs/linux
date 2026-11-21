@@ -91,9 +91,11 @@ static const struct ata_port_info acard_ahci_port_info[] = {
 };
 
 static const struct pci_device_id acard_ahci_pci_tbl[] = {
-	/* ACard */
-	{ PCI_VDEVICE(ARTOP, 0x000d), board_acard_ahci }, /* ATP8620 */
-
+	{
+		/* ACard ATP8620 */
+		PCI_VDEVICE(ARTOP, 0x000d),
+		.driver_data = board_acard_ahci,
+	},
 	{ }    /* terminate list */
 };
 
@@ -279,7 +281,7 @@ static int acard_ahci_port_start(struct ata_port *ap)
 	dma_addr_t mem_dma;
 	size_t dma_sz, rx_fis_sz;
 
-	pp = devm_kzalloc(dev, sizeof(*pp), GFP_KERNEL);
+	pp = devm_kzalloc_obj(dev, *pp);
 	if (!pp)
 		return -ENOMEM;
 
@@ -376,7 +378,7 @@ static int acard_ahci_init_one(struct pci_dev *pdev, const struct pci_device_id 
 	if (rc)
 		return rc;
 
-	hpriv = devm_kzalloc(dev, sizeof(*hpriv), GFP_KERNEL);
+	hpriv = devm_kzalloc_obj(dev, *hpriv);
 	if (!hpriv)
 		return -ENOMEM;
 

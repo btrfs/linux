@@ -2467,7 +2467,7 @@ static int dme1737_i2c_probe(struct i2c_client *client)
 	struct device *dev = &client->dev;
 	int err;
 
-	data = devm_kzalloc(dev, sizeof(struct dme1737_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct dme1737_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -2515,8 +2515,8 @@ static void dme1737_i2c_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id dme1737_id[] = {
-	{ "dme1737", dme1737 },
-	{ "sch5027", sch5027 },
+	{ .name = "dme1737", .driver_data = dme1737 },
+	{ .name = "sch5027", .driver_data = sch5027 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, dme1737_id);
@@ -2636,7 +2636,7 @@ static int dme1737_isa_probe(struct platform_device *pdev)
 		return -EBUSY;
 	}
 
-	data = devm_kzalloc(dev, sizeof(struct dme1737_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct dme1737_data);
 	if (!data)
 		return -ENOMEM;
 

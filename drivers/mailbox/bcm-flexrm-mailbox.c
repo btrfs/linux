@@ -26,7 +26,6 @@
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/mailbox_controller.h>
-#include <linux/mailbox_client.h>
 #include <linux/mailbox/brcm-message.h>
 #include <linux/module.h>
 #include <linux/msi.h>
@@ -1173,14 +1172,6 @@ static int flexrm_debugfs_stats_show(struct seq_file *file, void *offset)
 
 /* ====== FlexRM interrupt handler ===== */
 
-static irqreturn_t flexrm_irq_event(int irq, void *dev_id)
-{
-	/* We only have MSI for completions so just wakeup IRQ thread */
-	/* Ring related errors will be informed via completion descriptors */
-
-	return IRQ_WAKE_THREAD;
-}
-
 static irqreturn_t flexrm_irq_thread(int irq, void *dev_id)
 {
 	flexrm_process_completions(dev_id);
@@ -1271,10 +1262,8 @@ static int flexrm_startup(struct mbox_chan *chan)
 		ret = -ENODEV;
 		goto fail_free_cmpl_memory;
 	}
-	ret = request_threaded_irq(ring->irq,
-				   flexrm_irq_event,
-				   flexrm_irq_thread,
-				   0, dev_name(ring->mbox->dev), ring);
+	ret = request_threaded_irq(ring->irq, NULL, flexrm_irq_thread,
+				   IRQF_ONESHOT, dev_name(ring->mbox->dev), ring);
 	if (ret) {
 		dev_err(ring->mbox->dev,
 			"failed to request ring%d IRQ\n", ring->num);
@@ -1493,7 +1482,7 @@ static int flexrm_mbox_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 
 	/* Allocate driver mailbox struct */
-	mbox = devm_kzalloc(dev, sizeof(*mbox), GFP_KERNEL);
+	mbox = devm_kzalloc_obj(dev, *mbox);
 	if (!mbox) {
 		ret = -ENOMEM;
 		goto fail;
@@ -1524,7 +1513,7 @@ static int flexrm_mbox_probe(struct platform_device *pdev)
 	}
 
 	/* Allocate driver ring structs */
-	ring = devm_kcalloc(dev, mbox->num_rings, sizeof(*ring), GFP_KERNEL);
+	ring = devm_kzalloc_objs(dev, *ring, mbox->num_rings);
 	if (!ring) {
 		ret = -ENOMEM;
 		goto fail;
@@ -1620,8 +1609,8 @@ skip_debugfs:
 	mbox->controller.dev = dev;
 	mbox->controller.num_chans = mbox->num_rings;
 	mbox->controller.of_xlate = flexrm_mbox_of_xlate;
-	mbox->controller.chans = devm_kcalloc(dev, mbox->num_rings,
-				sizeof(*mbox->controller.chans), GFP_KERNEL);
+	mbox->controller.chans = devm_kzalloc_objs(dev, *mbox->controller.chans,
+						   mbox->num_rings);
 	if (!mbox->controller.chans) {
 		ret = -ENOMEM;
 		goto fail_free_debugfs_root;

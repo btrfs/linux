@@ -49,12 +49,13 @@ static int snd_timer_user_info_compat(struct file *file,
 {
 	struct snd_timer_user *tu;
 	struct snd_timer_info32 info;
-	struct snd_timer *t;
 
 	tu = file->private_data;
 	if (!tu->timeri)
 		return -EBADFD;
-	t = tu->timeri->timer;
+
+	struct snd_timer *t __free(snd_timeri_timer) =
+		snd_timeri_timer_get(tu->timeri);
 	if (!t)
 		return -EBADFD;
 	memset(&info, 0, sizeof(info));
@@ -98,6 +99,7 @@ static long __snd_timer_user_ioctl_compat(struct file *file, unsigned int cmd,
 	case SNDRV_TIMER_IOCTL_PAUSE:
 	case SNDRV_TIMER_IOCTL_PAUSE_OLD:
 	case SNDRV_TIMER_IOCTL_NEXT_DEVICE:
+	case SNDRV_TIMER_IOCTL_CREATE:
 		return __snd_timer_user_ioctl(file, cmd, (unsigned long)argp, true);
 	case SNDRV_TIMER_IOCTL_GPARAMS32:
 		return snd_timer_user_gparams_compat(file, argp);

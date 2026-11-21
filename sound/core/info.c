@@ -78,8 +78,8 @@ static int alloc_info_private(struct snd_info_entry *entry,
 	if (!entry || !entry->p)
 		return -ENODEV;
 	if (!try_module_get(entry->module))
-		return -EFAULT;
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+		return -ENODEV;
+	data = kzalloc_obj(*data);
 	if (!data) {
 		module_put(entry->module);
 		return -ENOMEM;
@@ -311,7 +311,7 @@ static ssize_t snd_info_text_entry_write(struct file *file,
 	guard(mutex)(&entry->access);
 	buf = data->wbuffer;
 	if (!buf) {
-		data->wbuffer = buf = kzalloc(sizeof(*buf), GFP_KERNEL);
+		data->wbuffer = buf = kzalloc_obj(*buf);
 		if (!buf)
 			return -ENOMEM;
 	}
@@ -355,7 +355,7 @@ static int snd_info_text_entry_open(struct inode *inode, struct file *file)
 	if (err < 0)
 		return err;
 
-	data->rbuffer = kzalloc(sizeof(*data->rbuffer), GFP_KERNEL);
+	data->rbuffer = kzalloc_obj(*data->rbuffer);
 	if (!data->rbuffer) {
 		err = -ENOMEM;
 		goto error;
@@ -528,6 +528,8 @@ int snd_info_card_register(struct snd_card *card)
 void snd_info_card_id_change(struct snd_card *card)
 {
 	guard(mutex)(&info_mutex);
+	if (card->shutdown)
+		return;
 	if (card->proc_root_link) {
 		proc_remove(card->proc_root_link);
 		card->proc_root_link = NULL;
@@ -555,7 +557,6 @@ void snd_info_card_disconnect(struct snd_card *card)
 	if (card->proc_root)
 		snd_info_clear_entries(card->proc_root);
 	card->proc_root_link = NULL;
-	card->proc_root = NULL;
 }
 
 /*
@@ -663,7 +664,7 @@ snd_info_create_entry(const char *name, struct snd_info_entry *parent,
 		      struct module *module)
 {
 	struct snd_info_entry *entry;
-	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	entry = kzalloc_obj(*entry);
 	if (entry == NULL)
 		return NULL;
 	entry->name = kstrdup(name, GFP_KERNEL);
@@ -737,6 +738,23 @@ static void snd_info_clear_entries(struct snd_info_entry *entry)
 }
 
 /**
+ * snd_info_disconnect_entry - remove proc nodes and drain their callbacks
+ * @entry: root of the info entry subtree
+ *
+ * Retains the info entries for snd_info_free_entry().  Callers must serialize
+ * registration and destruction, and must not hold locks needed by callbacks.
+ */
+void snd_info_disconnect_entry(struct snd_info_entry *entry)
+{
+	if (entry && entry->p) {
+		proc_remove(entry->p);
+		guard(mutex)(&info_mutex);
+		snd_info_clear_entries(entry);
+	}
+}
+EXPORT_SYMBOL(snd_info_disconnect_entry);
+
+/**
  * snd_info_free_entry - release the info entry
  * @entry: the info entry
  *
@@ -748,11 +766,7 @@ void snd_info_free_entry(struct snd_info_entry * entry)
 
 	if (!entry)
 		return;
-	if (entry->p) {
-		proc_remove(entry->p);
-		guard(mutex)(&info_mutex);
-		snd_info_clear_entries(entry);
-	}
+	snd_info_disconnect_entry(entry);
 
 	/* free all children at first */
 	list_for_each_entry_safe(p, n, &entry->children, list)

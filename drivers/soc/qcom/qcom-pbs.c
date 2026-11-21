@@ -173,6 +173,8 @@ struct pbs_dev *get_pbs_client_device(struct device *dev)
 		return ERR_PTR(-EINVAL);
 	}
 
+	platform_device_put(pdev);
+
 	return pbs;
 }
 EXPORT_SYMBOL_GPL(get_pbs_client_device);
@@ -183,7 +185,7 @@ static int qcom_pbs_probe(struct platform_device *pdev)
 	u32 val;
 	int ret;
 
-	pbs = devm_kzalloc(&pdev->dev, sizeof(*pbs), GFP_KERNEL);
+	pbs = devm_kzalloc_obj(&pdev->dev, *pbs);
 	if (!pbs)
 		return -ENOMEM;
 

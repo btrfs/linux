@@ -403,7 +403,7 @@ static int pyra_init_specials(struct hid_device *hdev)
 	if (intf->cur_altsetting->desc.bInterfaceProtocol
 			== USB_INTERFACE_PROTOCOL_MOUSE) {
 
-		pyra = kzalloc(sizeof(*pyra), GFP_KERNEL);
+		pyra = kzalloc_obj(*pyra);
 		if (!pyra) {
 			hid_err(hdev, "can't alloc device descriptor\n");
 			return -ENOMEM;
@@ -555,6 +555,9 @@ static int pyra_raw_event(struct hid_device *hdev, struct hid_report *report,
 		return 0;
 
 	if (pyra == NULL)
+		return 0;
+
+	if (size < sizeof(struct pyra_mouse_event_button))
 		return 0;
 
 	pyra_keep_values_up_to_date(pyra, data);
