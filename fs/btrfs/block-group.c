@@ -2098,10 +2098,16 @@ void btrfs_reclaim_block_groups(struct btrfs_fs_info *fs_info, unsigned int limi
 	if (!btrfs_should_reclaim(fs_info))
 		return;
 
-	guard(super_write)(fs_info->sb);
+	/*
+	 * Skip the reclaim while the filesystem is frozen or being frozen.
+	 * RECLAIM_ZONES calls this for a space ticket, and a writer waiting
+	 * on the ticket holds off the freeze, which holds off sb_start_write().
+	 */
+	if (!sb_start_write_trylock(fs_info->sb))
+		return;
 
 	if (!btrfs_exclop_start(fs_info, BTRFS_EXCLOP_BALANCE))
-		return;
+		goto out;
 
 	/*
 	 * Long running balances can keep us blocked here for eternity, so
@@ -2109,7 +2115,7 @@ void btrfs_reclaim_block_groups(struct btrfs_fs_info *fs_info, unsigned int limi
 	 */
 	if (!mutex_trylock(&fs_info->reclaim_bgs_lock)) {
 		btrfs_exclop_finish(fs_info);
-		return;
+		goto out;
 	}
 
 	spin_lock(&fs_info->unused_bgs_lock);
@@ -2159,6 +2165,8 @@ end:
 	list_splice_tail(&retry_list, &fs_info->reclaim_bgs);
 	spin_unlock(&fs_info->unused_bgs_lock);
 	btrfs_exclop_finish(fs_info);
+out:
+	sb_end_write(fs_info->sb);
 }
 
 void btrfs_reclaim_bgs_work(struct work_struct *work)
