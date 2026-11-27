@@ -311,6 +311,12 @@ struct platform_device;
 	.info = snd_soc_info_bool_ext, \
 	.get = xhandler_get, .put = xhandler_put, \
 	.private_value = xdata }
+#define SOC_SINGLE_BOOL_EXT_ACC(xname, xdata, xhandler_get, xhandler_put, xaccess) \
+{	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = xname, \
+	.access = xaccess, \
+	.info = snd_soc_info_bool_ext, \
+	.get = xhandler_get, .put = xhandler_put, \
+	.private_value = xdata }
 #define SOC_ENUM_EXT(xname, xenum, xhandler_get, xhandler_put) \
 {	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = xname, \
 	.info = snd_soc_info_enum_double, \
@@ -318,6 +324,13 @@ struct platform_device;
 	.private_value = (unsigned long)&xenum }
 #define SOC_VALUE_ENUM_EXT(xname, xenum, xhandler_get, xhandler_put) \
 	SOC_ENUM_EXT(xname, xenum, xhandler_get, xhandler_put)
+
+#define SOC_ENUM_EXT_ACC(xname, xenum, xhandler_get, xhandler_put, xaccess) \
+{	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = xname, \
+	.access = xaccess, \
+	.info = snd_soc_info_enum_double, \
+	.get = xhandler_get, .put = xhandler_put, \
+	.private_value = (unsigned long)&xenum }
 
 #define SND_SOC_BYTES(xname, xbase, xregs)		      \
 {	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = xname,   \
@@ -327,6 +340,13 @@ struct platform_device;
 		{.base = xbase, .num_regs = xregs }) }
 #define SND_SOC_BYTES_E(xname, xbase, xregs, xhandler_get, xhandler_put) \
 {	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = xname, \
+	.info = snd_soc_bytes_info, .get = xhandler_get, \
+	.put = xhandler_put, .private_value = \
+		((unsigned long)&(struct soc_bytes) \
+		{.base = xbase, .num_regs = xregs }) }
+#define SND_SOC_BYTES_E_ACC(xname, xbase, xregs, xhandler_get, xhandler_put, xaccess) \
+{	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = xname, \
+	.access = xaccess, \
 	.info = snd_soc_bytes_info, .get = xhandler_get, \
 	.put = xhandler_put, .private_value = \
 		((unsigned long)&(struct soc_bytes) \
@@ -408,15 +428,10 @@ struct snd_soc_jack_pin;
 #include <sound/soc-dpcm.h>
 #include <sound/soc-topology.h>
 
-enum snd_soc_pcm_subclass {
-	SND_SOC_PCM_CLASS_PCM	= 0,
-	SND_SOC_PCM_CLASS_BE	= 1,
-};
-
 int snd_soc_register_card(struct snd_soc_card *card);
 void snd_soc_unregister_card(struct snd_soc_card *card);
 int devm_snd_soc_register_card(struct device *dev, struct snd_soc_card *card);
-int devm_snd_soc_register_deferrable_card(struct device *dev, struct snd_soc_card *card);
+#define devm_snd_soc_register_deferrable_card(d, c) devm_snd_soc_register_card(d, c)
 #ifdef CONFIG_PM_SLEEP
 int snd_soc_suspend(struct device *dev);
 int snd_soc_resume(struct device *dev);
@@ -432,25 +447,16 @@ static inline int snd_soc_resume(struct device *dev)
 }
 #endif
 int snd_soc_poweroff(struct device *dev);
-int snd_soc_component_initialize(struct snd_soc_component *component,
-				 const struct snd_soc_component_driver *driver,
-				 struct device *dev);
-int snd_soc_add_component(struct snd_soc_component *component,
-			  struct snd_soc_dai_driver *dai_drv,
-			  int num_dai);
 int snd_soc_register_component(struct device *dev,
-			 const struct snd_soc_component_driver *component_driver,
-			 struct snd_soc_dai_driver *dai_drv, int num_dai);
+			       const struct snd_soc_component_driver *component_driver,
+			       struct snd_soc_dai_driver *dai_drv, int num_dai);
+
 int devm_snd_soc_register_component(struct device *dev,
 			 const struct snd_soc_component_driver *component_driver,
 			 struct snd_soc_dai_driver *dai_drv, int num_dai);
 #define snd_soc_unregister_component(dev) snd_soc_unregister_component_by_driver(dev, NULL)
 void snd_soc_unregister_component_by_driver(struct device *dev,
 			 const struct snd_soc_component_driver *component_driver);
-struct snd_soc_component *snd_soc_lookup_component_nolocked(struct device *dev,
-							    const char *driver_name);
-struct snd_soc_component *snd_soc_lookup_component(struct device *dev,
-						   const char *driver_name);
 
 int soc_new_pcm(struct snd_soc_pcm_runtime *rtd);
 #ifdef CONFIG_SND_SOC_COMPRESS
@@ -534,11 +540,7 @@ static inline int snd_soc_set_ac97_ops(struct snd_ac97_bus_ops *ops)
 struct snd_kcontrol *snd_soc_cnew(const struct snd_kcontrol_new *_template,
 				  void *data, const char *long_name,
 				  const char *prefix);
-int snd_soc_add_component_controls(struct snd_soc_component *component,
-	const struct snd_kcontrol_new *controls, unsigned int num_controls);
 int snd_soc_add_card_controls(struct snd_soc_card *soc_card,
-	const struct snd_kcontrol_new *controls, int num_controls);
-int snd_soc_add_dai_controls(struct snd_soc_dai *dai,
 	const struct snd_kcontrol_new *controls, int num_controls);
 int snd_soc_info_enum_double(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_info *uinfo);
@@ -682,7 +684,8 @@ struct snd_soc_dai_link_component {
 struct snd_soc_dai_link_ch_map {
 	unsigned int cpu;
 	unsigned int codec;
-	unsigned int ch_mask;
+	unsigned int cpu_ch_mask;
+	unsigned int codec_ch_mask;
 };
 
 struct snd_soc_dai_link {
@@ -960,9 +963,6 @@ struct snd_soc_card {
 	const char *long_name;
 	const char *driver_name;
 	const char *components;
-#ifdef CONFIG_DMI
-	char dmi_longname[80];
-#endif /* CONFIG_DMI */
 
 #ifdef CONFIG_PCI
 	/*
@@ -974,7 +974,7 @@ struct snd_soc_card {
 	bool pci_subsystem_set;
 #endif /* CONFIG_PCI */
 
-	char topology_shortname[32];
+	char *topology_shortname;
 
 	struct device *dev;
 	struct snd_card *snd_card;
@@ -985,7 +985,6 @@ struct snd_soc_card {
 
 	/* Mutex for PCM operations */
 	struct mutex pcm_mutex;
-	enum snd_soc_pcm_subclass pcm_subclass;
 
 	int (*probe)(struct snd_soc_card *card);
 	int (*late_probe)(struct snd_soc_card *card);
@@ -1011,8 +1010,6 @@ struct snd_soc_card {
 			    struct snd_soc_dai_link *link);
 	void (*remove_dai_link)(struct snd_soc_card *,
 			    struct snd_soc_dai_link *link);
-
-	long pmdown_time;
 
 	/* CPU <--> Codec DAI links  */
 	struct snd_soc_dai_link *dai_link;  /* predefined links only */
@@ -1044,10 +1041,14 @@ struct snd_soc_card {
 	int num_dapm_widgets;
 	const struct snd_soc_dapm_route *dapm_routes;
 	int num_dapm_routes;
+	const char **ignore_suspend_widgets;
+	int num_ignore_suspend_widgets;
 	const struct snd_soc_dapm_widget *of_dapm_widgets;
 	int num_of_dapm_widgets;
 	const struct snd_soc_dapm_route *of_dapm_routes;
 	int num_of_dapm_routes;
+	const char **of_ignore_suspend_widgets;
+	int num_of_ignore_suspend_widgets;
 
 	/* lists of probed devices belonging to this card */
 	struct list_head component_dev_list;
@@ -1058,11 +1059,8 @@ struct snd_soc_card {
 	struct list_head dapm_list;
 	struct list_head dapm_dirty;
 
-	/* attached dynamic objects */
-	struct list_head dobj_list;
-
 	/* Generic DAPM context for the card */
-	struct snd_soc_dapm_context dapm;
+	struct snd_soc_dapm_context *dapm;
 	struct snd_soc_dapm_stats dapm_stats;
 
 #ifdef CONFIG_DEBUG_FS
@@ -1071,11 +1069,8 @@ struct snd_soc_card {
 #ifdef CONFIG_PM_SLEEP
 	struct work_struct deferred_resume_work;
 #endif
-	u32 pop_time;
-
 	/* bit field */
 	unsigned int instantiated:1;
-	unsigned int topology_shortname_created:1;
 	unsigned int fully_routed:1;
 	unsigned int probed:1;
 	unsigned int component_chaining:1;
@@ -1122,7 +1117,7 @@ static inline int snd_soc_card_is_instantiated(struct snd_soc_card *card)
 
 static inline struct snd_soc_dapm_context *snd_soc_card_to_dapm(struct snd_soc_card *card)
 {
-	return &card->dapm;
+	return card->dapm;
 }
 
 /* SoC machine DAI configuration, glues a codec and cpu DAI together */
@@ -1305,22 +1300,6 @@ static inline unsigned int snd_soc_enum_item_to_val(const struct soc_enum *e,
 	return e->values[item];
 }
 
-/**
- * snd_soc_kcontrol_component() - Returns the component that registered the
- *  control
- * @kcontrol: The control for which to get the component
- *
- * Note: This function will work correctly if the control has been registered
- * for a component. With snd_soc_add_codec_controls() or via table based
- * setup for either a CODEC or component driver. Otherwise the behavior is
- * undefined.
- */
-static inline struct snd_soc_component *snd_soc_kcontrol_component(
-	struct snd_kcontrol *kcontrol)
-{
-	return snd_kcontrol_chip(kcontrol);
-}
-
 int snd_soc_util_init(void);
 void snd_soc_util_exit(void);
 
@@ -1337,23 +1316,18 @@ int snd_soc_of_parse_tdm_slot(struct device_node *np,
 			      unsigned int *rx_mask,
 			      unsigned int *slots,
 			      unsigned int *slot_width);
+int snd_soc_of_xlate_dai_name(struct snd_soc_component *component,
+			      const struct of_phandle_args *args,
+			      const char **dai_name);
 void snd_soc_of_parse_node_prefix(struct device_node *np,
 				   struct snd_soc_codec_conf *codec_conf,
 				   struct device_node *of_node,
 				   const char *propname);
-static inline
-void snd_soc_of_parse_audio_prefix(struct snd_soc_card *card,
-				   struct snd_soc_codec_conf *codec_conf,
-				   struct device_node *of_node,
-				   const char *propname)
-{
-	snd_soc_of_parse_node_prefix(card->dev->of_node,
-				     codec_conf, of_node, propname);
-}
 
 int snd_soc_of_parse_audio_routing(struct snd_soc_card *card,
 				   const char *propname);
 int snd_soc_of_parse_aux_devs(struct snd_soc_card *card, const char *propname);
+int snd_soc_of_parse_ignore_suspend_widgets(struct snd_soc_card *card, const char *propname);
 
 unsigned int snd_soc_daifmt_clock_provider_flipped(unsigned int dai_fmt);
 unsigned int snd_soc_daifmt_clock_provider_from_bitmap(unsigned int bit_frame);
@@ -1403,10 +1377,6 @@ void snd_soc_dlc_use_cpu_as_platform(struct snd_soc_dai_link_component *platform
 struct of_phandle_args *snd_soc_copy_dai_args(struct device *dev,
 					      const struct of_phandle_args *args);
 struct snd_soc_dai *snd_soc_get_dai_via_args(const struct of_phandle_args *dai_args);
-struct snd_soc_dai *snd_soc_register_dai(struct snd_soc_component *component,
-					 struct snd_soc_dai_driver *dai_drv,
-					 bool legacy_dai_naming);
-void snd_soc_unregister_dai(struct snd_soc_dai *dai);
 
 struct snd_soc_dai *snd_soc_find_dai(
 	const struct snd_soc_dai_link_component *dlc);
@@ -1482,22 +1452,22 @@ static inline void _snd_soc_dapm_mutex_assert_held_c(struct snd_soc_card *card)
 
 static inline void _snd_soc_dapm_mutex_lock_root_d(struct snd_soc_dapm_context *dapm)
 {
-	_snd_soc_dapm_mutex_lock_root_c(dapm->card);
+	_snd_soc_dapm_mutex_lock_root_c(snd_soc_dapm_to_card(dapm));
 }
 
 static inline void _snd_soc_dapm_mutex_lock_d(struct snd_soc_dapm_context *dapm)
 {
-	_snd_soc_dapm_mutex_lock_c(dapm->card);
+	_snd_soc_dapm_mutex_lock_c(snd_soc_dapm_to_card(dapm));
 }
 
 static inline void _snd_soc_dapm_mutex_unlock_d(struct snd_soc_dapm_context *dapm)
 {
-	_snd_soc_dapm_mutex_unlock_c(dapm->card);
+	_snd_soc_dapm_mutex_unlock_c(snd_soc_dapm_to_card(dapm));
 }
 
 static inline void _snd_soc_dapm_mutex_assert_held_d(struct snd_soc_dapm_context *dapm)
 {
-	_snd_soc_dapm_mutex_assert_held_c(dapm->card);
+	_snd_soc_dapm_mutex_assert_held_c(snd_soc_dapm_to_card(dapm));
 }
 
 #define snd_soc_dapm_mutex_lock_root(x) _Generic((x),			\
@@ -1518,7 +1488,7 @@ static inline void _snd_soc_dapm_mutex_assert_held_d(struct snd_soc_dapm_context
  */
 static inline void _snd_soc_dpcm_mutex_lock_c(struct snd_soc_card *card)
 {
-	mutex_lock_nested(&card->pcm_mutex, card->pcm_subclass);
+	mutex_lock(&card->pcm_mutex);
 }
 
 static inline void _snd_soc_dpcm_mutex_unlock_c(struct snd_soc_card *card)
@@ -1561,5 +1531,13 @@ static inline void _snd_soc_dpcm_mutex_assert_held_r(struct snd_soc_pcm_runtime 
 #include <sound/soc-component.h>
 #include <sound/soc-card.h>
 #include <sound/soc-jack.h>
+
+/*
+ * REMOVE ME
+ */
+#define snd_soc_add_dai_controls			snd_soc_dai_add_controls
+#define snd_soc_register_dai				snd_soc_dai_register
+#define snd_soc_unregister_dai				snd_soc_dai_unregister
+#define snd_soc_add_component_controls			snd_soc_component_add_controls
 
 #endif

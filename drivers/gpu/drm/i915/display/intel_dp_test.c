@@ -14,6 +14,7 @@
 #include "intel_display_regs.h"
 #include "intel_display_types.h"
 #include "intel_dp.h"
+#include "intel_dp_link_caps.h"
 #include "intel_dp_link_training.h"
 #include "intel_dp_mst.h"
 #include "intel_dp_test.h"
@@ -27,11 +28,92 @@ void intel_dp_test_reset(struct intel_dp *intel_dp)
 	memset(&intel_dp->compliance, 0, sizeof(intel_dp->compliance));
 }
 
+static bool set_filter_for_lane_count(struct intel_connector *connector,
+				      struct intel_dp_link_caps *link_caps,
+				      int lane_count,
+				      struct link_config_limits *limits)
+{
+	struct intel_dp_link_config link_config;
+	struct intel_dp_link_caps_order order =
+		intel_dp_link_caps_connector_compute_order(connector);
+	struct intel_dp_link_caps_filter new_filter = INTEL_DP_LINK_CAPS_FILTER_NONE;
+	struct intel_dp_link_caps_iter iter;
+	bool found = false;
+
+	intel_dp_link_caps_iter_start(&iter, link_caps, order, limits->link_config_filter);
+	for_each_dp_link_config(&iter, &link_config) {
+		if (link_config.lane_count != lane_count)
+			continue;
+
+		intel_dp_link_caps_filter_add(link_caps, &new_filter, &link_config);
+		found = true;
+	}
+	intel_dp_link_caps_iter_end(&iter);
+
+	if (!found)
+		return false;
+
+	limits->link_config_filter = new_filter;
+
+	return true;
+}
+
+static bool set_filter_for_link_config(struct intel_connector *connector,
+				       struct intel_dp_link_caps *link_caps,
+				       const struct intel_dp_link_config *link_params,
+				       struct link_config_limits *limits)
+{
+	struct intel_dp_link_caps_filter new_filter = INTEL_DP_LINK_CAPS_FILTER_NONE;
+
+	if (!intel_dp_link_caps_filter_add(link_caps, &new_filter, link_params))
+		return false;
+
+	limits->link_config_filter = new_filter;
+
+	return true;
+}
+
+static bool set_filter_for_link_params(struct intel_connector *connector,
+				       int link_rate, int lane_count,
+				       struct link_config_limits *limits)
+{
+	struct intel_dp *intel_dp = intel_attached_dp(connector);
+	struct intel_encoder *encoder = &dp_to_dig_port(intel_dp)->base;
+	struct intel_dp_link_caps *link_caps = intel_dp->link.caps;
+	struct intel_display *display = to_intel_display(intel_dp);
+	struct intel_dp_link_config requested_config;
+
+	requested_config.rate = link_rate;
+	requested_config.lane_count = lane_count;
+
+	if (set_filter_for_link_config(connector, link_caps, &requested_config, limits))
+		return true;
+
+	/*
+	 * Preserve the legacy behavior: if the requested (rate, lane_count)
+	 * combination is not an allowed config, fall back to all configs
+	 * matching the requested lane count.
+	 *
+	 * TODO: Recheck whether this behavior is actually correct.
+	 */
+	if (set_filter_for_lane_count(connector, link_caps, lane_count, limits))
+		return true;
+
+	drm_dbg_kms(display->drm,
+		    "[ENCODER:%d:%s] Invalid autotest link config parameters: %dx%d\n",
+		    encoder->base.base.id, encoder->base.name,
+		    requested_config.lane_count,
+		    requested_config.rate);
+
+	return false;
+}
+
 /* Adjust link config limits based on compliance test requests. */
-void intel_dp_test_compute_config(struct intel_dp *intel_dp,
+bool intel_dp_test_compute_config(struct intel_connector *connector,
 				  struct intel_crtc_state *pipe_config,
 				  struct link_config_limits *limits)
 {
+	struct intel_dp *intel_dp = intel_attached_dp(connector);
 	struct intel_display *display = to_intel_display(intel_dp);
 
 	/* For DP Compliance we override the computed bpp for the pipe */
@@ -47,24 +129,14 @@ void intel_dp_test_compute_config(struct intel_dp *intel_dp,
 
 	/* Use values requested by Compliance Test Request */
 	if (intel_dp->compliance.test_type == DP_TEST_LINK_TRAINING) {
-		int index;
-
-		/* Validate the compliance test data since max values
-		 * might have changed due to link train fallback.
-		 */
-		if (intel_dp_link_params_valid(intel_dp, intel_dp->compliance.test_link_rate,
-					       intel_dp->compliance.test_lane_count)) {
-			index = intel_dp_rate_index(intel_dp->common_rates,
-						    intel_dp->num_common_rates,
-						    intel_dp->compliance.test_link_rate);
-			if (index >= 0) {
-				limits->min_rate = intel_dp->compliance.test_link_rate;
-				limits->max_rate = intel_dp->compliance.test_link_rate;
-			}
-			limits->min_lane_count = intel_dp->compliance.test_lane_count;
-			limits->max_lane_count = intel_dp->compliance.test_lane_count;
-		}
+		if (!set_filter_for_link_params(connector,
+						intel_dp->compliance.test_link_rate,
+						intel_dp->compliance.test_lane_count,
+						limits))
+			return false;
 	}
+
+	return true;
 }
 
 /* Compliance test status bits  */
@@ -75,26 +147,25 @@ void intel_dp_test_compute_config(struct intel_dp *intel_dp,
 static u8 intel_dp_autotest_link_training(struct intel_dp *intel_dp)
 {
 	struct intel_display *display = to_intel_display(intel_dp);
-	int status = 0;
+	int ret;
 	int test_link_rate;
 	u8 test_lane_count, test_link_bw;
 	/* (DP CTS 1.2)
 	 * 4.3.1.11
 	 */
 	/* Read the TEST_LANE_COUNT and TEST_LINK_RTAE fields (DP CTS 3.1.4) */
-	status = drm_dp_dpcd_readb(&intel_dp->aux, DP_TEST_LANE_COUNT,
-				   &test_lane_count);
-
-	if (status <= 0) {
-		drm_dbg_kms(display->drm, "Lane count read failed\n");
+	ret = drm_dp_dpcd_read_byte(&intel_dp->aux, DP_TEST_LANE_COUNT,
+				    &test_lane_count);
+	if (ret < 0) {
+		drm_dbg_kms(display->drm, "Lane count read failed (%pe)\n", ERR_PTR(ret));
 		return DP_TEST_NAK;
 	}
 	test_lane_count &= DP_MAX_LANE_COUNT_MASK;
 
-	status = drm_dp_dpcd_readb(&intel_dp->aux, DP_TEST_LINK_RATE,
-				   &test_link_bw);
-	if (status <= 0) {
-		drm_dbg_kms(display->drm, "Link Rate read failed\n");
+	ret = drm_dp_dpcd_read_byte(&intel_dp->aux, DP_TEST_LINK_RATE,
+				    &test_link_bw);
+	if (ret < 0) {
+		drm_dbg_kms(display->drm, "Link Rate read failed (%pe)\n", ERR_PTR(ret));
 		return DP_TEST_NAK;
 	}
 	test_link_rate = drm_dp_bw_code_to_link_rate(test_link_bw);
@@ -116,36 +187,34 @@ static u8 intel_dp_autotest_video_pattern(struct intel_dp *intel_dp)
 	u8 test_pattern;
 	u8 test_misc;
 	__be16 h_width, v_height;
-	int status = 0;
+	int ret;
 
 	/* Read the TEST_PATTERN (DP CTS 3.1.5) */
-	status = drm_dp_dpcd_readb(&intel_dp->aux, DP_TEST_PATTERN,
-				   &test_pattern);
-	if (status <= 0) {
-		drm_dbg_kms(display->drm, "Test pattern read failed\n");
+	ret = drm_dp_dpcd_read_byte(&intel_dp->aux, DP_TEST_PATTERN,
+				    &test_pattern);
+	if (ret < 0) {
+		drm_dbg_kms(display->drm, "Test pattern read failed (%pe)\n", ERR_PTR(ret));
 		return DP_TEST_NAK;
 	}
 	if (test_pattern != DP_COLOR_RAMP)
 		return DP_TEST_NAK;
 
-	status = drm_dp_dpcd_read(&intel_dp->aux, DP_TEST_H_WIDTH_HI,
-				  &h_width, 2);
-	if (status <= 0) {
-		drm_dbg_kms(display->drm, "H Width read failed\n");
+	ret = drm_dp_dpcd_read_data(&intel_dp->aux, DP_TEST_H_WIDTH_HI, &h_width, 2);
+	if (ret < 0) {
+		drm_dbg_kms(display->drm, "H Width read failed (%pe)\n", ERR_PTR(ret));
 		return DP_TEST_NAK;
 	}
 
-	status = drm_dp_dpcd_read(&intel_dp->aux, DP_TEST_V_HEIGHT_HI,
-				  &v_height, 2);
-	if (status <= 0) {
-		drm_dbg_kms(display->drm, "V Height read failed\n");
+	ret = drm_dp_dpcd_read_data(&intel_dp->aux, DP_TEST_V_HEIGHT_HI,
+				    &v_height, 2);
+	if (ret < 0) {
+		drm_dbg_kms(display->drm, "V Height read failed (%pe)\n", ERR_PTR(ret));
 		return DP_TEST_NAK;
 	}
 
-	status = drm_dp_dpcd_readb(&intel_dp->aux, DP_TEST_MISC0,
-				   &test_misc);
-	if (status <= 0) {
-		drm_dbg_kms(display->drm, "TEST MISC read failed\n");
+	ret = drm_dp_dpcd_read_byte(&intel_dp->aux, DP_TEST_MISC0, &test_misc);
+	if (ret < 0) {
+		drm_dbg_kms(display->drm, "TEST MISC read failed (%pe)\n", ERR_PTR(ret));
 		return DP_TEST_NAK;
 	}
 	if ((test_misc & DP_TEST_COLOR_FORMAT_MASK) != DP_COLOR_FORMAT_RGB)
@@ -178,6 +247,7 @@ static u8 intel_dp_autotest_edid(struct intel_dp *intel_dp)
 	u8 test_result = DP_TEST_ACK;
 	struct intel_connector *intel_connector = intel_dp->attached_connector;
 	struct drm_connector *connector = &intel_connector->base;
+	int ret;
 
 	if (!intel_connector->detect_edid || connector->edid_corrupt ||
 	    intel_dp->aux.i2c_defer_count > 6) {
@@ -202,10 +272,11 @@ static u8 intel_dp_autotest_edid(struct intel_dp *intel_dp)
 		/* We have to write the checksum of the last block read */
 		block += block->extensions;
 
-		if (drm_dp_dpcd_writeb(&intel_dp->aux, DP_TEST_EDID_CHECKSUM,
-				       block->checksum) <= 0)
+		ret = drm_dp_dpcd_write_byte(&intel_dp->aux, DP_TEST_EDID_CHECKSUM,
+					     block->checksum);
+		if (ret < 0)
 			drm_dbg_kms(display->drm,
-				    "Failed to write EDID checksum\n");
+				    "Failed to write EDID checksum (%pe)\n", ERR_PTR(ret));
 
 		test_result = DP_TEST_ACK | DP_TEST_EDID_CHECKSUM_WRITE;
 		intel_dp->compliance.test_data.edid = INTEL_DP_RESOLUTION_PREFERRED;
@@ -325,8 +396,8 @@ static void intel_dp_process_phy_request(struct intel_dp *intel_dp,
 
 	intel_dp_phy_pattern_update(intel_dp, crtc_state);
 
-	drm_dp_dpcd_write(&intel_dp->aux, DP_TRAINING_LANE0_SET,
-			  intel_dp->train_set, crtc_state->lane_count);
+	drm_dp_dpcd_write_data(&intel_dp->aux, DP_TRAINING_LANE0_SET,
+			       intel_dp->train_set, crtc_state->lane_count);
 
 	drm_dp_set_phy_test_pattern(&intel_dp->aux, data,
 				    intel_dp->dpcd[DP_DPCD_REV]);
@@ -355,12 +426,12 @@ void intel_dp_test_request(struct intel_dp *intel_dp)
 	struct intel_display *display = to_intel_display(intel_dp);
 	u8 response = DP_TEST_NAK;
 	u8 request = 0;
-	int status;
+	int ret;
 
-	status = drm_dp_dpcd_readb(&intel_dp->aux, DP_TEST_REQUEST, &request);
-	if (status <= 0) {
+	ret = drm_dp_dpcd_read_byte(&intel_dp->aux, DP_TEST_REQUEST, &request);
+	if (ret < 0) {
 		drm_dbg_kms(display->drm,
-			    "Could not read test request from sink\n");
+			    "Could not read test request from sink (%pe)\n", ERR_PTR(ret));
 		goto update_status;
 	}
 
@@ -391,10 +462,10 @@ void intel_dp_test_request(struct intel_dp *intel_dp)
 		intel_dp->compliance.test_type = request;
 
 update_status:
-	status = drm_dp_dpcd_writeb(&intel_dp->aux, DP_TEST_RESPONSE, response);
-	if (status <= 0)
+	ret = drm_dp_dpcd_write_byte(&intel_dp->aux, DP_TEST_RESPONSE, response);
+	if (ret < 0)
 		drm_dbg_kms(display->drm,
-			    "Could not write test response to sink\n");
+			    "Could not write test response to sink (%pe)\n", ERR_PTR(ret));
 }
 
 /* phy test */
@@ -471,7 +542,7 @@ static int intel_dp_do_phy_test(struct intel_encoder *encoder,
 	drm_dbg_kms(display->drm, "[ENCODER:%d:%s] PHY test\n",
 		    encoder->base.base.id, encoder->base.name);
 
-	for_each_intel_crtc_in_pipe_mask(display->drm, crtc, pipe_mask) {
+	for_each_intel_crtc_in_pipe_mask(display, crtc, pipe_mask) {
 		const struct intel_crtc_state *crtc_state =
 			to_intel_crtc_state(crtc->base.state);
 

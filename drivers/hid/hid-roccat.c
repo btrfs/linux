@@ -40,7 +40,8 @@ struct roccat_device {
 	unsigned int minor;
 	int report_size;
 	int open;
-	int exist;
+	struct kref ref;
+	atomic_t exist;
 	wait_queue_head_t wait;
 	struct device *dev;
 	struct hid_device *hid;
@@ -70,6 +71,28 @@ static struct roccat_device *devices[ROCCAT_MAX_DEVICES];
 /* protects modifications of devices array */
 static DEFINE_MUTEX(devices_lock);
 
+static bool roccat_device_available(struct roccat_device *device)
+{
+	return atomic_read(&device->exist);
+}
+
+static void roccat_free_device(struct kref *ref)
+{
+	struct roccat_device *device;
+	int i;
+
+	WARN_ON(!mutex_is_locked(&devices_lock));
+
+	device = container_of(ref, struct roccat_device, ref);
+	for (i = 0; i < ROCCAT_CBUF_SIZE; i++)
+		kfree(device->cbuf[i].value);
+
+	devices[device->minor] = NULL;
+	mutex_destroy(&device->readers_lock);
+	mutex_destroy(&device->cbuf_lock);
+	kfree(device);
+}
+
 static ssize_t roccat_read(struct file *file, char __user *buffer,
 		size_t count, loff_t *ppos)
 {
@@ -96,7 +119,7 @@ static ssize_t roccat_read(struct file *file, char __user *buffer,
 				retval = -ERESTARTSYS;
 				break;
 			}
-			if (!device->exist) {
+			if (!roccat_device_available(device)) {
 				retval = -EIO;
 				break;
 			}
@@ -137,12 +160,18 @@ exit_unlock:
 static __poll_t roccat_poll(struct file *file, poll_table *wait)
 {
 	struct roccat_reader *reader = file->private_data;
+	bool avail;
+
 	poll_wait(file, &reader->device->wait, wait);
-	if (reader->cbuf_start != reader->device->cbuf_end)
-		return EPOLLIN | EPOLLRDNORM;
-	if (!reader->device->exist)
+
+	if (!roccat_device_available(reader->device))
 		return EPOLLERR | EPOLLHUP;
-	return 0;
+
+	mutex_lock(&reader->device->cbuf_lock);
+	avail = (reader->cbuf_start != reader->device->cbuf_end);
+	mutex_unlock(&reader->device->cbuf_lock);
+
+	return avail ? EPOLLIN | EPOLLRDNORM : 0;
 }
 
 static int roccat_open(struct inode *inode, struct file *file)
@@ -152,7 +181,7 @@ static int roccat_open(struct inode *inode, struct file *file)
 	struct roccat_device *device;
 	int error = 0;
 
-	reader = kzalloc(sizeof(struct roccat_reader), GFP_KERNEL);
+	reader = kzalloc_obj(struct roccat_reader);
 	if (!reader)
 		return -ENOMEM;
 
@@ -160,7 +189,7 @@ static int roccat_open(struct inode *inode, struct file *file)
 
 	device = devices[minor];
 
-	if (!device) {
+	if (!device || !roccat_device_available(device)) {
 		pr_emerg("roccat device with minor %d doesn't exist\n", minor);
 		error = -ENODEV;
 		goto exit_err_devices;
@@ -182,6 +211,7 @@ static int roccat_open(struct inode *inode, struct file *file)
 			--device->open;
 			goto exit_err_readers;
 		}
+		kref_get(&device->ref);
 	}
 
 	reader->device = device;
@@ -202,32 +232,26 @@ exit_err_devices:
 
 static int roccat_release(struct inode *inode, struct file *file)
 {
-	unsigned int minor = iminor(inode);
 	struct roccat_reader *reader = file->private_data;
-	struct roccat_device *device;
+	struct roccat_device *device = reader->device;
 
-	mutex_lock(&devices_lock);
-
-	device = devices[minor];
-	if (!device) {
-		mutex_unlock(&devices_lock);
-		pr_emerg("roccat device with minor %d doesn't exist\n", minor);
+	if (WARN_ON(!device))
 		return -ENODEV;
-	}
 
 	mutex_lock(&device->readers_lock);
 	list_del(&reader->node);
 	mutex_unlock(&device->readers_lock);
 	kfree(reader);
 
+	mutex_lock(&devices_lock);
+
 	if (!--device->open) {
 		/* removing last reader */
-		if (device->exist) {
+		if (roccat_device_available(device)) {
 			hid_hw_power(device->hid, PM_HINT_NORMAL);
 			hid_hw_close(device->hid);
-		} else {
-			kfree(device);
 		}
+		kref_put(&device->ref, roccat_free_device);
 	}
 
 	mutex_unlock(&devices_lock);
@@ -257,6 +281,7 @@ int roccat_report_event(int minor, u8 const *data)
 	if (!new_value)
 		return -ENOMEM;
 
+	mutex_lock(&device->readers_lock);
 	mutex_lock(&device->cbuf_lock);
 
 	report = &device->cbuf[device->cbuf_end];
@@ -279,6 +304,7 @@ int roccat_report_event(int minor, u8 const *data)
 	}
 
 	mutex_unlock(&device->cbuf_lock);
+	mutex_unlock(&device->readers_lock);
 
 	wake_up_interruptible(&device->wait);
 	return 0;
@@ -301,7 +327,7 @@ int roccat_connect(const struct class *klass, struct hid_device *hid, int report
 	struct roccat_device *device;
 	int temp;
 
-	device = kzalloc(sizeof(struct roccat_device), GFP_KERNEL);
+	device = kzalloc_obj(struct roccat_device);
 	if (!device)
 		return -ENOMEM;
 
@@ -333,18 +359,18 @@ int roccat_connect(const struct class *klass, struct hid_device *hid, int report
 		return temp;
 	}
 
-	mutex_unlock(&devices_lock);
-
 	init_waitqueue_head(&device->wait);
 	INIT_LIST_HEAD(&device->readers);
 	mutex_init(&device->readers_lock);
 	mutex_init(&device->cbuf_lock);
+	kref_init(&device->ref);
 	device->minor = minor;
 	device->hid = hid;
-	device->exist = 1;
+	atomic_set(&device->exist, 1);
 	device->cbuf_end = 0;
 	device->report_size = report_size;
 
+	mutex_unlock(&devices_lock);
 	return minor;
 }
 EXPORT_SYMBOL_GPL(roccat_connect);
@@ -358,22 +384,21 @@ void roccat_disconnect(int minor)
 
 	mutex_lock(&devices_lock);
 	device = devices[minor];
-	mutex_unlock(&devices_lock);
 
-	device->exist = 0; /* TODO exist maybe not needed */
+	if (WARN_ON(!device))
+		goto out;
 
-	device_destroy(device->dev->class, MKDEV(roccat_major, minor));
-
-	mutex_lock(&devices_lock);
-	devices[minor] = NULL;
-	mutex_unlock(&devices_lock);
+	if (!WARN_ON(!atomic_cmpxchg(&device->exist, 1, 0)))
+		device_destroy(device->dev->class, MKDEV(roccat_major, minor));
 
 	if (device->open) {
 		hid_hw_close(device->hid);
 		wake_up_interruptible(&device->wait);
-	} else {
-		kfree(device);
 	}
+
+	kref_put(&device->ref, roccat_free_device);
+out:
+	mutex_unlock(&devices_lock);
 }
 EXPORT_SYMBOL_GPL(roccat_disconnect);
 
@@ -387,7 +412,7 @@ static long roccat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	mutex_lock(&devices_lock);
 
 	device = devices[minor];
-	if (!device) {
+	if (!device || !roccat_device_available(device)) {
 		retval = -ENODEV;
 		goto out;
 	}

@@ -130,7 +130,7 @@ int of_flash_probe_gemini(struct platform_device *pdev,
 	if (!of_device_is_compatible(np, "cortina,gemini-flash"))
 		return 0;
 
-	gf = devm_kzalloc(dev, sizeof(*gf), GFP_KERNEL);
+	gf = devm_kzalloc_obj(dev, *gf);
 	if (!gf)
 		return -ENOMEM;
 	gf->dev = dev;
@@ -181,7 +181,7 @@ int of_flash_probe_gemini(struct platform_device *pdev,
 		dev_err(dev, "no enabled pin control state\n");
 
 	gf->disabled_state = pinctrl_lookup_state(gf->p, "disabled");
-	if (IS_ERR(gf->enabled_state)) {
+	if (IS_ERR(gf->disabled_state)) {
 		dev_err(dev, "no disabled pin control state\n");
 	} else {
 		ret = pinctrl_select_state(gf->p, gf->disabled_state);

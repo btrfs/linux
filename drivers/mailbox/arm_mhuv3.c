@@ -333,7 +333,7 @@ struct mhuv3_extension {
  * @rev: MHUv3 controller IIDR revision.
  * @var: MHUv3 controller IIDR variant.
  * @prod_id: MHUv3 controller IIDR product_id.
- * @num_chans: The total number of channnels discovered across all extensions.
+ * @num_chans: The total number of channels discovered across all extensions.
  * @cmb_irq: Combined IRQ number if any found defined.
  * @ctrl: A reference to the MHUv3 control page for this block.
  * @pbx: Base address of the PBX register mapping region.
@@ -606,7 +606,7 @@ static int mhuv3_dbe_channels_init(struct mhuv3 *mhu)
 		int k;
 
 		for (k = 0; k < MHUV3_FLAG_BITS; k++) {
-			priv = devm_kmalloc(mbox->dev, sizeof(*priv), GFP_KERNEL);
+			priv = devm_kmalloc_obj(mbox->dev, *priv);
 			if (!priv)
 				return -ENOMEM;
 
@@ -713,7 +713,7 @@ static int mhuv3_dbe_init(struct mhuv3 *mhu)
 
 	dev_dbg(dev, "%s: Initializing DBE Extension.\n", mhuv3_str[mhu->frame]);
 
-	e = devm_kzalloc(dev, sizeof(*e), GFP_KERNEL);
+	e = devm_kzalloc_obj(dev, *e);
 	if (!e)
 		return -ENOMEM;
 
@@ -772,8 +772,7 @@ static int mhuv3_initialize_channels(struct device *dev, struct mhuv3 *mhu)
 	struct mbox_controller *mbox = &mhu->mbox;
 	int i, ret = 0;
 
-	mbox->chans = devm_kcalloc(dev, mhu->num_chans,
-				   sizeof(*mbox->chans), GFP_KERNEL);
+	mbox->chans = devm_kzalloc_objs(dev, *mbox->chans, mhu->num_chans);
 	if (!mbox->chans)
 		return dev_err_probe(dev, -ENOMEM,
 				     "Failed to initialize channels\n");
@@ -980,10 +979,10 @@ static int mhuv3_setup_pbx(struct mhuv3 *mhu)
 
 		ret = devm_request_threaded_irq(dev, mhu->cmb_irq, NULL,
 						mhuv3_pbx_comb_interrupt,
-						IRQF_ONESHOT, "mhuv3-pbx", mhu);
+						IRQF_ONESHOT | IRQF_NO_SUSPEND,
+						"mhuv3-pbx", mhu);
 		if (ret)
-			return dev_err_probe(dev, ret,
-					     "Failed to request PBX IRQ\n");
+			return ret;
 
 		mhu->mbox.txdone_irq = true;
 		mhu->mbox.txdone_poll = false;
@@ -1017,10 +1016,11 @@ static int mhuv3_setup_mbx(struct mhuv3 *mhu)
 				     "MBX combined IRQ is missing !\n");
 
 	ret = devm_request_threaded_irq(dev, mhu->cmb_irq, NULL,
-					mhuv3_mbx_comb_interrupt, IRQF_ONESHOT,
+					mhuv3_mbx_comb_interrupt,
+					IRQF_ONESHOT | IRQF_NO_SUSPEND,
 					"mhuv3-mbx", mhu);
 	if (ret)
-		return dev_err_probe(dev, ret, "Failed to request MBX IRQ\n");
+		return ret;
 
 	for (i = 0; i < NUM_EXT; i++)
 		if (mhu->ext[i])
@@ -1053,7 +1053,7 @@ static int mhuv3_probe(struct platform_device *pdev)
 	struct mhuv3 *mhu;
 	int ret;
 
-	mhu = devm_kzalloc(dev, sizeof(*mhu), GFP_KERNEL);
+	mhu = devm_kzalloc_obj(dev, *mhu);
 	if (!mhu)
 		return -ENOMEM;
 

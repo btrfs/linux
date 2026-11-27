@@ -323,7 +323,7 @@ get_fp_strap(struct drm_device *dev, struct nvbios *bios)
 	/*
 	 * The fp strap is normally dictated by the "User Strap" in
 	 * PEXTDEV_BOOT_0[20:16], but on BMP cards when bit 2 of the
-	 * Internal_Flags struct at 0x48 is set, the user strap gets overriden
+	 * Internal_Flags struct at 0x48 is set, the user strap gets overridden
 	 * by the PCI subsystem ID during POST, but not before the previous user
 	 * strap has been committed to CR58 for CR57=0xf on head A, which may be
 	 * read and used instead
@@ -2085,9 +2085,26 @@ nouveau_bios_init(struct drm_device *dev)
 	int ret;
 
 	/* only relevant for PCI devices */
-	if (!dev_is_pci(dev->dev) ||
-	    nvkm_gsp_rm(nvxx_device(drm)->gsp))
+	if (!dev_is_pci(dev->dev))
 		return 0;
+
+	if (nvkm_gsp_rm(nvxx_device(drm)->gsp)) {
+		struct nvkm_bios *nvkm_bios = nvxx_bios(drm);
+
+		/*
+		 * If this GPU has an nvkm_device_chip.bios entry, then the VBIOS
+		 * data was already read by the nvkm layer during nvkm_bios_new().
+		 * Point the legacy DRM-level VBIOS structure at the same buffer
+		 * so that any remaining legacy code can access it. This exposes
+		 * the VBIOS via the DRM debugfs entries.
+		 */
+		if (nvkm_bios) {
+			bios->data = nvkm_bios->data;
+			bios->length = nvkm_bios->size;
+		}
+
+		return 0;
+	}
 
 	if (!NVInitVBIOS(dev))
 		return -ENODEV;

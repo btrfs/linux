@@ -42,8 +42,8 @@ at91_clk_register_sam9260_slow(struct regmap *regmap,
 			       int num_parents)
 {
 	struct clk_sam9260_slow *slowck;
+	struct clk_init_data init = {};
 	struct clk_hw *hw;
-	struct clk_init_data init;
 	int ret;
 
 	if (!name)
@@ -52,7 +52,7 @@ at91_clk_register_sam9260_slow(struct regmap *regmap,
 	if (!parent_names || !num_parents)
 		return ERR_PTR(-EINVAL);
 
-	slowck = kzalloc(sizeof(*slowck), GFP_KERNEL);
+	slowck = kzalloc_obj(*slowck);
 	if (!slowck)
 		return ERR_PTR(-ENOMEM);
 

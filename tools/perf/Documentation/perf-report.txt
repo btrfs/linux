@@ -29,6 +29,25 @@ OPTIONS
 --quiet::
 	Do not show any warnings or messages.  (Suppress -v)
 
+--progress::
+	Show progress for each of the processing phases, printing the
+	percentage done and the current/total counts: the first phase
+	counts the bytes of the perf.data file processed so far, the
+	merge and sort phases count hist entries, e.g.:
+
+	Processing events... [ 42.3%] 4G / 10G
+	Merging related events... [  7.1%] 1024 / 14387
+	Sorting events for output... [ 98.2%] 14132 / 14387
+
+	It is a no-op when using the TUI or GTK browsers, that already
+	present progress information, or when --quiet is used, that asks
+	for no messages at all.
+
+--no-progress::
+	Do not show progress while processing the perf.data file.  It
+	also turns off the progress the TUI and GTK browsers present,
+	which is their own.
+
 -n::
 --show-nr-samples::
 	Show the number of samples for each symbol
@@ -64,6 +83,9 @@ OPTIONS
 --symbol-filter=::
 	Only show symbols that match (partially) with this filter.
 
+--weights:: Show or hide (with `--no-weights`) weight columns in annotation output.
+	    By default, weight columns are shown when samples contain non-zero weights.
+
 -U::
 --hide-unresolved::
         Only display entries resolved to a symbol.
@@ -88,7 +110,7 @@ OPTIONS
 	Sort histogram entries by given key(s) - multiple keys can be specified
 	in CSV format.  Following sort keys are available:
 	pid, comm, dso, symbol, parent, cpu, socket, srcline, weight,
-	local_weight, cgroup_id, addr.
+	local_weight, cgroup_id, addr, comm_nodigit.
 
 	Each key has following meaning:
 
@@ -136,13 +158,17 @@ OPTIONS
 	- addr: (Full) virtual address of the sampled instruction
 	- retire_lat: On X86, this reports pipeline stall of this instruction compared
 	  to the previous instruction in cycles. And currently supported only on X86
-	- simd: Flags describing a SIMD operation. "e" for empty Arm SVE predicate. "p" for partial Arm SVE predicate
+	- simd: Flags describing a SIMD operation. The architecture type can be Arm's
+	  ASE (Advanced SIMD extension), SVE, SME. It provides an extra tag for
+	  predicate: "e" for empty predicate, "p" for partial predicate, "d" for
+	  predicate disabled, and "f" for full predicate.
 	- type: Data type of sample memory access.
 	- typeoff: Offset in the data type of sample memory access.
 	- symoff: Offset in the symbol.
 	- weight1: Average value of event specific weight (1st field of weight_struct).
 	- weight2: Average value of event specific weight (2nd field of weight_struct).
 	- weight3: Average value of event specific weight (3rd field of weight_struct).
+	- comm_nodigit: same as comm, with numbers replaced by "<N>"
 
 	By default, overhead, comm, dso and symbol keys are used.
 	(i.e. --sort overhead,comm,dso,symbol).
@@ -347,7 +373,10 @@ OPTIONS
 	requires a tty, if one is not present, as when piping to other
 	commands, the stdio interface is used.
 
---gtk:: Use the GTK2 interface.
+--gtk:: Use the GTK4 interface.
+
+--weights:: Show or hide (with `--no-weights`) weight columns in annotation output.
+           By default, weight columns are shown when samples contain non-zero weights.
 
 -k::
 --vmlinux=<file>::
@@ -368,8 +397,11 @@ OPTIONS
 --force::
         Don't do ownership validation.
 
---symfs=<directory>::
-        Look for files with symbols relative to this directory.
+--symfs=<directory[,layout]>::
+        Look for files with symbols relative to this directory. The optional
+        layout can be 'hierarchy' (default, matches full path) or 'flat'
+        (only matches base name). This is useful when debug files are stored
+        in a flat directory structure.
 
 -C::
 --cpu:: Only report samples for the list of CPUs provided. Multiple CPUs can
@@ -564,6 +596,11 @@ include::itrace.txt[]
 
 --raw-trace::
 	When displaying traceevent output, do not use print fmt or plugins.
+
+--hybrid-merge::
+	Merge matching events from all hybrid core PMUs into one
+	display. For example, if a wildcard expands to run on both p-cores and
+	e-cores, this aggregates them into a single view.
 
 -H::
 --hierarchy::

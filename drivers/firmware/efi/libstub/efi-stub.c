@@ -10,7 +10,7 @@
  */
 
 #include <linux/efi.h>
-#include <linux/screen_info.h>
+#include <linux/sysfb.h>
 #include <asm/efi.h>
 
 #include "efistub.h"
@@ -48,30 +48,48 @@
 static u64 virtmap_base = EFI_RT_VIRTUAL_BASE;
 static bool flat_va_mapping = (EFI_RT_VIRTUAL_OFFSET != 0);
 
-void __weak free_screen_info(struct screen_info *si)
+void __weak free_primary_display(struct sysfb_display_info *dpy)
+{ }
+
+static struct sysfb_display_info *setup_primary_display(void)
 {
-}
+	struct sysfb_display_info *dpy;
+	struct screen_info *screen = NULL;
+	struct edid_info *edid = NULL;
+	efi_status_t status;
 
-static struct screen_info *setup_graphics(void)
-{
-	struct screen_info *si, tmp = {};
-
-	if (efi_setup_gop(&tmp) != EFI_SUCCESS)
+	dpy = alloc_primary_display();
+	if (!dpy)
 		return NULL;
+	screen = &dpy->screen;
+#if defined(CONFIG_FIRMWARE_EDID)
+	edid = &dpy->edid;
+#endif
 
-	si = alloc_screen_info();
-	if (!si)
-		return NULL;
+	status = efi_setup_graphics(screen, edid);
+	if (status != EFI_SUCCESS)
+		goto err_free_primary_display;
 
-	*si = tmp;
-	return si;
+	return dpy;
+
+err_free_primary_display:
+	free_primary_display(dpy);
+	return NULL;
 }
 
 static void install_memreserve_table(void)
 {
+	static efi_guid_t memreserve_table_guid = LINUX_EFI_MEMRESERVE_TABLE_GUID;
 	struct linux_efi_memreserve *rsv;
-	efi_guid_t memreserve_table_guid = LINUX_EFI_MEMRESERVE_TABLE_GUID;
 	efi_status_t status;
+
+	/*
+	 * If an earlier boot stage installed a memreserve table already, e.g.,
+	 * a kexec loader passing on the persistent reservations made by the
+	 * previous kernel, use it as is: installing a new one would replace it.
+	 */
+	if (get_efi_config_table(memreserve_table_guid))
+		return;
 
 	status = efi_bs_call(allocate_pool, EFI_LOADER_DATA, sizeof(*rsv),
 			     (void **)&rsv);
@@ -145,16 +163,17 @@ efi_status_t efi_stub_common(efi_handle_t handle,
 			     unsigned long image_addr,
 			     char *cmdline_ptr)
 {
-	struct screen_info *si;
+	struct sysfb_display_info *dpy;
 	efi_status_t status;
 
 	status = check_platform_features();
 	if (status != EFI_SUCCESS)
 		return status;
 
-	si = setup_graphics();
+	dpy = setup_primary_display();
 
 	efi_retrieve_eventlog();
+	efi_bli_set_variables(image);
 
 	/* Ask the firmware to clear memory on unclean shutdown */
 	efi_enable_reset_attack_mitigation();
@@ -172,7 +191,8 @@ efi_status_t efi_stub_common(efi_handle_t handle,
 
 	status = efi_boot_kernel(handle, image, image_addr, cmdline_ptr);
 
-	free_screen_info(si);
+	free_primary_display(dpy);
+
 	return status;
 }
 

@@ -15,7 +15,6 @@
 #include <linux/slab.h>
 #include <linux/err.h>
 #include <linux/io.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/mailbox_controller.h>
@@ -123,7 +122,7 @@ static int platform_mhu_probe(struct platform_device *pdev)
 	};
 
 	/* Allocate memory for device */
-	mhu = devm_kzalloc(dev, sizeof(*mhu), GFP_KERNEL);
+	mhu = devm_kzalloc_obj(dev, *mhu);
 	if (!mhu)
 		return -ENOMEM;
 

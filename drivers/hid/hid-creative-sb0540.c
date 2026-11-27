@@ -153,7 +153,7 @@ static int creative_sb0540_raw_event(struct hid_device *hid,
 	u64 code, main_code;
 	int key;
 
-	if (len != 6)
+	if (len != 6 || !(hid->claimed & HID_CLAIMED_INPUT))
 		return 0;
 
 	/* From daemons/hw_hiddev.c sb0540_rec() in lirc */
@@ -223,8 +223,7 @@ static int creative_sb0540_probe(struct hid_device *hid,
 	int ret;
 	struct creative_sb0540 *creative_sb0540;
 
-	creative_sb0540 = devm_kzalloc(&hid->dev,
-		sizeof(struct creative_sb0540), GFP_KERNEL);
+	creative_sb0540 = devm_kzalloc_obj(&hid->dev, struct creative_sb0540);
 
 	if (!creative_sb0540)
 		return -ENOMEM;

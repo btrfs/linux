@@ -630,8 +630,7 @@ static int mp29502_probe(struct i2c_client *client)
 	struct pmbus_driver_info *info;
 	struct mp29502_data *data;
 
-	data = devm_kzalloc(&client->dev, sizeof(struct mp29502_data),
-			    GFP_KERNEL);
+	data = devm_kzalloc_obj(&client->dev, struct mp29502_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -642,8 +641,8 @@ static int mp29502_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id mp29502_id[] = {
-	{"mp29502", 0},
-	{}
+	{ .name = "mp29502", .driver_data = 0 },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mp29502_id);
 

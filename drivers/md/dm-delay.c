@@ -224,7 +224,7 @@ static int delay_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		return -EINVAL;
 	}
 
-	dc = kzalloc(sizeof(*dc), GFP_KERNEL);
+	dc = kzalloc_obj(*dc);
 	if (!dc) {
 		ti->error = "Cannot allocate context";
 		return -ENOMEM;
@@ -290,7 +290,9 @@ out:
 	} else {
 		timer_setup(&dc->delay_timer, handle_delayed_timer, 0);
 		INIT_WORK(&dc->flush_expired_bios, flush_expired_bios);
-		dc->kdelayd_wq = alloc_workqueue("kdelayd", WQ_MEM_RECLAIM, 0);
+		dc->kdelayd_wq = alloc_workqueue("kdelayd",
+						 WQ_MEM_RECLAIM | WQ_PERCPU,
+						 0);
 		if (!dc->kdelayd_wq) {
 			ret = -EINVAL;
 			DMERR("Couldn't start kdelayd");
@@ -299,6 +301,7 @@ out:
 	}
 
 	ti->num_flush_bios = 1;
+	ti->flush_supported = dc->flush.delay != 0;
 	ti->num_discard_bios = 1;
 	ti->accounts_remapped_io = true;
 	ti->per_io_data_size = sizeof(struct dm_delay_info);
@@ -449,7 +452,7 @@ out:
 
 static struct target_type delay_target = {
 	.name	     = "delay",
-	.version     = {1, 5, 0},
+	.version     = {1, 6, 0},
 	.features    = DM_TARGET_PASSES_INTEGRITY | DM_TARGET_ZONED_HM,
 	.module      = THIS_MODULE,
 	.ctr	     = delay_ctr,

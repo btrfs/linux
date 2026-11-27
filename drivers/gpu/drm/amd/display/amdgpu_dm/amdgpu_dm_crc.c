@@ -32,6 +32,8 @@
 #include "dc.h"
 #include "amdgpu_securedisplay.h"
 #include "amdgpu_dm_psr.h"
+#include "amdgpu_dm_replay.h"
+#include "dm_helpers.h"
 
 static const char *const pipe_crc_sources[] = {
 	"none",
@@ -42,7 +44,8 @@ static const char *const pipe_crc_sources[] = {
 	"auto",
 };
 
-static enum amdgpu_dm_pipe_crc_source dm_parse_crc_source(const char *source)
+STATIC_IFN_KUNIT
+enum amdgpu_dm_pipe_crc_source dm_parse_crc_source(const char *source)
 {
 	if (!source || !strcmp(source, "none"))
 		return AMDGPU_DM_PIPE_CRC_SOURCE_NONE;
@@ -57,25 +60,91 @@ static enum amdgpu_dm_pipe_crc_source dm_parse_crc_source(const char *source)
 
 	return AMDGPU_DM_PIPE_CRC_SOURCE_INVALID;
 }
+EXPORT_IF_KUNIT(dm_parse_crc_source);
 
-static bool dm_is_crc_source_crtc(enum amdgpu_dm_pipe_crc_source src)
+STATIC_IFN_KUNIT
+bool dm_is_crc_source_crtc(enum amdgpu_dm_pipe_crc_source src)
 {
 	return (src == AMDGPU_DM_PIPE_CRC_SOURCE_CRTC) ||
 	       (src == AMDGPU_DM_PIPE_CRC_SOURCE_CRTC_DITHER);
 }
+EXPORT_IF_KUNIT(dm_is_crc_source_crtc);
 
-static bool dm_is_crc_source_dprx(enum amdgpu_dm_pipe_crc_source src)
+STATIC_IFN_KUNIT
+bool dm_is_crc_source_dprx(enum amdgpu_dm_pipe_crc_source src)
 {
 	return (src == AMDGPU_DM_PIPE_CRC_SOURCE_DPRX) ||
 	       (src == AMDGPU_DM_PIPE_CRC_SOURCE_DPRX_DITHER);
 }
+EXPORT_IF_KUNIT(dm_is_crc_source_dprx);
 
-static bool dm_need_crc_dither(enum amdgpu_dm_pipe_crc_source src)
+STATIC_IFN_KUNIT
+bool dm_need_crc_dither(enum amdgpu_dm_pipe_crc_source src)
 {
 	return (src == AMDGPU_DM_PIPE_CRC_SOURCE_CRTC_DITHER) ||
 	       (src == AMDGPU_DM_PIPE_CRC_SOURCE_DPRX_DITHER) ||
 	       (src == AMDGPU_DM_PIPE_CRC_SOURCE_NONE);
 }
+EXPORT_IF_KUNIT(dm_need_crc_dither);
+
+/**
+ * dm_need_dp_aux() - Does this source transition require the DP AUX handle?
+ * @source: Requested CRC source.
+ * @cur_crc_src: Current CRC source.
+ *
+ * Returns true when either the new source is DPRX-based (starting DPRX CRC),
+ * or the current source is DPRX-based and the new source is NONE (stopping it).
+ *
+ * Return: true if the DP AUX handle is needed, false otherwise.
+ */
+STATIC_IFN_KUNIT
+bool dm_need_dp_aux(enum amdgpu_dm_pipe_crc_source source,
+		    enum amdgpu_dm_pipe_crc_source cur_crc_src)
+{
+	return dm_is_crc_source_dprx(source) ||
+	       (source == AMDGPU_DM_PIPE_CRC_SOURCE_NONE && dm_is_crc_source_dprx(cur_crc_src));
+}
+EXPORT_IF_KUNIT(dm_need_dp_aux);
+
+/**
+ * dm_crc_source_should_start_dprx() - Should drm_dp_start_crc() be called?
+ * @source: Requested CRC source.
+ * @cur_crc_src: Current CRC source.
+ *
+ * True when CRC is transitioning from off to a DPRX source
+ * (!enabled && enable && is_dprx(@source)).
+ *
+ * Return: true if drm_dp_start_crc() should be called, false otherwise.
+ */
+STATIC_IFN_KUNIT
+bool dm_crc_source_should_start_dprx(enum amdgpu_dm_pipe_crc_source source,
+				      enum amdgpu_dm_pipe_crc_source cur_crc_src)
+{
+	return !amdgpu_dm_is_valid_crc_source(cur_crc_src) &&
+	       amdgpu_dm_is_valid_crc_source(source) &&
+	       dm_is_crc_source_dprx(source);
+}
+EXPORT_IF_KUNIT(dm_crc_source_should_start_dprx);
+
+/**
+ * dm_crc_source_should_stop_dprx() - Should drm_dp_stop_crc() be called?
+ * @source: Requested CRC source.
+ * @cur_crc_src: Current CRC source.
+ *
+ * True when CRC is transitioning from a DPRX source to off
+ * (enabled && !enable && is_dprx(@cur_crc_src)).
+ *
+ * Return: true if drm_dp_stop_crc() should be called, false otherwise.
+ */
+STATIC_IFN_KUNIT
+bool dm_crc_source_should_stop_dprx(enum amdgpu_dm_pipe_crc_source source,
+				     enum amdgpu_dm_pipe_crc_source cur_crc_src)
+{
+	return amdgpu_dm_is_valid_crc_source(cur_crc_src) &&
+	       !amdgpu_dm_is_valid_crc_source(source) &&
+	       dm_is_crc_source_dprx(cur_crc_src);
+}
+EXPORT_IF_KUNIT(dm_crc_source_should_stop_dprx);
 
 const char *const *amdgpu_dm_crtc_get_crc_sources(struct drm_crtc *crtc,
 						  size_t *count)
@@ -83,6 +152,7 @@ const char *const *amdgpu_dm_crtc_get_crc_sources(struct drm_crtc *crtc,
 	*count = ARRAY_SIZE(pipe_crc_sources);
 	return pipe_crc_sources;
 }
+EXPORT_IF_KUNIT(amdgpu_dm_crtc_get_crc_sources);
 
 #ifdef CONFIG_DRM_AMD_SECURE_DISPLAY
 static void update_phy_id_mapping(struct amdgpu_device *adev)
@@ -105,7 +175,9 @@ static void update_phy_id_mapping(struct amdgpu_device *adev)
 			continue;
 
 		if (idx >= AMDGPU_DM_MAX_CRTC) {
-			DRM_WARN("%s connected connectors exceed max crtc\n", __func__);
+			drm_warn(adev_to_drm(adev),
+				"%s connected connectors exceed max crtc\n",
+				__func__);
 			mutex_unlock(&ddev->mode_config.mutex);
 			return;
 		}
@@ -484,7 +556,7 @@ amdgpu_dm_crtc_verify_crc_source(struct drm_crtc *crtc, const char *src_name,
 {
 	enum amdgpu_dm_pipe_crc_source source = dm_parse_crc_source(src_name);
 
-	if (source < 0) {
+	if (source == AMDGPU_DM_PIPE_CRC_SOURCE_INVALID) {
 		DRM_DEBUG_DRIVER("Unknown CRC source %s for CRTC%d\n",
 				 src_name, crtc->index);
 		return -EINVAL;
@@ -493,6 +565,7 @@ amdgpu_dm_crtc_verify_crc_source(struct drm_crtc *crtc, const char *src_name,
 	*values_cnt = 3;
 	return 0;
 }
+EXPORT_IF_KUNIT(amdgpu_dm_crtc_verify_crc_source);
 
 int amdgpu_dm_crtc_configure_crc_source(struct drm_crtc *crtc,
 					struct dm_crtc_state *dm_crtc_state,
@@ -502,6 +575,7 @@ int amdgpu_dm_crtc_configure_crc_source(struct drm_crtc *crtc,
 	struct dc_stream_state *stream_state = dm_crtc_state->stream;
 	bool enable = amdgpu_dm_is_valid_crc_source(source);
 	int ret = 0;
+	enum crc_poly_mode crc_poly_mode = CRC_POLY_MODE_16;
 
 	/* Configuration will be deferred to stream enable. */
 	if (!stream_state)
@@ -509,16 +583,36 @@ int amdgpu_dm_crtc_configure_crc_source(struct drm_crtc *crtc,
 
 	mutex_lock(&adev->dm.dc_lock);
 
-	/* For PSR1, check that the panel has exited PSR */
-	if (stream_state->link->psr_settings.psr_version < DC_PSR_VERSION_SU_1)
-		amdgpu_dm_psr_wait_disable(stream_state);
+	/* Notify power module about CRC window active to disable PSR/Replay
+	 * Power module will check caps internally and skip if not supported
+	 */
+	if (enable) {
+		amdgpu_dm_psr_set_event(&adev->dm, stream_state, true,
+			psr_event_crc_window_active, true);
+
+		amdgpu_dm_replay_set_event(&adev->dm, stream_state, true,
+			replay_event_crc_window_active, true);
+	}
+
+	/* CRC polynomial selection only support for DCN3.6+ except DCN4.0.1 */
+	if ((amdgpu_ip_version(adev, DCE_HWIP, 0) >= IP_VERSION(3, 6, 0)) &&
+		(amdgpu_ip_version(adev, DCE_HWIP, 0) != IP_VERSION(4, 0, 1))) {
+		struct amdgpu_crtc *acrtc = to_amdgpu_crtc(crtc);
+
+		crc_poly_mode = acrtc->dm_irq_params.crc_poly_mode;
+	}
 
 	/* Enable or disable CRTC CRC generation */
 	if (dm_is_crc_source_crtc(source) || source == AMDGPU_DM_PIPE_CRC_SOURCE_NONE) {
-		if (!dc_stream_configure_crc(stream_state->ctx->dc,
-					     stream_state, NULL, enable, enable, 0, true)) {
-			ret = -EINVAL;
-			goto unlock;
+		int i;
+
+		for (i = 0; i < MAX_CRC_WINDOW_NUM; i++) {
+			if (!dc_stream_configure_crc(stream_state->ctx->dc,
+						     stream_state, NULL, enable, enable,
+						     i, true, crc_poly_mode)) {
+				ret = -EINVAL;
+				goto unlock;
+			}
 		}
 	}
 
@@ -534,11 +628,22 @@ int amdgpu_dm_crtc_configure_crc_source(struct drm_crtc *crtc,
 					    DYN_EXPANSION_AUTO);
 	}
 
+	if (!enable) {
+		/* Notify power module about CRC window inactive to re-enable PSR/Replay
+		 * Power module will check caps internally and skip if not supported
+		 */
+		amdgpu_dm_psr_set_event(&adev->dm, stream_state, false,
+			psr_event_crc_window_active, false);
+
+		amdgpu_dm_replay_set_event(&adev->dm, stream_state, false,
+			replay_event_crc_window_active, false);
+	}
 unlock:
 	mutex_unlock(&adev->dm.dc_lock);
 
 	return ret;
 }
+EXPORT_IF_KUNIT(amdgpu_dm_crtc_configure_crc_source);
 
 int amdgpu_dm_crtc_set_crc_source(struct drm_crtc *crtc, const char *src_name)
 {
@@ -557,7 +662,7 @@ int amdgpu_dm_crtc_set_crc_source(struct drm_crtc *crtc, const char *src_name)
 	bool enabled = false;
 	int ret = 0;
 
-	if (source < 0) {
+	if (source == AMDGPU_DM_PIPE_CRC_SOURCE_INVALID) {
 		DRM_DEBUG_DRIVER("Unknown CRC source %s for CRTC%d\n",
 				 src_name, crtc->index);
 		return -EINVAL;
@@ -584,8 +689,13 @@ int amdgpu_dm_crtc_set_crc_source(struct drm_crtc *crtc, const char *src_name)
 		 */
 		ret = wait_for_completion_interruptible_timeout(
 			&commit->hw_done, 10 * HZ);
-		if (ret)
+		if (ret < 0 && ret != -ERESTARTSYS)
 			goto cleanup;
+
+		if (ret == 0) {
+			ret = -ETIMEDOUT;
+			goto cleanup;
+		}
 	}
 
 	enable = amdgpu_dm_is_valid_crc_source(source);
@@ -607,9 +717,7 @@ int amdgpu_dm_crtc_set_crc_source(struct drm_crtc *crtc, const char *src_name)
 	 * CRTC DITHER  | XXXX        | Enable CRTC CRC, set dither
 	 * DPRX DITHER  | XXXX        | Enable DPRX CRC, need 'aux', set dither
 	 */
-	if (dm_is_crc_source_dprx(source) ||
-	    (source == AMDGPU_DM_PIPE_CRC_SOURCE_NONE &&
-	     dm_is_crc_source_dprx(cur_crc_src))) {
+	if (dm_need_dp_aux(source, cur_crc_src)) {
 		struct amdgpu_dm_connector *aconn = NULL;
 		struct drm_connector *connector;
 		struct drm_connector_list_iter conn_iter;
@@ -671,23 +779,24 @@ int amdgpu_dm_crtc_set_crc_source(struct drm_crtc *crtc, const char *src_name)
 		goto cleanup;
 	}
 
-	if (!enabled && enable) {
-		if (dm_is_crc_source_dprx(source)) {
-			if (drm_dp_start_crc(aux, crtc)) {
-				DRM_DEBUG_DRIVER("dp start crc failed\n");
-				ret = -EINVAL;
-				goto cleanup;
-			}
+	if (dm_crc_source_should_start_dprx(source, cur_crc_src)) {
+		/* !enabled && enable && is_dprx(source): CRC off → DPRX on */
+		if (drm_dp_start_crc(aux, crtc)) {
+			DRM_DEBUG_DRIVER("dp start crc failed\n");
+			ret = -EINVAL;
+			goto cleanup;
+		}
+	} else if (dm_crc_source_should_stop_dprx(source, cur_crc_src)) {
+		/* enabled && !enable && is_dprx(cur_crc_src): DPRX on → CRC off */
+		drm_crtc_vblank_put(crtc);
+		if (drm_dp_stop_crc(aux)) {
+			DRM_DEBUG_DRIVER("dp stop crc failed\n");
+			ret = -EINVAL;
+			goto cleanup;
 		}
 	} else if (enabled && !enable) {
+		/* Non-DPRX source (e.g. CRTC) turning off: release vblank ref */
 		drm_crtc_vblank_put(crtc);
-		if (dm_is_crc_source_dprx(source)) {
-			if (drm_dp_stop_crc(aux)) {
-				DRM_DEBUG_DRIVER("dp stop crc failed\n");
-				ret = -EINVAL;
-				goto cleanup;
-			}
-		}
 	}
 
 	spin_lock_irq(&drm_dev->event_lock);
@@ -712,6 +821,7 @@ cleanup:
 
 	return ret;
 }
+EXPORT_IF_KUNIT(amdgpu_dm_crtc_set_crc_source);
 
 /**
  * amdgpu_dm_crtc_handle_crc_irq: Report to DRM the CRC on given CRTC.
@@ -724,16 +834,19 @@ void amdgpu_dm_crtc_handle_crc_irq(struct drm_crtc *crtc)
 {
 	struct dm_crtc_state *crtc_state;
 	struct dc_stream_state *stream_state;
-	struct drm_device *drm_dev = NULL;
+	struct drm_device *drm_dev;
 	enum amdgpu_dm_pipe_crc_source cur_crc_src;
-	struct amdgpu_crtc *acrtc = NULL;
+	struct amdgpu_crtc *acrtc;
 	uint32_t crcs[3];
 	unsigned long flags;
 
-	if (crtc == NULL)
+	if (!crtc || !crtc->state || !crtc->dev)
 		return;
 
 	crtc_state = to_dm_crtc_state(crtc->state);
+	if (!crtc_state->stream)
+		return;
+
 	stream_state = crtc_state->stream;
 	acrtc = to_amdgpu_crtc(crtc);
 	drm_dev = crtc->dev;
@@ -766,6 +879,7 @@ void amdgpu_dm_crtc_handle_crc_irq(struct drm_crtc *crtc)
 				       drm_crtc_accurate_vblank_count(crtc), crcs);
 	}
 }
+EXPORT_IF_KUNIT(amdgpu_dm_crtc_handle_crc_irq);
 
 #if defined(CONFIG_DRM_AMD_SECURE_DISPLAY)
 void amdgpu_dm_crtc_handle_crc_window_irq(struct drm_crtc *crtc)
@@ -782,7 +896,6 @@ void amdgpu_dm_crtc_handle_crc_window_irq(struct drm_crtc *crtc)
 	unsigned long flags1;
 	bool forward_roi_change = false;
 	bool notify_ta = false;
-	bool all_crc_ready = true;
 	struct dc_stream_state *stream_state;
 	int i;
 
@@ -856,7 +969,7 @@ void amdgpu_dm_crtc_handle_crc_window_irq(struct drm_crtc *crtc)
 			else if (adev->dm.secure_display_ctx.op_mode == DISPLAY_CRC_MODE)
 				/* update ROI via dm*/
 				dc_stream_configure_crc(stream_state->ctx->dc, stream_state,
-					&crc_window, true, true, i, false);
+					&crc_window, true, true, i, false, (enum crc_poly_mode)acrtc->dm_irq_params.crc_poly_mode);
 
 			reset_crc_frame_count[i] = true;
 
@@ -880,7 +993,7 @@ void amdgpu_dm_crtc_handle_crc_window_irq(struct drm_crtc *crtc)
 			else if (adev->dm.secure_display_ctx.op_mode == DISPLAY_CRC_MODE)
 				/* Avoid ROI window get changed, keep overwriting. */
 				dc_stream_configure_crc(stream_state->ctx->dc, stream_state,
-						&crc_window, true, true, i, false);
+						&crc_window, true, true, i, false, (enum crc_poly_mode)acrtc->dm_irq_params.crc_poly_mode);
 
 			/* crc ready for psp to read out */
 			crtc_ctx->crc_info.crc[i].crc_ready = true;
@@ -906,9 +1019,6 @@ void amdgpu_dm_crtc_handle_crc_window_irq(struct drm_crtc *crtc)
 			continue;
 		}
 
-		if (!crtc_ctx->crc_info.crc[i].crc_ready)
-			all_crc_ready = false;
-
 		if (reset_crc_frame_count[i] || crtc_ctx->crc_info.crc[i].frame_count == UINT_MAX)
 			/* Reset the reference frame count after user update the ROI
 			 * or it reaches the maximum value.
@@ -918,9 +1028,6 @@ void amdgpu_dm_crtc_handle_crc_window_irq(struct drm_crtc *crtc)
 			crtc_ctx->crc_info.crc[i].frame_count += 1;
 	}
 	spin_unlock_irqrestore(&crtc_ctx->crc_info.lock, flags1);
-
-	if (all_crc_ready)
-		complete_all(&crtc_ctx->crc_info.completion);
 }
 
 void amdgpu_dm_crtc_secure_display_create_contexts(struct amdgpu_device *adev)
@@ -928,9 +1035,8 @@ void amdgpu_dm_crtc_secure_display_create_contexts(struct amdgpu_device *adev)
 	struct secure_display_crtc_context *crtc_ctx = NULL;
 	int i;
 
-	crtc_ctx = kcalloc(adev->mode_info.num_crtc,
-				      sizeof(struct secure_display_crtc_context),
-				      GFP_KERNEL);
+	crtc_ctx = kzalloc_objs(struct secure_display_crtc_context,
+				adev->mode_info.num_crtc);
 
 	if (!crtc_ctx) {
 		adev->dm.secure_display_ctx.crtc_ctx = NULL;

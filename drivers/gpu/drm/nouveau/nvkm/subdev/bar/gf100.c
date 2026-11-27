@@ -133,6 +133,12 @@ gf100_bar_oneinit(struct nvkm_bar *base)
 		if (ret)
 			return ret;
 
+		if (bar->base.func->bar2.oneinit) {
+			ret = bar->base.func->bar2.oneinit(&bar->base);
+			if (ret)
+				return ret;
+		}
+
 		bar->base.subdev.oneinit = true;
 		nvkm_bar_bar2_init(bar->base.subdev.device);
 	}
@@ -165,7 +171,7 @@ gf100_bar_new_(const struct nvkm_bar_func *func, struct nvkm_device *device,
 	       enum nvkm_subdev_type type, int inst, struct nvkm_bar **pbar)
 {
 	struct gf100_bar *bar;
-	if (!(bar = kzalloc(sizeof(*bar), GFP_KERNEL)))
+	if (!(bar = kzalloc_obj(*bar)))
 		return -ENOMEM;
 	nvkm_bar_ctor(func, device, type, inst, &bar->base);
 	bar->bar2_halve = nvkm_boolopt(device->cfgopt, "NvBar2Halve", false);

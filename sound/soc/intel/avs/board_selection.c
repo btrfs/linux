@@ -367,7 +367,7 @@ static const struct avs_acpi_boards i2s_boards[] = {
 	AVS_MACH_ENTRY(HDA_SKL_LP,	avs_skl_i2s_machines),
 	AVS_MACH_ENTRY(HDA_KBL_LP,	avs_kbl_i2s_machines),
 	AVS_MACH_ENTRY(HDA_APL,		avs_apl_i2s_machines),
-	AVS_MACH_ENTRY(HDA_GML,		avs_gml_i2s_machines),
+	AVS_MACH_ENTRY(HDA_GLK,		avs_gml_i2s_machines),
 	AVS_MACH_ENTRY(HDA_CNL_LP,	avs_cnl_i2s_machines),
 	AVS_MACH_ENTRY(HDA_CNL_H,	avs_cnl_i2s_machines),
 	AVS_MACH_ENTRY(HDA_CML_LP,	avs_cnl_i2s_machines),
@@ -423,7 +423,7 @@ static struct platform_device *avs_register_board_pdata(struct avs_dev *adev, co
 {
 	struct avs_mach_pdata *pdata;
 
-	pdata = devm_kzalloc(adev->dev, sizeof(*pdata), GFP_KERNEL);
+	pdata = devm_kzalloc_obj(adev->dev, *pdata);
 	if (!pdata)
 		return ERR_PTR(-ENOMEM);
 
@@ -482,7 +482,7 @@ static int avs_register_i2s_test_board(struct avs_dev *adev, int ssp_port, int t
 	struct platform_device *pdev;
 	unsigned long *tdms;
 
-	tdms = devm_kcalloc(adev->dev, ssp_port + 1, sizeof(*tdms), GFP_KERNEL);
+	tdms = devm_kzalloc_objs(adev->dev, *tdms, ssp_port + 1);
 	mach.tplg_filename = devm_kasprintf(adev->dev, GFP_KERNEL,
 					    AVS_STRING_FMT("i2s", "-test-tplg.bin",
 							   ssp_port, tdm_slot));
@@ -520,7 +520,8 @@ static int avs_register_i2s_test_boards(struct avs_dev *adev)
 	if (num_elems > max_ssps) {
 		dev_err(adev->dev, "board supports only %d SSP, %d specified\n",
 			max_ssps, num_elems);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto exit;
 	}
 
 	for (ssp_port = 0; ssp_port < num_elems; ssp_port++) {
@@ -528,11 +529,13 @@ static int avs_register_i2s_test_boards(struct avs_dev *adev)
 		for_each_set_bit(tdm_slot, &tdm_slots, 16) {
 			ret = avs_register_i2s_test_board(adev, ssp_port, tdm_slot);
 			if (ret)
-				return ret;
+				goto exit;
 		}
 	}
 
-	return 0;
+exit:
+	kfree(array);
+	return ret;
 }
 
 static int avs_register_i2s_board(struct avs_dev *adev, struct snd_soc_acpi_mach *mach)

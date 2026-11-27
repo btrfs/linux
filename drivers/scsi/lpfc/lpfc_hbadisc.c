@@ -1,7 +1,7 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2017-2025 Broadcom. All Rights Reserved. The term *
+ * Copyright (C) 2017-2026 Broadcom. All Rights Reserved. The term *
  * “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.     *
  * Copyright (C) 2004-2016 Emulex.  All rights reserved.           *
  * EMULEX and SLI are trademarks of Emulex.                        *
@@ -424,7 +424,7 @@ lpfc_check_nlp_post_devloss(struct lpfc_vport *vport,
 			    struct lpfc_nodelist *ndlp)
 {
 	if (test_and_clear_bit(NLP_IN_RECOV_POST_DEV_LOSS, &ndlp->save_flags)) {
-		lpfc_nlp_get(ndlp);
+		clear_bit(NLP_DROPPED, &ndlp->nlp_flag);
 		lpfc_printf_vlog(vport, KERN_INFO, LOG_DISCOVERY | LOG_NODE,
 				 "8438 Devloss timeout reversed on DID x%x "
 				 "refcnt %d ndlp %p flag x%lx "
@@ -566,7 +566,8 @@ lpfc_dev_loss_tmo_handler(struct lpfc_nodelist *ndlp)
 			return fcf_inuse;
 		}
 
-		lpfc_nlp_put(ndlp);
+		if (!test_and_set_bit(NLP_DROPPED, &ndlp->nlp_flag))
+			lpfc_nlp_put(ndlp);
 		return fcf_inuse;
 	}
 
@@ -724,8 +725,7 @@ lpfc_alloc_fast_evt(struct lpfc_hba *phba) {
 	if (atomic_read(&phba->fast_event_count) > LPFC_MAX_EVT_COUNT)
 		return NULL;
 
-	ret = kzalloc(sizeof(struct lpfc_fast_path_event),
-			GFP_ATOMIC);
+	ret = kzalloc_obj(struct lpfc_fast_path_event, GFP_ATOMIC);
 	if (ret) {
 		atomic_inc(&phba->fast_event_count);
 		INIT_LIST_HEAD(&ret->work_evt.evt_listp);
@@ -1139,7 +1139,7 @@ lpfc_workq_post_event(struct lpfc_hba *phba, void *arg1, void *arg2,
 	 * All Mailbox completions and LPFC_ELS_RING rcv ring IOCB events will
 	 * be queued to worker thread for processing
 	 */
-	evtp = kmalloc(sizeof(struct lpfc_work_evt), GFP_ATOMIC);
+	evtp = kmalloc_obj(struct lpfc_work_evt, GFP_ATOMIC);
 	if (!evtp)
 		return 0;
 
@@ -1340,9 +1340,9 @@ lpfc_linkdown(struct lpfc_hba *phba)
 		}
 		clear_bit(FC_PT2PT, &phba->pport->fc_flag);
 		clear_bit(FC_PT2PT_PLOGI, &phba->pport->fc_flag);
-		spin_lock_irq(shost->host_lock);
+		spin_lock_irq(&shost->host_lock);
 		phba->pport->rcv_flogi_cnt = 0;
-		spin_unlock_irq(shost->host_lock);
+		spin_unlock_irq(&shost->host_lock);
 	}
 	return 0;
 }
@@ -1406,9 +1406,9 @@ lpfc_linkup_port(struct lpfc_vport *vport)
 	}
 	set_bit(FC_NDISC_ACTIVE, &vport->fc_flag);
 
-	spin_lock_irq(shost->host_lock);
+	spin_lock_irq(&shost->host_lock);
 	vport->fc_ns_retry = 0;
-	spin_unlock_irq(shost->host_lock);
+	spin_unlock_irq(&shost->host_lock);
 	lpfc_setup_fdmi_mask(vport);
 
 	lpfc_linkup_cleanup_nodes(vport);
@@ -1437,9 +1437,9 @@ lpfc_linkup(struct lpfc_hba *phba)
 	 * absorbed without an ACQE. No lock here - in worker thread
 	 * and discovery is synchronized.
 	 */
-	spin_lock_irq(shost->host_lock);
+	spin_lock_irq(&shost->host_lock);
 	phba->pport->rcv_flogi_cnt = 0;
-	spin_unlock_irq(shost->host_lock);
+	spin_unlock_irq(&shost->host_lock);
 
 	return 0;
 }
@@ -1845,7 +1845,7 @@ lpfc_copy_fcf_record(struct lpfc_fcf_rec *fcf_rec,
  * @flag: flag bits to be set to the driver fcf record.
  *
  * This routine updates the driver FCF record from the new HBA FCF record
- * together with the address mode, vlan_id, and other informations. This
+ * together with the address mode, vlan_id, and other information. This
  * routine is called with the hbalock held.
  **/
 static void
@@ -2120,7 +2120,7 @@ lpfc_match_fcf_conn_list(struct lpfc_hba *phba,
 /**
  * lpfc_check_pending_fcoe_event - Check if there is pending fcoe event.
  * @phba: pointer to lpfc hba data structure.
- * @unreg_fcf: Unregister FCF if FCF table need to be re-scaned.
+ * @unreg_fcf: Unregister FCF if FCF table need to be re-scanned.
  *
  * This function check if there is any fcoe event pending while driver
  * scan FCF entries. If there is any pending event, it will restart the
@@ -2290,7 +2290,7 @@ lpfc_sli4_fcf_rec_mbox_parse(struct lpfc_hba *phba, LPFC_MBOXQ_t *mboxq,
  * @vlan_id: the lowest vlan identifier associated to this fcf record.
  * @next_fcf_index: the index to the next fcf record in hba's fcf table.
  *
- * This routine logs the detailed FCF record if the LOG_FIP loggin is
+ * This routine logs the detailed FCF record if the LOG_FIP login is
  * enabled.
  **/
 static void
@@ -3173,7 +3173,11 @@ lpfc_init_vfi_cmpl(struct lpfc_hba *phba, LPFC_MBOXQ_t *mboxq)
 		return;
 	}
 
-	lpfc_initial_flogi(vport);
+	if (!lpfc_initial_flogi(vport)) {
+		lpfc_printf_vlog(vport, KERN_ERR, LOG_MBOX | LOG_ELS,
+				 "2345 Can't issue initial FLOGI\n");
+		lpfc_vport_set_state(vport, FC_VPORT_FAILED);
+	}
 	mempool_free(mboxq, phba->mbox_mem_pool);
 	return;
 }
@@ -3246,8 +3250,14 @@ lpfc_init_vpi_cmpl(struct lpfc_hba *phba, LPFC_MBOXQ_t *mboxq)
 			return;
 	}
 
-	if (phba->link_flag & LS_NPIV_FAB_SUPPORTED)
-		lpfc_initial_fdisc(vport);
+	if (phba->link_flag & LS_NPIV_FAB_SUPPORTED) {
+		if (!lpfc_initial_fdisc(vport)) {
+			lpfc_printf_vlog(vport, KERN_WARNING,
+					 LOG_MBOX | LOG_ELS,
+					 "2346 Can't issue initial FDISC\n");
+			lpfc_vport_set_state(vport, FC_VPORT_FAILED);
+		}
+	}
 	else {
 		lpfc_vport_set_state(vport, FC_VPORT_NO_FABRIC_SUPP);
 		lpfc_printf_vlog(vport, KERN_ERR, LOG_TRACE_EVENT,
@@ -3390,9 +3400,9 @@ lpfc_mbx_cmpl_reg_vfi(struct lpfc_hba *phba, LPFC_MBOXQ_t *mboxq)
 	set_bit(FC_VFI_REGISTERED, &vport->fc_flag);
 	clear_bit(FC_VPORT_NEEDS_REG_VPI, &vport->fc_flag);
 	clear_bit(FC_VPORT_NEEDS_INIT_VPI, &vport->fc_flag);
-	spin_lock_irq(shost->host_lock);
+	spin_lock_irq(&shost->host_lock);
 	vport->vpi_state |= LPFC_VPI_REGISTERED;
-	spin_unlock_irq(shost->host_lock);
+	spin_unlock_irq(&shost->host_lock);
 
 	/* In case SLI4 FC loopback test, we are ready */
 	if ((phba->sli_rev == LPFC_SLI_REV4) &&
@@ -3465,7 +3475,7 @@ lpfc_mbx_cmpl_read_sparam(struct lpfc_hba *phba, LPFC_MBOXQ_t *pmb)
 	phba->fc_edtov = ed_tov;
 	phba->fc_ratov = (2 * ed_tov) / 1000;
 	if (phba->fc_ratov < FF_DEF_RATOV) {
-		/* RA_TOV should be atleast 10sec for initial flogi */
+		/* RA_TOV should be at least 10sec for initial flogi */
 		phba->fc_ratov = FF_DEF_RATOV;
 	}
 
@@ -3642,8 +3652,7 @@ lpfc_mbx_process_link_up(struct lpfc_hba *phba, struct lpfc_mbx_read_top *la)
 		 * defaults.
 		 */
 		if (!test_bit(HBA_FIP_SUPPORT, &phba->hba_flag)) {
-			fcf_record = kzalloc(sizeof(struct fcf_record),
-					GFP_KERNEL);
+			fcf_record = kzalloc_obj(struct fcf_record);
 			if (unlikely(!fcf_record)) {
 				lpfc_printf_log(phba, KERN_ERR,
 					LOG_TRACE_EVENT,
@@ -3808,7 +3817,7 @@ lpfc_mbx_cmpl_read_topology(struct lpfc_hba *phba, LPFC_MBOXQ_t *pmb)
 		if (phba->cmf_active_mode != LPFC_CFG_OFF)
 			lpfc_cmf_signal_init(phba);
 
-		if (phba->lmt & LMT_64Gb)
+		if (phba->lmt & (LMT_64Gb | LMT_128Gb))
 			lpfc_read_lds_params(phba);
 
 	} else if (attn_type == LPFC_ATT_LINK_DOWN ||
@@ -3934,9 +3943,9 @@ lpfc_mbx_cmpl_unreg_vpi(struct lpfc_hba *phba, LPFC_MBOXQ_t *pmb)
 	}
 
 	set_bit(FC_VPORT_NEEDS_REG_VPI, &vport->fc_flag);
-	spin_lock_irq(shost->host_lock);
+	spin_lock_irq(&shost->host_lock);
 	vport->vpi_state &= ~LPFC_VPI_REGISTERED;
-	spin_unlock_irq(shost->host_lock);
+	spin_unlock_irq(&shost->host_lock);
 	mempool_free(pmb, phba->mbox_mem_pool);
 	lpfc_cleanup_vports_rrqs(vport, NULL);
 	/*
@@ -4001,9 +4010,9 @@ lpfc_mbx_cmpl_reg_vpi(struct lpfc_hba *phba, LPFC_MBOXQ_t *pmb)
 	}
 
 	clear_bit(FC_VPORT_NEEDS_REG_VPI, &vport->fc_flag);
-	spin_lock_irq(shost->host_lock);
+	spin_lock_irq(&shost->host_lock);
 	vport->vpi_state |= LPFC_VPI_REGISTERED;
-	spin_unlock_irq(shost->host_lock);
+	spin_unlock_irq(&shost->host_lock);
 	vport->num_disc_nodes = 0;
 	/* go thru NPR list and issue ELS PLOGIs */
 	if (atomic_read(&vport->fc_npr_cnt))
@@ -4054,7 +4063,7 @@ lpfc_create_static_vport(struct lpfc_hba *phba)
 	memset(pmb, 0, sizeof(LPFC_MBOXQ_t));
 	mb = &pmb->u.mb;
 
-	vport_info = kzalloc(sizeof(struct static_vport_info), GFP_KERNEL);
+	vport_info = kzalloc_obj(struct static_vport_info);
 	if (!vport_info) {
 		lpfc_printf_log(phba, KERN_ERR, LOG_TRACE_EVENT,
 				"0543 lpfc_create_static_vport failed to"
@@ -4371,6 +4380,8 @@ out:
 		lpfc_ns_cmd(vport, SLI_CTNS_RNN_ID, 0, 0);
 		lpfc_ns_cmd(vport, SLI_CTNS_RSNN_NN, 0, 0);
 		lpfc_ns_cmd(vport, SLI_CTNS_RSPN_ID, 0, 0);
+		if (phba->pni)
+			lpfc_ns_cmd(vport, SLI_CTNS_RSPNI_PNI, 0, 0);
 		lpfc_ns_cmd(vport, SLI_CTNS_RFT_ID, 0, 0);
 
 		if ((vport->cfg_enable_fc4_type == LPFC_ENABLE_BOTH) ||
@@ -4399,7 +4410,7 @@ out:
 					LOG_INIT | LOG_ELS | LOG_DISCOVERY,
 					"4220 Issue EDC status x%x Data x%x\n",
 					rc, phba->cgn_init_reg_signal);
-		} else if (phba->lmt & LMT_64Gb) {
+		} else if (phba->lmt & (LMT_64Gb | LMT_128Gb)) {
 			/* may send link fault capability descriptor */
 			lpfc_issue_els_edc(vport, 0);
 		} else {
@@ -4940,6 +4951,13 @@ lpfc_drop_node(struct lpfc_vport *vport, struct lpfc_nodelist *ndlp)
 	 */
 	if (ndlp->nlp_state == NLP_STE_UNUSED_NODE)
 		return;
+
+	lpfc_printf_vlog(vport, KERN_INFO, LOG_NODE | LOG_ELS | LOG_DISCOVERY,
+			"3421 Mark ndlp x%px Dropped. DID x%06x, nflags x%lx "
+			"xflags x%x ref_cnt %d\n",
+			 ndlp, ndlp->nlp_DID, ndlp->nlp_flag,
+			 ndlp->fc4_xpt_flags, kref_read(&ndlp->kref));
+
 	lpfc_nlp_set_state(vport, ndlp, NLP_STE_UNUSED_NODE);
 	if (vport->phba->sli_rev == LPFC_SLI_REV4) {
 		lpfc_cleanup_vports_rrqs(vport, ndlp);
@@ -5226,12 +5244,11 @@ lpfc_set_unreg_login_mbx_cmpl(struct lpfc_hba *phba, struct lpfc_vport *vport,
 
 /*
  * Free rpi associated with LPFC_NODELIST entry.
- * This routine is called from lpfc_freenode(), when we are removing
- * a LPFC_NODELIST entry. It is also called if the driver initiates a
- * LOGO that completes successfully, and we are waiting to PLOGI back
- * to the remote NPort. In addition, it is called after we receive
- * and unsolicated ELS cmd, send back a rsp, the rsp completes and
- * we are waiting to PLOGI back to the remote NPort.
+ * This routine is called if the driver initiates a LOGO that completes
+ * successfully, and we are waiting to PLOGI back to the remote NPort.
+ * In addition, it is called after we receive and unsolicited ELS cmd,
+ * send back a rsp, the rsp completes and we are waiting to PLOGI back
+ * to the remote NPort.
  */
 int
 lpfc_unreg_rpi(struct lpfc_vport *vport, struct lpfc_nodelist *ndlp)
@@ -5336,6 +5353,7 @@ out:
 		clear_bit(NLP_NPR_ADISC, &ndlp->nlp_flag);
 		if (acc_plogi)
 			clear_bit(NLP_LOGO_ACC, &ndlp->nlp_flag);
+		memset(&ndlp->nlp_enc_info, 0, sizeof(ndlp->nlp_enc_info));
 		return 1;
 	}
 	clear_bit(NLP_LOGO_ACC, &ndlp->nlp_flag);
@@ -5609,9 +5627,9 @@ lpfc_findnode_did(struct lpfc_vport *vport, uint32_t did)
 	struct lpfc_nodelist *ndlp;
 	unsigned long iflags;
 
-	spin_lock_irqsave(shost->host_lock, iflags);
+	spin_lock_irqsave(&shost->host_lock, iflags);
 	ndlp = __lpfc_findnode_did(vport, did);
-	spin_unlock_irqrestore(shost->host_lock, iflags);
+	spin_unlock_irqrestore(&shost->host_lock, iflags);
 	return ndlp;
 }
 
@@ -6415,9 +6433,9 @@ lpfc_findnode_wwpn(struct lpfc_vport *vport, struct lpfc_name *wwpn)
 	struct Scsi_Host *shost = lpfc_shost_from_vport(vport);
 	struct lpfc_nodelist *ndlp;
 
-	spin_lock_irq(shost->host_lock);
+	spin_lock_irq(&shost->host_lock);
 	ndlp = __lpfc_find_node(vport, lpfc_filter_by_wwpn, wwpn);
-	spin_unlock_irq(shost->host_lock);
+	spin_unlock_irq(&shost->host_lock);
 	return ndlp;
 }
 
@@ -6433,9 +6451,9 @@ lpfc_findnode_rpi(struct lpfc_vport *vport, uint16_t rpi)
 	struct lpfc_nodelist *ndlp;
 	unsigned long flags;
 
-	spin_lock_irqsave(shost->host_lock, flags);
+	spin_lock_irqsave(&shost->host_lock, flags);
 	ndlp = __lpfc_findnode_rpi(vport, rpi);
-	spin_unlock_irqrestore(shost->host_lock, flags);
+	spin_unlock_irqrestore(&shost->host_lock, flags);
 	return ndlp;
 }
 
@@ -6540,7 +6558,7 @@ lpfc_nlp_init(struct lpfc_vport *vport, uint32_t did)
 	return ndlp;
 }
 
-/* This routine releases all resources associated with a specifc NPort's ndlp
+/* This routine releases all resources associated with a specific NPort's ndlp
  * and mempool_free's the nodelist.
  */
 static void
@@ -6596,11 +6614,6 @@ lpfc_nlp_get(struct lpfc_nodelist *ndlp)
 	unsigned long flags;
 
 	if (ndlp) {
-		lpfc_debugfs_disc_trc(ndlp->vport, LPFC_DISC_TRC_NODE,
-			"node get:        did:x%x flg:x%lx refcnt:x%x",
-			ndlp->nlp_DID, ndlp->nlp_flag,
-			kref_read(&ndlp->kref));
-
 		/* The check of ndlp usage to prevent incrementing the
 		 * ndlp reference count that is in the process of being
 		 * released.
@@ -6608,9 +6621,8 @@ lpfc_nlp_get(struct lpfc_nodelist *ndlp)
 		spin_lock_irqsave(&ndlp->lock, flags);
 		if (!kref_get_unless_zero(&ndlp->kref)) {
 			spin_unlock_irqrestore(&ndlp->lock, flags);
-			lpfc_printf_vlog(ndlp->vport, KERN_WARNING, LOG_NODE,
-				"0276 %s: ndlp:x%px refcnt:%d\n",
-				__func__, (void *)ndlp, kref_read(&ndlp->kref));
+			pr_info("0276 %s: NDLP x%px has zero reference count. "
+				"Exiting\n", __func__, ndlp);
 			return NULL;
 		}
 		spin_unlock_irqrestore(&ndlp->lock, flags);
@@ -6781,9 +6793,9 @@ lpfc_unregister_fcf_prep(struct lpfc_hba *phba)
 				lpfc_sli4_unreg_all_rpis(vports[i]);
 			lpfc_mbx_unreg_vpi(vports[i]);
 			shost = lpfc_shost_from_vport(vports[i]);
-			spin_lock_irq(shost->host_lock);
+			spin_lock_irq(&shost->host_lock);
 			vports[i]->vpi_state &= ~LPFC_VPI_REGISTERED;
-			spin_unlock_irq(shost->host_lock);
+			spin_unlock_irq(&shost->host_lock);
 			set_bit(FC_VPORT_NEEDS_INIT_VPI, &vports[i]->fc_flag);
 		}
 	lpfc_destroy_vport_work_array(phba, vports);
@@ -6796,9 +6808,9 @@ lpfc_unregister_fcf_prep(struct lpfc_hba *phba)
 			lpfc_sli4_unreg_all_rpis(phba->pport);
 		lpfc_mbx_unreg_vpi(phba->pport);
 		shost = lpfc_shost_from_vport(phba->pport);
-		spin_lock_irq(shost->host_lock);
+		spin_lock_irq(&shost->host_lock);
 		phba->pport->vpi_state &= ~LPFC_VPI_REGISTERED;
-		spin_unlock_irq(shost->host_lock);
+		spin_unlock_irq(&shost->host_lock);
 		set_bit(FC_VPORT_NEEDS_INIT_VPI, &phba->pport->fc_flag);
 	}
 
@@ -7007,8 +7019,7 @@ lpfc_read_fcf_conn_tbl(struct lpfc_hba *phba,
 	for (i = 0; i < record_count; i++) {
 		if (!(conn_rec[i].flags & FCFCNCT_VALID))
 			continue;
-		conn_entry = kzalloc(sizeof(struct lpfc_fcf_conn_entry),
-			GFP_KERNEL);
+		conn_entry = kzalloc_obj(struct lpfc_fcf_conn_entry);
 		if (!conn_entry) {
 			lpfc_printf_log(phba, KERN_ERR, LOG_TRACE_EVENT,
 					"2566 Failed to allocate connection"

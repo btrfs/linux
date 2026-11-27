@@ -303,8 +303,10 @@ static bool is_full_charged(struct charger_manager *cm)
 			if (cm->battery_status == POWER_SUPPLY_STATUS_FULL
 					&& desc->fullbatt_vchkdrop_uV)
 				uV += desc->fullbatt_vchkdrop_uV;
-			if (uV >= desc->fullbatt_uV)
-				return true;
+			if (uV >= desc->fullbatt_uV) {
+				is_full = true;
+				goto out;
+			}
 		}
 	}
 
@@ -881,32 +883,28 @@ static bool cm_setup_timer(void)
 	mutex_unlock(&cm_list_mtx);
 
 	if (timer_req && cm_timer) {
-		ktime_t now, add;
-
 		/*
 		 * Set alarm with the polling interval (wakeup_ms)
 		 * The alarm time should be NOW + CM_RTC_SMALL or later.
 		 */
-		if (wakeup_ms == UINT_MAX ||
-			wakeup_ms < CM_RTC_SMALL * MSEC_PER_SEC)
+		if (wakeup_ms == UINT_MAX || wakeup_ms < CM_RTC_SMALL * MSEC_PER_SEC)
 			wakeup_ms = 2 * CM_RTC_SMALL * MSEC_PER_SEC;
 
 		pr_info("Charger Manager wakeup timer: %u ms\n", wakeup_ms);
 
-		now = ktime_get_boottime();
-		add = ktime_set(wakeup_ms / MSEC_PER_SEC,
-				(wakeup_ms % MSEC_PER_SEC) * NSEC_PER_MSEC);
-		alarm_start(cm_timer, ktime_add(now, add));
-
 		cm_suspend_duration_ms = wakeup_ms;
 
-		return true;
+		/*
+		 * The timer should always be queued as the timeout is at least
+		 * two seconds out. Handle it correctly nevertheless.
+		 */
+		return alarm_start_timer(cm_timer, ktime_add_ms(0, wakeup_ms), true);
 	}
 	return false;
 }
 
 /**
- * charger_extcon_work - enable/diable charger according to the state
+ * charger_extcon_work - enable/disable charger according to the state
  *			of charger cable
  *
  * @work: work_struct of the function charger_extcon_work.
@@ -1016,6 +1014,29 @@ static int charger_extcon_init(struct charger_manager *cm,
 	return 0;
 }
 
+static int charger_manager_get_regulators(struct charger_manager *cm)
+{
+	struct charger_desc *desc = cm->desc;
+	struct charger_regulator *charger;
+	int i, ret;
+
+	for (i = 0; i < desc->num_charger_regulators; i++) {
+		charger = &desc->charger_regulators[i];
+		charger->consumer = regulator_get(cm->dev,
+						  charger->regulator_name);
+		if (IS_ERR(charger->consumer)) {
+			dev_err(cm->dev, "Cannot find charger(%s)\n",
+				charger->regulator_name);
+			ret = PTR_ERR(charger->consumer);
+			while (i-- > 0)
+				regulator_put(desc->charger_regulators[i].consumer);
+			return ret;
+		}
+		charger->cm = cm;
+	}
+	return 0;
+}
+
 /**
  * charger_manager_register_extcon - Register extcon device to receive state
  *				     of charger cable.
@@ -1037,15 +1058,6 @@ static int charger_manager_register_extcon(struct charger_manager *cm)
 
 	for (i = 0; i < desc->num_charger_regulators; i++) {
 		charger = &desc->charger_regulators[i];
-
-		charger->consumer = regulator_get(cm->dev,
-					charger->regulator_name);
-		if (IS_ERR(charger->consumer)) {
-			dev_err(cm->dev, "Cannot find charger(%s)\n",
-				charger->regulator_name);
-			return PTR_ERR(charger->consumer);
-		}
-		charger->cm = cm;
 
 		for (j = 0; j < charger->num_cables; j++) {
 			struct charger_cable *cable = &charger->cables[j];
@@ -1287,7 +1299,7 @@ static struct charger_desc *of_cm_parse_desc(struct device *dev)
 	u32 battery_stat = CM_NO_BATTERY;
 	int num_chgs = 0;
 
-	desc = devm_kzalloc(dev, sizeof(*desc), GFP_KERNEL);
+	desc = devm_kzalloc_obj(dev, *desc);
 	if (!desc)
 		return ERR_PTR(-ENOMEM);
 
@@ -1348,19 +1360,15 @@ static struct charger_desc *of_cm_parse_desc(struct device *dev)
 		struct charger_regulator *chg_regs;
 		struct device_node *child;
 
-		chg_regs = devm_kcalloc(dev,
-					desc->num_charger_regulators,
-					sizeof(*chg_regs),
-					GFP_KERNEL);
+		chg_regs = devm_kzalloc_objs(dev, *chg_regs,
+					     desc->num_charger_regulators);
 		if (!chg_regs)
 			return ERR_PTR(-ENOMEM);
 
 		desc->charger_regulators = chg_regs;
 
-		desc->sysfs_groups = devm_kcalloc(dev,
-					desc->num_charger_regulators + 1,
-					sizeof(*desc->sysfs_groups),
-					GFP_KERNEL);
+		desc->sysfs_groups = devm_kzalloc_objs(dev, *desc->sysfs_groups,
+						       desc->num_charger_regulators + 1);
 		if (!desc->sysfs_groups)
 			return ERR_PTR(-ENOMEM);
 
@@ -1374,10 +1382,8 @@ static struct charger_desc *of_cm_parse_desc(struct device *dev)
 			/* charger cables */
 			chg_regs->num_cables = of_get_child_count(child);
 			if (chg_regs->num_cables) {
-				cables = devm_kcalloc(dev,
-						      chg_regs->num_cables,
-						      sizeof(*cables),
-						      GFP_KERNEL);
+				cables = devm_kzalloc_objs(dev, *cables,
+							   chg_regs->num_cables);
 				if (!cables) {
 					of_node_put(child);
 					return ERR_PTR(-ENOMEM);
@@ -1434,7 +1440,7 @@ static int charger_manager_probe(struct platform_device *pdev)
 		return PTR_ERR(desc);
 	}
 
-	cm = devm_kzalloc(&pdev->dev, sizeof(*cm), GFP_KERNEL);
+	cm = devm_kzalloc_obj(&pdev->dev, *cm);
 	if (!cm)
 		return -ENOMEM;
 
@@ -1445,7 +1451,7 @@ static int charger_manager_probe(struct platform_device *pdev)
 
 	/* Initialize alarm timer */
 	if (alarmtimer_get_rtcdev()) {
-		cm_timer = devm_kzalloc(cm->dev, sizeof(*cm_timer), GFP_KERNEL);
+		cm_timer = devm_kzalloc_obj(cm->dev, *cm_timer);
 		if (!cm_timer)
 			return -ENOMEM;
 		alarm_init(cm_timer, ALARM_BOOTTIME, cm_timer_func);
@@ -1524,10 +1530,8 @@ static int charger_manager_probe(struct platform_device *pdev)
 	cm->charger_psy_desc.name = cm->psy_name_buf;
 
 	/* Allocate for psy properties because they may vary */
-	properties = devm_kcalloc(&pdev->dev,
-			     ARRAY_SIZE(default_charger_props) +
-				NUM_CHARGER_PSY_OPTIONAL,
-			     sizeof(*properties), GFP_KERNEL);
+	properties = devm_kzalloc_objs(&pdev->dev, *properties,
+				       ARRAY_SIZE(default_charger_props) + NUM_CHARGER_PSY_OPTIONAL);
 	if (!properties)
 		return -ENOMEM;
 
@@ -1582,13 +1586,23 @@ static int charger_manager_probe(struct platform_device *pdev)
 	}
 	psy_cfg.attr_grp = desc->sysfs_groups;
 
+	/*
+	 * Acquire charger regulators before exposing the sysfs entries, so
+	 * userspace cannot reach externally_control before the regulators
+	 * (and charger->cm) are available.  Mirrors the order in remove().
+	 */
+	ret = charger_manager_get_regulators(cm);
+	if (ret < 0)
+		return ret;
+
 	cm->charger_psy = power_supply_register(&pdev->dev,
 						&cm->charger_psy_desc,
 						&psy_cfg);
 	if (IS_ERR(cm->charger_psy)) {
 		dev_err(&pdev->dev, "Cannot register charger-manager with name \"%s\"\n",
 			cm->charger_psy_desc.name);
-		return PTR_ERR(cm->charger_psy);
+		ret = PTR_ERR(cm->charger_psy);
+		goto err_regulator;
 	}
 
 	/* Register extcon device for charger cable */
@@ -1622,10 +1636,10 @@ static int charger_manager_probe(struct platform_device *pdev)
 	return 0;
 
 err_reg_extcon:
+	power_supply_unregister(cm->charger_psy);
+err_regulator:
 	for (i = 0; i < desc->num_charger_regulators; i++)
 		regulator_put(desc->charger_regulators[i].consumer);
-
-	power_supply_unregister(cm->charger_psy);
 
 	return ret;
 }
@@ -1644,17 +1658,17 @@ static void charger_manager_remove(struct platform_device *pdev)
 	cancel_work_sync(&setup_polling);
 	cancel_delayed_work_sync(&cm_monitor_work);
 
-	for (i = 0 ; i < desc->num_charger_regulators ; i++)
-		regulator_put(desc->charger_regulators[i].consumer);
+	try_charger_enable(cm, false);
 
 	power_supply_unregister(cm->charger_psy);
 
-	try_charger_enable(cm, false);
+	for (i = 0 ; i < desc->num_charger_regulators ; i++)
+		regulator_put(desc->charger_regulators[i].consumer);
 }
 
 static const struct platform_device_id charger_manager_id[] = {
-	{ "charger-manager", 0 },
-	{ },
+	{ .name = "charger-manager" },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, charger_manager_id);
 

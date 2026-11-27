@@ -33,7 +33,7 @@ static int pd_parse_state_nodes(
 		if (ret)
 			goto free_state;
 
-		state_buf = kmalloc(sizeof(u32), GFP_KERNEL);
+		state_buf = kmalloc_obj(u32);
 		if (!state_buf) {
 			ret = -ENOMEM;
 			goto free_state;
@@ -95,11 +95,11 @@ struct generic_pm_domain *dt_idle_pd_alloc(struct device_node *np,
 	struct genpd_power_state *states = NULL;
 	int ret, state_count = 0;
 
-	pd = kzalloc(sizeof(*pd), GFP_KERNEL);
+	pd = kzalloc_obj(*pd);
 	if (!pd)
 		goto out;
 
-	pd->name = kasprintf(GFP_KERNEL, "%pOF", np);
+	pd->name = kstrdup(kbasename(of_node_full_name(np)), GFP_KERNEL);
 	if (!pd->name)
 		goto free_pd;
 
@@ -112,7 +112,6 @@ struct generic_pm_domain *dt_idle_pd_alloc(struct device_node *np,
 		goto free_name;
 
 	pd->free_states = pd_free_states;
-	pd->name = kbasename(pd->name);
 	pd->states = states;
 	pd->state_count = state_count;
 

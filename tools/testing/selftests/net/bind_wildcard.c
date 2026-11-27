@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Copyright Amazon.com Inc. or its affiliates. */
 
+#define _GNU_SOURCE
+#include <sched.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 
-#include "../kselftest_harness.h"
+#include "kselftest_harness.h"
 
 static const __u32 in4addr_any = INADDR_ANY;
 static const __u32 in4addr_loopback = INADDR_LOOPBACK;
@@ -716,6 +718,9 @@ static void setup_addr(FIXTURE_DATA(bind_wildcard) *self, int i,
 
 FIXTURE_SETUP(bind_wildcard)
 {
+	ASSERT_EQ(unshare(CLONE_NEWNET), 0);
+	ASSERT_EQ(system("ip link set lo up"), 0);
+
 	setup_addr(self, 0, variant->family[0], variant->addr[0]);
 	setup_addr(self, 1, variant->family[1], variant->addr[1]);
 
@@ -804,6 +809,60 @@ TEST_F(bind_wildcard, reuseport)
 
 	for (i = 0; i < NR_SOCKETS; i++)
 		bind_socket(_metadata, self, variant, i, SO_REUSEPORT);
+}
+
+/* The SO_REUSEPORT bind cache (tb->fast_*) filled by a v6only [::] socket
+ * must not let a dual-stack [::] socket skip the conflict check against a
+ * 0.0.0.0 listener.
+ */
+TEST(reuseport_v6only_cache)
+{
+	struct sockaddr_in6 addr6 = {
+		.sin6_family = AF_INET6,
+		.sin6_addr = in6addr_any,
+	};
+	struct sockaddr_in addr4 = {
+		.sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_ANY),
+	};
+	socklen_t addrlen;
+	int fd[3], ret;
+	int on = 1;
+
+	ASSERT_EQ(unshare(CLONE_NEWNET), 0);
+
+	/* bind(0.0.0.0:P), listen() */
+	fd[0] = socket(AF_INET, SOCK_STREAM, 0);
+	ASSERT_GT(fd[0], 0);
+	ASSERT_EQ(bind(fd[0], (struct sockaddr *)&addr4, sizeof(addr4)), 0);
+	ASSERT_EQ(listen(fd[0], 1), 0);
+
+	addrlen = sizeof(addr4);
+	ASSERT_EQ(getsockname(fd[0], (struct sockaddr *)&addr4, &addrlen), 0);
+	addr6.sin6_port = addr4.sin_port;
+
+	/* SO_REUSEPORT + IPV6_V6ONLY, bind([::]:P) fills the cache. */
+	fd[1] = socket(AF_INET6, SOCK_STREAM, 0);
+	ASSERT_GT(fd[1], 0);
+	ret = setsockopt(fd[1], SOL_IPV6, IPV6_V6ONLY, &on, sizeof(on));
+	ASSERT_EQ(ret, 0);
+	ret = setsockopt(fd[1], SOL_SOCKET, SO_REUSEPORT, &on, sizeof(on));
+	ASSERT_EQ(ret, 0);
+	ASSERT_EQ(bind(fd[1], (struct sockaddr *)&addr6, sizeof(addr6)), 0);
+
+	/* SO_REUSEPORT, bind([::]:P) conflicts with 0.0.0.0:P. */
+	fd[2] = socket(AF_INET6, SOCK_STREAM, 0);
+	ASSERT_GT(fd[2], 0);
+	ret = setsockopt(fd[2], SOL_SOCKET, SO_REUSEPORT, &on, sizeof(on));
+	ASSERT_EQ(ret, 0);
+
+	ret = bind(fd[2], (struct sockaddr *)&addr6, sizeof(addr6));
+	ASSERT_EQ(ret, -1);
+	ASSERT_EQ(errno, EADDRINUSE);
+
+	close(fd[2]);
+	close(fd[1]);
+	close(fd[0]);
 }
 
 TEST_HARNESS_MAIN

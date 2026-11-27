@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright (C) 2012-2015, 2018-2025 Intel Corporation
+ * Copyright (C) 2012-2015, 2018-2026 Intel Corporation
  * Copyright (C) 2013-2015 Intel Mobile Communications GmbH
  * Copyright (C) 2016-2017 Intel Deutschland GmbH
  */
@@ -1798,8 +1798,7 @@ int iwl_mvm_sta_init(struct iwl_mvm *mvm, struct ieee80211_vif *vif,
 	if (iwl_mvm_has_new_rx_api(mvm)) {
 		int q;
 
-		dup_data = kcalloc(mvm->trans->info.num_rxqs,
-				   sizeof(*dup_data), GFP_KERNEL);
+		dup_data = kzalloc_objs(*dup_data, mvm->trans->info.num_rxqs);
 		if (!dup_data)
 			return -ENOMEM;
 		/*
@@ -2793,7 +2792,11 @@ static int iwl_mvm_fw_baid_op_sta(struct iwl_mvm *mvm,
 		if (WARN_ON(start && iwl_mvm_has_new_rx_api(mvm) &&
 			    !(status & IWL_ADD_STA_BAID_VALID_MASK)))
 			return -EINVAL;
-		return u32_get_bits(status, IWL_ADD_STA_BAID_MASK);
+		ret = u32_get_bits(status, IWL_ADD_STA_BAID_MASK);
+		if (IWL_FW_CHECK(mvm, start && ret >= ARRAY_SIZE(mvm->baid_map),
+				 "invalid BAID %d from FW\n", ret))
+			return -EINVAL;
+		return ret;
 	case ADD_STA_IMMEDIATE_BA_FAILURE:
 		IWL_WARN(mvm, "RX BA Session refused by fw\n");
 		return -ENOSPC;

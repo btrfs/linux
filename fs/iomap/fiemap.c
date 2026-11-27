@@ -56,7 +56,7 @@ advance:
 }
 
 int iomap_fiemap(struct inode *inode, struct fiemap_extent_info *fi,
-		u64 start, u64 len, const struct iomap_ops *ops)
+		u64 start, u64 len, iomap_iter_next_fn next)
 {
 	struct iomap_iter iter = {
 		.inode		= inode,
@@ -73,18 +73,18 @@ int iomap_fiemap(struct inode *inode, struct fiemap_extent_info *fi,
 	if (ret)
 		return ret;
 
-	while ((ret = iomap_iter(&iter, ops)) > 0)
+	while ((ret = iomap_iter(&iter, next)) > 0)
 		iter.status = iomap_fiemap_iter(&iter, fi, &prev);
+
+	/* inode with no (attribute) mapping will give ENOENT */
+	if (ret < 0 && ret != -ENOENT)
+		return ret;
 
 	if (prev.type != IOMAP_HOLE) {
 		ret = iomap_to_fiemap(fi, &prev, FIEMAP_EXTENT_LAST);
 		if (ret < 0)
 			return ret;
 	}
-
-	/* inode with no (attribute) mapping will give ENOENT */
-	if (ret < 0 && ret != -ENOENT)
-		return ret;
 	return 0;
 }
 EXPORT_SYMBOL_GPL(iomap_fiemap);
@@ -92,7 +92,7 @@ EXPORT_SYMBOL_GPL(iomap_fiemap);
 /* legacy ->bmap interface.  0 is the error return (!) */
 sector_t
 iomap_bmap(struct address_space *mapping, sector_t bno,
-		const struct iomap_ops *ops)
+		iomap_iter_next_fn next)
 {
 	struct iomap_iter iter = {
 		.inode	= mapping->host,
@@ -107,7 +107,7 @@ iomap_bmap(struct address_space *mapping, sector_t bno,
 		return 0;
 
 	bno = 0;
-	while ((ret = iomap_iter(&iter, ops)) > 0) {
+	while ((ret = iomap_iter(&iter, next)) > 0) {
 		if (iter.iomap.type == IOMAP_MAPPED)
 			bno = iomap_sector(&iter.iomap, iter.pos) >> blkshift;
 		/* leave iter.status unset to abort loop */

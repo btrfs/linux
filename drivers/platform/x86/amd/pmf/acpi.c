@@ -9,6 +9,9 @@
  */
 
 #include <linux/acpi.h>
+#include <linux/array_size.h>
+#include <linux/cleanup.h>
+#include <linux/dev_printk.h>
 #include "pmf.h"
 
 #define APMF_CQL_NOTIFICATION  2
@@ -47,7 +50,7 @@ static union acpi_object *apmf_if_call(struct amd_pmf_dev *pdev, int fn, struct 
 	return buffer.pointer;
 }
 
-static int apmf_if_call_store_buffer(struct amd_pmf_dev *pdev, int fn, void *dest, size_t out_sz)
+int apmf_if_call_store_buffer(struct amd_pmf_dev *pdev, int fn, void *dest, size_t out_sz)
 {
 	union acpi_object *info;
 	size_t size;
@@ -118,8 +121,7 @@ static union acpi_object *apts_if_call(struct amd_pmf_dev *pdev, u32 state_index
 	return buffer.pointer;
 }
 
-static int apts_if_call_store_buffer(struct amd_pmf_dev *pdev,
-				     u32 index, void *data, size_t out_sz)
+int apts_if_call_store_buffer(struct amd_pmf_dev *pdev, u32 index, void *data, size_t out_sz)
 {
 	union acpi_object *info;
 	size_t size;
@@ -153,46 +155,6 @@ static int apts_if_call_store_buffer(struct amd_pmf_dev *pdev,
 out:
 	kfree(info);
 	return err;
-}
-
-int is_apmf_func_supported(struct amd_pmf_dev *pdev, unsigned long index)
-{
-	/* If bit-n is set, that indicates function n+1 is supported */
-	return !!(pdev->supported_func & BIT(index - 1));
-}
-
-int is_apmf_bios_input_notifications_supported(struct amd_pmf_dev *pdev)
-{
-	return !!(pdev->notifications & CUSTOM_BIOS_INPUT_BITS);
-}
-
-int apts_get_static_slider_granular_v2(struct amd_pmf_dev *pdev,
-				       struct amd_pmf_apts_granular_output *data, u32 apts_idx)
-{
-	if (!is_apmf_func_supported(pdev, APMF_FUNC_STATIC_SLIDER_GRANULAR))
-		return -EINVAL;
-
-	return apts_if_call_store_buffer(pdev, apts_idx, data, sizeof(*data));
-}
-
-int apmf_get_static_slider_granular_v2(struct amd_pmf_dev *pdev,
-				       struct apmf_static_slider_granular_output_v2 *data)
-{
-	if (!is_apmf_func_supported(pdev, APMF_FUNC_STATIC_SLIDER_GRANULAR))
-		return -EINVAL;
-
-	return apmf_if_call_store_buffer(pdev, APMF_FUNC_STATIC_SLIDER_GRANULAR,
-					 data, sizeof(*data));
-}
-
-int apmf_get_static_slider_granular(struct amd_pmf_dev *pdev,
-				    struct apmf_static_slider_granular_output *data)
-{
-	if (!is_apmf_func_supported(pdev, APMF_FUNC_STATIC_SLIDER_GRANULAR))
-		return -EINVAL;
-
-	return apmf_if_call_store_buffer(pdev, APMF_FUNC_STATIC_SLIDER_GRANULAR,
-									 data, sizeof(*data));
 }
 
 int apmf_os_power_slider_update(struct amd_pmf_dev *pdev, u8 event)
@@ -310,25 +272,37 @@ static int apmf_notify_smart_pc_update(struct amd_pmf_dev *pdev, u32 val, u32 pr
 	return 0;
 }
 
-int apmf_get_auto_mode_def(struct amd_pmf_dev *pdev, struct apmf_auto_mode *data)
+/* Store custom BIOS inputs data in ring buffer */
+static void amd_pmf_custom_bios_inputs_rb(struct amd_pmf_dev *pmf_dev)
 {
-	return apmf_if_call_store_buffer(pdev, APMF_FUNC_AUTO_MODE, data, sizeof(*data));
-}
+	struct pmf_cbi_ring_buffer *rb = &pmf_dev->cbi_buf;
+	int i;
 
-int apmf_get_sbios_requests_v2(struct amd_pmf_dev *pdev, struct apmf_sbios_req_v2 *req)
-{
-	return apmf_if_call_store_buffer(pdev, APMF_FUNC_SBIOS_REQUESTS, req, sizeof(*req));
-}
+	guard(mutex)(&pmf_dev->cbi_mutex);
 
-int apmf_get_sbios_requests_v1(struct amd_pmf_dev *pdev, struct apmf_sbios_req_v1 *req)
-{
-	return apmf_if_call_store_buffer(pdev, APMF_FUNC_SBIOS_REQUESTS, req, sizeof(*req));
-}
+	switch (pmf_dev->cpu_id) {
+	case AMD_CPU_ID_PS:
+		for (i = 0; i < ARRAY_SIZE(custom_bios_inputs_v1); i++)
+			rb->data[rb->head].val[i] = pmf_dev->req1.custom_policy[i];
+		rb->data[rb->head].preq = pmf_dev->req1.pending_req;
+		break;
+	case PCI_DEVICE_ID_AMD_1AH_M20H_ROOT:
+	case PCI_DEVICE_ID_AMD_1AH_M60H_ROOT:
+		for (i = 0; i < ARRAY_SIZE(custom_bios_inputs); i++)
+			rb->data[rb->head].val[i] = pmf_dev->req.custom_policy[i];
+		rb->data[rb->head].preq = pmf_dev->req.pending_req;
+		break;
+	default:
+		return;
+	}
 
-int apmf_get_sbios_requests(struct amd_pmf_dev *pdev, struct apmf_sbios_req *req)
-{
-	return apmf_if_call_store_buffer(pdev, APMF_FUNC_SBIOS_REQUESTS,
-									 req, sizeof(*req));
+	if (CIRC_SPACE(rb->head, rb->tail, CUSTOM_BIOS_INPUT_RING_ENTRIES) == 0) {
+		/* Rare case: ensures the newest BIOS input value is kept */
+		dev_warn(pmf_dev->dev, "Overwriting BIOS input value, data may be lost\n");
+		rb->tail = (rb->tail + 1) & (CUSTOM_BIOS_INPUT_RING_ENTRIES - 1);
+	}
+
+	rb->head = (rb->head + 1) & (CUSTOM_BIOS_INPUT_RING_ENTRIES - 1);
 }
 
 static void amd_pmf_handle_early_preq(struct amd_pmf_dev *pdev)
@@ -356,6 +330,8 @@ static void apmf_event_handler_v2(acpi_handle handle, u32 event, void *data)
 	dev_dbg(pmf_dev->dev, "Pending request (preq): 0x%x\n", pmf_dev->req.pending_req);
 
 	amd_pmf_handle_early_preq(pmf_dev);
+
+	amd_pmf_custom_bios_inputs_rb(pmf_dev);
 }
 
 static void apmf_event_handler_v1(acpi_handle handle, u32 event, void *data)
@@ -374,6 +350,8 @@ static void apmf_event_handler_v1(acpi_handle handle, u32 event, void *data)
 	dev_dbg(pmf_dev->dev, "Pending request (preq1): 0x%x\n", pmf_dev->req1.pending_req);
 
 	amd_pmf_handle_early_preq(pmf_dev);
+
+	amd_pmf_custom_bios_inputs_rb(pmf_dev);
 }
 
 static void apmf_event_handler(acpi_handle handle, u32 event, void *data)
@@ -453,16 +431,6 @@ static int apmf_get_system_params(struct amd_pmf_dev *dev)
 	dev->hb_interval = params.heartbeat_int;
 
 	return 0;
-}
-
-int apmf_get_dyn_slider_def_ac(struct amd_pmf_dev *pdev, struct apmf_dyn_slider_output *data)
-{
-	return apmf_if_call_store_buffer(pdev, APMF_FUNC_DYN_SLIDER_AC, data, sizeof(*data));
-}
-
-int apmf_get_dyn_slider_def_dc(struct amd_pmf_dev *pdev, struct apmf_dyn_slider_output *data)
-{
-	return apmf_if_call_store_buffer(pdev, APMF_FUNC_DYN_SLIDER_DC, data, sizeof(*data));
 }
 
 static apmf_event_handler_t apmf_event_handlers[] = {

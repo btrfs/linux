@@ -5,16 +5,23 @@
  * Copyright © 2024 Amazon.com, Inc. or its affiliates.
  */
 
+#include "linux/poll.h"
+#include "linux/types.h"
+#include "linux/wait.h"
 #include <linux/acpi.h>
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/init.h>
+#include <linux/io.h>
+#include <linux/interrupt.h>
 #include <linux/kernel.h>
+#include <linux/kref.h>
 #include <linux/miscdevice.h>
 #include <linux/mm.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 
@@ -39,11 +46,14 @@ struct vmclock_state {
 	struct resource res;
 	struct vmclock_abi *clk;
 	struct miscdevice miscdev;
+	wait_queue_head_t disrupt_wait;
 	struct ptp_clock_info ptp_clock_info;
 	struct ptp_clock *ptp_clock;
 	enum clocksource_ids cs_id, sys_cs_id;
 	int index;
 	char *name;
+	struct kref kref;
+	bool removed;
 };
 
 #define VMCLOCK_MAX_WAIT ms_to_ktime(100)
@@ -76,13 +86,13 @@ static uint64_t mul_u64_u64_shr_add_u64(uint64_t *res_hi, uint64_t delta,
 
 static bool tai_adjust(struct vmclock_abi *clk, uint64_t *sec)
 {
-	if (likely(clk->time_type == VMCLOCK_TIME_UTC))
+	if (clk->time_type == VMCLOCK_TIME_TAI)
 		return true;
 
-	if (clk->time_type == VMCLOCK_TIME_TAI &&
+	if (clk->time_type == VMCLOCK_TIME_UTC &&
 	    (le64_to_cpu(clk->flags) & VMCLOCK_FLAG_TAI_OFFSET_VALID)) {
 		if (sec)
-			*sec += (int16_t)le16_to_cpu(clk->tai_offset_sec);
+			*sec -= (int16_t)le16_to_cpu(clk->tai_offset_sec);
 		return true;
 	}
 	return false;
@@ -94,7 +104,6 @@ static int vmclock_get_crosststamp(struct vmclock_state *st,
 				   struct timespec64 *tspec)
 {
 	ktime_t deadline = ktime_add(ktime_get(), VMCLOCK_MAX_WAIT);
-	struct system_time_snapshot systime_snapshot;
 	uint64_t cycle, delta, seq, frac_sec;
 
 #ifdef CONFIG_X86
@@ -125,17 +134,19 @@ static int vmclock_get_crosststamp(struct vmclock_state *st,
 		 * will be derived from the *same* counter value.
 		 *
 		 * If the system isn't using the same counter, then the value
-		 * from ktime_get_snapshot() will still be used as pre_ts, and
-		 * ptp_read_system_postts() is called to populate postts after
-		 * calling get_cycles().
-		 *
-		 * The conversion to timespec64 happens further down, outside
-		 * the seq_count loop.
+		 * from ptp_read_system_prets() will still be used as pre_ts,
+		 * and ptp_read_system_postts() is called to populate postts
+		 * after calling get_cycles().
 		 */
 		if (sts) {
-			ktime_get_snapshot(&systime_snapshot);
-			if (systime_snapshot.cs_id == st->cs_id) {
-				cycle = systime_snapshot.cycles;
+			ptp_read_system_prets(sts);
+			if (sts->pre_sts.cs_id == st->cs_id) {
+				cycle = sts->pre_sts.cycles;
+				sts->post_sts = sts->pre_sts;
+			} else if (sts->pre_sts.hw_csid == st->cs_id &&
+				   sts->pre_sts.hw_cycles) {
+				cycle = sts->pre_sts.hw_cycles;
+				sts->post_sts = sts->pre_sts;
 			} else {
 				cycle = get_cycles();
 				ptp_read_system_postts(sts);
@@ -171,12 +182,6 @@ static int vmclock_get_crosststamp(struct vmclock_state *st,
 	if (system_counter) {
 		system_counter->cycles = cycle;
 		system_counter->cs_id = st->cs_id;
-	}
-
-	if (sts) {
-		sts->pre_ts = ktime_to_timespec64(systime_snapshot.real);
-		if (systime_snapshot.cs_id == st->cs_id)
-			sts->post_ts = sts->pre_ts;
 	}
 
 	return 0;
@@ -265,7 +270,7 @@ static int ptp_vmclock_getcrosststamp(struct ptp_clock_info *ptp,
 	if (ret == -ENODEV) {
 		struct system_time_snapshot systime_snapshot;
 
-		ktime_get_snapshot(&systime_snapshot);
+		ktime_get_snapshot_id(CLOCK_REALTIME, &systime_snapshot);
 
 		if (systime_snapshot.cs_id == CSID_X86_TSC ||
 		    systime_snapshot.cs_id == CSID_X86_KVM_CLK) {
@@ -343,9 +348,9 @@ static struct ptp_clock *vmclock_ptp_register(struct device *dev,
 		return NULL;
 	}
 
-	/* Only UTC, or TAI with offset */
+	/* Accept TAI directly, or UTC with valid offset for conversion to TAI */
 	if (!tai_adjust(st->clk, NULL)) {
-		dev_info(dev, "vmclock does not provide unambiguous UTC\n");
+		dev_info(dev, "vmclock does not provide unambiguous time\n");
 		return NULL;
 	}
 
@@ -357,13 +362,27 @@ static struct ptp_clock *vmclock_ptp_register(struct device *dev,
 	return ptp_clock_register(&st->ptp_clock_info, dev);
 }
 
+struct vmclock_file_state {
+	struct vmclock_state *st;
+	atomic_t seq;
+};
+
 static int vmclock_miscdev_mmap(struct file *fp, struct vm_area_struct *vma)
 {
-	struct vmclock_state *st = container_of(fp->private_data,
-						struct vmclock_state, miscdev);
+	struct vmclock_file_state *fst = fp->private_data;
+	struct vmclock_state *st = fst->st;
+
+	if (READ_ONCE(st->removed))
+		return -ENODEV;
 
 	if ((vma->vm_flags & (VM_READ|VM_WRITE)) != VM_READ)
 		return -EROFS;
+
+	/*
+	 * Restrict the read-only mapping so it cannot be upgraded to
+	 * writable later with mprotect().
+	 */
+	vm_flags_clear(vma, VM_MAYWRITE);
 
 	if (vma->vm_end - vma->vm_start != PAGE_SIZE || vma->vm_pgoff)
 		return -EINVAL;
@@ -379,11 +398,14 @@ static int vmclock_miscdev_mmap(struct file *fp, struct vm_area_struct *vma)
 static ssize_t vmclock_miscdev_read(struct file *fp, char __user *buf,
 				    size_t count, loff_t *ppos)
 {
-	struct vmclock_state *st = container_of(fp->private_data,
-						struct vmclock_state, miscdev);
 	ktime_t deadline = ktime_add(ktime_get(), VMCLOCK_MAX_WAIT);
+	struct vmclock_file_state *fst = fp->private_data;
+	struct vmclock_state *st = fst->st;
+	uint32_t seq, old_seq;
 	size_t max_count;
-	uint32_t seq;
+
+	if (READ_ONCE(st->removed))
+		return -ENODEV;
 
 	if (*ppos >= PAGE_SIZE)
 		return 0;
@@ -392,6 +414,7 @@ static ssize_t vmclock_miscdev_read(struct file *fp, char __user *buf,
 	if (count > max_count)
 		count = max_count;
 
+	old_seq = atomic_read(&fst->seq);
 	while (1) {
 		seq = le32_to_cpu(st->clk->seq_count) & ~1U;
 		/* Pairs with hypervisor wmb */
@@ -402,8 +425,16 @@ static ssize_t vmclock_miscdev_read(struct file *fp, char __user *buf,
 
 		/* Pairs with hypervisor wmb */
 		virt_rmb();
-		if (seq == le32_to_cpu(st->clk->seq_count))
-			break;
+		if (seq == le32_to_cpu(st->clk->seq_count)) {
+			/*
+			 * Either we updated fst->seq to seq (the latest version we observed)
+			 * or someone else did (old_seq == seq), so we can break.
+			 */
+			if (atomic_try_cmpxchg(&fst->seq, &old_seq, seq) ||
+			    old_seq == seq) {
+				break;
+			}
+		}
 
 		if (ktime_after(ktime_get(), deadline))
 			return -ETIMEDOUT;
@@ -413,25 +444,86 @@ static ssize_t vmclock_miscdev_read(struct file *fp, char __user *buf,
 	return count;
 }
 
+static __poll_t vmclock_miscdev_poll(struct file *fp, poll_table *wait)
+{
+	struct vmclock_file_state *fst = fp->private_data;
+	struct vmclock_state *st = fst->st;
+	uint32_t seq;
+
+	/*
+	 * Hypervisor will not send us any notifications, so fail immediately
+	 * to avoid having caller sleeping for ever.
+	 */
+	if (!(le64_to_cpu(st->clk->flags) & VMCLOCK_FLAG_NOTIFICATION_PRESENT))
+		return POLLHUP;
+
+	poll_wait(fp, &st->disrupt_wait, wait);
+
+	/* After poll_wait(), so vmclock_remove()'s wake-up is not missed */
+	if (READ_ONCE(st->removed))
+		return EPOLLHUP | EPOLLERR;
+
+	seq = le32_to_cpu(st->clk->seq_count);
+	if (atomic_read(&fst->seq) != seq)
+		return POLLIN | POLLRDNORM;
+
+	return 0;
+}
+
+static int vmclock_miscdev_open(struct inode *inode, struct file *fp)
+{
+	struct vmclock_state *st = container_of(fp->private_data,
+						struct vmclock_state, miscdev);
+	struct vmclock_file_state *fst = kzalloc_obj(*fst);
+
+	if (!fst)
+		return -ENOMEM;
+
+	/*
+	 * misc_open() calls this with misc_mtx held, and vmclock_remove()
+	 * calls misc_deregister(), which takes misc_mtx, before the device's
+	 * own reference is dropped.
+	 */
+	kref_get(&st->kref);
+	fst->st = st;
+	atomic_set(&fst->seq, 0);
+
+	fp->private_data = fst;
+
+	return 0;
+}
+
+static void vmclock_free(struct kref *kref)
+{
+	struct vmclock_state *st =
+		container_of(kref, struct vmclock_state, kref);
+
+	if (st->clk)
+		memunmap(st->clk);
+	kfree(st);
+}
+
+static int vmclock_miscdev_release(struct inode *inode, struct file *fp)
+{
+	struct vmclock_file_state *fst = fp->private_data;
+
+	kref_put(&fst->st->kref, vmclock_free);
+	kfree(fst);
+	return 0;
+}
+
 static const struct file_operations vmclock_miscdev_fops = {
 	.owner = THIS_MODULE,
+	.open = vmclock_miscdev_open,
+	.release = vmclock_miscdev_release,
 	.mmap = vmclock_miscdev_mmap,
 	.read = vmclock_miscdev_read,
+	.poll = vmclock_miscdev_poll,
 };
 
 /* module operations */
 
-static void vmclock_remove(void *data)
-{
-	struct vmclock_state *st = data;
-
-	if (st->ptp_clock)
-		ptp_clock_unregister(st->ptp_clock);
-
-	if (st->miscdev.minor != MISC_DYNAMIC_MINOR)
-		misc_deregister(&st->miscdev);
-}
-
+#if IS_ENABLED(CONFIG_ACPI)
 static acpi_status vmclock_acpi_resources(struct acpi_resource *ares, void *data)
 {
 	struct vmclock_state *st = data;
@@ -459,6 +551,40 @@ static acpi_status vmclock_acpi_resources(struct acpi_resource *ares, void *data
 	return AE_ERROR;
 }
 
+static void
+vmclock_acpi_notification_handler(acpi_handle __always_unused handle,
+				  u32 __always_unused event, void *dev)
+{
+	struct device *device = dev;
+	struct vmclock_state *st = device->driver_data;
+
+	wake_up_interruptible(&st->disrupt_wait);
+}
+
+static int vmclock_setup_acpi_notification(struct device *dev)
+{
+	struct acpi_device *adev = ACPI_COMPANION(dev);
+	acpi_status status;
+
+	/*
+	 * This should never happen as this function is only called when
+	 * has_acpi_companion(dev) is true, but the logic is sufficiently
+	 * complex that Coverity can't see the tautology.
+	 */
+	if (!adev)
+		return -ENODEV;
+
+	status = acpi_install_notify_handler(adev->handle, ACPI_DEVICE_NOTIFY,
+					     vmclock_acpi_notification_handler,
+					     dev);
+	if (ACPI_FAILURE(status)) {
+		dev_err(dev, "failed to install notification handler");
+		return -ENODEV;
+	}
+
+	return 0;
+}
+
 static int vmclock_probe_acpi(struct device *dev, struct vmclock_state *st)
 {
 	struct acpi_device *adev = ACPI_COMPANION(dev);
@@ -481,6 +607,93 @@ static int vmclock_probe_acpi(struct device *dev, struct vmclock_state *st)
 
 	return 0;
 }
+#endif /* CONFIG_ACPI */
+
+static irqreturn_t vmclock_of_irq_handler(int __always_unused irq, void *_st)
+{
+	struct vmclock_state *st = _st;
+
+	wake_up_interruptible(&st->disrupt_wait);
+	return IRQ_HANDLED;
+}
+
+static int vmclock_probe_dt(struct device *dev, struct vmclock_state *st)
+{
+	struct platform_device *pdev = to_platform_device(dev);
+	struct resource *res;
+
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!res)
+		return -ENODEV;
+
+	st->res = *res;
+
+	return 0;
+}
+
+static int vmclock_setup_of_notification(struct device *dev)
+{
+	struct platform_device *pdev = to_platform_device(dev);
+	int irq;
+
+	irq = platform_get_irq(pdev, 0);
+	if (irq < 0)
+		return irq;
+
+	return devm_request_irq(dev, irq, vmclock_of_irq_handler, IRQF_SHARED,
+				"vmclock", dev->driver_data);
+}
+
+static int vmclock_setup_notification(struct device *dev,
+				      struct vmclock_state *st)
+{
+	/* The device does not support notifications. Nothing else to do */
+	if (!(le64_to_cpu(st->clk->flags) & VMCLOCK_FLAG_NOTIFICATION_PRESENT))
+		return 0;
+
+#if IS_ENABLED(CONFIG_ACPI)
+	if (has_acpi_companion(dev))
+		return vmclock_setup_acpi_notification(dev);
+#endif
+	return vmclock_setup_of_notification(dev);
+}
+
+static void vmclock_remove(void *data)
+{
+	struct device *dev = data;
+	struct vmclock_state *st = dev->driver_data;
+
+	if (!st) {
+		dev_err(dev, "%s called with NULL driver_data", __func__);
+		return;
+	}
+
+#if IS_ENABLED(CONFIG_ACPI)
+	if (has_acpi_companion(dev))
+		acpi_remove_notify_handler(ACPI_COMPANION(dev)->handle,
+					   ACPI_DEVICE_NOTIFY,
+					   vmclock_acpi_notification_handler);
+#endif
+
+	if (st->ptp_clock)
+		ptp_clock_unregister(st->ptp_clock);
+
+	if (st->miscdev.minor != MISC_DYNAMIC_MINOR)
+		misc_deregister(&st->miscdev);
+
+	/* Files still open now fail, and a poll() in progress returns */
+	WRITE_ONCE(st->removed, true);
+	wake_up_interruptible_all(&st->disrupt_wait);
+
+	dev->driver_data = NULL;
+}
+
+static void vmclock_put(void *data)
+{
+	struct vmclock_state *st = data;
+
+	kref_put(&st->kref, vmclock_free);
+}
 
 static void vmclock_put_idx(void *data)
 {
@@ -495,14 +708,22 @@ static int vmclock_probe(struct platform_device *pdev)
 	struct vmclock_state *st;
 	int ret;
 
-	st = devm_kzalloc(dev, sizeof(*st), GFP_KERNEL);
+	/* Open files can outlive the device, so st is not devm memory */
+	st = kzalloc_obj(*st);
 	if (!st)
 		return -ENOMEM;
+	kref_init(&st->kref);
 
+	ret = devm_add_action_or_reset(dev, vmclock_put, st);
+	if (ret)
+		return ret;
+
+#if IS_ENABLED(CONFIG_ACPI)
 	if (has_acpi_companion(dev))
 		ret = vmclock_probe_acpi(dev, st);
 	else
-		ret = -EINVAL; /* Only ACPI for now */
+#endif
+		ret = vmclock_probe_dt(dev, st);
 
 	if (ret) {
 		dev_info(dev, "Failed to obtain physical address: %d\n", ret);
@@ -514,13 +735,11 @@ static int vmclock_probe(struct platform_device *pdev)
 			 resource_size(&st->res));
 		return -EINVAL;
 	}
-	st->clk = devm_memremap(dev, st->res.start, resource_size(&st->res),
-				MEMREMAP_WB | MEMREMAP_DEC);
-	if (IS_ERR(st->clk)) {
-		ret = PTR_ERR(st->clk);
+	st->clk = memremap(st->res.start, resource_size(&st->res),
+			   MEMREMAP_WB | MEMREMAP_DEC);
+	if (!st->clk) {
 		dev_info(dev, "failed to map shared memory\n");
-		st->clk = NULL;
-		return ret;
+		return -ENXIO;
 	}
 
 	if (le32_to_cpu(st->clk->magic) != VMCLOCK_MAGIC ||
@@ -545,7 +764,14 @@ static int vmclock_probe(struct platform_device *pdev)
 
 	st->miscdev.minor = MISC_DYNAMIC_MINOR;
 
-	ret = devm_add_action_or_reset(&pdev->dev, vmclock_remove, st);
+	init_waitqueue_head(&st->disrupt_wait);
+	dev->driver_data = st;
+
+	ret = devm_add_action_or_reset(&pdev->dev, vmclock_remove, dev);
+	if (ret)
+		return ret;
+
+	ret = vmclock_setup_notification(dev, st);
 	if (ret)
 		return ret;
 
@@ -591,15 +817,23 @@ static int vmclock_probe(struct platform_device *pdev)
 
 static const struct acpi_device_id vmclock_acpi_ids[] = {
 	{ "AMZNC10C", 0 },
+	{ "VMCLOCK", 0 },
 	{}
 };
 MODULE_DEVICE_TABLE(acpi, vmclock_acpi_ids);
+
+static const struct of_device_id vmclock_of_ids[] = {
+	{ .compatible = "amazon,vmclock", },
+	{ },
+};
+MODULE_DEVICE_TABLE(of, vmclock_of_ids);
 
 static struct platform_driver vmclock_platform_driver = {
 	.probe		= vmclock_probe,
 	.driver	= {
 		.name	= "vmclock",
 		.acpi_match_table = vmclock_acpi_ids,
+		.of_match_table = vmclock_of_ids,
 	},
 };
 

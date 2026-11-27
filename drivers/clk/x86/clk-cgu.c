@@ -91,7 +91,7 @@ lgm_clk_register_mux(struct lgm_clk_provider *ctx,
 	struct clk_hw *hw;
 	int ret;
 
-	mux = devm_kzalloc(dev, sizeof(*mux), GFP_KERNEL);
+	mux = devm_kzalloc_obj(dev, *mux);
 	if (!mux)
 		return ERR_PTR(-ENOMEM);
 
@@ -137,10 +137,8 @@ static int lgm_clk_divider_determine_rate(struct clk_hw *hw,
 {
 	struct lgm_clk_divider *divider = to_lgm_clk_divider(hw);
 
-	req->rate = divider_round_rate(hw, req->rate, &req->best_parent_rate, divider->table,
-				       divider->width, divider->flags);
-
-	return 0;
+	return divider_determine_rate(hw, req, divider->table, divider->width,
+				      divider->flags);
 }
 
 static int
@@ -205,7 +203,7 @@ lgm_clk_register_divider(struct lgm_clk_provider *ctx,
 	struct clk_hw *hw;
 	int ret;
 
-	div = devm_kzalloc(dev, sizeof(*div), GFP_KERNEL);
+	div = devm_kzalloc_obj(dev, *div);
 	if (!div)
 		return ERR_PTR(-ENOMEM);
 
@@ -306,7 +304,7 @@ lgm_clk_register_gate(struct lgm_clk_provider *ctx,
 	struct clk_hw *hw;
 	int ret;
 
-	gate = devm_kzalloc(dev, sizeof(*gate), GFP_KERNEL);
+	gate = devm_kzalloc_obj(dev, *gate);
 	if (!gate)
 		return ERR_PTR(-ENOMEM);
 
@@ -549,7 +547,7 @@ int lgm_clk_register_ddiv(struct lgm_clk_provider *ctx,
 		struct clk_init_data init = {};
 		struct lgm_clk_ddiv *ddiv;
 
-		ddiv = devm_kzalloc(dev, sizeof(*ddiv), GFP_KERNEL);
+		ddiv = devm_kzalloc_obj(dev, *ddiv);
 		if (!ddiv)
 			return -ENOMEM;
 

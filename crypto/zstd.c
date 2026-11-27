@@ -10,6 +10,7 @@
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/net.h>
+#include <linux/overflow.h>
 #include <linux/vmalloc.h>
 #include <linux/zstd.h>
 #include <crypto/internal/acompress.h>
@@ -25,7 +26,7 @@ struct zstd_ctx {
 	zstd_dctx *dctx;
 	size_t wksp_size;
 	zstd_parameters params;
-	u8 wksp[] __aligned(8);
+	u8 wksp[] __aligned(8) __counted_by(wksp_size);
 };
 
 static DEFINE_MUTEX(zstd_stream_lock);
@@ -38,13 +39,12 @@ static void *zstd_alloc_stream(void)
 
 	params = zstd_get_params(ZSTD_DEF_LEVEL, ZSTD_MAX_SIZE);
 
-	wksp_size = max_t(size_t,
-			  zstd_cstream_workspace_bound(&params.cParams),
-			  zstd_dstream_workspace_bound(ZSTD_MAX_SIZE));
+	wksp_size = max(zstd_cstream_workspace_bound(&params.cParams),
+			zstd_dstream_workspace_bound(ZSTD_MAX_SIZE));
 	if (!wksp_size)
 		return ERR_PTR(-EINVAL);
 
-	ctx = kvmalloc(sizeof(*ctx) + wksp_size, GFP_KERNEL);
+	ctx = kvmalloc_flex(*ctx, wksp, wksp_size);
 	if (!ctx)
 		return ERR_PTR(-ENOMEM);
 
@@ -75,11 +75,6 @@ static int zstd_init(struct crypto_acomp *acomp_tfm)
 	return ret;
 }
 
-static void zstd_exit(struct crypto_acomp *acomp_tfm)
-{
-	crypto_acomp_free_streams(&zstd_streams);
-}
-
 static int zstd_compress_one(struct acomp_req *req, struct zstd_ctx *ctx,
 			     const void *src, void *dst, unsigned int *dlen)
 {
@@ -101,6 +96,7 @@ static int zstd_compress_one(struct acomp_req *req, struct zstd_ctx *ctx,
 
 static int zstd_compress(struct acomp_req *req)
 {
+	bool stream_initialized = false;
 	struct crypto_acomp_stream *s;
 	unsigned int pos, scur, dcur;
 	unsigned int total_out = 0;
@@ -119,12 +115,6 @@ static int zstd_compress(struct acomp_req *req)
 	ret = acomp_walk_virt(&walk, req, true);
 	if (ret)
 		goto out;
-
-	ctx->cctx = zstd_init_cstream(&ctx->params, 0, ctx->wksp, ctx->wksp_size);
-	if (!ctx->cctx) {
-		ret = -EINVAL;
-		goto out;
-	}
 
 	do {
 		dcur = acomp_walk_next_dst(&walk);
@@ -145,6 +135,19 @@ static int zstd_compress(struct acomp_req *req)
 				acomp_walk_done_src(&walk, scur);
 				acomp_walk_done_dst(&walk, dcur);
 				goto out;
+			}
+
+			if (!stream_initialized) {
+				ctx->cctx = zstd_init_cstream(&ctx->params, 0,
+							      ctx->wksp, ctx->wksp_size);
+				if (!ctx->cctx) {
+					/* Release in the reverse of the map order. */
+					acomp_walk_done_src(&walk, 0);
+					acomp_walk_done_dst(&walk, 0);
+					ret = -EINVAL;
+					goto out;
+				}
+				stream_initialized = true;
 			}
 
 			if (scur) {
@@ -212,6 +215,7 @@ static int zstd_decompress_one(struct acomp_req *req, struct zstd_ctx *ctx,
 
 static int zstd_decompress(struct acomp_req *req)
 {
+	bool stream_initialized = false;
 	struct crypto_acomp_stream *s;
 	unsigned int total_out = 0;
 	unsigned int scur, dcur;
@@ -228,12 +232,6 @@ static int zstd_decompress(struct acomp_req *req)
 	ret = acomp_walk_virt(&walk, req, true);
 	if (ret)
 		goto out;
-
-	ctx->dctx = zstd_init_dstream(ZSTD_MAX_SIZE, ctx->wksp, ctx->wksp_size);
-	if (!ctx->dctx) {
-		ret = -EINVAL;
-		goto out;
-	}
 
 	do {
 		scur = acomp_walk_next_src(&walk);
@@ -258,6 +256,19 @@ static int zstd_decompress(struct acomp_req *req)
 			if (!dcur) {
 				ret = -ENOSPC;
 				goto out;
+			}
+
+			if (!stream_initialized) {
+				ctx->dctx = zstd_init_dstream(ZSTD_MAX_SIZE, ctx->wksp,
+							      ctx->wksp_size);
+				if (!ctx->dctx) {
+					/* Release in the reverse of the map order. */
+					acomp_walk_done_dst(&walk, 0);
+					acomp_walk_done_src(&walk, 0);
+					ret = -EINVAL;
+					goto out;
+				}
+				stream_initialized = true;
 			}
 
 			outbuf.pos = 0;
@@ -297,7 +308,6 @@ static struct acomp_alg zstd_acomp = {
 		.cra_module = THIS_MODULE,
 	},
 	.init = zstd_init,
-	.exit = zstd_exit,
 	.compress = zstd_compress,
 	.decompress = zstd_decompress,
 };
@@ -310,6 +320,7 @@ static int __init zstd_mod_init(void)
 static void __exit zstd_mod_fini(void)
 {
 	crypto_unregister_acomp(&zstd_acomp);
+	crypto_acomp_free_streams(&zstd_streams);
 }
 
 module_init(zstd_mod_init);

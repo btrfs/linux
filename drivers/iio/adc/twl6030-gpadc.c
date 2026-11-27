@@ -16,7 +16,6 @@
  */
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -416,7 +415,7 @@ static u8 twl6032_channel_to_reg(int channel)
 {
 	/*
 	 * for any prior chosen channel, when the conversion is ready
-	 * the result is avalable in GPCH0_LSB, GPCH0_MSB.
+	 * the result is available in GPCH0_LSB, GPCH0_MSB.
 	 */
 
 	return TWL6032_GPADC_GPCH0_LSB;
@@ -894,10 +893,8 @@ static int twl6030_gpadc_probe(struct platform_device *pdev)
 
 	gpadc = iio_priv(indio_dev);
 
-	gpadc->twl6030_cal_tbl = devm_kcalloc(dev,
-					pdata->nchannels,
-					sizeof(*gpadc->twl6030_cal_tbl),
-					GFP_KERNEL);
+	gpadc->twl6030_cal_tbl = devm_kzalloc_objs(dev, *gpadc->twl6030_cal_tbl,
+						   pdata->nchannels);
 	if (!gpadc->twl6030_cal_tbl)
 		return -ENOMEM;
 

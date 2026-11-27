@@ -12,7 +12,6 @@
 #include <linux/device.h>
 #include <linux/hrtimer.h>
 #include <linux/io-64-nonatomic-hi-lo.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pps_gen_kernel.h>
@@ -189,11 +188,7 @@ static int pps_tio_gen_enable(struct pps_gen_device *pps_gen, bool enable)
 static int pps_tio_get_time(struct pps_gen_device *pps_gen,
 			    struct timespec64 *time)
 {
-	struct system_time_snapshot snap;
-
-	ktime_get_snapshot(&snap);
-	*time = ktime_to_timespec64(snap.real);
-
+	ktime_get_real_ts64(time);
 	return 0;
 }
 
@@ -208,7 +203,7 @@ static int pps_gen_tio_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
-	tio = devm_kzalloc(dev, sizeof(*tio), GFP_KERNEL);
+	tio = devm_kzalloc_obj(dev, *tio);
 	if (!tio)
 		return -ENOMEM;
 

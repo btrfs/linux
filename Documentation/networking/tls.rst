@@ -215,9 +215,10 @@ To prevent attempting to decrypt incoming records using the wrong key,
 decryption will be paused when a KeyUpdate message is received by the
 kernel, until the new key has been provided using the TLS_RX socket
 option. Any read occurring after the KeyUpdate has been read and
-before the new key is provided will fail with EKEYEXPIRED. poll() will
-not report any read events from the socket until the new key is
-provided. There is no pausing on the transmit side.
+before the new key is provided will fail with EKEYEXPIRED. Once the
+KeyUpdate has been read, poll() will not report any read events from
+the socket until the new key is provided. There is no pausing on the
+transmit side.
 
 Userspace should make sure that the crypto_info provided has been set
 properly. In particular, the kernel will not check for key/nonce
@@ -279,6 +280,26 @@ otherwise it is an attack vector to doubling the TLS processing cost.
 If the record decrypted turns out to had been padded or is not a data
 record it will be decrypted again into a kernel buffer without zero copy.
 Such events are counted in the ``TlsDecryptRetry`` statistic.
+
+TLS_TX_MAX_PAYLOAD_LEN
+~~~~~~~~~~~~~~~~~~~~~~
+
+Specifies the maximum size of the plaintext payload for transmitted TLS records.
+
+When this option is set, the kernel enforces the specified limit on all outgoing
+TLS records. No plaintext fragment will exceed this size. This option can be used
+to implement the TLS Record Size Limit extension [1].
+
+* For TLS 1.2, the value corresponds directly to the record size limit.
+* For TLS 1.3, the value should be set to record_size_limit - 1, since
+  the record size limit includes one additional byte for the ContentType
+  field.
+
+The valid range for this option is 64 to 16384 bytes for TLS 1.2, and 63 to
+16384 bytes for TLS 1.3. The lower minimum for TLS 1.3 accounts for the
+extra byte used by the ContentType field.
+
+[1] https://datatracker.ietf.org/doc/html/rfc8449
 
 Statistics
 ==========

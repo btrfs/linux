@@ -3,7 +3,6 @@
 
 #include <linux/err.h>
 #include <linux/io.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/pinctrl/pinconf-generic.h>
 #include <linux/pinctrl/pinctrl.h>
@@ -466,6 +465,7 @@ static const struct of_device_id bcm4908_pinctrl_of_match_table[] = {
 	{ .compatible = "brcm,bcm4908-pinctrl", },
 	{ }
 };
+MODULE_DEVICE_TABLE(of, bcm4908_pinctrl_of_match_table);
 
 static int bcm4908_pinctrl_probe(struct platform_device *pdev)
 {
@@ -476,7 +476,7 @@ static int bcm4908_pinctrl_probe(struct platform_device *pdev)
 	char **pin_names;
 	int i;
 
-	bcm4908_pinctrl = devm_kzalloc(dev, sizeof(*bcm4908_pinctrl), GFP_KERNEL);
+	bcm4908_pinctrl = devm_kzalloc_obj(dev, *bcm4908_pinctrl);
 	if (!bcm4908_pinctrl)
 		return -ENOMEM;
 	pctldesc = &bcm4908_pinctrl->pctldesc;
@@ -500,7 +500,7 @@ static int bcm4908_pinctrl_probe(struct platform_device *pdev)
 	if (IS_ERR(pin_names))
 		return PTR_ERR(pin_names);
 
-	pins = devm_kcalloc(dev, BCM4908_NUM_PINS, sizeof(*pins), GFP_KERNEL);
+	pins = devm_kzalloc_objs(dev, *pins, BCM4908_NUM_PINS);
 	if (!pins)
 		return -ENOMEM;
 	for (i = 0; i < BCM4908_NUM_PINS; i++) {
@@ -524,7 +524,7 @@ static int bcm4908_pinctrl_probe(struct platform_device *pdev)
 		int *pins;
 		int j;
 
-		pins = devm_kcalloc(dev, group->num_pins, sizeof(*pins), GFP_KERNEL);
+		pins = devm_kzalloc_objs(dev, *pins, group->num_pins);
 		if (!pins)
 			return -ENOMEM;
 		for (j = 0; j < group->num_pins; j++)
@@ -561,4 +561,3 @@ module_platform_driver(bcm4908_pinctrl_driver);
 MODULE_AUTHOR("Rafał Miłecki");
 MODULE_DESCRIPTION("Broadcom BCM4908 pinmux driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, bcm4908_pinctrl_of_match_table);

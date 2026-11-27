@@ -7,6 +7,7 @@
 #define __KSMBD_CONNECTION_H__
 
 #include <linux/list.h>
+#include <linux/inet.h>
 #include <linux/ip.h>
 #include <net/sock.h>
 #include <net/tcp.h>
@@ -15,13 +16,25 @@
 #include <linux/kthread.h>
 #include <linux/nls.h>
 #include <linux/unicode.h>
+#include <linux/workqueue.h>
+#include <linux/bitmap.h>
 
 #include "smb_common.h"
 #include "ksmbd_work.h"
 
 struct smbdirect_buffer_descriptor_v1;
+struct ksmbd_session;
 
 #define KSMBD_SOCKET_BACKLOG		16
+
+/*
+ * Size of the per-connection SMB2 command sequence window. This mirrors
+ * SMB2_MAX_CREDITS, the maximum number of credits (and therefore the
+ * maximum number of outstanding sequence numbers) that can be granted on
+ * a connection. It must be a power of two so the window can be indexed as
+ * a ring.
+ */
+#define KSMBD_CMD_SEQ_WINDOW		8192
 
 enum {
 	KSMBD_SESS_NEW = 0,
@@ -33,7 +46,7 @@ enum {
 	KSMBD_SESS_RELEASING
 };
 
-struct ksmbd_stats {
+struct ksmbd_conn_stats {
 	atomic_t			open_files_count;
 	atomic64_t			request_served;
 };
@@ -48,12 +61,16 @@ struct ksmbd_conn {
 	struct mutex			srv_mutex;
 	int				status;
 	unsigned int			cli_cap;
+	bool				stop_called;
 	union {
 		__be32			inet_addr;
 #if IS_ENABLED(CONFIG_IPV6)
 		u8			inet6_addr[16];
 #endif
 	};
+#if IS_ENABLED(CONFIG_IPV6)
+	bool				is_ipv6;
+#endif
 	unsigned int			inet_hash;
 	char				*request_buf;
 	struct ksmbd_transport		*transport;
@@ -63,6 +80,9 @@ struct ksmbd_conn {
 	struct rw_semaphore		session_lock;
 	/* smb session 1 per user */
 	struct xarray			sessions;
+	/* New sessions and SMB3 channels each reserve one connection slot. */
+	atomic64_t			session_count;
+	unsigned long			creation_time;
 	unsigned long			last_active;
 	/* How many request are running currently */
 	atomic_t			req_running;
@@ -71,19 +91,29 @@ struct ksmbd_conn {
 	unsigned int			total_credits;
 	unsigned int			outstanding_credits;
 	spinlock_t			credits_lock;
+	/*
+	 * Connection command sequence window. [seq_low, seq_high) is the
+	 * range of granted sequence numbers (message IDs). seq_bitmap marks
+	 * the ones in that range that have been granted but
+	 * not yet consumed by a received request.  All three are protected by
+	 * credits_lock.
+	 */
+	u64				seq_low;
+	u64				seq_high;
+	DECLARE_BITMAP(seq_bitmap, KSMBD_CMD_SEQ_WINDOW);
 	wait_queue_head_t		req_running_q;
 	wait_queue_head_t		r_count_q;
 	/* Lock to protect requests list*/
 	spinlock_t			request_lock;
+	/* Set under request_lock at teardown start and kept set thereafter. */
+	bool				releasing;
 	struct list_head		requests;
 	struct list_head		async_requests;
 	int				connection_type;
-	struct ksmbd_stats		stats;
+	struct ksmbd_conn_stats		stats;
 	char				ClientGUID[SMB2_CLIENT_GUID_SIZE];
 	struct ntlmssp_auth		ntlmssp;
 
-	spinlock_t			llist_lock;
-	struct list_head		lock_list;
 
 	struct preauth_integrity_info	*preauth_info;
 
@@ -112,12 +142,21 @@ struct ksmbd_conn {
 
 	__le16				cipher_type;
 	__le16				compress_algorithm;
+	/* Negotiated SMB 3.1.1 compression capabilities. */
+	bool				compress_chained;
+	bool				compress_pattern;
+	/* Bitmap indexed by SMB2_RDMA_TRANSFORM_* IDs. */
+	unsigned long			rdma_transform_ids;
+	bool				rdma_transform_negotiated;
 	bool				posix_ext_supported;
 	bool				signing_negotiated;
 	__le16				signing_algorithm;
 	bool				binding;
 	atomic_t			refcnt;
 	bool				is_aapl;
+	bool				aapl_readdir_attr; /* READDIR_ATTR negotiated */
+	bool				aapl_readdir_attr_v2; /* V2 specifically */
+	struct work_struct		release_work;
 };
 
 struct ksmbd_conn_ops {
@@ -125,15 +164,34 @@ struct ksmbd_conn_ops {
 	int	(*terminate_fn)(struct ksmbd_conn *conn);
 };
 
+struct ksmbd_tx_tracking {
+	/* Required TCP byte count, including transport and socket queues. */
+	u64		end;
+	unsigned long	retry_after;
+	bool		valid;
+};
+
+struct ksmbd_transport_write {
+	struct kvec	*iov;
+	int		iov_cnt;
+	int		size;
+	bool		need_invalidate_rkey;
+	unsigned int	remote_key;
+	int		msg_flags;
+	struct ksmbd_tx_tracking *tracking;
+};
+
 struct ksmbd_transport_ops {
-	int (*prepare)(struct ksmbd_transport *t);
 	void (*disconnect)(struct ksmbd_transport *t);
 	void (*shutdown)(struct ksmbd_transport *t);
 	int (*read)(struct ksmbd_transport *t, char *buf,
 		    unsigned int size, int max_retries);
-	int (*writev)(struct ksmbd_transport *t, struct kvec *iovs, int niov,
-		      int size, bool need_invalidate_rkey,
-		      unsigned int remote_key);
+	/* Retained bytes must be privately owned before a full result is returned. */
+	int (*writev)(struct ksmbd_transport *t,
+		      const struct ksmbd_transport_write *tx);
+	/* Optional delivery tracking for nonblocking break sends. */
+	bool (*is_acked)(struct ksmbd_transport *t,
+			 const struct ksmbd_tx_tracking *tracking);
 	int (*rdma_read)(struct ksmbd_transport *t,
 			 void *buf, unsigned int len,
 			 struct smbdirect_buffer_descriptor_v1 *desc,
@@ -152,6 +210,8 @@ struct ksmbd_transport {
 
 #define KSMBD_TCP_RECV_TIMEOUT	(7 * HZ)
 #define KSMBD_TCP_SEND_TIMEOUT	(5 * HZ)
+#define KSMBD_SESSION_EXPIRATION_INTERVAL	(5 * HZ)
+#define KSMBD_UNAUTHENTICATED_CONN_TIMEOUT	(45 * HZ)
 #define KSMBD_TCP_PEER_SOCKADDR(c)	((struct sockaddr *)&((c)->peer_addr))
 
 #define CONN_HASH_BITS	12
@@ -160,11 +220,20 @@ extern struct rw_semaphore conn_list_lock;
 
 bool ksmbd_conn_alive(struct ksmbd_conn *conn);
 void ksmbd_conn_wait_idle(struct ksmbd_conn *conn);
-int ksmbd_conn_wait_idle_sess_id(struct ksmbd_conn *curr_conn, u64 sess_id);
+int ksmbd_conn_wait_idle_sess(struct ksmbd_conn *curr_conn,
+			      struct ksmbd_session *sess);
 struct ksmbd_conn *ksmbd_conn_alloc(void);
 void ksmbd_conn_free(struct ksmbd_conn *conn);
+struct ksmbd_conn *ksmbd_conn_get(struct ksmbd_conn *conn);
+void ksmbd_conn_put(struct ksmbd_conn *conn);
+void ksmbd_conn_abort(struct ksmbd_conn *conn);
+int ksmbd_conn_wq_init(void);
+void ksmbd_conn_wq_destroy(void);
 bool ksmbd_conn_lookup_dialect(struct ksmbd_conn *c);
 int ksmbd_conn_write(struct ksmbd_work *work);
+int ksmbd_conn_write_tracked(struct ksmbd_work *work,
+			     struct ksmbd_tx_tracking *tracking);
+int ksmbd_conn_write_eor(struct ksmbd_work *work);
 int ksmbd_conn_rdma_read(struct ksmbd_conn *conn,
 			 void *buf, unsigned int buflen,
 			 struct smbdirect_buffer_descriptor_v1 *desc,
@@ -182,6 +251,7 @@ void ksmbd_conn_transport_destroy(void);
 void ksmbd_conn_lock(struct ksmbd_conn *conn);
 void ksmbd_conn_unlock(struct ksmbd_conn *conn);
 void ksmbd_conn_r_count_inc(struct ksmbd_conn *conn);
+bool ksmbd_conn_r_count_inc_if_good(struct ksmbd_conn *conn);
 void ksmbd_conn_r_count_dec(struct ksmbd_conn *conn);
 
 /*
@@ -190,9 +260,24 @@ void ksmbd_conn_r_count_dec(struct ksmbd_conn *conn);
  * This is a hack. We will move status to a proper place once we land
  * a multi-sessions support.
  */
+static inline bool ksmbd_conn_new(struct ksmbd_conn *conn)
+{
+	return READ_ONCE(conn->status) == KSMBD_SESS_NEW;
+}
+
 static inline bool ksmbd_conn_good(struct ksmbd_conn *conn)
 {
-	return READ_ONCE(conn->status) == KSMBD_SESS_GOOD;
+	return !READ_ONCE(conn->releasing) &&
+		READ_ONCE(conn->status) == KSMBD_SESS_GOOD;
+}
+
+static inline unsigned int
+ksmbd_max_allowed_pdu_size(struct ksmbd_conn *conn)
+{
+	if (ksmbd_conn_good(conn))
+		return SMB3_MAX_MSGSIZE + conn->vals->max_write_size;
+
+	return SMB3_MAX_MSGSIZE;
 }
 
 static inline bool ksmbd_conn_need_negotiate(struct ksmbd_conn *conn)
@@ -217,7 +302,8 @@ static inline bool ksmbd_conn_exiting(struct ksmbd_conn *conn)
 
 static inline bool ksmbd_conn_releasing(struct ksmbd_conn *conn)
 {
-	return READ_ONCE(conn->status) == KSMBD_SESS_RELEASING;
+	return READ_ONCE(conn->releasing) ||
+		READ_ONCE(conn->status) == KSMBD_SESS_RELEASING;
 }
 
 static inline void ksmbd_conn_set_new(struct ksmbd_conn *conn)
@@ -252,8 +338,9 @@ static inline void ksmbd_conn_set_exiting(struct ksmbd_conn *conn)
 
 static inline void ksmbd_conn_set_releasing(struct ksmbd_conn *conn)
 {
+	WRITE_ONCE(conn->releasing, true);
 	WRITE_ONCE(conn->status, KSMBD_SESS_RELEASING);
 }
 
-void ksmbd_all_conn_set_status(u64 sess_id, u32 status);
+void ksmbd_all_conn_set_status(struct ksmbd_session *sess, u32 status);
 #endif /* __CONNECTION_H__ */

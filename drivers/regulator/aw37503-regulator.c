@@ -184,7 +184,7 @@ static int aw37503_probe(struct i2c_client *client)
 	struct regulator_config config = { };
 	int id;
 
-	chip = devm_kzalloc(dev, sizeof(*chip), GFP_KERNEL);
+	chip = devm_kzalloc_obj(dev, *chip);
 	if (!chip)
 		return -ENOMEM;
 
@@ -212,8 +212,8 @@ static int aw37503_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id aw37503_id[] = {
-	{.name = "aw37503",},
-	{},
+	{ .name = "aw37503" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, aw37503_id);
 

@@ -363,6 +363,7 @@
 	firmware {
 		scm {
 			compatible = "qcom,scm-sdm845", "qcom,scm";
+			sram = <&minidump_config>;
 		};
 	};
 
@@ -2218,6 +2219,11 @@
 			};
 		};
 
+		refgen: regulator@ff1000 {
+			compatible = "qcom,sdm845-refgen-regulator";
+			reg = <0x0 0x00ff1000 0x0 0x60>;
+		};
+
 		llcc: system-cache-controller@1100000 {
 			compatible = "qcom,sdm845-llcc";
 			reg = <0 0x01100000 0 0x45000>, <0 0x01180000 0 0x50000>,
@@ -2367,37 +2373,36 @@
 				      "slave_q2a",
 				      "tbu";
 
-			iommu-map = <0x0   &apps_smmu 0x1c10 0x1>,
-				    <0x100 &apps_smmu 0x1c11 0x1>,
-				    <0x200 &apps_smmu 0x1c12 0x1>,
-				    <0x300 &apps_smmu 0x1c13 0x1>,
-				    <0x400 &apps_smmu 0x1c14 0x1>,
-				    <0x500 &apps_smmu 0x1c15 0x1>,
-				    <0x600 &apps_smmu 0x1c16 0x1>,
-				    <0x700 &apps_smmu 0x1c17 0x1>,
-				    <0x800 &apps_smmu 0x1c18 0x1>,
-				    <0x900 &apps_smmu 0x1c19 0x1>,
-				    <0xa00 &apps_smmu 0x1c1a 0x1>,
-				    <0xb00 &apps_smmu 0x1c1b 0x1>,
-				    <0xc00 &apps_smmu 0x1c1c 0x1>,
-				    <0xd00 &apps_smmu 0x1c1d 0x1>,
-				    <0xe00 &apps_smmu 0x1c1e 0x1>,
-				    <0xf00 &apps_smmu 0x1c1f 0x1>;
+			iommu-map = <0x0   &apps_smmu 0x1c10 0x0 0x1>,
+				    <0x100 &apps_smmu 0x1c11 0x0 0x1>,
+				    <0x200 &apps_smmu 0x1c12 0x0 0x1>,
+				    <0x300 &apps_smmu 0x1c13 0x0 0x1>,
+				    <0x400 &apps_smmu 0x1c14 0x0 0x1>,
+				    <0x500 &apps_smmu 0x1c15 0x0 0x1>,
+				    <0x600 &apps_smmu 0x1c16 0x0 0x1>,
+				    <0x700 &apps_smmu 0x1c17 0x0 0x1>,
+				    <0x800 &apps_smmu 0x1c18 0x0 0x1>,
+				    <0x900 &apps_smmu 0x1c19 0x0 0x1>,
+				    <0xa00 &apps_smmu 0x1c1a 0x0 0x1>,
+				    <0xb00 &apps_smmu 0x1c1b 0x0 0x1>,
+				    <0xc00 &apps_smmu 0x1c1c 0x0 0x1>,
+				    <0xd00 &apps_smmu 0x1c1d 0x0 0x1>,
+				    <0xe00 &apps_smmu 0x1c1e 0x0 0x1>,
+				    <0xf00 &apps_smmu 0x1c1f 0x0 0x1>;
 
 			resets = <&gcc GCC_PCIE_0_BCR>;
 			reset-names = "pci";
 
 			power-domains = <&gcc PCIE_0_GDSC>;
 
-			phys = <&pcie0_phy>;
-			phy-names = "pciephy";
-
 			status = "disabled";
 
-			pcie@0 {
+			pcie0_port0: pcie@0 {
 				device_type = "pci";
 				reg = <0x0 0x0 0x0 0x0 0x0>;
 				bus-range = <0x01 0xff>;
+
+				phys = <&pcie0_phy>;
 
 				#address-cells = <3>;
 				#size-cells = <2>;
@@ -2497,37 +2502,36 @@
 			assigned-clocks = <&gcc GCC_PCIE_1_AUX_CLK>;
 			assigned-clock-rates = <19200000>;
 
-			iommu-map = <0x0   &apps_smmu 0x1c00 0x1>,
-				    <0x100 &apps_smmu 0x1c01 0x1>,
-				    <0x200 &apps_smmu 0x1c02 0x1>,
-				    <0x300 &apps_smmu 0x1c03 0x1>,
-				    <0x400 &apps_smmu 0x1c04 0x1>,
-				    <0x500 &apps_smmu 0x1c05 0x1>,
-				    <0x600 &apps_smmu 0x1c06 0x1>,
-				    <0x700 &apps_smmu 0x1c07 0x1>,
-				    <0x800 &apps_smmu 0x1c08 0x1>,
-				    <0x900 &apps_smmu 0x1c09 0x1>,
-				    <0xa00 &apps_smmu 0x1c0a 0x1>,
-				    <0xb00 &apps_smmu 0x1c0b 0x1>,
-				    <0xc00 &apps_smmu 0x1c0c 0x1>,
-				    <0xd00 &apps_smmu 0x1c0d 0x1>,
-				    <0xe00 &apps_smmu 0x1c0e 0x1>,
-				    <0xf00 &apps_smmu 0x1c0f 0x1>;
+			iommu-map = <0x0   &apps_smmu 0x1c00 0x0 0x1>,
+				    <0x100 &apps_smmu 0x1c01 0x0 0x1>,
+				    <0x200 &apps_smmu 0x1c02 0x0 0x1>,
+				    <0x300 &apps_smmu 0x1c03 0x0 0x1>,
+				    <0x400 &apps_smmu 0x1c04 0x0 0x1>,
+				    <0x500 &apps_smmu 0x1c05 0x0 0x1>,
+				    <0x600 &apps_smmu 0x1c06 0x0 0x1>,
+				    <0x700 &apps_smmu 0x1c07 0x0 0x1>,
+				    <0x800 &apps_smmu 0x1c08 0x0 0x1>,
+				    <0x900 &apps_smmu 0x1c09 0x0 0x1>,
+				    <0xa00 &apps_smmu 0x1c0a 0x0 0x1>,
+				    <0xb00 &apps_smmu 0x1c0b 0x0 0x1>,
+				    <0xc00 &apps_smmu 0x1c0c 0x0 0x1>,
+				    <0xd00 &apps_smmu 0x1c0d 0x0 0x1>,
+				    <0xe00 &apps_smmu 0x1c0e 0x0 0x1>,
+				    <0xf00 &apps_smmu 0x1c0f 0x0 0x1>;
 
 			resets = <&gcc GCC_PCIE_1_BCR>;
 			reset-names = "pci";
 
 			power-domains = <&gcc PCIE_1_GDSC>;
 
-			phys = <&pcie1_phy>;
-			phy-names = "pciephy";
-
 			status = "disabled";
 
-			pcie@0 {
+			pcie1_port0: pcie@0 {
 				device_type = "pci";
 				reg = <0x0 0x0 0x0 0x0 0x0>;
 				bus-range = <0x01 0xff>;
+
+				phys = <&pcie1_phy>;
 
 				#address-cells = <3>;
 				#size-cells = <2>;
@@ -2775,6 +2779,11 @@
 			qcom,smem-state-names = "ipa-clock-enabled-valid",
 						"ipa-clock-enabled";
 
+			qcom,gsi-loader = "self";
+			memory-region = <&ipa_fw_mem>;
+
+			sram = <&ipa_modem_tables>;
+
 			status = "disabled";
 		};
 
@@ -2799,6 +2808,62 @@
 			#interrupt-cells = <2>;
 			gpio-ranges = <&tlmm 0 0 151>;
 			wakeup-parent = <&pdc_intc>;
+
+			cam_mclk0_default: cam-mclk0-default-state {
+				pins = "gpio13";
+				function = "cam_mclk";
+				drive-strength = <2>;
+				bias-disable;
+			};
+
+			cam_mclk0_sleep: cam-mclk0-sleep-state {
+				pins = "gpio13";
+				function = "cam_mclk";
+				drive-strength = <2>;
+				bias-pull-down;
+			};
+
+			cam_mclk1_default: cam-mclk1-default-state {
+				pins = "gpio14";
+				function = "cam_mclk";
+				drive-strength = <2>;
+				bias-disable;
+			};
+
+			cam_mclk1_sleep: cam-mclk1-sleep-state {
+				pins = "gpio14";
+				function = "cam_mclk";
+				drive-strength = <2>;
+				bias-pull-down;
+			};
+
+			cam_mclk2_default: cam-mclk2-default-state {
+				pins = "gpio15";
+				function = "cam_mclk";
+				drive-strength = <2>;
+				bias-disable;
+			};
+
+			cam_mclk2_sleep: cam-mclk2-sleep-state {
+				pins = "gpio15";
+				function = "cam_mclk";
+				drive-strength = <2>;
+				bias-pull-down;
+			};
+
+			cam_mclk3_default: cam-mclk3-default-state {
+				pins = "gpio16";
+				function = "cam_mclk";
+				drive-strength = <2>;
+				bias-disable;
+			};
+
+			cam_mclk3_sleep: cam-mclk3-sleep-state {
+				pins = "gpio16";
+				function = "cam_mclk";
+				drive-strength = <2>;
+				bias-pull-down;
+			};
 
 			cci0_default: cci0-default-state {
 				/* SDA, SCL */
@@ -4559,7 +4624,7 @@
 			interconnect-names = "mdp0-mem", "mdp1-mem";
 
 			iommus = <&apps_smmu 0x880 0x8>,
-			         <&apps_smmu 0xc80 0x8>;
+				 <&apps_smmu 0xc80 0x8>;
 
 			status = "disabled";
 
@@ -4750,6 +4815,8 @@
 
 				phys = <&mdss_dsi0_phy>;
 
+				refgen-supply = <&refgen>;
+
 				status = "disabled";
 
 				#address-cells = <1>;
@@ -4824,6 +4891,8 @@
 
 				phys = <&mdss_dsi1_phy>;
 
+				refgen-supply = <&refgen>;
+
 				status = "disabled";
 
 				#address-cells = <1>;
@@ -4893,6 +4962,10 @@
 
 			status = "disabled";
 
+			gpu_zap_shader: zap-shader {
+				memory-region = <&gpu_mem>;
+			};
+
 			gpu_opp_table: opp-table {
 				compatible = "operating-points-v2";
 
@@ -4956,7 +5029,7 @@
 				     <GIC_SPI 370 IRQ_TYPE_EDGE_RISING>,
 				     <GIC_SPI 371 IRQ_TYPE_EDGE_RISING>;
 			clocks = <&gcc GCC_GPU_MEMNOC_GFX_CLK>,
-			         <&gcc GCC_GPU_CFG_AHB_CLK>;
+				 <&gcc GCC_GPU_CFG_AHB_CLK>;
 			clock-names = "bus", "iface";
 
 			power-domains = <&gpucc GPU_CX_GDSC>;
@@ -4975,7 +5048,7 @@
 			interrupt-names = "hfi", "gmu";
 
 			clocks = <&gpucc GPU_CC_CX_GMU_CLK>,
-			         <&gpucc GPU_CC_CXO_CLK>,
+				 <&gpucc GPU_CC_CXO_CLK>,
 				 <&gcc GCC_DDRSS_GPU_AXI_CLK>,
 				 <&gcc GCC_GPU_MEMNOC_GFX_CLK>;
 			clock-names = "gmu", "cxo", "axi", "memnoc";
@@ -5031,7 +5104,7 @@
 
 		pdc_intc: interrupt-controller@b220000 {
 			compatible = "qcom,sdm845-pdc", "qcom,pdc";
-			reg = <0 0x0b220000 0 0x30000>;
+			reg = <0 0x0b220000 0 0x10000>;
 			qcom,pdc-ranges = <0 480 94>, <94 609 15>, <115 630 7>;
 			#interrupt-cells = <2>;
 			interrupt-parent = <&intc>;
@@ -5120,6 +5193,14 @@
 			#size-cells = <1>;
 
 			ranges = <0 0 0x14680000 0x40000>;
+
+			minidump_config: minidump-sram@1c {
+				reg = <0x1c 0x4>;
+			};
+
+			ipa_modem_tables: modem-tables@3d000 {
+				reg = <0x3d000 0x2000>;
+			};
 
 			pil-reloc@3f94c {
 				compatible = "qcom,pil-reloc-info";

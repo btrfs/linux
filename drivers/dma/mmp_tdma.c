@@ -554,8 +554,7 @@ static void mmp_tdma_issue_pending(struct dma_chan *chan)
 
 static void mmp_tdma_remove(struct platform_device *pdev)
 {
-	if (pdev->dev.of_node)
-		of_dma_controller_free(pdev->dev.of_node);
+	of_dma_controller_free(pdev->dev.of_node);
 }
 
 static int mmp_tdma_chan_init(struct mmp_tdma_device *tdev,
@@ -570,7 +569,7 @@ static int mmp_tdma_chan_init(struct mmp_tdma_device *tdev,
 	}
 
 	/* alloc channel */
-	tdmac = devm_kzalloc(tdev->dev, sizeof(*tdmac), GFP_KERNEL);
+	tdmac = devm_kzalloc_obj(tdev->dev, *tdmac);
 	if (!tdmac)
 		return -ENOMEM;
 
@@ -644,7 +643,7 @@ static int mmp_tdma_probe(struct platform_device *pdev)
 	type = (kernel_ulong_t)device_get_match_data(&pdev->dev);
 
 	/* always have couple channels */
-	tdev = devm_kzalloc(&pdev->dev, sizeof(*tdev), GFP_KERNEL);
+	tdev = devm_kzalloc_obj(&pdev->dev, *tdev);
 	if (!tdev)
 		return -ENOMEM;
 
@@ -743,6 +742,5 @@ module_platform_driver(mmp_tdma_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("MMP Two-Channel DMA Driver");
-MODULE_ALIAS("platform:mmp-tdma");
 MODULE_AUTHOR("Leo Yan <leoy@marvell.com>");
 MODULE_AUTHOR("Zhangfei Gao <zhangfei.gao@marvell.com>");

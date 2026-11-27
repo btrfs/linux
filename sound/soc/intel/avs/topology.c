@@ -350,6 +350,8 @@ AVS_DEFINE_PTR_PARSER(modcfg_base, struct avs_tplg_modcfg_base, modcfgs_base);
 AVS_DEFINE_PTR_PARSER(modcfg_ext, struct avs_tplg_modcfg_ext, modcfgs_ext);
 AVS_DEFINE_PTR_PARSER(pplcfg, struct avs_tplg_pplcfg, pplcfgs);
 AVS_DEFINE_PTR_PARSER(binding, struct avs_tplg_binding, bindings);
+AVS_DEFINE_PTR_PARSER(init_config, struct avs_tplg_init_config, init_configs);
+AVS_DEFINE_PTR_PARSER(nhlt_config, struct avs_tplg_nhlt_config, nhlt_configs);
 
 static int
 parse_audio_format_bitfield(struct snd_soc_component *comp, void *elem, void *object, u32 offset)
@@ -417,6 +419,22 @@ static int parse_link_formatted_string(struct snd_soc_component *comp, void *ele
 
 	avs_ssp_sprint(val, SNDRV_CTL_ELEM_ID_NAME_MAXLEN, tuple->string, ssp_port, tdm_slot);
 
+	return 0;
+}
+
+static int avs_parse_nhlt_config_size(struct snd_soc_component *comp, void *elem, void *object,
+				      u32 offset)
+{
+	struct snd_soc_tplg_vendor_value_elem *tuple = elem;
+	struct acpi_nhlt_config **blob = (struct acpi_nhlt_config **)((u8 *)object + offset);
+	u32 size;
+
+	size = le32_to_cpu(tuple->value);
+	*blob = devm_kzalloc_flex(comp->card->dev, **blob, capabilities, size);
+	if (!*blob)
+		return -ENOMEM;
+
+	(*blob)->capabilities_size = size;
 	return 0;
 }
 
@@ -966,7 +984,7 @@ static int avs_tplg_parse_modcfg_ext(struct snd_soc_component *comp,
 		if (!num_pins)
 			return -EINVAL;
 
-		pins = devm_kcalloc(comp->card->dev, num_pins, sizeof(*pins), GFP_KERNEL);
+		pins = devm_kzalloc_objs(comp->card->dev, *pins, num_pins);
 		if (!pins)
 			return -ENOMEM;
 
@@ -1181,8 +1199,14 @@ static const struct avs_tplg_token_parser module_parsers[] = {
 	{
 		.token = AVS_TKN_MOD_INIT_CONFIG_NUM_IDS_U32,
 		.type = SND_SOC_TPLG_TUPLE_TYPE_WORD,
-		.offset = offsetof(struct avs_tplg_module, num_config_ids),
+		.offset = offsetof(struct avs_tplg_module, num_init_configs),
 		.parse = avs_parse_byte_token,
+	},
+	{
+		.token = AVS_TKN_MOD_NHLT_CONFIG_ID_U32,
+		.type = SND_SOC_TPLG_TUPLE_TYPE_WORD,
+		.offset = offsetof(struct avs_tplg_module, nhlt_config),
+		.parse = avs_parse_nhlt_config_ptr,
 	},
 };
 
@@ -1191,9 +1215,32 @@ static const struct avs_tplg_token_parser init_config_parsers[] = {
 		.token = AVS_TKN_MOD_INIT_CONFIG_ID_U32,
 		.type = SND_SOC_TPLG_TUPLE_TYPE_WORD,
 		.offset = 0,
-		.parse = avs_parse_word_token,
+		.parse = avs_parse_init_config_ptr,
 	},
 };
+
+static int avs_tplg_module_init_configs(struct snd_soc_component *comp,
+					struct avs_tplg_module *module,
+					struct snd_soc_tplg_vendor_array *tuples, u32 block_size)
+{
+	struct avs_tplg_init_config **cfgs;
+	int ret;
+
+	if (!module->num_init_configs)
+		return -EINVAL;
+
+	cfgs = devm_kzalloc_objs(comp->card->dev, *cfgs,
+				 module->num_init_configs);
+	if (!cfgs)
+		return -ENOMEM;
+
+	ret = parse_dictionary_entries(comp, tuples, block_size, cfgs, module->num_init_configs,
+				       sizeof(*cfgs), AVS_TKN_MOD_INIT_CONFIG_ID_U32,
+				       init_config_parsers, ARRAY_SIZE(init_config_parsers));
+	if (!ret)
+		module->init_configs = cfgs;
+	return ret;
+}
 
 static struct avs_tplg_module *
 avs_tplg_module_create(struct snd_soc_component *comp, struct avs_tplg_pipeline *owner,
@@ -1209,7 +1256,7 @@ avs_tplg_module_create(struct snd_soc_component *comp, struct avs_tplg_pipeline 
 	if (ret)
 		return ERR_PTR(ret);
 
-	module = devm_kzalloc(comp->card->dev, sizeof(*module), GFP_KERNEL);
+	module = devm_kzalloc_obj(comp->card->dev, *module);
 	if (!module)
 		return ERR_PTR(-ENOMEM);
 
@@ -1221,27 +1268,11 @@ avs_tplg_module_create(struct snd_soc_component *comp, struct avs_tplg_pipeline 
 	block_size -= esize;
 	/* Parse trailing config ids if any. */
 	if (block_size) {
-		u32 num_config_ids = module->num_config_ids;
-		u32 *config_ids;
-
-		if (!num_config_ids)
-			return ERR_PTR(-EINVAL);
-
-		config_ids = devm_kcalloc(comp->card->dev, num_config_ids, sizeof(*config_ids),
-					   GFP_KERNEL);
-		if (!config_ids)
-			return ERR_PTR(-ENOMEM);
-
 		tuples = avs_tplg_vendor_array_at(tuples, esize);
-		ret = parse_dictionary_entries(comp, tuples, block_size,
-					       config_ids, num_config_ids, sizeof(*config_ids),
-					       AVS_TKN_MOD_INIT_CONFIG_ID_U32,
-					       init_config_parsers,
-					       ARRAY_SIZE(init_config_parsers));
+
+		ret = avs_tplg_module_init_configs(comp, module, tuples, block_size);
 		if (ret)
 			return ERR_PTR(ret);
-
-		module->config_ids = config_ids;
 	}
 
 	module->owner = owner;
@@ -1288,7 +1319,7 @@ avs_tplg_pipeline_create(struct snd_soc_component *comp, struct avs_tplg_path *o
 	u32 modblk_size, offset;
 	int ret;
 
-	pipeline = devm_kzalloc(comp->card->dev, sizeof(*pipeline), GFP_KERNEL);
+	pipeline = devm_kzalloc_obj(comp->card->dev, *pipeline);
 	if (!pipeline)
 		return ERR_PTR(-ENOMEM);
 
@@ -1325,8 +1356,9 @@ avs_tplg_pipeline_create(struct snd_soc_component *comp, struct avs_tplg_path *o
 
 		modblk_size = block_size;
 	} else {
-		pipeline->bindings = devm_kcalloc(comp->card->dev, pipeline->num_bindings,
-						  sizeof(*pipeline->bindings), GFP_KERNEL);
+		pipeline->bindings = devm_kzalloc_objs(comp->card->dev,
+						       *pipeline->bindings,
+						       pipeline->num_bindings);
 		if (!pipeline->bindings)
 			return ERR_PTR(-ENOMEM);
 
@@ -1418,7 +1450,7 @@ avs_tplg_path_create(struct snd_soc_component *comp, struct avs_tplg_path_templa
 	u32 offset;
 	int ret;
 
-	path = devm_kzalloc(comp->card->dev, sizeof(*path), GFP_KERNEL);
+	path = devm_kzalloc_obj(comp->card->dev, *path);
 	if (!path)
 		return ERR_PTR(-ENOMEM);
 
@@ -1561,7 +1593,7 @@ avs_tplg_path_template_create(struct snd_soc_component *comp, struct avs_tplg *o
 	struct avs_tplg_path_template *template;
 	int ret;
 
-	template = devm_kzalloc(comp->card->dev, sizeof(*template), GFP_KERNEL);
+	template = devm_kzalloc_obj(comp->card->dev, *template);
 	if (!template)
 		return ERR_PTR(-ENOMEM);
 
@@ -1651,11 +1683,13 @@ static const struct avs_tplg_token_parser mod_init_config_parsers[] = {
 
 static int avs_tplg_parse_initial_configs(struct snd_soc_component *comp,
 					   struct snd_soc_tplg_vendor_array *tuples,
-					   u32 block_size)
+					   u32 block_size, u32 *offset)
 {
 	struct avs_soc_component *acomp = to_avs_soc_component(comp);
 	struct avs_tplg *tplg = acomp->tplg;
 	int ret, i;
+
+	*offset = 0;
 
 	/* Parse tuple section telling how many init configs there are. */
 	ret = parse_dictionary_header(comp, tuples, (void **)&tplg->init_configs,
@@ -1666,6 +1700,7 @@ static int avs_tplg_parse_initial_configs(struct snd_soc_component *comp,
 		return ret;
 
 	block_size -= le32_to_cpu(tuples->size);
+	*offset += le32_to_cpu(tuples->size);
 	/* With header parsed, move on to parsing entries. */
 	tuples = avs_tplg_vendor_array_next(tuples);
 
@@ -1681,17 +1716,23 @@ static int avs_tplg_parse_initial_configs(struct snd_soc_component *comp,
 		 */
 		tmp = avs_tplg_vendor_array_next(tuples);
 		esize = le32_to_cpu(tuples->size) + le32_to_cpu(tmp->size);
+		*offset += esize;
 
 		ret = parse_dictionary_entries(comp, tuples, esize, config, 1, sizeof(*config),
 					       AVS_TKN_INIT_CONFIG_ID_U32,
 					       mod_init_config_parsers,
 					       ARRAY_SIZE(mod_init_config_parsers));
+		if (ret)
+			return ret;
+		if (config->length > block_size)
+			return -EINVAL;
 
 		block_size -= esize;
 
 		/* handle raw data section */
 		init_config_data = (void *)tuples + esize;
 		esize = config->length;
+		*offset += esize;
 
 		config->data = devm_kmemdup(comp->card->dev, init_config_data, esize, GFP_KERNEL);
 		if (!config->data)
@@ -1699,6 +1740,72 @@ static int avs_tplg_parse_initial_configs(struct snd_soc_component *comp,
 
 		tuples = init_config_data + esize;
 		block_size -= esize;
+	}
+
+	return 0;
+}
+
+static const struct avs_tplg_token_parser mod_nhlt_config_parsers[] = {
+	{
+		.token = AVS_TKN_NHLT_CONFIG_ID_U32,
+		.type = SND_SOC_TPLG_TUPLE_TYPE_WORD,
+		.offset = offsetof(struct avs_tplg_nhlt_config, id),
+		.parse = avs_parse_word_token,
+	},
+	{
+		.token = AVS_TKN_NHLT_CONFIG_SIZE_U32,
+		.type = SND_SOC_TPLG_TUPLE_TYPE_WORD,
+		.offset = offsetof(struct avs_tplg_nhlt_config, blob),
+		.parse = avs_parse_nhlt_config_size,
+	},
+};
+
+static int avs_tplg_parse_nhlt_configs(struct snd_soc_component *comp,
+				       struct snd_soc_tplg_vendor_array *tuples,
+				       u32 block_size)
+{
+	struct avs_soc_component *acomp = to_avs_soc_component(comp);
+	struct avs_tplg *tplg = acomp->tplg;
+	int ret, i;
+
+	/* Parse the header section to know how many entries there are. */
+	ret = parse_dictionary_header(comp, tuples, (void **)&tplg->nhlt_configs,
+				      &tplg->num_nhlt_configs,
+				      sizeof(*tplg->nhlt_configs),
+				      AVS_TKN_MANIFEST_NUM_NHLT_CONFIGS_U32);
+	if (ret)
+		return ret;
+
+	block_size -= le32_to_cpu(tuples->size);
+	/* With the header parsed, move on to parsing entries. */
+	tuples = avs_tplg_vendor_array_next(tuples);
+
+	for (i = 0; i < tplg->num_nhlt_configs && block_size > 0; i++) {
+		struct avs_tplg_nhlt_config *config;
+		u32 esize;
+
+		config = &tplg->nhlt_configs[i];
+		esize = le32_to_cpu(tuples->size);
+
+		ret = parse_dictionary_entries(comp, tuples, esize, config, 1, sizeof(*config),
+					       AVS_TKN_NHLT_CONFIG_ID_U32,
+					       mod_nhlt_config_parsers,
+					       ARRAY_SIZE(mod_nhlt_config_parsers));
+		if (ret)
+			return ret;
+		/* With tuples parsed, the blob shall be allocated. */
+		if (!config->blob)
+			return -EINVAL;
+		if (config->blob->capabilities_size > block_size)
+			return -EINVAL;
+
+		/* Consume the raw data and move to the next entry. */
+		memcpy(config->blob->capabilities, (u8 *)tuples + esize,
+		       config->blob->capabilities_size);
+		esize += config->blob->capabilities_size;
+
+		block_size -= esize;
+		tuples = avs_tplg_vendor_array_at(tuples, esize);
 	}
 
 	return 0;
@@ -2008,11 +2115,26 @@ static int avs_manifest(struct snd_soc_component *comp, int index,
 	tuples = avs_tplg_vendor_array_at(tuples, offset);
 
 	/* Initial configs dictionary. */
-	ret = avs_tplg_parse_initial_configs(comp, tuples, remaining);
+	ret = avs_tplg_parse_initial_configs(comp, tuples, remaining, &offset);
 	if (ret < 0)
 		return ret;
 
-	return 0;
+	remaining -= offset;
+	tuples = avs_tplg_vendor_array_at(tuples, offset);
+
+	ret = avs_tplg_vendor_array_lookup(tuples, remaining,
+					   AVS_TKN_MANIFEST_NUM_NHLT_CONFIGS_U32, &offset);
+	if (ret == -ENOENT)
+		return 0;
+	if (ret) {
+		dev_err(comp->dev, "NHLT config lookup failed: %d\n", ret);
+		return ret;
+	}
+
+	tuples = avs_tplg_vendor_array_at(tuples, offset);
+
+	/* NHLT configs dictionary. */
+	return avs_tplg_parse_nhlt_configs(comp, tuples, remaining);
 }
 
 enum {
@@ -2067,7 +2189,7 @@ avs_control_load(struct snd_soc_component *comp, int index, struct snd_kcontrol_
 	tuples = tmc->priv.array;
 	block_size = le32_to_cpu(tmc->priv.size);
 
-	ctl_data = devm_kzalloc(comp->card->dev, sizeof(*ctl_data), GFP_KERNEL);
+	ctl_data = devm_kzalloc_obj(comp->card->dev, *ctl_data);
 	if (!ctl_data)
 		return -ENOMEM;
 
@@ -2087,7 +2209,7 @@ avs_control_load(struct snd_soc_component *comp, int index, struct snd_kcontrol_
 	return 0;
 }
 
-static const struct snd_soc_tplg_ops avs_tplg_ops = {
+const struct snd_soc_tplg_ops avs_tplg_ops = {
 	.io_ops			= avs_control_ops,
 	.io_ops_count		= ARRAY_SIZE(avs_control_ops),
 	.control_load		= avs_control_load,
@@ -2103,7 +2225,7 @@ struct avs_tplg *avs_tplg_new(struct snd_soc_component *comp)
 {
 	struct avs_tplg *tplg;
 
-	tplg = devm_kzalloc(comp->card->dev, sizeof(*tplg), GFP_KERNEL);
+	tplg = devm_kzalloc_obj(comp->card->dev, *tplg);
 	if (!tplg)
 		return NULL;
 
@@ -2111,30 +2233,4 @@ struct avs_tplg *avs_tplg_new(struct snd_soc_component *comp)
 	INIT_LIST_HEAD(&tplg->path_tmpl_list);
 
 	return tplg;
-}
-
-int avs_load_topology(struct snd_soc_component *comp, const char *filename)
-{
-	const struct firmware *fw;
-	int ret;
-
-	ret = request_firmware(&fw, filename, comp->dev);
-	if (ret < 0) {
-		dev_err(comp->dev, "request topology \"%s\" failed: %d\n", filename, ret);
-		return ret;
-	}
-
-	ret = snd_soc_tplg_component_load(comp, &avs_tplg_ops, fw);
-	if (ret < 0)
-		dev_err(comp->dev, "load topology \"%s\" failed: %d\n", filename, ret);
-
-	release_firmware(fw);
-	return ret;
-}
-
-int avs_remove_topology(struct snd_soc_component *comp)
-{
-	snd_soc_tplg_component_remove(comp);
-
-	return 0;
 }

@@ -154,8 +154,6 @@ EXPORT_SYMBOL(eth_get_headlen);
  */
 __be16 eth_type_trans(struct sk_buff *skb, struct net_device *dev)
 {
-	unsigned short _service_access_point;
-	const unsigned short *sap;
 	const struct ethhdr *eth;
 
 	skb->dev = dev;
@@ -176,31 +174,16 @@ __be16 eth_type_trans(struct sk_buff *skb, struct net_device *dev)
 	if (likely(eth_proto_is_802_3(eth->h_proto)))
 		return eth->h_proto;
 
-	/*
-	 *      This is a magic hack to spot IPX packets. Older Novell breaks
-	 *      the protocol design and runs IPX over 802.3 without an 802.2 LLC
-	 *      layer. We look for FFFF which isn't a used 802.2 SSAP/DSAP. This
-	 *      won't work for fault tolerant netware but does for the rest.
-	 */
-	sap = skb_header_pointer(skb, 0, sizeof(*sap), &_service_access_point);
-	if (sap && *sap == 0xFFFF)
-		return htons(ETH_P_802_3);
-
-	/*
-	 *      Real 802.2 LLC
-	 */
+	/* No ethertype: this is an 802.2 LLC frame (length field). */
 	return htons(ETH_P_802_2);
 }
 EXPORT_SYMBOL(eth_type_trans);
 
-/**
- * eth_header_parse - extract hardware address from packet
- * @skb: packet to extract header from
- * @haddr: destination buffer
- */
-int eth_header_parse(const struct sk_buff *skb, unsigned char *haddr)
+int eth_header_parse(const struct sk_buff *skb, const struct net_device *dev,
+		     unsigned char *haddr)
 {
 	const struct ethhdr *eth = eth_hdr(skb);
+
 	memcpy(haddr, eth->h_source, ETH_ALEN);
 	return ETH_ALEN;
 }

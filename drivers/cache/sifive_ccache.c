@@ -124,6 +124,8 @@ static const struct of_device_id sifive_ccache_ids[] = {
 	{ .compatible = "sifive,fu740-c000-ccache" },
 	{ .compatible = "starfive,jh7100-ccache",
 	  .data = (void *)(QUIRK_NONSTANDARD_CACHE_OPS | QUIRK_BROKEN_DATA_UNCORR) },
+	{ .compatible = "starfive,jh7110-ccache",
+	  .data = (void *)(QUIRK_NONSTANDARD_CACHE_OPS) },
 	{ .compatible = "sifive,ccache0" },
 	{ /* end of table */ }
 };
@@ -273,7 +275,7 @@ static int sifive_ccache_probe(struct platform_device *pdev)
 
 		rc = devm_request_irq(dev, g_irq[i], ccache_int_handler, 0, "ccache_ecc", NULL);
 		if (rc)
-			return dev_err_probe(dev, rc, "Could not request IRQ %d\n", g_irq[i]);
+			return rc;
 	}
 
 	return 0;

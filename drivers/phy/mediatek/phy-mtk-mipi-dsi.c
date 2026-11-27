@@ -117,7 +117,7 @@ static int mtk_mipi_tx_probe(struct platform_device *pdev)
 	struct phy_provider *phy_provider;
 	int ret;
 
-	mipi_tx = devm_kzalloc(dev, sizeof(*mipi_tx), GFP_KERNEL);
+	mipi_tx = devm_kzalloc_obj(dev, *mipi_tx);
 	if (!mipi_tx)
 		return -ENOMEM;
 
@@ -183,6 +183,7 @@ static const struct of_device_id mtk_mipi_tx_match[] = {
 	{ .compatible = "mediatek,mt2701-mipi-tx", .data = &mt2701_mipitx_data },
 	{ .compatible = "mediatek,mt8173-mipi-tx", .data = &mt8173_mipitx_data },
 	{ .compatible = "mediatek,mt8183-mipi-tx", .data = &mt8183_mipitx_data },
+	{ .compatible = "mediatek,mt8196-mipi-tx", .data = &mt8196_mipitx_data },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, mtk_mipi_tx_match);

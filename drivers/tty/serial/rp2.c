@@ -197,7 +197,7 @@ struct rp2_card {
 };
 
 #define RP_ID(prod) PCI_VDEVICE(RP, (prod))
-#define RP_CAP(ports, smpte) (((ports) << 8) | ((smpte) << 0))
+#define RP_CAP(ports, smpte) .driver_data = (((ports) << 8) | ((smpte) << 0))
 
 static inline void rp2_decode_cap(const struct pci_device_id *id,
 				  int *ports, int *smpte)
@@ -700,7 +700,7 @@ static int rp2_probe(struct pci_dev *pdev,
 	struct rp2_uart_port *ports;
 	int rc;
 
-	card = devm_kzalloc(&pdev->dev, sizeof(*card), GFP_KERNEL);
+	card = devm_kzalloc_obj(&pdev->dev, *card);
 	if (!card)
 		return -ENOMEM;
 	pci_set_drvdata(pdev, card);
@@ -734,8 +734,7 @@ static int rp2_probe(struct pci_dev *pdev,
 
 	rp2_init_card(card);
 
-	ports = devm_kcalloc(&pdev->dev, card->n_ports, sizeof(*ports),
-			     GFP_KERNEL);
+	ports = devm_kzalloc_objs(&pdev->dev, *ports, card->n_ports);
 	if (!ports)
 		return -ENOMEM;
 	card->ports = ports;

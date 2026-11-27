@@ -5,6 +5,7 @@
  * Copyright IBM Corp. 2019
  */
 
+#include <linux/cfi_types.h>
 #include <linux/linkage.h>
 #include <asm/asm-extable.h>
 #include <asm/errno.h>
@@ -18,80 +19,74 @@
  * affects a few functions that are not performance-relevant.
  */
 	.macro BR_EX_AMODE31_r14
-	exrl	0,0f
+	exrl	0,555f
 	j	.
-0:	br	%r14
+555:	br	%r14
 	.endm
 
 /*
  * int _diag14_amode31(unsigned long rx, unsigned long ry1, unsigned long subcode)
  */
-SYM_FUNC_START(_diag14_amode31)
+SYM_TYPED_FUNC_START(_diag14_amode31)
 	lgr	%r1,%r2
 	lgr	%r2,%r3
 	lgr	%r3,%r4
 	lhi	%r5,-EIO
 	sam31
-	diag	%r1,%r2,0x14
-.Ldiag14_ex:
+0:	diag	%r1,%r2,0x14
 	ipm	%r5
 	srl	%r5,28
-.Ldiag14_fault:
-	sam64
+1:	sam64
 	lgfr	%r2,%r5
 	BR_EX_AMODE31_r14
-	EX_TABLE_AMODE31(.Ldiag14_ex, .Ldiag14_fault)
+	EX_TABLE_INSN_AMODE31(0b, 1b)
 SYM_FUNC_END(_diag14_amode31)
 
 /*
  * int _diag210_amode31(struct diag210 *addr)
  */
-SYM_FUNC_START(_diag210_amode31)
+SYM_TYPED_FUNC_START(_diag210_amode31)
 	lgr	%r1,%r2
 	lhi	%r2,-1
 	sam31
-	diag	%r1,%r0,0x210
-.Ldiag210_ex:
+0:	diag	%r1,%r0,0x210
 	ipm	%r2
 	srl	%r2,28
-.Ldiag210_fault:
-	sam64
+1:	sam64
 	lgfr	%r2,%r2
 	BR_EX_AMODE31_r14
-	EX_TABLE_AMODE31(.Ldiag210_ex, .Ldiag210_fault)
+	EX_TABLE_INSN_AMODE31(0b, 1b)
 SYM_FUNC_END(_diag210_amode31)
 
 /*
  * int diag8c(struct diag8c *addr, struct ccw_dev_id *devno, size_t len)
 */
-SYM_FUNC_START(_diag8c_amode31)
+SYM_TYPED_FUNC_START(_diag8c_amode31)
 	llgf	%r3,0(%r3)
 	sam31
-	diag	%r2,%r4,0x8c
-.Ldiag8c_ex:
-	sam64
+0:	diag	%r2,%r4,0x8c
+1:	sam64
 	lgfr	%r2,%r3
 	BR_EX_AMODE31_r14
-	EX_TABLE_AMODE31(.Ldiag8c_ex, .Ldiag8c_ex)
+	EX_TABLE_INSN_AMODE31(0b, 1b)
 SYM_FUNC_END(_diag8c_amode31)
 /*
  * int _diag26c_amode31(void *req, void *resp, enum diag26c_sc subcode)
  */
-SYM_FUNC_START(_diag26c_amode31)
+SYM_TYPED_FUNC_START(_diag26c_amode31)
 	lghi	%r5,-EOPNOTSUPP
 	sam31
-	diag	%r2,%r4,0x26c
-.Ldiag26c_ex:
-	sam64
+0:	diag	%r2,%r4,0x26c
+1:	sam64
 	lgfr	%r2,%r5
 	BR_EX_AMODE31_r14
-	EX_TABLE_AMODE31(.Ldiag26c_ex, .Ldiag26c_ex)
+	EX_TABLE_INSN_AMODE31(0b, 1b)
 SYM_FUNC_END(_diag26c_amode31)
 
 /*
  * void _diag0c_amode31(unsigned long rx)
  */
-SYM_FUNC_START(_diag0c_amode31)
+SYM_TYPED_FUNC_START(_diag0c_amode31)
 	sam31
 	diag	%r2,%r2,0x0c
 	sam64
@@ -103,7 +98,7 @@ SYM_FUNC_END(_diag0c_amode31)
  *
  * Calls diag 308 subcode 1 and continues execution
  */
-SYM_FUNC_START(_diag308_reset_amode31)
+SYM_TYPED_FUNC_START(_diag308_reset_amode31)
 	larl	%r4,ctlregs		# Save control registers
 	stctg	%c0,%c15,0(%r4)
 	lg	%r2,0(%r4)		# Disable lowcore protection

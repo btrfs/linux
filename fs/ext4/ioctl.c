@@ -26,6 +26,8 @@
 #include <linux/fsmap.h>
 #include "fsmap.h"
 #include <trace/events/ext4.h>
+#include <linux/fserror.h>
+#include <kunit/static_stub.h>
 
 typedef void ext4_update_sb_callback(struct ext4_sb_info *sbi,
 				     struct ext4_super_block *es,
@@ -53,6 +55,13 @@ static void ext4_sb_setuuid(struct ext4_sb_info *sbi,
 {
 	memcpy(es->s_uuid, (__u8 *)arg, UUID_SIZE);
 }
+
+int ext4_ioctl_sync_bh(struct buffer_head *bh)
+{
+	KUNIT_STATIC_STUB_REDIRECT(ext4_ioctl_sync_bh, bh);
+	return sync_dirty_buffer(bh);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_ioctl_sync_bh);
 
 static
 int ext4_update_primary_sb(struct super_block *sb, handle_t *handle,
@@ -88,7 +97,7 @@ int ext4_update_primary_sb(struct super_block *sb, handle_t *handle,
 	err = ext4_handle_dirty_metadata(handle, NULL, bh);
 	if (err)
 		goto out_err;
-	err = sync_dirty_buffer(bh);
+	err = ext4_ioctl_sync_bh(bh);
 out_err:
 	ext4_std_error(sb, err);
 	return err;
@@ -166,7 +175,7 @@ static int ext4_update_backup_sb(struct super_block *sb,
 		BUFFER_TRACE(bh, "marking dirty");
 		mark_buffer_dirty(bh);
 	}
-	err = sync_dirty_buffer(bh);
+	err = ext4_ioctl_sync_bh(bh);
 
 out_bh:
 	brelse(bh);
@@ -360,6 +369,7 @@ void ext4_reset_inode_seed(struct inode *inode)
 	csum = ext4_chksum(sbi->s_csum_seed, (__u8 *)&inum, sizeof(inum));
 	ei->i_csum_seed = ext4_chksum(csum, (__u8 *)&gen, sizeof(gen));
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_reset_inode_seed);
 
 /*
  * Swap the information from the given @inode and the inode
@@ -372,7 +382,7 @@ void ext4_reset_inode_seed(struct inode *inode)
  *
  */
 static long swap_inode_boot_loader(struct super_block *sb,
-				struct mnt_idmap *idmap,
+				const struct mnt_idmap *idmap,
 				struct inode *inode)
 {
 	handle_t *handle;
@@ -476,7 +486,7 @@ static long swap_inode_boot_loader(struct super_block *sb,
 	if (err < 0) {
 		/* No need to update quota information. */
 		ext4_warning(inode->i_sb,
-			"couldn't mark inode #%lu dirty (err %d)",
+			"couldn't mark inode #%llu dirty (err %d)",
 			inode->i_ino, err);
 		/* Revert all changes: */
 		swap_inode_data(inode, inode_bl);
@@ -492,7 +502,7 @@ static long swap_inode_boot_loader(struct super_block *sb,
 	if (err < 0) {
 		/* No need to update quota information. */
 		ext4_warning(inode_bl->i_sb,
-			"couldn't mark inode #%lu dirty (err %d)",
+			"couldn't mark inode #%llu dirty (err %d)",
 			inode_bl->i_ino, err);
 		goto revert;
 	}
@@ -829,11 +839,17 @@ int ext4_force_shutdown(struct super_block *sb, u32 flags)
 		bdev_thaw(sb->s_bdev);
 		break;
 	case EXT4_GOING_FLAGS_LOGFLUSH:
+		/*
+		 * Call ext4_force_commit() before setting EXT4_FLAGS_SHUTDOWN.
+		 * This is because in data=ordered mode, journal commit
+		 * triggers data writeback which fails if shutdown is already
+		 * set, causing the journal to be aborted prematurely before
+		 * the commit succeeds.
+		 */
+		(void) ext4_force_commit(sb);
 		set_bit(EXT4_FLAGS_SHUTDOWN, &sbi->s_ext4_flags);
-		if (sbi->s_journal && !is_journal_aborted(sbi->s_journal)) {
-			(void) ext4_force_commit(sb);
+		if (sbi->s_journal && !is_journal_aborted(sbi->s_journal))
 			jbd2_journal_abort(sbi->s_journal, -ESHUTDOWN);
-		}
 		break;
 	case EXT4_GOING_FLAGS_NOLOGFLUSH:
 		set_bit(EXT4_FLAGS_SHUTDOWN, &sbi->s_ext4_flags);
@@ -844,8 +860,10 @@ int ext4_force_shutdown(struct super_block *sb, u32 flags)
 		return -EINVAL;
 	}
 	clear_opt(sb, DISCARD);
+	fserror_report_shutdown(sb, GFP_KERNEL);
 	return 0;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_force_shutdown);
 
 static int ext4_ioctl_shutdown(struct super_block *sb, unsigned long arg)
 {
@@ -966,6 +984,7 @@ static long ext4_ioctl_group_add(struct file *file,
 
 	err = ext4_group_add(sb, input);
 	if (EXT4_SB(sb)->s_journal) {
+		ext4_fc_mark_ineligible(sb, EXT4_FC_REASON_RESIZE, NULL);
 		jbd2_journal_lock_updates(EXT4_SB(sb)->s_journal);
 		err2 = jbd2_journal_flush(EXT4_SB(sb)->s_journal, 0);
 		jbd2_journal_unlock_updates(EXT4_SB(sb)->s_journal);
@@ -998,8 +1017,9 @@ int ext4_fileattr_get(struct dentry *dentry, struct file_kattr *fa)
 
 	return 0;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_fileattr_get);
 
-int ext4_fileattr_set(struct mnt_idmap *idmap,
+int ext4_fileattr_set(const struct mnt_idmap *idmap,
 		      struct dentry *dentry, struct file_kattr *fa)
 {
 	struct inode *inode = d_inode(dentry);
@@ -1028,6 +1048,7 @@ int ext4_fileattr_set(struct mnt_idmap *idmap,
 out:
 	return err;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_fileattr_set);
 
 /* So that the fiemap access checks can't overflow on 32 bit machines. */
 #define FIEMAP_MAX_EXTENTS	(UINT_MAX / sizeof(struct fiemap_extent))
@@ -1353,7 +1374,8 @@ static void ext4_sb_setparams(struct ext4_sb_info *sbi,
 		es->s_encoding = cpu_to_le16(params->encoding);
 	if (params->set_flags & EXT4_TUNE_FL_ENCODING_FLAGS)
 		es->s_encoding_flags = cpu_to_le16(params->encoding_flags);
-	strscpy_pad(es->s_mount_opts, params->mount_opts);
+	if (params->set_flags & EXT4_TUNE_FL_MOUNT_OPTS)
+		strscpy_pad(es->s_mount_opts, params->mount_opts);
 	if (params->set_flags & EXT4_TUNE_FL_EDIT_FEATURES) {
 		es->s_feature_compat |=
 			cpu_to_le32(params->set_feature_compat_mask);
@@ -1374,77 +1396,74 @@ static void ext4_sb_setparams(struct ext4_sb_info *sbi,
 		    EXT4_FEATURE_INCOMPAT_CSUM_SEED)
 			es->s_checksum_seed = cpu_to_le32(sbi->s_csum_seed);
 	}
-	if (params->set_flags & EXT4_TUNE_FL_FORCE_FSCK)
+	if (params->set_flags & EXT4_TUNE_FL_FORCE_FSCK) {
+		sbi->s_mount_state |= EXT4_ERROR_FS;
 		es->s_state |= cpu_to_le16(EXT4_ERROR_FS);
+	}
 }
 
-static int ext4_ioctl_set_tune_sb(struct file *filp,
-				  struct ext4_tune_sb_params __user *in)
+static int ext4_validate_tune_sb_params(struct super_block *sb,
+					struct ext4_tune_sb_params *params)
 {
-	struct ext4_tune_sb_params params;
-	struct super_block *sb = file_inode(filp)->i_sb;
 	struct ext4_sb_info *sbi = EXT4_SB(sb);
 	struct ext4_super_block *es = sbi->s_es;
 	int enabling_casefold = 0;
-	int ret;
 
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
+	if (strnlen(params->mount_opts, sizeof(params->mount_opts)) ==
+	    sizeof(params->mount_opts))
+		return -E2BIG;
 
-	if (copy_from_user(&params, in, sizeof(params)))
-		return -EFAULT;
-
-	if ((params.set_flags & ~TUNE_OPS_SUPPORTED) != 0)
+	if ((params->set_flags & ~TUNE_OPS_SUPPORTED) != 0)
 		return -EOPNOTSUPP;
 
-	if ((params.set_flags & EXT4_TUNE_FL_ERRORS_BEHAVIOR) &&
-	    (params.errors_behavior > EXT4_ERRORS_PANIC))
+	if ((params->set_flags & EXT4_TUNE_FL_ERRORS_BEHAVIOR) &&
+	    (params->errors_behavior > EXT4_ERRORS_PANIC))
 		return -EINVAL;
 
-	if ((params.set_flags & EXT4_TUNE_FL_RESERVED_BLOCKS) &&
-	    (params.reserved_blocks > ext4_blocks_count(sbi->s_es) / 2))
+	if ((params->set_flags & EXT4_TUNE_FL_RESERVED_BLOCKS) &&
+	    (params->reserved_blocks > ext4_blocks_count(sbi->s_es) / 2))
 		return -EINVAL;
-	if ((params.set_flags & EXT4_TUNE_FL_DEF_HASH_ALG) &&
-	    ((params.def_hash_alg > DX_HASH_LAST) ||
-	     (params.def_hash_alg == DX_HASH_SIPHASH)))
+	if ((params->set_flags & EXT4_TUNE_FL_DEF_HASH_ALG) &&
+	    ((params->def_hash_alg > DX_HASH_LAST) ||
+	     (params->def_hash_alg == DX_HASH_SIPHASH)))
 		return -EINVAL;
-	if ((params.set_flags & EXT4_TUNE_FL_FEATURES) &&
-	    (params.set_flags & EXT4_TUNE_FL_EDIT_FEATURES))
+	if ((params->set_flags & EXT4_TUNE_FL_FEATURES) &&
+	    (params->set_flags & EXT4_TUNE_FL_EDIT_FEATURES))
 		return -EINVAL;
 
-	if (params.set_flags & EXT4_TUNE_FL_FEATURES) {
-		params.set_feature_compat_mask =
-			params.feature_compat &
+	if (params->set_flags & EXT4_TUNE_FL_FEATURES) {
+		params->set_feature_compat_mask =
+			params->feature_compat &
 			~le32_to_cpu(es->s_feature_compat);
-		params.set_feature_incompat_mask =
-			params.feature_incompat &
+		params->set_feature_incompat_mask =
+			params->feature_incompat &
 			~le32_to_cpu(es->s_feature_incompat);
-		params.set_feature_ro_compat_mask =
-			params.feature_ro_compat &
+		params->set_feature_ro_compat_mask =
+			params->feature_ro_compat &
 			~le32_to_cpu(es->s_feature_ro_compat);
-		params.clear_feature_compat_mask =
-			~params.feature_compat &
+		params->clear_feature_compat_mask =
+			~params->feature_compat &
 			le32_to_cpu(es->s_feature_compat);
-		params.clear_feature_incompat_mask =
-			~params.feature_incompat &
+		params->clear_feature_incompat_mask =
+			~params->feature_incompat &
 			le32_to_cpu(es->s_feature_incompat);
-		params.clear_feature_ro_compat_mask =
-			~params.feature_ro_compat &
+		params->clear_feature_ro_compat_mask =
+			~params->feature_ro_compat &
 			le32_to_cpu(es->s_feature_ro_compat);
-		params.set_flags |= EXT4_TUNE_FL_EDIT_FEATURES;
+		params->set_flags |= EXT4_TUNE_FL_EDIT_FEATURES;
 	}
-	if (params.set_flags & EXT4_TUNE_FL_EDIT_FEATURES) {
-		if ((params.set_feature_compat_mask &
+	if (params->set_flags & EXT4_TUNE_FL_EDIT_FEATURES) {
+		if ((params->set_feature_compat_mask &
 		     ~EXT4_TUNE_SET_COMPAT_SUPP) ||
-		    (params.set_feature_incompat_mask &
+		    (params->set_feature_incompat_mask &
 		     ~EXT4_TUNE_SET_INCOMPAT_SUPP) ||
-		    (params.set_feature_ro_compat_mask &
+		    (params->set_feature_ro_compat_mask &
 		     ~EXT4_TUNE_SET_RO_COMPAT_SUPP) ||
-		    (params.clear_feature_compat_mask &
+		    (params->clear_feature_compat_mask &
 		     ~EXT4_TUNE_CLEAR_COMPAT_SUPP) ||
-		    (params.clear_feature_incompat_mask &
+		    (params->clear_feature_incompat_mask &
 		     ~EXT4_TUNE_CLEAR_INCOMPAT_SUPP) ||
-		    (params.clear_feature_ro_compat_mask &
+		    (params->clear_feature_ro_compat_mask &
 		     ~EXT4_TUNE_CLEAR_RO_COMPAT_SUPP))
 			return -EOPNOTSUPP;
 
@@ -1452,34 +1471,35 @@ static int ext4_ioctl_set_tune_sb(struct file *filp,
 		 * Filter out the features that are already set from
 		 * the set_mask.
 		 */
-		params.set_feature_compat_mask &=
+		params->set_feature_compat_mask &=
 			~le32_to_cpu(es->s_feature_compat);
-		params.set_feature_incompat_mask &=
+		params->set_feature_incompat_mask &=
 			~le32_to_cpu(es->s_feature_incompat);
-		params.set_feature_ro_compat_mask &=
+		params->set_feature_ro_compat_mask &=
 			~le32_to_cpu(es->s_feature_ro_compat);
-		if ((params.set_feature_incompat_mask &
-		     EXT4_FEATURE_INCOMPAT_CASEFOLD)) {
+		if (params->set_feature_incompat_mask &
+		    EXT4_FEATURE_INCOMPAT_CASEFOLD) {
 			enabling_casefold = 1;
-			if (!(params.set_flags & EXT4_TUNE_FL_ENCODING)) {
-				params.encoding = EXT4_ENC_UTF8_12_1;
-				params.set_flags |= EXT4_TUNE_FL_ENCODING;
+			if (!(params->set_flags & EXT4_TUNE_FL_ENCODING)) {
+				params->encoding = EXT4_ENC_UTF8_12_1;
+				params->set_flags |= EXT4_TUNE_FL_ENCODING;
 			}
-			if (!(params.set_flags & EXT4_TUNE_FL_ENCODING_FLAGS)) {
-				params.encoding_flags = 0;
-				params.set_flags |= EXT4_TUNE_FL_ENCODING_FLAGS;
+			if (!(params->set_flags &
+			      EXT4_TUNE_FL_ENCODING_FLAGS)) {
+				params->encoding_flags = 0;
+				params->set_flags |=
+					EXT4_TUNE_FL_ENCODING_FLAGS;
 			}
 		}
-		if ((params.set_feature_compat_mask &
-		     EXT4_FEATURE_COMPAT_DIR_INDEX)) {
-			uuid_t	uu;
+		if (params->set_feature_compat_mask &
+		    EXT4_FEATURE_COMPAT_DIR_INDEX) {
+			uuid_t uu;
 
 			memcpy(&uu, sbi->s_hash_seed, UUID_SIZE);
 			if (uuid_is_null(&uu))
-				generate_random_uuid((char *)
-						     &sbi->s_hash_seed);
-			if (params.set_flags & EXT4_TUNE_FL_DEF_HASH_ALG)
-				sbi->s_def_hash_version = params.def_hash_alg;
+				generate_random_uuid((char *)&sbi->s_hash_seed);
+			if (params->set_flags & EXT4_TUNE_FL_DEF_HASH_ALG)
+				sbi->s_def_hash_version = params->def_hash_alg;
 			else if (sbi->s_def_hash_version == 0)
 				sbi->s_def_hash_version = DX_HASH_HALF_MD4;
 			if (!(es->s_flags &
@@ -1494,20 +1514,41 @@ static int ext4_ioctl_set_tune_sb(struct file *filp,
 			}
 		}
 	}
-	if (params.set_flags & EXT4_TUNE_FL_ENCODING) {
+	if (params->set_flags & EXT4_TUNE_FL_ENCODING) {
 		if (!enabling_casefold)
 			return -EINVAL;
-		if (params.encoding == 0)
-			params.encoding = EXT4_ENC_UTF8_12_1;
-		else if (params.encoding != EXT4_ENC_UTF8_12_1)
+		if (params->encoding == 0)
+			params->encoding = EXT4_ENC_UTF8_12_1;
+		else if (params->encoding != EXT4_ENC_UTF8_12_1)
 			return -EINVAL;
 	}
-	if (params.set_flags & EXT4_TUNE_FL_ENCODING_FLAGS) {
+	if (params->set_flags & EXT4_TUNE_FL_ENCODING_FLAGS) {
 		if (!enabling_casefold)
 			return -EINVAL;
-		if (params.encoding_flags & ~SB_ENC_SUPP_MASK)
+		if (params->encoding_flags & ~SB_ENC_SUPP_MASK)
 			return -EINVAL;
 	}
+
+	return 0;
+}
+
+static int ext4_ioctl_set_tune_sb(struct file *filp,
+				  struct ext4_tune_sb_params __user *in)
+{
+	struct ext4_tune_sb_params params;
+	struct super_block *sb = file_inode(filp)->i_sb;
+	struct ext4_sb_info *sbi = EXT4_SB(sb);
+	int ret;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	if (copy_from_user(&params, in, sizeof(params)))
+		return -EFAULT;
+
+	ret = ext4_validate_tune_sb_params(sb, &params);
+	if (ret)
+		return ret;
 
 	ret = mnt_want_write_file(filp);
 	if (ret)
@@ -1526,7 +1567,7 @@ static long __ext4_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	struct inode *inode = file_inode(filp);
 	struct super_block *sb = inode->i_sb;
-	struct mnt_idmap *idmap = file_mnt_idmap(filp);
+	const struct mnt_idmap *idmap = file_mnt_idmap(filp);
 
 	ext4_debug("cmd = %u, arg = %lu\n", cmd, arg);
 
@@ -1607,6 +1648,8 @@ setversion_out:
 
 		err = ext4_group_extend(sb, EXT4_SB(sb)->s_es, n_blocks_count);
 		if (EXT4_SB(sb)->s_journal) {
+			ext4_fc_mark_ineligible(sb, EXT4_FC_REASON_RESIZE,
+						NULL);
 			jbd2_journal_lock_updates(EXT4_SB(sb)->s_journal);
 			err2 = jbd2_journal_flush(EXT4_SB(sb)->s_journal, 0);
 			jbd2_journal_unlock_updates(EXT4_SB(sb)->s_journal);
@@ -1641,15 +1684,8 @@ group_extend_out:
 		if (!(fd_file(donor)->f_mode & FMODE_WRITE))
 			return -EBADF;
 
-		if (ext4_has_feature_bigalloc(sb)) {
-			ext4_msg(sb, KERN_ERR,
-				 "Online defrag not supported with bigalloc");
-			return -EOPNOTSUPP;
-		} else if (IS_DAX(inode)) {
-			ext4_msg(sb, KERN_ERR,
-				 "Online defrag not supported with DAX");
-			return -EOPNOTSUPP;
-		}
+		if (file_inode(filp)->i_sb != file_inode(fd_file(donor))->i_sb)
+			return -EXDEV;
 
 		err = mnt_want_write_file(filp);
 		if (err)
@@ -1666,10 +1702,10 @@ group_extend_out:
 	}
 
 	case EXT4_IOC_GROUP_ADD: {
-		struct ext4_new_group_data input;
+		struct ext4_new_group_input __user *uinput = (void __user *)arg;
+		struct ext4_new_group_data input = {};
 
-		if (copy_from_user(&input, (struct ext4_new_group_input __user *)arg,
-				sizeof(input)))
+		if (copy_from_user(&input, uinput, sizeof(*uinput)))
 			return -EFAULT;
 
 		return ext4_ioctl_group_add(filp, &input);
@@ -1922,6 +1958,7 @@ long ext4_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	return __ext4_ioctl(filp, cmd, arg);
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_ioctl);
 
 #ifdef CONFIG_COMPAT
 long ext4_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
@@ -1998,6 +2035,7 @@ long ext4_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	}
 	return ext4_ioctl(file, cmd, (unsigned long) compat_ptr(arg));
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_compat_ioctl);
 #endif
 
 static void set_overhead(struct ext4_sb_info *sbi,
@@ -2018,3 +2056,85 @@ int ext4_update_overhead(struct super_block *sb, bool force)
 		return 0;
 	return ext4_update_superblocks_fn(sb, set_overhead, &sbi->s_overhead);
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_update_overhead);
+
+#if IS_ENABLED(CONFIG_EXT4_KUNIT_TESTS)
+void ext4_sb_setlabel_test(struct ext4_sb_info *sbi,
+			   struct ext4_super_block *es, const void *arg)
+{
+	ext4_sb_setlabel(sbi, es, arg);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_sb_setlabel_test);
+
+void ext4_sb_setuuid_test(struct ext4_sb_info *sbi,
+			  struct ext4_super_block *es, const void *arg)
+{
+	ext4_sb_setuuid(sbi, es, arg);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_sb_setuuid_test);
+
+void ext4_sb_setparams_test(struct ext4_sb_info *sbi,
+			    struct ext4_super_block *es, const void *arg)
+{
+	ext4_sb_setparams(sbi, es, arg);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_sb_setparams_test);
+
+int ext4_validate_tune_sb_params_test(struct super_block *sb,
+				      struct ext4_tune_sb_params *params)
+{
+	return ext4_validate_tune_sb_params(sb, params);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_validate_tune_sb_params_test);
+
+int ext4_update_primary_sb_test(struct super_block *sb, handle_t *handle,
+				void (*func)(struct ext4_sb_info *,
+					     struct ext4_super_block *,
+					     const void *),
+				const void *arg)
+{
+	return ext4_update_primary_sb(sb, handle, func, arg);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_update_primary_sb_test);
+
+int ext4_update_backup_sb_test(struct super_block *sb, handle_t *handle,
+			       ext4_group_t grp,
+			       void (*func)(struct ext4_sb_info *,
+					    struct ext4_super_block *,
+					    const void *),
+			       const void *arg)
+{
+	return ext4_update_backup_sb(sb, handle, grp, func, arg);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_update_backup_sb_test);
+
+int ext4_update_superblocks_fn_test(struct super_block *sb,
+				    void (*func)(struct ext4_sb_info *,
+						 struct ext4_super_block *,
+						 const void *),
+				    const void *arg)
+{
+	return ext4_update_superblocks_fn(sb, func, arg);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_update_superblocks_fn_test);
+
+void ext4_swap_inode_data_test(struct inode *inode1, struct inode *inode2)
+{
+	swap_inode_data(inode1, inode2);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_swap_inode_data_test);
+
+int ext4_ioctl_check_immutable_test(struct inode *inode, __u32 new_projid,
+				    unsigned int flags)
+{
+	return ext4_ioctl_check_immutable(inode, new_projid, flags);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_ioctl_check_immutable_test);
+
+bool ext4_dax_compatible_test(struct inode *inode, unsigned int oldflags,
+			      unsigned int flags)
+{
+	return dax_compatible(inode, oldflags, flags);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_dax_compatible_test);
+#endif

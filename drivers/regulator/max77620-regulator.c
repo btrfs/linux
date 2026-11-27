@@ -786,15 +786,13 @@ static int max77620_regulator_probe(struct platform_device *pdev)
 	int ret = 0;
 	int id;
 
-	pmic = devm_kzalloc(dev, sizeof(*pmic), GFP_KERNEL);
+	pmic = devm_kzalloc_obj(dev, *pmic);
 	if (!pmic)
 		return -ENOMEM;
 
 	platform_set_drvdata(pdev, pmic);
 	pmic->dev = dev;
 	pmic->rmap = max77620_chip->rmap;
-	if (!dev->of_node)
-		dev->of_node = pdev->dev.parent->of_node;
 
 	switch (max77620_chip->chip_id) {
 	case MAX77620:
@@ -904,10 +902,10 @@ static const struct dev_pm_ops max77620_regulator_pm_ops = {
 };
 
 static const struct platform_device_id max77620_regulator_devtype[] = {
-	{ .name = "max77620-pmic", },
-	{ .name = "max20024-pmic", },
-	{ .name = "max77663-pmic", },
-	{},
+	{ .name = "max77620-pmic" },
+	{ .name = "max20024-pmic" },
+	{ .name = "max77663-pmic" },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, max77620_regulator_devtype);
 

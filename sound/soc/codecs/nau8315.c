@@ -11,7 +11,6 @@
 #include <linux/acpi.h>
 #include <linux/device.h>
 #include <linux/err.h>
-#include <linux/gpio.h>
 #include <linux/gpio/consumer.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -118,7 +117,7 @@ static int nau8315_platform_probe(struct platform_device *pdev)
 {
 	struct nau8315_priv *nau8315;
 
-	nau8315 = devm_kzalloc(&pdev->dev, sizeof(*nau8315), GFP_KERNEL);
+	nau8315 = devm_kzalloc_obj(&pdev->dev, *nau8315);
 	if (!nau8315)
 		return -ENOMEM;
 

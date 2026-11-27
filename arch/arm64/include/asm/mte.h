@@ -8,7 +8,7 @@
 #include <asm/compiler.h>
 #include <asm/mte-def.h>
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <linux/bitfield.h>
 #include <linux/kasan-enabled.h>
@@ -23,9 +23,7 @@ unsigned long mte_copy_tags_from_user(void *to, const void __user *from,
 				      unsigned long n);
 unsigned long mte_copy_tags_to_user(void __user *to, void *from,
 				    unsigned long n);
-int mte_save_tags(struct page *page);
 void mte_save_page_tags(const void *page_addr, void *tag_storage);
-void mte_restore_tags(swp_entry_t entry, struct page *page);
 void mte_restore_page_tags(void *page_addr, const void *tag_storage);
 void mte_invalidate_tags(int type, pgoff_t offset);
 void mte_invalidate_tags_area(int type);
@@ -96,6 +94,7 @@ static inline bool try_page_mte_tagging(struct page *page)
 }
 
 void mte_zero_clear_page_tags(void *addr);
+void mte_clear_folio_tags(struct folio *folio);
 void mte_sync_tags(pte_t pte, unsigned int nr_pages);
 void mte_copy_page_tags(void *kto, const void *kfrom);
 void mte_thread_init_user(void);
@@ -126,6 +125,9 @@ static inline bool try_page_mte_tagging(struct page *page)
 	return false;
 }
 static inline void mte_zero_clear_page_tags(void *addr)
+{
+}
+static inline void mte_clear_folio_tags(struct folio *folio)
 {
 }
 static inline void mte_sync_tags(pte_t pte, unsigned int nr_pages)
@@ -224,10 +226,10 @@ static inline bool folio_try_hugetlb_mte_tagging(struct folio *folio)
 }
 #endif
 
-static inline void mte_disable_tco_entry(struct task_struct *task)
+static inline bool mte_disable_tco_entry(struct task_struct *task)
 {
 	if (!system_supports_mte())
-		return;
+		return false;
 
 	/*
 	 * Re-enable tag checking (TCO set on exception entry). This is only
@@ -240,8 +242,12 @@ static inline void mte_disable_tco_entry(struct task_struct *task)
 	 * expensive.
 	 */
 	if (kasan_hw_tags_enabled() ||
-	    (task->thread.sctlr_user & (1UL << SCTLR_EL1_TCF0_SHIFT)))
+	    (task->thread.sctlr_user & (1UL << SCTLR_EL1_TCF0_SHIFT))) {
 		asm volatile(SET_PSTATE_TCO(0));
+		return true;
+	}
+
+	return false;
 }
 
 #ifdef CONFIG_KASAN_HW_TAGS
@@ -252,12 +258,18 @@ static inline void mte_check_tfsr_entry(void)
 	if (!kasan_hw_tags_enabled())
 		return;
 
+	if (!system_uses_mte_async_or_asymm_mode())
+		return;
+
 	mte_check_tfsr_el1();
 }
 
 static inline void mte_check_tfsr_exit(void)
 {
 	if (!kasan_hw_tags_enabled())
+		return;
+
+	if (!system_uses_mte_async_or_asymm_mode())
 		return;
 
 	/*
@@ -282,5 +294,5 @@ static inline void mte_check_tfsr_exit(void)
 }
 #endif /* CONFIG_KASAN_HW_TAGS */
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 #endif /* __ASM_MTE_H  */

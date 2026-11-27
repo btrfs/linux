@@ -86,9 +86,9 @@
 #define MB_DEFAULT_LINEAR_SCAN_THRESHOLD	16
 
 /*
- * The maximum order upto which CR_BEST_AVAIL_LEN can trim a particular
+ * The maximum order up to which CR_BEST_AVAIL_LEN can trim a particular
  * allocation request. Example, if we have an order 7 request and max trim order
- * of 3, we can trim this request upto order 4.
+ * of 3, we can trim this request up to order 4.
  */
 #define MB_DEFAULT_BEST_AVAIL_TRIM_ORDER	3
 
@@ -270,4 +270,74 @@ ext4_mballoc_query_range(
 	ext4_mballoc_query_range_fn	formatter,
 	void				*priv);
 
+extern int ext4_mb_mark_context(handle_t *handle,
+		struct super_block *sb, bool state,
+		ext4_group_t group, ext4_grpblk_t blkoff,
+		ext4_grpblk_t len, int flags,
+		ext4_grpblk_t *ret_changed);
+extern int ext4_issue_discard(struct super_block *sb,
+		ext4_group_t block_group, ext4_grpblk_t cluster, int count);
+#if IS_ENABLED(CONFIG_EXT4_KUNIT_TESTS)
+extern void mb_clear_bits_test(void *bm, int cur, int len);
+extern ext4_fsblk_t
+ext4_mb_new_blocks_simple_test(struct ext4_allocation_request *ar,
+			       int *errp);
+extern int mb_find_next_zero_bit_test(void *addr, int max, int start);
+extern int mb_find_next_bit_test(void *addr, int max, int start);
+extern void mb_clear_bit_test(int bit, void *addr);
+extern void mb_set_bit_test(int bit, void *addr);
+extern int mb_test_bit_test(int bit, void *addr);
+extern int mb_test_and_clear_bits_test(void *bm, int cur, int len);
+extern void *mb_find_buddy_test(struct ext4_buddy *e4b, int order, int *max);
+extern int mb_find_order_for_block_test(struct ext4_buddy *e4b, int block);
+extern int mb_find_extent_test(struct ext4_buddy *e4b, int block, int needed,
+			       struct ext4_free_extent *ex);
+extern int mb_avg_fragment_size_order_test(struct super_block *sb,
+					   ext4_grpblk_t len);
+extern void mb_update_avg_fragment_size_test(struct super_block *sb,
+					     struct ext4_group_info *grp);
+extern void mb_set_largest_free_order_test(struct super_block *sb,
+					   struct ext4_group_info *grp);
+extern bool ext4_mb_good_group_test(struct ext4_allocation_context *ac,
+				    ext4_group_t group, enum criteria cr);
+extern int ext4_mb_good_group_nolock_test(struct ext4_allocation_context *ac,
+					  ext4_group_t group, enum criteria cr);
+extern int ext4_mb_find_by_goal_test(struct ext4_allocation_context *ac,
+				     struct ext4_buddy *e4b);
+extern void ext4_mb_simple_scan_group_test(struct ext4_allocation_context *ac,
+					   struct ext4_buddy *e4b);
+extern void ext4_mb_scan_aligned_test(struct ext4_allocation_context *ac,
+				      struct ext4_buddy *e4b);
+extern void ext4_mb_complex_scan_group_test(struct ext4_allocation_context *ac,
+					    struct ext4_buddy *e4b);
+extern void ext4_mb_try_best_found_test(struct ext4_allocation_context *ac,
+					struct ext4_buddy *e4b);
+extern int ext4_mb_regular_allocator_test(struct ext4_allocation_context *ac);
+extern void ext4_mb_initialize_context_test(struct ext4_allocation_context *ac,
+					    struct ext4_allocation_request *ar);
+extern void ext4_mb_normalize_request_test(struct ext4_allocation_context *ac,
+					   struct ext4_allocation_request *ar);
+extern void ext4_mb_new_preallocation_test(struct ext4_allocation_context *ac);
+extern void ext4_mb_release_context_test(struct ext4_allocation_context *ac);
+extern int ext4_mb_pa_alloc_test(struct ext4_allocation_context *ac);
+extern void ext4_mb_generate_from_pa_test(struct super_block *sb, void *bitmap,
+					  ext4_group_t group);
+extern int ext4_mb_discard_preallocations_test(struct super_block *sb,
+					       int needed);
+extern int
+ext4_mb_mark_diskspace_used_test(struct ext4_allocation_context *ac,
+				 handle_t *handle);
+extern int mb_mark_used_test(struct ext4_buddy *e4b,
+			     struct ext4_free_extent *ex);
+extern void ext4_mb_generate_buddy_test(struct super_block *sb,
+		void *buddy, void *bitmap, ext4_group_t group,
+		struct ext4_group_info *grp);
+extern int ext4_mb_load_buddy_test(struct super_block *sb,
+		ext4_group_t group, struct ext4_buddy *e4b);
+extern void ext4_mb_unload_buddy_test(struct ext4_buddy *e4b);
+extern void mb_free_blocks_test(struct inode *inode,
+		struct ext4_buddy *e4b, int first, int count);
+extern void ext4_free_blocks_simple_test(struct inode *inode,
+		ext4_fsblk_t block, unsigned long count);
+#endif
 #endif

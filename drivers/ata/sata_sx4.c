@@ -267,8 +267,7 @@ static const struct ata_port_info pdc_port_info[] = {
 };
 
 static const struct pci_device_id pdc_sata_pci_tbl[] = {
-	{ PCI_VDEVICE(PROMISE, 0x6622), board_20621 },
-
+	{ PCI_VDEVICE(PROMISE, 0x6622), .driver_data = board_20621 },
 	{ }	/* terminate list */
 };
 
@@ -285,7 +284,7 @@ static int pdc_port_start(struct ata_port *ap)
 	struct device *dev = ap->host->dev;
 	struct pdc_port_priv *pp;
 
-	pp = devm_kzalloc(dev, sizeof(*pp), GFP_KERNEL);
+	pp = devm_kzalloc_obj(dev, *pp);
 	if (!pp)
 		return -ENOMEM;
 
@@ -853,6 +852,7 @@ static int pdc_softreset(struct ata_link *link, unsigned int *class,
 }
 
 static void pdc_error_handler(struct ata_port *ap)
+	__must_hold(&ap->host->eh_mutex)
 {
 	if (!ata_port_is_frozen(ap))
 		pdc_reset_port(ap);
@@ -1402,7 +1402,7 @@ static int pdc_sata_init_one(struct pci_dev *pdev,
 
 	/* allocate host */
 	host = ata_host_alloc_pinfo(&pdev->dev, ppi, 4);
-	hpriv = devm_kzalloc(&pdev->dev, sizeof(*hpriv), GFP_KERNEL);
+	hpriv = devm_kzalloc_obj(&pdev->dev, *hpriv);
 	if (!host || !hpriv)
 		return -ENOMEM;
 

@@ -86,7 +86,7 @@ static ssize_t name_show(struct device *dev, struct device_attribute *attr, char
 {
 	struct w1_slave *sl = dev_to_w1_slave(dev);
 
-	return sprintf(buf, "%s\n", sl->name);
+	return sysfs_emit(buf, "%s\n", sl->name);
 }
 static DEVICE_ATTR_RO(name);
 
@@ -116,7 +116,7 @@ static ssize_t rw_write(struct file *filp, struct kobject *kobj,
 {
 	struct w1_slave *sl = kobj_to_w1_slave(kobj);
 
-	mutex_lock(&sl->master->mutex);
+	mutex_lock(&sl->master->bus_mutex);
 	if (w1_reset_select_slave(sl)) {
 		count = 0;
 		goto out_up;
@@ -125,7 +125,7 @@ static ssize_t rw_write(struct file *filp, struct kobject *kobj,
 	w1_write_block(sl->master, buf, count);
 
 out_up:
-	mutex_unlock(&sl->master->mutex);
+	mutex_unlock(&sl->master->bus_mutex);
 	return count;
 }
 
@@ -135,9 +135,9 @@ static ssize_t rw_read(struct file *filp, struct kobject *kobj,
 {
 	struct w1_slave *sl = kobj_to_w1_slave(kobj);
 
-	mutex_lock(&sl->master->mutex);
+	mutex_lock(&sl->master->bus_mutex);
 	w1_read_block(sl->master, buf, count);
-	mutex_unlock(&sl->master->mutex);
+	mutex_unlock(&sl->master->bus_mutex);
 	return count;
 }
 
@@ -207,7 +207,7 @@ static ssize_t w1_master_attribute_show_name(struct device *dev, struct device_a
 	ssize_t count;
 
 	mutex_lock(&md->mutex);
-	count = sprintf(buf, "%s\n", md->name);
+	count = sysfs_emit(buf, "%s\n", md->name);
 	mutex_unlock(&md->mutex);
 
 	return count;
@@ -243,7 +243,7 @@ static ssize_t w1_master_attribute_show_search(struct device *dev,
 	ssize_t count;
 
 	mutex_lock(&md->mutex);
-	count = sprintf(buf, "%d\n", md->search_count);
+	count = sysfs_emit(buf, "%d\n", md->search_count);
 	mutex_unlock(&md->mutex);
 
 	return count;
@@ -276,7 +276,7 @@ static ssize_t w1_master_attribute_show_pullup(struct device *dev,
 	ssize_t count;
 
 	mutex_lock(&md->mutex);
-	count = sprintf(buf, "%d\n", md->enable_pullup);
+	count = sysfs_emit(buf, "%d\n", md->enable_pullup);
 	mutex_unlock(&md->mutex);
 
 	return count;
@@ -288,20 +288,20 @@ static ssize_t w1_master_attribute_show_pointer(struct device *dev, struct devic
 	ssize_t count;
 
 	mutex_lock(&md->mutex);
-	count = sprintf(buf, "0x%p\n", md->bus_master);
+	count = sysfs_emit(buf, "0x%p\n", md->bus_master);
 	mutex_unlock(&md->mutex);
 	return count;
 }
 
 static ssize_t w1_master_attribute_show_timeout(struct device *dev, struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%d\n", w1_timeout);
+	return sysfs_emit(buf, "%d\n", w1_timeout);
 }
 
 static ssize_t w1_master_attribute_show_timeout_us(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%d\n", w1_timeout_us);
+	return sysfs_emit(buf, "%d\n", w1_timeout_us);
 }
 
 static ssize_t w1_master_attribute_store_max_slave_count(struct device *dev,
@@ -328,7 +328,7 @@ static ssize_t w1_master_attribute_show_max_slave_count(struct device *dev, stru
 	ssize_t count;
 
 	mutex_lock(&md->mutex);
-	count = sprintf(buf, "%d\n", md->max_slave_count);
+	count = sysfs_emit(buf, "%d\n", md->max_slave_count);
 	mutex_unlock(&md->mutex);
 	return count;
 }
@@ -339,7 +339,7 @@ static ssize_t w1_master_attribute_show_attempts(struct device *dev, struct devi
 	ssize_t count;
 
 	mutex_lock(&md->mutex);
-	count = sprintf(buf, "%lu\n", md->attempts);
+	count = sysfs_emit(buf, "%lu\n", md->attempts);
 	mutex_unlock(&md->mutex);
 	return count;
 }
@@ -350,7 +350,7 @@ static ssize_t w1_master_attribute_show_slave_count(struct device *dev, struct d
 	ssize_t count;
 
 	mutex_lock(&md->mutex);
-	count = sprintf(buf, "%d\n", md->slave_count);
+	count = sysfs_emit(buf, "%d\n", md->slave_count);
 	mutex_unlock(&md->mutex);
 	return count;
 }
@@ -402,6 +402,11 @@ static int w1_atoreg_num(struct device *dev, const char *buf, size_t count,
 	 */
 	const char *error_msg = "bad slave string format, expecting "
 		"ff-dddddddddddd\n";
+
+	if (count < 3) {
+		dev_err(dev, "%s", error_msg);
+		return -EINVAL;
+	}
 
 	if (buf[2] != '-') {
 		dev_err(dev, "%s", error_msg);
@@ -715,7 +720,7 @@ int w1_attach_slave_device(struct w1_master *dev, struct w1_reg_num *rn)
 	int err;
 	struct w1_netlink_msg msg;
 
-	sl = kzalloc(sizeof(struct w1_slave), GFP_KERNEL);
+	sl = kzalloc_obj(struct w1_slave);
 	if (!sl) {
 		dev_err(&dev->dev,
 			 "%s: failed to allocate new slave device.\n",
@@ -758,8 +763,6 @@ int w1_attach_slave_device(struct w1_master *dev, struct w1_reg_num *rn)
 	if (err < 0) {
 		dev_err(&dev->dev, "%s: Attaching %s failed.\n", __func__,
 			 sl->name);
-		dev->slave_count--;
-		w1_family_put(sl->family);
 		atomic_dec(&sl->master->refcnt);
 		kfree(sl);
 		return err;
@@ -778,15 +781,23 @@ int w1_unref_slave(struct w1_slave *sl)
 {
 	struct w1_master *dev = sl->master;
 	int refcnt;
+
+	/*
+	 * Once it is off the list nobody can find the slave and take a new
+	 * reference.  The lock must not be held any longer than that: the rest
+	 * waits for sysfs callbacks and for users of the family data.
+	 */
 	mutex_lock(&dev->list_mutex);
 	refcnt = atomic_sub_return(1, &sl->refcnt);
+	if (refcnt == 0)
+		list_del(&sl->w1_slave_entry);
+	mutex_unlock(&dev->list_mutex);
+
 	if (refcnt == 0) {
 		struct w1_netlink_msg msg;
 
 		dev_dbg(&sl->dev, "%s: detaching %s [%p].\n", __func__,
 			sl->name, sl);
-
-		list_del(&sl->w1_slave_entry);
 
 		memset(&msg, 0, sizeof(msg));
 		memcpy(msg.id.id, &sl->reg_num, sizeof(msg.id));
@@ -801,7 +812,6 @@ int w1_unref_slave(struct w1_slave *sl)
 		kfree(sl);
 	}
 	atomic_dec(&dev->refcnt);
-	mutex_unlock(&dev->list_mutex);
 	return refcnt;
 }
 

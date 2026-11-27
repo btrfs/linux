@@ -243,6 +243,7 @@ unsigned ext4_free_clusters_after_init(struct super_block *sb,
 	return num_clusters_in_group(sb, block_group) -
 		ext4_num_overhead_clusters(sb, block_group, gdp);
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_free_clusters_after_init);
 
 /*
  * The free blocks are managed by bitmaps.  A file system contains several
@@ -329,11 +330,15 @@ struct ext4_group_info *ext4_get_group_info(struct super_block *sb,
 	struct ext4_group_info **grp_info;
 	long indexv, indexh;
 
-	if (unlikely(group >= EXT4_SB(sb)->s_groups_count))
+	if (unlikely(group >= ext4_get_groups_count(sb)))
+		return NULL;
+	if (unlikely(!EXT4_SB(sb)->s_group_info))
 		return NULL;
 	indexv = group >> (EXT4_DESC_PER_BLOCK_BITS(sb));
 	indexh = group & ((EXT4_DESC_PER_BLOCK(sb)) - 1);
 	grp_info = sbi_array_rcu_deref(EXT4_SB(sb), s_group_info, indexv);
+	if (unlikely(!grp_info))
+		return NULL;
 	return grp_info[indexh];
 }
 
@@ -485,7 +490,7 @@ ext4_read_block_bitmap_nowait(struct super_block *sb, ext4_group_t block_group,
 					EXT4_GROUP_INFO_BBITMAP_CORRUPT);
 		return ERR_PTR(-EFSCORRUPTED);
 	}
-	bh = sb_getblk(sb, bitmap_blk);
+	bh = ext4_sb_getblk(sb, bitmap_blk);
 	if (unlikely(!bh)) {
 		ext4_warning(sb, "Cannot get buffer for block bitmap - "
 			     "block_group = %u, block_bitmap = %llu",
@@ -607,6 +612,7 @@ ext4_read_block_bitmap(struct super_block *sb, ext4_group_t block_group)
 	}
 	return bh;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_read_block_bitmap);
 
 /**
  * ext4_has_free_clusters()
@@ -674,6 +680,7 @@ int ext4_claim_free_clusters(struct ext4_sb_info *sbi,
 	} else
 		return -ENOSPC;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_claim_free_clusters);
 
 /**
  * ext4_should_retry_alloc() - check if a block allocation should be retried
@@ -720,6 +727,7 @@ int ext4_should_retry_alloc(struct super_block *sb, int *retries)
 	(void) jbd2_journal_force_commit_nested(sbi->s_journal);
 	return 1;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_should_retry_alloc);
 
 /*
  * ext4_new_meta_blocks() -- allocate block for meta data (indexing) blocks
@@ -752,7 +760,7 @@ ext4_fsblk_t ext4_new_meta_blocks(handle_t *handle, struct inode *inode,
 		*count = ar.len;
 	/*
 	 * Account for the allocated meta blocks.  We will never
-	 * fail EDQUOT for metdata, but we do account for it.
+	 * fail EDQUOT for metadata, but we do account for it.
 	 */
 	if (!(*errp) && (flags & EXT4_MB_DELALLOC_RESERVED)) {
 		dquot_alloc_block_nofail(inode,
@@ -760,6 +768,7 @@ ext4_fsblk_t ext4_new_meta_blocks(handle_t *handle, struct inode *inode,
 	}
 	return ret;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_new_meta_blocks);
 
 /**
  * ext4_count_free_clusters() -- count filesystem free clusters
@@ -873,6 +882,7 @@ int ext4_bg_has_super(struct super_block *sb, ext4_group_t group)
 
 	return 0;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_bg_has_super);
 
 static unsigned long ext4_bg_num_gdb_meta(struct super_block *sb,
 					ext4_group_t group)
@@ -919,6 +929,7 @@ unsigned long ext4_bg_num_gdb(struct super_block *sb, ext4_group_t group)
 	return ext4_bg_num_gdb_meta(sb,group);
 
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_bg_num_gdb);
 
 /*
  * This function returns the number of file system metadata blocks at
@@ -945,6 +956,7 @@ unsigned int ext4_num_base_meta_blocks(struct super_block *sb,
 	}
 	return num;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_num_base_meta_blocks);
 
 static unsigned int ext4_num_base_meta_clusters(struct super_block *sb,
 						ext4_group_t block_group)
@@ -1000,4 +1012,5 @@ ext4_fsblk_t ext4_inode_to_goal_block(struct inode *inode)
 			((last_block - bg_start) / 16);
 	return bg_start + colour;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_inode_to_goal_block);
 

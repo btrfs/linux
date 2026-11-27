@@ -145,7 +145,7 @@ static int pwrseq_thead_gpu_match(struct pwrseq_device *pwrseq,
 				PWRSEQ_MATCH_OK : PWRSEQ_NO_MATCH;
 
 	ctx->num_clks = ARRAY_SIZE(clk_names);
-	ctx->clks = kcalloc(ctx->num_clks, sizeof(*ctx->clks), GFP_KERNEL);
+	ctx->clks = kzalloc_objs(*ctx->clks, ctx->num_clks);
 	if (!ctx->clks)
 		return -ENOMEM;
 
@@ -183,7 +183,7 @@ static int pwrseq_thead_gpu_probe(struct auxiliary_device *adev,
 	struct pwrseq_thead_gpu_ctx *ctx;
 	struct pwrseq_config config = {};
 
-	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
+	ctx = devm_kzalloc_obj(dev, *ctx);
 	if (!ctx)
 		return -ENOMEM;
 

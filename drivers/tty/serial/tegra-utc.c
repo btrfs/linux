@@ -10,7 +10,6 @@
 #include <linux/iopoll.h>
 #include <linux/kfifo.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/property.h>
 #include <linux/platform_device.h>
 #include <linux/serial.h>
@@ -538,7 +537,7 @@ static int tegra_utc_probe(struct platform_device *pdev)
 	struct tegra_utc_port *tup;
 	int ret;
 
-	tup = devm_kzalloc(dev, sizeof(*tup), GFP_KERNEL);
+	tup = devm_kzalloc_obj(dev, *tup);
 	if (!tup)
 		return -ENOMEM;
 

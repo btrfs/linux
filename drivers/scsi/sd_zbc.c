@@ -35,8 +35,7 @@ static bool sd_zbc_is_gap_zone(const u8 buf[64])
  * @buf: SCSI zone descriptor.
  * @idx: Index of the zone relative to the first zone reported by the current
  *	sd_zbc_report_zones() call.
- * @cb: Callback function pointer.
- * @data: Second argument passed to @cb.
+ * @args: report zones arguments (callback, etc)
  *
  * Return: Value returned by @cb.
  *
@@ -44,12 +43,11 @@ static bool sd_zbc_is_gap_zone(const u8 buf[64])
  * call @cb(blk_zone, @data).
  */
 static int sd_zbc_parse_report(struct scsi_disk *sdkp, const u8 buf[64],
-			       unsigned int idx, report_zones_cb cb, void *data)
+			unsigned int idx, struct blk_report_zones_args *args)
 {
 	struct scsi_device *sdp = sdkp->device;
 	struct blk_zone zone = { 0 };
 	sector_t start_lba, gran;
-	int ret;
 
 	if (WARN_ON_ONCE(sd_zbc_is_gap_zone(buf)))
 		return -EINVAL;
@@ -87,11 +85,7 @@ static int sd_zbc_parse_report(struct scsi_disk *sdkp, const u8 buf[64],
 	else
 		zone.wp = logical_to_sectors(sdp, get_unaligned_be64(&buf[24]));
 
-	ret = cb(&zone, idx, data);
-	if (ret)
-		return ret;
-
-	return 0;
+	return disk_report_zone(sdkp->disk, &zone, idx, args);
 }
 
 /**
@@ -217,18 +211,18 @@ static inline sector_t sd_zbc_zone_sectors(struct scsi_disk *sdkp)
  * @disk: Disk to report zones for.
  * @sector: Start sector.
  * @nr_zones: Maximum number of zones to report.
- * @cb: Callback function called to report zone information.
- * @data: Second argument passed to @cb.
+ * @args: Callback arguments.
  *
  * Called by the block layer to iterate over zone information. See also the
  * disk->fops->report_zones() calls in block/blk-zoned.c.
  */
 int sd_zbc_report_zones(struct gendisk *disk, sector_t sector,
-			unsigned int nr_zones, report_zones_cb cb, void *data)
+			unsigned int nr_zones,
+			struct blk_report_zones_args *args)
 {
 	struct scsi_disk *sdkp = scsi_disk(disk);
 	sector_t lba = sectors_to_logical(sdkp->device, sector);
-	unsigned int nr, i;
+	unsigned int nr, i, max_in_buf;
 	unsigned char *buf;
 	u64 zone_length, start_lba;
 	size_t offset, buflen = 0;
@@ -247,13 +241,18 @@ int sd_zbc_report_zones(struct gendisk *disk, sector_t sector,
 	if (!buf)
 		return -ENOMEM;
 
+	max_in_buf = (buflen - ZBC_REPORT_ZONES_HEADER_SIZE) /
+		ZBC_ZONE_DESCRIPTOR_SIZE;
+
 	while (zone_idx < nr_zones && lba < sdkp->capacity) {
 		ret = sd_zbc_do_report_zones(sdkp, buf, buflen, lba, true);
 		if (ret)
 			goto out;
 
 		offset = 0;
-		nr = min(nr_zones, get_unaligned_be32(&buf[0]) / 64);
+		nr = min3(nr_zones - zone_idx,
+			  get_unaligned_be32(&buf[0]) / ZBC_ZONE_DESCRIPTOR_SIZE,
+			  max_in_buf);
 		if (!nr)
 			break;
 
@@ -283,7 +282,7 @@ int sd_zbc_report_zones(struct gendisk *disk, sector_t sector,
 			}
 
 			ret = sd_zbc_parse_report(sdkp, buf + offset, zone_idx,
-						  cb, data);
+						  args);
 			if (ret)
 				goto out;
 
@@ -375,7 +374,7 @@ unsigned int sd_zbc_complete(struct scsi_cmnd *cmd, unsigned int good_bytes,
 	if (op_is_zone_mgmt(req_op(rq)) &&
 	    result &&
 	    sshdr->sense_key == ILLEGAL_REQUEST &&
-	    sshdr->asc == 0x24) {
+	    scsi_sense_asc(sshdr) == ASC_INVALID_FIELD_IN_CDB) {
 		/*
 		 * INVALID FIELD IN CDB error: a zone management command was
 		 * attempted on a conventional zone. Nothing to worry about,
@@ -595,7 +594,7 @@ int sd_zbc_revalidate_zones(struct scsi_disk *sdkp)
 int sd_zbc_read_zones(struct scsi_disk *sdkp, struct queue_limits *lim,
 		u8 buf[SD_BUF_SIZE])
 {
-	unsigned int nr_zones;
+	u64 nr_zones;
 	u32 zone_blocks = 0;
 	int ret;
 
@@ -627,6 +626,12 @@ int sd_zbc_read_zones(struct scsi_disk *sdkp, struct queue_limits *lim,
 		goto err;
 
 	nr_zones = round_up(sdkp->capacity, zone_blocks) >> ilog2(zone_blocks);
+	if (nr_zones > INT_MAX) {
+		sd_printk(KERN_ERR, sdkp, "Too many zones (%llu)\n",
+			  nr_zones);
+		ret = -EINVAL;
+		goto err;
+	}
 	sdkp->early_zone_info.nr_zones = nr_zones;
 	sdkp->early_zone_info.zone_blocks = zone_blocks;
 

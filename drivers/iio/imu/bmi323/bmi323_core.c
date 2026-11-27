@@ -156,7 +156,6 @@ struct bmi323_data {
 	struct iio_mount_matrix orientation;
 	enum bmi323_irq_pin irq_pin;
 	struct iio_trigger *trig;
-	bool drdy_trigger_enabled;
 	enum bmi323_state state;
 	s64 fifo_tstamp, old_fifo_tstamp;
 	u32 odrns[BMI323_SENSORS_CNT];
@@ -1129,7 +1128,7 @@ static int bmi323_set_watermark(struct iio_dev *indio_dev, unsigned int val)
 {
 	struct bmi323_data *data = iio_priv(indio_dev);
 
-	val = min(val, (u32)BMI323_FIFO_FULL_IN_FRAMES);
+	val = min(val, BMI323_FIFO_FULL_IN_FRAMES);
 
 	guard(mutex)(&data->mutex);
 	data->watermark = val;
@@ -1947,7 +1946,7 @@ static int bmi323_trigger_probe(struct bmi323_data *data,
 					bmi323_irq_thread_handler,
 					IRQF_ONESHOT, "bmi323-int", indio_dev);
 	if (ret)
-		return dev_err_probe(data->dev, ret, "Failed to request IRQ\n");
+		return ret;
 
 	ret = devm_iio_trigger_register(data->dev, data->trig);
 	if (ret)

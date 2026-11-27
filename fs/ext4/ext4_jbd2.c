@@ -4,11 +4,14 @@
  */
 
 #include "ext4_jbd2.h"
+#include <kunit/static_stub.h>
 
 #include <trace/events/ext4.h>
 
 int ext4_inode_journal_mode(struct inode *inode)
 {
+	KUNIT_STATIC_STUB_REDIRECT(ext4_inode_journal_mode, inode);
+
 	if (EXT4_JOURNAL(inode) == NULL)
 		return EXT4_INODE_WRITEBACK_DATA_MODE;	/* writeback */
 	/* We do not support data journalling with delayed allocation */
@@ -16,10 +19,13 @@ int ext4_inode_journal_mode(struct inode *inode)
 	    ext4_test_inode_flag(inode, EXT4_INODE_EA_INODE) ||
 	    test_opt(inode->i_sb, DATA_FLAGS) == EXT4_MOUNT_JOURNAL_DATA ||
 	    (ext4_test_inode_flag(inode, EXT4_INODE_JOURNAL_DATA) &&
-	    !test_opt(inode->i_sb, DELALLOC) &&
-	    !mapping_large_folio_support(inode->i_mapping))) {
-		/* We do not support data journalling for encrypted data */
-		if (S_ISREG(inode->i_mode) && IS_ENCRYPTED(inode))
+	    !test_opt(inode->i_sb, DELALLOC))) {
+		/*
+		 * We do not support data journalling for encrypted data
+		 * and buffered IOMAP path.
+		 */
+		if (S_ISREG(inode->i_mode) &&
+		    (IS_ENCRYPTED(inode) || ext4_inode_buffered_iomap(inode)))
 			return EXT4_INODE_ORDERED_DATA_MODE;  /* ordered */
 		return EXT4_INODE_JOURNAL_DATA_MODE;	/* journal data */
 	}
@@ -34,14 +40,22 @@ int ext4_inode_journal_mode(struct inode *inode)
 static handle_t *ext4_get_nojournal(void)
 {
 	handle_t *handle = current->journal_info;
-	unsigned long ref_cnt = (unsigned long)handle;
 
-	BUG_ON(ref_cnt >= EXT4_NOJOURNAL_MAX_REF_COUNT);
+	BUG_ON(handle && !handle->h_invalid);
 
-	ref_cnt++;
-	handle = (handle_t *)ref_cnt;
-
-	current->journal_info = handle;
+	if (!handle) {
+		handle = jbd2_alloc_handle(GFP_NOFS);
+		if (!handle)
+			return ERR_PTR(-ENOMEM);
+		handle->h_invalid = 1;
+		/*
+		 * This is done by start_this_handle() if journalling
+		 * is enabled.
+		 */
+		handle->saved_alloc_context = memalloc_nofs_save();
+		current->journal_info = handle;
+	}
+	handle->h_ref++;
 	return handle;
 }
 
@@ -49,14 +63,14 @@ static handle_t *ext4_get_nojournal(void)
 /* Decrement the non-pointer handle value */
 static void ext4_put_nojournal(handle_t *handle)
 {
-	unsigned long ref_cnt = (unsigned long)handle;
+	BUG_ON(handle->h_ref == 0);
 
-	BUG_ON(ref_cnt == 0);
-
-	ref_cnt--;
-	handle = (handle_t *)ref_cnt;
-
-	current->journal_info = handle;
+	handle->h_ref--;
+	if (handle->h_ref == 0) {
+		memalloc_nofs_restore(handle->saved_alloc_context);
+		jbd2_free_handle(handle);
+		current->journal_info = NULL;
+	}
 }
 
 /*
@@ -115,6 +129,7 @@ handle_t *__ext4_journal_start_sb(struct inode *inode,
 	return jbd2__journal_start(journal, blocks, rsv_blocks, revoke_creds,
 				   GFP_NOFS, type, line);
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(__ext4_journal_start_sb);
 
 int __ext4_journal_stop(const char *where, unsigned int line, handle_t *handle)
 {
@@ -142,6 +157,7 @@ int __ext4_journal_stop(const char *where, unsigned int line, handle_t *handle)
 		__ext4_std_error(sb, where, line, err);
 	return err;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(__ext4_journal_stop);
 
 handle_t *__ext4_journal_start_reserved(handle_t *handle, unsigned int line,
 					int type)
@@ -170,6 +186,9 @@ handle_t *__ext4_journal_start_reserved(handle_t *handle, unsigned int line,
 int __ext4_journal_ensure_credits(handle_t *handle, int check_cred,
 				  int extend_cred, int revoke_cred)
 {
+	KUNIT_STATIC_STUB_REDIRECT(__ext4_journal_ensure_credits, handle,
+				   check_cred, extend_cred, revoke_cred);
+
 	if (!ext4_handle_valid(handle))
 		return 0;
 	if (is_handle_aborted(handle))
@@ -181,6 +200,7 @@ int __ext4_journal_ensure_credits(handle_t *handle, int check_cred,
 	revoke_cred = max(0, revoke_cred - handle->h_revoke_credits);
 	return ext4_journal_extend(handle, extend_cred, revoke_cred);
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(__ext4_journal_ensure_credits);
 
 static void ext4_journal_abort_handle(const char *caller, unsigned int line,
 				      const char *err_fn,
@@ -236,6 +256,9 @@ int __ext4_journal_get_write_access(const char *where, unsigned int line,
 {
 	int err;
 
+	KUNIT_STATIC_STUB_REDIRECT(__ext4_journal_get_write_access, where, line,
+				   handle, sb, bh, trigger_type);
+
 	might_sleep();
 
 	if (ext4_handle_valid(handle)) {
@@ -255,6 +278,7 @@ int __ext4_journal_get_write_access(const char *where, unsigned int line,
 		&EXT4_SB(sb)->s_journal_triggers[trigger_type].tr_triggers);
 	return 0;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(__ext4_journal_get_write_access);
 
 /*
  * The ext4 forget function must perform a revoke if we are freeing data
@@ -351,11 +375,29 @@ int __ext4_journal_get_create_access(const char *where, unsigned int line,
 	return 0;
 }
 
+static void ext4_inode_attach_mmb(struct inode *inode)
+{
+	struct mapping_metadata_bhs *mmb;
+
+	/*
+	 * It's difficult to handle failure when marking buffer dirty without
+	 * leaving filesystem corrupted
+	 */
+	mmb = kmalloc_obj(*mmb, GFP_NOFS | __GFP_NOFAIL | __GFP_ACCOUNT);
+	mmb_init(mmb, &inode->i_data);
+	/* Someone swapped another mmb before us? */
+	if (cmpxchg(&EXT4_I(inode)->i_metadata_bhs, NULL, mmb))
+		kfree(mmb);
+}
+
 int __ext4_handle_dirty_metadata(const char *where, unsigned int line,
 				 handle_t *handle, struct inode *inode,
 				 struct buffer_head *bh)
 {
 	int err = 0;
+
+	KUNIT_STATIC_STUB_REDIRECT(__ext4_handle_dirty_metadata, where, line,
+				   handle, inode, bh);
 
 	might_sleep();
 
@@ -390,13 +432,28 @@ int __ext4_handle_dirty_metadata(const char *where, unsigned int line,
 					 err);
 		}
 	} else {
-		if (inode)
-			mark_buffer_dirty_inode(bh, inode);
-		else
+		/*
+		 * Fast commit replay runs without a handle, before the
+		 * writeback paths are set up.  Don't track the buffer in the
+		 * inode's metadata list then: mmb_mark_buffer_dirty() sets
+		 * I_METADATA_WRITEBACK, and since the superblock isn't active
+		 * yet the iput() ending the replay step writes the inode out
+		 * and enters ext4_writepages() before s_writepages_rwsem is
+		 * initialized.  Journal recovery flushes the whole block
+		 * device once replay is done, so the buffer still gets
+		 * written.
+		 */
+		if (inode && !(EXT4_SB(inode->i_sb)->s_mount_state &
+			       EXT4_FC_REPLAY)) {
+			if (!ext4_i_metadata_bhs(inode))
+				ext4_inode_attach_mmb(inode);
+			mmb_mark_buffer_dirty(bh, ext4_i_metadata_bhs(inode));
+		} else {
 			mark_buffer_dirty(bh);
+		}
 		if (inode && inode_needs_sync(inode)) {
 			sync_dirty_buffer(bh);
-			if (buffer_req(bh) && !buffer_uptodate(bh)) {
+			if (buffer_write_io_error(bh)) {
 				ext4_error_inode_err(inode, where, line,
 						     bh->b_blocknr, EIO,
 					"IO error syncing itable block");
@@ -406,3 +463,8 @@ int __ext4_handle_dirty_metadata(const char *where, unsigned int line,
 	}
 	return err;
 }
+
+#if IS_ENABLED(CONFIG_EXT4_KUNIT_TESTS)
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_inode_journal_mode);
+EXPORT_SYMBOL_FOR_EXT4_TEST(__ext4_handle_dirty_metadata);
+#endif

@@ -222,7 +222,7 @@ static struct ti_sci_inta_vint_desc *ti_sci_inta_alloc_parent_irq(struct irq_dom
 		goto free_vint;
 	}
 
-	vint_desc = kzalloc(sizeof(*vint_desc), GFP_KERNEL);
+	vint_desc = kzalloc_obj(*vint_desc);
 	if (!vint_desc) {
 		ret = -ENOMEM;
 		goto free_vint;
@@ -620,9 +620,8 @@ static int ti_sci_inta_get_unmapped_sources(struct ti_sci_inta_irq_domain *inta)
 	if (count <= 0)
 		return 0;
 
-	inta->unmapped_dev_ids = devm_kcalloc(dev, count,
-					      sizeof(*inta->unmapped_dev_ids),
-					      GFP_KERNEL);
+	inta->unmapped_dev_ids = devm_kzalloc_objs(dev, *inta->unmapped_dev_ids,
+						   count);
 	if (!inta->unmapped_dev_ids)
 		return -ENOMEM;
 
@@ -663,7 +662,7 @@ static int ti_sci_inta_irq_domain_probe(struct platform_device *pdev)
 	if (!parent_domain)
 		return -EPROBE_DEFER;
 
-	inta = devm_kzalloc(dev, sizeof(*inta), GFP_KERNEL);
+	inta = devm_kzalloc_obj(dev, *inta);
 	if (!inta)
 		return -ENOMEM;
 

@@ -12,7 +12,6 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/platform_device.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/fsl/ftm.h>
 #include <linux/rtc.h>
@@ -247,7 +246,7 @@ static int ftm_rtc_probe(struct platform_device *pdev)
 	int ret;
 	struct ftm_rtc *rtc;
 
-	rtc = devm_kzalloc(&pdev->dev, sizeof(*rtc), GFP_KERNEL);
+	rtc = devm_kzalloc_obj(&pdev->dev, *rtc);
 	if (unlikely(!rtc)) {
 		dev_err(&pdev->dev, "cannot alloc memory for rtc\n");
 		return -ENOMEM;

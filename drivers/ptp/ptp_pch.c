@@ -10,6 +10,7 @@
 
 #include <linux/device.h>
 #include <linux/err.h>
+#include <linux/hex.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/io-64-nonatomic-lo-hi.h>
@@ -451,7 +452,7 @@ pch_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	unsigned long flags;
 	struct pch_dev *chip;
 
-	chip = devm_kzalloc(&pdev->dev, sizeof(*chip), GFP_KERNEL);
+	chip = devm_kzalloc_obj(&pdev->dev, *chip);
 	if (chip == NULL)
 		return -ENOMEM;
 

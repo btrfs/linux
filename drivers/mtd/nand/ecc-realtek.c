@@ -17,10 +17,12 @@
  * - BCH12 : Generate 20 ECC bytes from 512 data bytes plus 6 free bytes
  *
  * It can run for arbitrary NAND flash chips with different block and OOB sizes. Currently there
- * are only two known devices in the wild that have NAND flash and make use of this ECC engine
- * (Linksys LGS328C & LGS352C). To keep compatibility with vendor firmware, new modes can only
- * be added when new data layouts have been analyzed. For now allow BCH6 on flash with 2048 byte
- * blocks and 64 bytes oob.
+ * are a few known devices in the wild that make use of this ECC engine
+ * (Linksys LGS328C, LGS352C & Netlink HG323DAC). To keep compatibility with vendor firmware,
+ * new modes can only be added when new data layouts have been analyzed. For now allow BCH6 on
+ * flash with 2048 byte blocks and at least 64 bytes oob. Some vendors make use of
+ * 128 bytes OOB NAND chips (e.g. Macronix MX35LF1G24AD) but only use BCH6 and thus the first
+ * 64 bytes of the OOB area. In this case the engine leaves any extra bytes unused.
  *
  * This driver aligns with kernel ECC naming conventions. Neverthless a short notice on the
  * Realtek naming conventions for the different structures in the OOB area.
@@ -39,7 +41,7 @@
  */
 
 #define RTL_ECC_ALLOWED_PAGE_SIZE 	2048
-#define RTL_ECC_ALLOWED_OOB_SIZE	64
+#define RTL_ECC_ALLOWED_MIN_OOB_SIZE	64
 #define RTL_ECC_ALLOWED_STRENGTH	6
 
 #define RTL_ECC_BLOCK_SIZE 		512
@@ -310,10 +312,10 @@ static int rtl_ecc_check_support(struct nand_device *nand)
 	struct mtd_info *mtd = nanddev_to_mtd(nand);
 	struct device *dev = nand->ecc.engine->dev;
 
-	if (mtd->oobsize != RTL_ECC_ALLOWED_OOB_SIZE ||
+	if (mtd->oobsize < RTL_ECC_ALLOWED_MIN_OOB_SIZE ||
 	    mtd->writesize != RTL_ECC_ALLOWED_PAGE_SIZE) {
-		dev_err(dev, "only flash geometry data=%d, oob=%d supported\n",
-			RTL_ECC_ALLOWED_PAGE_SIZE, RTL_ECC_ALLOWED_OOB_SIZE);
+		dev_err(dev, "only flash geometry data=%d, oob>=%d supported\n",
+			RTL_ECC_ALLOWED_PAGE_SIZE, RTL_ECC_ALLOWED_MIN_OOB_SIZE);
 		return -EINVAL;
 	}
 
@@ -343,7 +345,7 @@ static int rtl_ecc_init_ctx(struct nand_device *nand)
 	if (ret)
 		return ret;
 
-	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
+	ctx = devm_kzalloc_obj(dev, *ctx);
 	if (!ctx)
 		return -ENOMEM;
 
@@ -394,7 +396,7 @@ static int rtl_ecc_probe(struct platform_device *pdev)
 	void __iomem *base;
 	int ret;
 
-	rtlc = devm_kzalloc(dev, sizeof(*rtlc), GFP_KERNEL);
+	rtlc = devm_kzalloc_obj(dev, *rtlc);
 	if (!rtlc)
 		return -ENOMEM;
 
@@ -448,6 +450,7 @@ static const struct of_device_id rtl_ecc_of_ids[] = {
 	},
 	{ /* sentinel */ },
 };
+MODULE_DEVICE_TABLE(of, rtl_ecc_of_ids);
 
 static struct platform_driver rtl_ecc_driver = {
 	.driver	= {

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2005-2014, 2018-2025 Intel Corporation
+ * Copyright (C) 2005-2014, 2018-2026 Intel Corporation
  * Copyright (C) 2013-2014 Intel Mobile Communications GmbH
  * Copyright (C) 2016 Intel Deutschland GmbH
  */
@@ -14,9 +14,9 @@
  * low power states due to driver-invoked device resets
  * (e.g. CSR_RESET_REG_FLAG_SW_RESET) or uCode-driven power-saving modes.
  *
- * Use iwl_write32() and iwl_read32() family to access these registers;
+ * Use iwl_trans_write32() and iwl_trans_read32() family to access these registers;
  * these provide simple PCI bus access, without waking up the MAC.
- * Do not use iwl_write_direct32() family for these registers;
+ * Do not use iwl_trans_write_direct32() family for these registers;
  * no need to "grab nic access" via CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ.
  * The MAC (uCode processor, etc.) does not need to be powered up for accessing
  * the CSR registers.
@@ -36,7 +36,7 @@
 #define CSR_GP_CNTRL            (CSR_BASE+0x024)
 #define CSR_FUNC_SCRATCH        (CSR_BASE+0x02c) /* Scratch register - used for FW dbg */
 
-/* 2nd byte of CSR_INT_COALESCING, not accessible via iwl_write32()! */
+/* 2nd byte of CSR_INT_COALESCING, not accessible via iwl_trans_write32()! */
 #define CSR_INT_PERIODIC_REG	(CSR_BASE+0x005)
 
 /*
@@ -366,6 +366,7 @@ enum {
 #define CSR_HW_RF_ID_TYPE_GF4		(0x0010E000)
 #define CSR_HW_RF_ID_TYPE_FM		(0x00112000)
 #define CSR_HW_RF_ID_TYPE_WP		(0x00113000)
+#define CSR_HW_RF_ID_TYPE_PE		(0x00114000)
 
 /* HW_RF CHIP STEP  */
 #define CSR_HW_RF_STEP(_val) (((_val) >> 8) & 0xF)
@@ -473,7 +474,7 @@ enum {
  * indirect read/write via HEEP_CTRL_WRD_PCIEX_CTRL (0xEC) and
  * HEEP_CTRL_WRD_PCIEX_DATA (0xF4) registers.
  *
- * Use iwl_write32()/iwl_read32() family to access these registers. The MAC HW
+ * Use iwl_trans_write32()/iwl_trans_read32() family to access these registers. The MAC HW
  * need not be powered up so no "grab inc access" is required.
  */
 
@@ -500,12 +501,13 @@ enum {
  * to indirectly access device's internal memory or registers that
  * may be powered-down.
  *
- * Use iwl_write_direct32()/iwl_read_direct32() family for these registers;
+ * Use iwl_trans_write_direct32() family for writing to these registers;
+ * A read operation doesn't exist, can be added if needed.
  * host must "grab nic access" via CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ
  * to make sure the MAC (uCode processor, etc.) is powered up for accessing
  * internal resources.
  *
- * Do not use iwl_write32()/iwl_read32() family to access these registers;
+ * Do not use iwl_trans_write32()/iwl_trans_read32() family to access these registers;
  * these provide only simple PCI bus access, without waking up the MAC.
  */
 #define HBUS_BASE	(0x400)

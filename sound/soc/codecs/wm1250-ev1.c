@@ -133,7 +133,7 @@ static int wm1250_ev1_pdata(struct i2c_client *i2c)
 	if (!pdata)
 		return 0;
 
-	wm1250 = devm_kzalloc(&i2c->dev, sizeof(*wm1250), GFP_KERNEL);
+	wm1250 = devm_kzalloc_obj(&i2c->dev, *wm1250);
 	if (!wm1250)
 		return -ENOMEM;
 
@@ -204,7 +204,7 @@ static int wm1250_ev1_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id wm1250_ev1_i2c_id[] = {
-	{ "wm1250-ev1" },
+	{ .name = "wm1250-ev1" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wm1250_ev1_i2c_id);

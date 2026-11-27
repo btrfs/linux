@@ -24,6 +24,7 @@
 
 #include <linux/fs.h>
 #include <linux/buffer_head.h>
+#include <linux/filelock.h>
 #include <linux/slab.h>
 #include <linux/iversion.h>
 #include <linux/unicode.h>
@@ -125,6 +126,7 @@ int __ext4_check_dir_entry(const char *function, unsigned int line,
 
 	return 1;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(__ext4_check_dir_entry);
 
 static int ext4_readdir(struct file *file, struct dir_context *ctx)
 {
@@ -137,6 +139,7 @@ static int ext4_readdir(struct file *file, struct dir_context *ctx)
 	struct buffer_head *bh = NULL;
 	struct fscrypt_str fstr = FSTR_INIT(NULL, 0);
 	struct dir_private_info *info = file->private_data;
+	bool has_csum = ext4_has_feature_metadata_csum(sb);
 
 	err = fscrypt_prepare_readdir(inode);
 	if (err)
@@ -148,7 +151,7 @@ static int ext4_readdir(struct file *file, struct dir_context *ctx)
 			return err;
 
 		/* Can we just clear INDEX flag to ignore htree information? */
-		if (!ext4_has_feature_metadata_csum(sb)) {
+		if (!has_csum) {
 			/*
 			 * We don't set the inode dirty flag since it's not
 			 * critical that it gets flushed back to the disk.
@@ -192,13 +195,13 @@ static int ext4_readdir(struct file *file, struct dir_context *ctx)
 			continue;
 		}
 		if (err > 0) {
-			pgoff_t index = map.m_pblk >>
-					(PAGE_SHIFT - inode->i_blkbits);
+			pgoff_t index = map.m_pblk << inode->i_blkbits >>
+					PAGE_SHIFT;
 			if (!ra_has_index(&file->f_ra, index))
 				page_cache_sync_readahead(
 					sb->s_bdev->bd_mapping,
-					&file->f_ra, file,
-					index, 1);
+					&file->f_ra, file, index,
+					1 << EXT4_SB(sb)->s_min_folio_order);
 			file->f_ra.prev_pos = (loff_t)index << PAGE_SHIFT;
 			bh = ext4_bread(NULL, inode, map.m_lblk, 0);
 			if (IS_ERR(bh)) {
@@ -234,7 +237,10 @@ static int ext4_readdir(struct file *file, struct dir_context *ctx)
 		 * dirent right now.  Scan from the start of the block
 		 * to make sure. */
 		if (!inode_eq_iversion(inode, info->cookie)) {
-			for (i = 0; i < sb->s_blocksize && i < offset; ) {
+			for (i = 0;
+			     i <= sb->s_blocksize -
+				  ext4_dir_rec_len(1, has_csum ? NULL : inode) &&
+			     i < offset;) {
 				de = (struct ext4_dir_entry_2 *)
 					(bh->b_data + i);
 				/* It's too expensive to do a full
@@ -251,9 +257,20 @@ static int ext4_readdir(struct file *file, struct dir_context *ctx)
 							    sb->s_blocksize);
 			}
 			offset = i;
-			ctx->pos = (ctx->pos & ~(sb->s_blocksize - 1))
+			ctx->pos = (ctx->pos & ~((loff_t)sb->s_blocksize - 1))
 				| offset;
 			info->cookie = inode_query_iversion(inode);
+		}
+
+		if (unlikely(offset < sb->s_blocksize &&
+			     offset > sb->s_blocksize -
+			     ext4_dir_rec_len(1, has_csum ? NULL : inode))) {
+			EXT4_ERROR_FILE(file, bh->b_blocknr,
+					"bad entry in directory: %s - offset=%u, size=%lu",
+					"directory entry too close to block end",
+					offset, sb->s_blocksize);
+			ctx->pos = round_up(ctx->pos, sb->s_blocksize);
+			goto next_block;
 		}
 
 		while (ctx->pos < inode->i_size
@@ -311,6 +328,7 @@ static int ext4_readdir(struct file *file, struct dir_context *ctx)
 			ctx->pos += ext4_rec_len_from_disk(de->rec_len,
 						sb->s_blocksize);
 		}
+next_block:
 		if ((ctx->pos < inode->i_size) && !dir_relax_shared(inode))
 			goto done;
 		brelse(bh);
@@ -458,6 +476,7 @@ void ext4_htree_free_dir_info(struct dir_private_info *p)
 	free_rb_tree_fname(&p->root);
 	kfree(p);
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_htree_free_dir_info);
 
 /*
  * Given a directory entry, enter it into the fname rb tree.
@@ -479,8 +498,7 @@ int ext4_htree_store_dirent(struct file *dir_file, __u32 hash,
 	p = &info->root.rb_node;
 
 	/* Create and allocate the fname structure */
-	new_fn = kzalloc(struct_size(new_fn, name, ent_name->len + 1),
-			 GFP_KERNEL);
+	new_fn = kzalloc_flex(*new_fn, name, ent_name->len + 1);
 	if (!new_fn)
 		return -ENOMEM;
 	new_fn->hash = hash;
@@ -519,6 +537,7 @@ int ext4_htree_store_dirent(struct file *dir_file, __u32 hash,
 	rb_insert_color(&new_fn->rb_hash, &info->root);
 	return 0;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_htree_store_dirent);
 
 
 
@@ -535,7 +554,7 @@ static int call_filldir(struct file *file, struct dir_context *ctx,
 	struct super_block *sb = inode->i_sb;
 
 	if (!fname) {
-		ext4_msg(sb, KERN_ERR, "%s:%d: inode #%lu: comm %s: "
+		ext4_msg(sb, KERN_ERR, "%s:%d: inode #%llu: comm %s: "
 			 "called with null fname?!?", __func__, __LINE__,
 			 inode->i_ino, current->comm);
 		return 0;
@@ -667,12 +686,13 @@ int ext4_check_all_de(struct inode *dir, struct buffer_head *bh, void *buf,
 
 	return 0;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_check_all_de);
 
 static int ext4_dir_open(struct inode *inode, struct file *file)
 {
 	struct dir_private_info *info;
 
-	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	info = kzalloc_obj(*info);
 	if (!info)
 		return -ENOMEM;
 	file->private_data = info;
@@ -690,4 +710,38 @@ const struct file_operations ext4_dir_operations = {
 #endif
 	.fsync		= ext4_sync_file,
 	.release	= ext4_release_dir,
+	.setlease	= generic_setlease,
 };
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_dir_operations);
+
+#if IS_ENABLED(CONFIG_EXT4_KUNIT_TESTS)
+int ext4_is_dx_dir_test(struct inode *inode)
+{
+	return is_dx_dir(inode);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_is_dx_dir_test);
+
+loff_t ext4_dir_hash2pos_test(struct file *filp, __u32 major, __u32 minor)
+{
+	return hash2pos(filp, major, minor);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_dir_hash2pos_test);
+
+__u32 ext4_dir_pos2maj_hash_test(struct file *filp, loff_t pos)
+{
+	return pos2maj_hash(filp, pos);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_dir_pos2maj_hash_test);
+
+__u32 ext4_dir_pos2min_hash_test(struct file *filp, loff_t pos)
+{
+	return pos2min_hash(filp, pos);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_dir_pos2min_hash_test);
+
+loff_t ext4_get_htree_eof_test(struct file *filp)
+{
+	return ext4_get_htree_eof(filp);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_get_htree_eof_test);
+#endif

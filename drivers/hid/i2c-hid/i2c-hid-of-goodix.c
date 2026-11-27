@@ -51,8 +51,10 @@ static int goodix_i2c_hid_power_up(struct i2chid_ops *ops)
 		return ret;
 
 	ret = regulator_enable(ihid_goodix->vddio);
-	if (ret)
+	if (ret) {
+		regulator_disable(ihid_goodix->vdd);
 		return ret;
+	}
 
 	if (ihid_goodix->timings->post_power_delay_ms)
 		msleep(ihid_goodix->timings->post_power_delay_ms);
@@ -80,8 +82,7 @@ static int i2c_hid_of_goodix_probe(struct i2c_client *client)
 {
 	struct i2c_hid_of_goodix *ihid_goodix;
 
-	ihid_goodix = devm_kzalloc(&client->dev, sizeof(*ihid_goodix),
-				   GFP_KERNEL);
+	ihid_goodix = devm_kzalloc_obj(&client->dev, *ihid_goodix);
 	if (!ihid_goodix)
 		return -ENOMEM;
 

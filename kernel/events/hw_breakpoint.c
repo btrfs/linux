@@ -185,7 +185,8 @@ static inline int hw_breakpoint_slots_cached(int type)
 static __init bool
 bp_slots_histogram_alloc(struct bp_slots_histogram *hist, enum bp_type_idx type)
 {
-	hist->count = kcalloc(hw_breakpoint_slots_cached(type), sizeof(*hist->count), GFP_KERNEL);
+	hist->count = kzalloc_objs(*hist->count,
+				   hw_breakpoint_slots_cached(type));
 	return hist->count;
 }
 
@@ -967,8 +968,7 @@ static int hw_breakpoint_event_init(struct perf_event *bp)
 
 static int hw_breakpoint_add(struct perf_event *bp, int flags)
 {
-	if (!(flags & PERF_EF_START))
-		bp->hw.state = PERF_HES_STOPPED;
+	bp->hw.state = (flags & PERF_EF_START) ? 0 : PERF_HES_STOPPED;
 
 	if (is_sampling_event(bp)) {
 		bp->hw.last_period = bp->hw.sample_period;

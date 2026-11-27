@@ -723,6 +723,9 @@ afu_ioctl_dma_map(struct dfl_feature_dev_data *fdata, void __user *arg)
 	if (map.argsz < minsz || map.flags)
 		return -EINVAL;
 
+	if (map.length >> PAGE_SHIFT > (u64)INT_MAX)
+		return -EINVAL;
+
 	ret = afu_dma_map_region(fdata, map.user_addr, map.length, &map.iova);
 	if (ret)
 		return ret;
@@ -857,7 +860,7 @@ static int afu_dev_init(struct platform_device *pdev)
 	struct dfl_feature_dev_data *fdata = to_dfl_feature_dev_data(&pdev->dev);
 	struct dfl_afu *afu;
 
-	afu = devm_kzalloc(&pdev->dev, sizeof(*afu), GFP_KERNEL);
+	afu = devm_kzalloc_obj(&pdev->dev, *afu);
 	if (!afu)
 		return -ENOMEM;
 

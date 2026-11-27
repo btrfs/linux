@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
  * Copyright (C) 2015-2017 Intel Deutschland GmbH
- * Copyright (C) 2018-2021, 2023, 2025 Intel Corporation
+ * Copyright (C) 2018-2021, 2023, 2025-2026 Intel Corporation
  */
 #include <linux/module.h>
 #include <linux/stringify.h>
@@ -30,10 +30,7 @@ static const struct iwl_family_base_params iwl9000_base = {
 	.eeprom_size = OTP_LOW_IMAGE_SIZE_32K,
 	.num_of_queues = 31,
 	.max_tfd_queue_size = 256,
-	.shadow_ram_support = true,
-	.led_compensation = 57,
 	.wd_timeout = IWL_LONG_WD_TIMEOUT,
-	.max_event_log_size = 512,
 	.shadow_reg_enable = true,
 	.pcie_l1_allowed = true,
 	.smem_offset = IWL9000_SMEM_OFFSET,
@@ -41,7 +38,6 @@ static const struct iwl_family_base_params iwl9000_base = {
 	.features = IWL_TX_CSUM_NETIF_FLAGS | NETIF_F_RXCSUM,
 	.apmg_not_supported = true,
 	.mac_addr_from_csr = 0x380,
-	.min_umac_error_event_table = 0x800000,
 	.d3_debug_data_base_addr = 0x401000,
 	.d3_debug_data_length = 92 * 1024,
 	.nvm_hw_section_num = 10,

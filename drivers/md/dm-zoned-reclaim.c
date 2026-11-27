@@ -106,9 +106,7 @@ static void dmz_reclaim_kcopy_end(int read_err, unsigned long write_err,
 	else
 		zrc->kc_err = 0;
 
-	clear_bit_unlock(DMZ_RECLAIM_KCOPY, &zrc->flags);
-	smp_mb__after_atomic();
-	wake_up_bit(&zrc->flags, DMZ_RECLAIM_KCOPY);
+	clear_and_wake_up_bit(DMZ_RECLAIM_KCOPY, &zrc->flags);
 }
 
 /*
@@ -290,7 +288,13 @@ static int dmz_reclaim_rnd_data(struct dmz_reclaim *zrc, struct dm_zone *dzone)
 again:
 	szone = dmz_alloc_zone(zmd, zrc->dev_idx,
 			       alloc_flags | DMZ_ALLOC_RECLAIM);
-	if (!szone && alloc_flags == DMZ_ALLOC_SEQ && dmz_nr_cache_zones(zmd)) {
+	/*
+	 * If no free sequential zone is available, a cache zone can still be
+	 * moved into a free random zone of the zoned device, which frees cache
+	 * space. Do not do this for a random zone: moving it into another
+	 * random zone frees nothing and, on an idle target, repeats forever.
+	 */
+	if (!szone && alloc_flags == DMZ_ALLOC_SEQ && dmz_is_cache(dzone)) {
 		alloc_flags = DMZ_ALLOC_RND;
 		goto again;
 	}
@@ -539,6 +543,16 @@ static void dmz_reclaim_work(struct work_struct *work)
 		dmz_nr_rnd_zones(zmd, zrc->dev_idx));
 
 	ret = dmz_do_reclaim(zrc);
+	if (ret == -ENOSPC || ret == -EBUSY) {
+		/*
+		 * No zone to copy into (-ENOSPC) or no zone to reclaim
+		 * (-EBUSY): retrying at once cannot make progress and would
+		 * spin. Poll again after the idle period instead, without
+		 * postponing work that an allocation has already queued.
+		 */
+		queue_delayed_work(zrc->wq, &zrc->work, DMZ_IDLE_PERIOD);
+		return;
+	}
 	if (ret && ret != -EINTR) {
 		if (!dmz_check_dev(zmd))
 			return;
@@ -556,7 +570,7 @@ int dmz_ctr_reclaim(struct dmz_metadata *zmd,
 	struct dmz_reclaim *zrc;
 	int ret;
 
-	zrc = kzalloc(sizeof(struct dmz_reclaim), GFP_KERNEL);
+	zrc = kzalloc_obj(struct dmz_reclaim);
 	if (!zrc)
 		return -ENOMEM;
 

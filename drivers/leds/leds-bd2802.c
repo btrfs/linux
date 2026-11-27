@@ -661,7 +661,7 @@ static int bd2802_probe(struct i2c_client *client)
 	struct bd2802_led *led;
 	int ret, i;
 
-	led = devm_kzalloc(&client->dev, sizeof(struct bd2802_led), GFP_KERNEL);
+	led = devm_kzalloc_obj(&client->dev, struct bd2802_led);
 	if (!led)
 		return -ENOMEM;
 
@@ -776,7 +776,7 @@ static int bd2802_resume(struct device *dev)
 static SIMPLE_DEV_PM_OPS(bd2802_pm, bd2802_suspend, bd2802_resume);
 
 static const struct i2c_device_id bd2802_id[] = {
-	{ "BD2802" },
+	{ .name = "BD2802" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, bd2802_id);

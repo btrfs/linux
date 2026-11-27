@@ -18,7 +18,6 @@
 #include <linux/platform_device.h>
 #include <linux/phy/phy.h>
 #include <linux/regulator/consumer.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 
 #include "pcie-designware.h"
@@ -289,7 +288,7 @@ static int exynos_pcie_probe(struct platform_device *pdev)
 	struct device_node *np = dev->of_node;
 	int ret;
 
-	ep = devm_kzalloc(dev, sizeof(*ep), GFP_KERNEL);
+	ep = devm_kzalloc_obj(dev, *ep);
 	if (!ep)
 		return -ENOMEM;
 

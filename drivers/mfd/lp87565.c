@@ -9,7 +9,6 @@
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/mfd/core.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
 
@@ -50,7 +49,7 @@ static int lp87565_probe(struct i2c_client *client)
 	int ret;
 	unsigned int otpid;
 
-	lp87565 = devm_kzalloc(&client->dev, sizeof(*lp87565), GFP_KERNEL);
+	lp87565 = devm_kzalloc_obj(&client->dev, *lp87565);
 	if (!lp87565)
 		return -ENOMEM;
 

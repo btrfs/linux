@@ -189,7 +189,7 @@ static int mall_change(struct net *net, struct sk_buff *in_skb,
 			return -EINVAL;
 	}
 
-	new = kzalloc(sizeof(*new), GFP_KERNEL);
+	new = kzalloc_obj(*new, GFP_KERNEL_ACCOUNT);
 	if (!new)
 		return -ENOBUFS;
 
@@ -201,7 +201,7 @@ static int mall_change(struct net *net, struct sk_buff *in_skb,
 		handle = 1;
 	new->handle = handle;
 	new->flags = userflags;
-	new->pf = alloc_percpu(struct tc_matchall_pcnt);
+	new->pf = alloc_percpu_gfp(struct tc_matchall_pcnt, GFP_KERNEL_ACCOUNT);
 	if (!new->pf) {
 		err = -ENOMEM;
 		goto err_alloc_percpu;
@@ -366,7 +366,8 @@ static int mall_dump(struct net *net, struct tcf_proto *tp, void *fh,
 	if (tcf_exts_dump(skb, &head->exts))
 		goto nla_put_failure;
 
-	nla_nest_end(skb, nest);
+	if (nla_nest_end_safe(skb, nest) < 0)
+		goto nla_put_failure;
 
 	if (tcf_exts_dump_stats(skb, &head->exts) < 0)
 		goto nla_put_failure;

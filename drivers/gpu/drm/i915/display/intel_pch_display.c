@@ -6,7 +6,6 @@
 #include <drm/drm_print.h>
 
 #include "g4x_dp.h"
-#include "i915_reg.h"
 #include "intel_crt.h"
 #include "intel_crt_regs.h"
 #include "intel_de.h"
@@ -41,7 +40,7 @@ enum pipe intel_crtc_pch_transcoder(struct intel_crtc *crtc)
 
 static void assert_pch_dp_disabled(struct intel_display *display,
 				   enum pipe pipe, enum port port,
-				   i915_reg_t dp_reg)
+				   intel_reg_t dp_reg)
 {
 	enum pipe port_pipe;
 	bool state;
@@ -60,7 +59,7 @@ static void assert_pch_dp_disabled(struct intel_display *display,
 
 static void assert_pch_hdmi_disabled(struct intel_display *display,
 				     enum pipe pipe, enum port port,
-				     i915_reg_t hdmi_reg)
+				     intel_reg_t hdmi_reg)
 {
 	enum pipe port_pipe;
 	bool state;
@@ -116,7 +115,7 @@ static void assert_pch_transcoder_disabled(struct intel_display *display,
 }
 
 static void ibx_sanitize_pch_hdmi_port(struct intel_display *display,
-				       enum port port, i915_reg_t hdmi_reg)
+				       enum port port, intel_reg_t hdmi_reg)
 {
 	u32 val = intel_de_read(display, hdmi_reg);
 
@@ -135,7 +134,7 @@ static void ibx_sanitize_pch_hdmi_port(struct intel_display *display,
 }
 
 static void ibx_sanitize_pch_dp_port(struct intel_display *display,
-				     enum port port, i915_reg_t dp_reg)
+				     enum port port, intel_reg_t dp_reg)
 {
 	u32 val = intel_de_read(display, dp_reg);
 
@@ -248,7 +247,7 @@ static void ilk_enable_pch_transcoder(const struct intel_crtc_state *crtc_state)
 	struct intel_display *display = to_intel_display(crtc_state);
 	struct intel_crtc *crtc = to_intel_crtc(crtc_state->uapi.crtc);
 	enum pipe pipe = crtc->pipe;
-	i915_reg_t reg;
+	intel_reg_t reg;
 	u32 val, pipeconf_val;
 
 	/* Make sure PCH DPLL is enabled */
@@ -305,7 +304,7 @@ static void ilk_enable_pch_transcoder(const struct intel_crtc_state *crtc_state)
 	}
 
 	intel_de_write(display, reg, val | TRANS_ENABLE);
-	if (intel_de_wait_for_set(display, reg, TRANS_STATE_ENABLE, 100))
+	if (intel_de_wait_for_set_ms(display, reg, TRANS_STATE_ENABLE, 100))
 		drm_err(display->drm, "failed to enable transcoder %c\n",
 			pipe_name(pipe));
 }
@@ -314,7 +313,7 @@ static void ilk_disable_pch_transcoder(struct intel_crtc *crtc)
 {
 	struct intel_display *display = to_intel_display(crtc);
 	enum pipe pipe = crtc->pipe;
-	i915_reg_t reg;
+	intel_reg_t reg;
 
 	/* FDI relies on the transcoder */
 	assert_fdi_tx_disabled(display, pipe);
@@ -326,7 +325,7 @@ static void ilk_disable_pch_transcoder(struct intel_crtc *crtc)
 	reg = PCH_TRANSCONF(pipe);
 	intel_de_rmw(display, reg, TRANS_ENABLE, 0);
 	/* wait for PCH transcoder off, transcoder state */
-	if (intel_de_wait_for_clear(display, reg, TRANS_STATE_ENABLE, 50))
+	if (intel_de_wait_for_clear_ms(display, reg, TRANS_STATE_ENABLE, 50))
 		drm_err(display->drm, "failed to disable transcoder %c\n",
 			pipe_name(pipe));
 
@@ -418,7 +417,7 @@ void ilk_pch_enable(struct intel_atomic_state *state,
 			&crtc_state->hw.adjusted_mode;
 		u32 bpc = (intel_de_read(display, TRANSCONF(display, pipe))
 			   & TRANSCONF_BPC_MASK) >> 5;
-		i915_reg_t reg = TRANS_DP_CTL(pipe);
+		intel_reg_t reg = TRANS_DP_CTL(pipe);
 		enum port port;
 
 		temp = intel_de_read(display, reg);
@@ -572,8 +571,8 @@ static void lpt_enable_pch_transcoder(const struct intel_crtc_state *crtc_state)
 		val |= TRANS_INTERLACE_PROGRESSIVE;
 
 	intel_de_write(display, LPT_TRANSCONF, val);
-	if (intel_de_wait_for_set(display, LPT_TRANSCONF,
-				  TRANS_STATE_ENABLE, 100))
+	if (intel_de_wait_for_set_ms(display, LPT_TRANSCONF,
+				     TRANS_STATE_ENABLE, 100))
 		drm_err(display->drm, "Failed to enable PCH transcoder\n");
 }
 
@@ -581,8 +580,8 @@ static void lpt_disable_pch_transcoder(struct intel_display *display)
 {
 	intel_de_rmw(display, LPT_TRANSCONF, TRANS_ENABLE, 0);
 	/* wait for PCH transcoder off, transcoder state */
-	if (intel_de_wait_for_clear(display, LPT_TRANSCONF,
-				    TRANS_STATE_ENABLE, 50))
+	if (intel_de_wait_for_clear_ms(display, LPT_TRANSCONF,
+				       TRANS_STATE_ENABLE, 50))
 		drm_err(display->drm, "Failed to disable PCH transcoder\n");
 
 	/* Workaround: clear timing override bit. */

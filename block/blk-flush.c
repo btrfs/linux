@@ -199,7 +199,8 @@ static void blk_flush_complete_seq(struct request *rq,
 }
 
 static enum rq_end_io_ret flush_end_io(struct request *flush_rq,
-				       blk_status_t error)
+				       blk_status_t error,
+				       const struct io_comp_batch *iob)
 {
 	struct request_queue *q = flush_rq->q;
 	struct list_head *running;
@@ -211,7 +212,13 @@ static enum rq_end_io_ret flush_end_io(struct request *flush_rq,
 	spin_lock_irqsave(&fq->mq_flush_lock, flags);
 
 	if (!req_ref_put_and_test(flush_rq)) {
-		fq->rq_status = error;
+		/*
+		 * Remember the status of the flush for whoever drops the last
+		 * reference. blk_mq_put_rq_ref() gets here with BLK_STS_OK and
+		 * must not wipe it out.
+		 */
+		if (error != BLK_STS_OK)
+			fq->rq_status = error;
 		spin_unlock_irqrestore(&fq->mq_flush_lock, flags);
 		return RQ_END_IO_NONE;
 	}
@@ -335,7 +342,8 @@ static void blk_kick_flush(struct request_queue *q, struct blk_flush_queue *fq,
 }
 
 static enum rq_end_io_ret mq_flush_data_end_io(struct request *rq,
-					       blk_status_t error)
+					       blk_status_t error,
+					       const struct io_comp_batch *iob)
 {
 	struct request_queue *q = rq->q;
 	struct blk_mq_hw_ctx *hctx = rq->mq_hctx;

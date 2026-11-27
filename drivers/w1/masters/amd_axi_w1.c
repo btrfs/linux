@@ -12,7 +12,6 @@
 #include <linux/io.h>
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/types.h>
@@ -300,7 +299,7 @@ static int amd_axi_w1_probe(struct platform_device *pdev)
 	u32 ver_major, ver_minor;
 	int val, rc = 0;
 
-	lp = devm_kzalloc(dev, sizeof(*lp), GFP_KERNEL);
+	lp = devm_kzalloc_obj(dev, *lp);
 	if (!lp)
 		return -ENOMEM;
 

@@ -44,7 +44,6 @@ struct hdc2010_data {
 	struct i2c_client *client;
 	struct mutex lock;
 	u8 measurement_config;
-	u8 interrupt_config;
 	u8 drdy_config;
 };
 
@@ -318,8 +317,8 @@ static void hdc2010_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id hdc2010_id[] = {
-	{ "hdc2010" },
-	{ "hdc2080" },
+	{ .name = "hdc2010" },
+	{ .name = "hdc2080" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, hdc2010_id);

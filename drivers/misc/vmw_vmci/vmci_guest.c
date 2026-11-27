@@ -621,7 +621,7 @@ static int vmci_guest_probe_device(struct pci_dev *pdev,
 		iobase = pcim_iomap_table(pdev)[0];
 	}
 
-	vmci_dev = devm_kzalloc(&pdev->dev, sizeof(*vmci_dev), GFP_KERNEL);
+	vmci_dev = devm_kzalloc_obj(&pdev->dev, *vmci_dev);
 	if (!vmci_dev) {
 		dev_err(&pdev->dev,
 			"Can't allocate memory for VMCI device\n");
@@ -960,8 +960,8 @@ static void vmci_guest_remove_device(struct pci_dev *pdev)
 }
 
 static const struct pci_device_id vmci_ids[] = {
-	{ PCI_DEVICE(PCI_VENDOR_ID_VMWARE, PCI_DEVICE_ID_VMWARE_VMCI), },
-	{ 0 },
+	{ PCI_DEVICE(PCI_VENDOR_ID_VMWARE, PCI_DEVICE_ID_VMWARE_VMCI) },
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, vmci_ids);
 

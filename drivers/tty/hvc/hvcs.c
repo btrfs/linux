@@ -748,7 +748,7 @@ static int hvcs_probe(
 		return -EFAULT;
 	}
 
-	hvcsd = kzalloc(sizeof(*hvcsd), GFP_KERNEL);
+	hvcsd = kzalloc_obj(*hvcsd);
 	if (!hvcsd)
 		return -ENODEV;
 
@@ -1394,8 +1394,7 @@ static int hvcs_alloc_index_list(int n)
 {
 	int i;
 
-	hvcs_index_list = kmalloc_array(n, sizeof(hvcs_index_count),
-					GFP_KERNEL);
+	hvcs_index_list = kmalloc_objs(hvcs_index_count, n);
 	if (!hvcs_index_list)
 		return -ENOMEM;
 	hvcs_index_count = n;
@@ -1471,7 +1470,7 @@ static int hvcs_initialize(void)
 		goto register_fail;
 	}
 
-	hvcs_pi_buff = (unsigned long *) __get_free_page(GFP_KERNEL);
+	hvcs_pi_buff = kmalloc(PAGE_SIZE, GFP_KERNEL);
 	if (!hvcs_pi_buff) {
 		rc = -ENOMEM;
 		goto buff_alloc_fail;
@@ -1487,7 +1486,7 @@ static int hvcs_initialize(void)
 	return 0;
 
 kthread_fail:
-	free_page((unsigned long)hvcs_pi_buff);
+	kfree(hvcs_pi_buff);
 buff_alloc_fail:
 	tty_unregister_driver(hvcs_tty_driver);
 register_fail:
@@ -1529,7 +1528,7 @@ static void __exit hvcs_module_exit(void)
 	kthread_stop(hvcs_task);
 
 	spin_lock(&hvcs_pi_lock);
-	free_page((unsigned long)hvcs_pi_buff);
+	kfree(hvcs_pi_buff);
 	hvcs_pi_buff = NULL;
 	spin_unlock(&hvcs_pi_lock);
 

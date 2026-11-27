@@ -69,9 +69,8 @@ static struct dentry *ufs_lookup(struct inode * dir, struct dentry *dentry, unsi
  * If the create succeeds, we fill in the inode information
  * with d_instantiate(). 
  */
-static int ufs_create (struct mnt_idmap * idmap,
-		struct inode * dir, struct dentry * dentry, umode_t mode,
-		bool excl)
+static int ufs_create (const struct mnt_idmap * idmap,
+		struct inode * dir, struct dentry * dentry, umode_t mode)
 {
 	struct inode *inode;
 
@@ -86,7 +85,7 @@ static int ufs_create (struct mnt_idmap * idmap,
 	return ufs_add_nondir(dentry, inode);
 }
 
-static int ufs_mknod(struct mnt_idmap *idmap, struct inode *dir,
+static int ufs_mknod(const struct mnt_idmap *idmap, struct inode *dir,
 		     struct dentry *dentry, umode_t mode, dev_t rdev)
 {
 	struct inode *inode;
@@ -106,7 +105,7 @@ static int ufs_mknod(struct mnt_idmap *idmap, struct inode *dir,
 	return err;
 }
 
-static int ufs_symlink (struct mnt_idmap * idmap, struct inode * dir,
+static int ufs_symlink (const struct mnt_idmap * idmap, struct inode * dir,
 	struct dentry * dentry, const char * symname)
 {
 	struct super_block * sb = dir->i_sb;
@@ -166,7 +165,7 @@ static int ufs_link (struct dentry * old_dentry, struct inode * dir,
 	return error;
 }
 
-static struct dentry *ufs_mkdir(struct mnt_idmap * idmap, struct inode * dir,
+static struct dentry *ufs_mkdir(const struct mnt_idmap * idmap, struct inode * dir,
 				struct dentry * dentry, umode_t mode)
 {
 	struct inode * inode;
@@ -174,7 +173,7 @@ static struct dentry *ufs_mkdir(struct mnt_idmap * idmap, struct inode * dir,
 
 	inode_inc_link_count(dir);
 
-	inode = ufs_new_inode(dir, S_IFDIR|mode);
+	inode = ufs_new_inode(dir, mode);
 	err = PTR_ERR(inode);
 	if (IS_ERR(inode))
 		goto out_dir;
@@ -241,7 +240,7 @@ static int ufs_rmdir (struct inode * dir, struct dentry *dentry)
 	return err;
 }
 
-static int ufs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
+static int ufs_rename(const struct mnt_idmap *idmap, struct inode *old_dir,
 		      struct dentry *old_dentry, struct inode *new_dir,
 		      struct dentry *new_dentry, unsigned int flags)
 {

@@ -57,6 +57,7 @@ properties:
         - allwinner,sun8i-r40-gmac
         - allwinner,sun8i-v3s-emac
         - allwinner,sun50i-a64-emac
+        - allwinner,sun50i-h616-emac1
         - amlogic,meson6-dwmac
         - amlogic,meson8b-dwmac
         - amlogic,meson8m2-dwmac
@@ -69,12 +70,15 @@ properties:
         - ingenic,x2000-mac
         - loongson,ls2k-dwmac
         - loongson,ls7a-dwmac
+        - nuvoton,ma35d1-dwmac
         - nxp,s32g2-dwmac
         - qcom,qcs404-ethqos
+        - qcom,sa8255p-ethqos
         - qcom,sa8775p-ethqos
         - qcom,sc8280xp-ethqos
         - qcom,sm8150-ethqos
         - renesas,r9a06g032-gmac
+        - renesas,r9a08g046-gbeth
         - renesas,r9a09g077-gbeth
         - renesas,rzn1-gmac
         - renesas,rzv2h-gbeth
@@ -86,10 +90,14 @@ properties:
         - rockchip,rk3328-gmac
         - rockchip,rk3366-gmac
         - rockchip,rk3368-gmac
+        - rockchip,rk3399-gmac
+        - rockchip,rk3506-gmac
+        - rockchip,rk3528-gmac
+        - rockchip,rk3568-gmac
         - rockchip,rk3576-gmac
         - rockchip,rk3588-gmac
-        - rockchip,rk3399-gmac
         - rockchip,rv1108-gmac
+        - rockchip,rv1126-gmac
         - snps,dwmac
         - snps,dwmac-3.40a
         - snps,dwmac-3.50a
@@ -104,6 +112,7 @@ properties:
         - snps,dwmac-5.10a
         - snps,dwmac-5.20
         - snps,dwmac-5.30a
+        - snps,dwmac-5.40a
         - snps,dwxgmac
         - snps,dwxgmac-2.10
         - sophgo,sg2042-dwmac
@@ -112,6 +121,7 @@ properties:
         - starfive,jh7110-dwmac
         - tesla,fsd-ethqos
         - thead,th1520-gmac
+        - ultrarisc,dp1000-gmac
 
   reg:
     minItems: 1
@@ -138,6 +148,8 @@ properties:
           pattern: '^rx-queue-[0-7]$'
         - description: Per channel transmit completion interrupt
           pattern: '^tx-queue-[0-7]$'
+        - description: PPS interrupt
+          pattern: '^ptp-pps-[0-3]$'
 
   clocks:
     minItems: 1
@@ -165,7 +177,7 @@ properties:
     minItems: 1
     items:
       - description: GMAC stmmaceth reset
-      - description: AHB reset
+      - description: AHB or OCP reset
 
   reset-names:
     oneOf:
@@ -173,10 +185,11 @@ properties:
           - enum: [stmmaceth, ahb]
       - items:
           - const: stmmaceth
-          - const: ahb
+          - enum: [ahb, stmmaceth-ocp]
 
   power-domains:
-    maxItems: 1
+    minItems: 1
+    maxItems: 2
 
   mac-mode:
     $ref: ethernet-controller.yaml#/properties/phy-connection-type
@@ -185,21 +198,6 @@ properties:
       converter in-between the MAC & PHY (e.g. GMII-to-RGMII). This converter
       can be passive (no SW requirement), and requires that the MAC operate
       in a different mode than the PHY in order to function.
-
-  snps,axi-config:
-    $ref: /schemas/types.yaml#/definitions/phandle
-    description:
-      AXI BUS Mode parameters. Phandle to a node that can contain the
-      following properties
-        * snps,lpi_en, enable Low Power Interface
-        * snps,xit_frm, unlock on WoL
-        * snps,wr_osr_lmt, max write outstanding req. limit
-        * snps,rd_osr_lmt, max read outstanding req. limit
-        * snps,kbbe, do not cross 1KiB boundary.
-        * snps,blen, this is a vector of supported burst length.
-        * snps,fb, fixed-burst
-        * snps,mb, mixed-burst
-        * snps,rb, rebuild INCRx Burst
 
   snps,mtl-rx-config:
     $ref: /schemas/types.yaml#/definitions/phandle
@@ -552,60 +550,6 @@ properties:
     required:
       - compatible
 
-  stmmac-axi-config:
-    type: object
-    unevaluatedProperties: false
-    description:
-      AXI BUS Mode parameters.
-
-    properties:
-      snps,lpi_en:
-        $ref: /schemas/types.yaml#/definitions/flag
-        description:
-          enable Low Power Interface
-
-      snps,xit_frm:
-        $ref: /schemas/types.yaml#/definitions/flag
-        description:
-          unlock on WoL
-
-      snps,wr_osr_lmt:
-        $ref: /schemas/types.yaml#/definitions/uint32
-        description:
-          max write outstanding req. limit
-
-      snps,rd_osr_lmt:
-        $ref: /schemas/types.yaml#/definitions/uint32
-        description:
-          max read outstanding req. limit
-
-      snps,kbbe:
-        $ref: /schemas/types.yaml#/definitions/flag
-        description:
-          do not cross 1KiB boundary.
-
-      snps,blen:
-        $ref: /schemas/types.yaml#/definitions/uint32-array
-        description:
-          this is a vector of supported burst length.
-        minItems: 7
-        maxItems: 7
-
-      snps,fb:
-        $ref: /schemas/types.yaml#/definitions/flag
-        description:
-          fixed-burst
-
-      snps,mb:
-        $ref: /schemas/types.yaml#/definitions/flag
-        description:
-          mixed-burst
-
-      snps,rb:
-        $ref: /schemas/types.yaml#/definitions/flag
-        description:
-          rebuild INCRx Burst
-
 required:
   - compatible
   - reg
@@ -619,6 +563,7 @@ dependencies:
 
 allOf:
   - $ref: ethernet-controller.yaml#
+  - $ref: snps,dwmac-common.yaml#
   - if:
       properties:
         compatible:
@@ -631,6 +576,7 @@ allOf:
                 - allwinner,sun8i-r40-gmac
                 - allwinner,sun8i-v3s-emac
                 - allwinner,sun50i-a64-emac
+                - allwinner,sun50i-h616-emac1
                 - loongson,ls2k-dwmac
                 - loongson,ls7a-dwmac
                 - ingenic,jz4775-mac
@@ -639,6 +585,7 @@ allOf:
                 - ingenic,x1830-mac
                 - ingenic,x2000-mac
                 - qcom,qcs404-ethqos
+                - qcom,sa8255p-ethqos
                 - qcom,sa8775p-ethqos
                 - qcom,sc8280xp-ethqos
                 - qcom,sm8150-ethqos
@@ -649,6 +596,7 @@ allOf:
                 - snps,dwmac-5.10a
                 - snps,dwmac-5.20
                 - snps,dwmac-5.30a
+                - snps,dwmac-5.40a
                 - snps,dwxgmac
                 - snps,dwxgmac-2.10
                 - st,spear600-gmac

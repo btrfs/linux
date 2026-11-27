@@ -10,6 +10,7 @@
 #include <linux/bitmap.h>
 #include <linux/device.h>
 #include <linux/gpio/driver.h>
+#include <linux/hex.h>
 #include <linux/mfd/core.h>
 #include <linux/mfd/macsmc.h>
 
@@ -238,7 +239,7 @@ static int macsmc_gpio_probe(struct platform_device *pdev)
 	smc_key key;
 	int ret;
 
-	smcgp = devm_kzalloc(&pdev->dev, sizeof(*smcgp), GFP_KERNEL);
+	smcgp = devm_kzalloc_obj(&pdev->dev, *smcgp);
 	if (!smcgp)
 		return -ENOMEM;
 

@@ -59,15 +59,15 @@ struct clk_hw *imx_clk_hw_gate_exclusive(const char *name, const char *parent,
 	 void __iomem *reg, u8 shift, u32 exclusive_mask)
 {
 	struct clk_gate_exclusive *exgate;
+	struct clk_init_data init = {};
 	struct clk_gate *gate;
 	struct clk_hw *hw;
-	struct clk_init_data init;
 	int ret;
 
 	if (exclusive_mask == 0)
 		return ERR_PTR(-EINVAL);
 
-	exgate = kzalloc(sizeof(*exgate), GFP_KERNEL);
+	exgate = kzalloc_obj(*exgate);
 	if (!exgate)
 		return ERR_PTR(-ENOMEM);
 	gate = &exgate->gate;

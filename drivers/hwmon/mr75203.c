@@ -13,8 +13,6 @@
 #include <linux/hwmon.h>
 #include <linux/kstrtox.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
-#include <linux/mutex.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
@@ -666,8 +664,7 @@ static int pvt_get_active_channel(struct device *dev, struct pvt_device *pvt,
 	 * vm_map = [0 0 0 0 0 1 1 2 2 2 2]
 	 * ch_map = [0 1 2 3 4 0 1 0 1 2 3]
 	 */
-	pvt->vd = devm_kcalloc(dev, pvt->vm_channels.total, sizeof(*pvt->vd),
-			       GFP_KERNEL);
+	pvt->vd = devm_kzalloc_objs(dev, *pvt->vd, pvt->vm_channels.total);
 	if (!pvt->vd)
 		return -ENOMEM;
 
@@ -774,7 +771,7 @@ static int mr75203_probe(struct platform_device *pdev)
 	struct pvt_device *pvt;
 	int ret;
 
-	pvt = devm_kzalloc(dev, sizeof(*pvt), GFP_KERNEL);
+	pvt = devm_kzalloc_obj(dev, *pvt);
 	if (!pvt)
 		return -ENOMEM;
 
@@ -817,7 +814,7 @@ static int mr75203_probe(struct platform_device *pdev)
 	if (!val)
 		return -ENODEV;
 
-	pvt_info = devm_kcalloc(dev, val + 2, sizeof(*pvt_info), GFP_KERNEL);
+	pvt_info = devm_kzalloc_objs(dev, *pvt_info, val + 2);
 	if (!pvt_info)
 		return -ENOMEM;
 	pvt_info[0] = HWMON_CHANNEL_INFO(chip, HWMON_C_REGISTER_TZ);
@@ -832,8 +829,7 @@ static int mr75203_probe(struct platform_device *pdev)
 		if (ret)
 			return ret;
 
-		temp_config = devm_kcalloc(dev, ts_num + 1,
-					   sizeof(*temp_config), GFP_KERNEL);
+		temp_config = devm_kzalloc_objs(dev, *temp_config, ts_num + 1);
 		if (!temp_config)
 			return -ENOMEM;
 
@@ -883,8 +879,8 @@ static int mr75203_probe(struct platform_device *pdev)
 		if (ret)
 			return ret;
 
-		in_config = devm_kcalloc(dev, pvt->vm_channels.total + 1,
-					 sizeof(*in_config), GFP_KERNEL);
+		in_config = devm_kzalloc_objs(dev, *in_config,
+					      pvt->vm_channels.total + 1);
 		if (!in_config)
 			return -ENOMEM;
 

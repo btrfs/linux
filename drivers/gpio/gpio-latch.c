@@ -43,12 +43,9 @@
 #include <linux/gpio/consumer.h>
 #include <linux/gpio/driver.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/delay.h>
-
-#include "gpiolib.h"
 
 struct gpio_latch_priv {
 	struct gpio_chip gc;
@@ -144,7 +141,7 @@ static int gpio_latch_probe(struct platform_device *pdev)
 	struct gpio_latch_priv *priv;
 	unsigned int n_latches;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

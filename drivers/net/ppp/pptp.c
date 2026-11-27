@@ -62,7 +62,7 @@ static struct pppox_sock *lookup_chan(u16 call_id, __be32 s_addr)
 		if (opt->dst_addr.sin_addr.s_addr != s_addr)
 			sock = NULL;
 		else
-			sock_hold(sk_pppox(sock));
+			sock_hold(&sock->sk);
 	}
 	rcu_read_unlock();
 
@@ -164,7 +164,7 @@ static int pptp_xmit(struct ppp_channel *chan, struct sk_buff *skb)
 	struct iphdr  *iph;
 	int    max_headroom;
 
-	if (sk_pppox(po)->sk_state & PPPOX_DEAD)
+	if (po->sk.sk_state & PPPOX_DEAD)
 		goto tx_drop;
 
 	rt = pptp_route_output(po, &fl4);
@@ -278,11 +278,8 @@ static int pptp_rcv_core(struct sock *sk, struct sk_buff *skb)
 	__u8 *payload;
 	struct pptp_gre_header *header;
 
-	if (!(sk->sk_state & PPPOX_CONNECTED)) {
-		if (sock_queue_rcv_skb(sk, skb))
-			goto drop;
-		return NET_RX_SUCCESS;
-	}
+	if (!(sk->sk_state & PPPOX_CONNECTED))
+		goto drop;
 
 	header = (struct pptp_gre_header *)(skb->data);
 	headersize  = sizeof(*header);
@@ -375,15 +372,15 @@ static int pptp_rcv(struct sk_buff *skb)
 	if (po) {
 		skb_dst_drop(skb);
 		nf_reset_ct(skb);
-		return sk_receive_skb(sk_pppox(po), skb, 0);
+		return sk_receive_skb(&po->sk, skb, 0);
 	}
 drop:
 	kfree_skb(skb);
 	return NET_RX_DROP;
 }
 
-static int pptp_bind(struct socket *sock, struct sockaddr *uservaddr,
-	int sockaddr_len)
+static int pptp_bind(struct socket *sock, struct sockaddr_unsized *uservaddr,
+		     int sockaddr_len)
 {
 	struct sock *sk = sock->sk;
 	struct sockaddr_pppox *sp = (struct sockaddr_pppox *) uservaddr;
@@ -415,8 +412,8 @@ out:
 	return error;
 }
 
-static int pptp_connect(struct socket *sock, struct sockaddr *uservaddr,
-	int sockaddr_len, int flags)
+static int pptp_connect(struct socket *sock, struct sockaddr_unsized *uservaddr,
+			int sockaddr_len, int flags)
 {
 	struct sock *sk = sock->sk;
 	struct sockaddr_pppox *sp = (struct sockaddr_pppox *) uservaddr;
@@ -539,7 +536,6 @@ static void pptp_sock_destruct(struct sock *sk)
 		del_chan(pppox_sk(sk));
 		pppox_unbind_sock(sk);
 	}
-	skb_queue_purge(&sk->sk_receive_queue);
 	dst_release(rcu_dereference_protected(sk->sk_dst_cache, 1));
 }
 

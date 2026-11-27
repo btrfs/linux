@@ -10,12 +10,12 @@
 #include <linux/errno.h>
 #include <linux/spinlock.h>
 #include <linux/mutex.h>
+#include <linux/seq_file.h>
 #include "messages.h"
 #include "volumes.h"
 #include "disk-io.h"
 #include "block-group.h"
 #include "btrfs_inode.h"
-#include "fs.h"
 
 struct block_device;
 struct extent_buffer;
@@ -38,7 +38,11 @@ struct btrfs_zoned_device_info {
 	u32 nr_zones;
 	unsigned int max_active_zones;
 	/*
-	 * Reserved active zones for one metadata and one system block group.
+	 * Reserved active zones for one metadata, one tree-log and one system
+	 * block group: the reservation made at mount minus the zones of such
+	 * block groups active on this device now. It is negative when more of
+	 * them are active than were reserved, which does not mean that there
+	 * are extra active zones.
 	 * It can vary per-device depending on the allocation status.
 	 */
 	int reserved_active_zones;
@@ -82,6 +86,7 @@ int btrfs_sync_zone_write_pointer(struct btrfs_device *tgt_dev, u64 logical,
 				  u64 physical_start, u64 physical_pos);
 bool btrfs_zone_activate(struct btrfs_block_group *block_group);
 int btrfs_zone_finish(struct btrfs_block_group *block_group);
+void btrfs_zone_finish_relocated(struct btrfs_block_group *block_group);
 bool btrfs_can_activate_zone(struct btrfs_fs_devices *fs_devices, u64 flags);
 int btrfs_zone_finish_endio(struct btrfs_fs_info *fs_info, u64 logical,
 			     u64 length);
@@ -94,10 +99,20 @@ bool btrfs_zoned_should_reclaim(const struct btrfs_fs_info *fs_info);
 void btrfs_zoned_release_data_reloc_bg(struct btrfs_fs_info *fs_info, u64 logical,
 				       u64 length);
 int btrfs_zone_finish_one_bg(struct btrfs_fs_info *fs_info);
-int btrfs_zoned_activate_one_bg(struct btrfs_fs_info *fs_info,
-				struct btrfs_space_info *space_info, bool do_finish);
+int btrfs_zoned_activate_one_bg(struct btrfs_space_info *space_info, bool do_finish);
 void btrfs_check_active_zone_reservation(struct btrfs_fs_info *fs_info);
 int btrfs_reset_unused_block_groups(struct btrfs_space_info *space_info, u64 num_bytes);
+void btrfs_show_zoned_stats(struct btrfs_fs_info *fs_info, struct seq_file *seq);
+
+#ifdef CONFIG_BTRFS_FS_RUN_SANITY_TESTS
+struct zone_info;
+
+int btrfs_load_block_group_by_raid_type(struct btrfs_block_group *bg,
+					struct btrfs_chunk_map *map,
+					struct zone_info *zone_info,
+					unsigned long *active, u64 last_alloc);
+#endif
+
 #else /* CONFIG_BLK_DEV_ZONED */
 
 static inline int btrfs_get_dev_zone_info_all_devices(struct btrfs_fs_info *fs_info)
@@ -228,6 +243,8 @@ static inline int btrfs_zone_finish(struct btrfs_block_group *block_group)
 	return 0;
 }
 
+static inline void btrfs_zone_finish_relocated(struct btrfs_block_group *block_group) { }
+
 static inline bool btrfs_can_activate_zone(struct btrfs_fs_devices *fs_devices,
 					   u64 flags)
 {
@@ -262,8 +279,7 @@ static inline int btrfs_zone_finish_one_bg(struct btrfs_fs_info *fs_info)
 	return 1;
 }
 
-static inline int btrfs_zoned_activate_one_bg(struct btrfs_fs_info *fs_info,
-					      struct btrfs_space_info *space_info,
+static inline int btrfs_zoned_activate_one_bg(struct btrfs_space_info *space_info,
 					      bool do_finish)
 {
 	/* Consider all the block groups are active */
@@ -274,6 +290,11 @@ static inline void btrfs_check_active_zone_reservation(struct btrfs_fs_info *fs_
 
 static inline int btrfs_reset_unused_block_groups(struct btrfs_space_info *space_info,
 						  u64 num_bytes)
+{
+	return 0;
+}
+
+static inline int btrfs_show_zoned_stats(struct btrfs_fs_info *fs_info, struct seq_file *seq)
 {
 	return 0;
 }

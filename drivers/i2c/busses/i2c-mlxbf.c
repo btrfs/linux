@@ -20,6 +20,7 @@
 #include <linux/platform_device.h>
 #include <linux/string.h>
 #include <linux/string_choices.h>
+#include <linux/units.h>
 
 /* Defines what functionality is present. */
 #define MLXBF_I2C_FUNC_SMBUS_BLOCK \
@@ -65,14 +66,12 @@
  * strongly dependent on the core clock frequency of the SMBus
  * Master. Default value is set to 400MHz.
  */
-#define MLXBF_I2C_TYU_PLL_OUT_FREQ  (400 * 1000 * 1000)
+#define MLXBF_I2C_TYU_PLL_OUT_FREQ  (400 * HZ_PER_MHZ)
 /* Reference clock for Bluefield - 156 MHz. */
 #define MLXBF_I2C_PLL_IN_FREQ       156250000ULL
 
 /* Constant used to determine the PLL frequency. */
 #define MLNXBF_I2C_COREPLL_CONST    16384ULL
-
-#define MLXBF_I2C_FREQUENCY_1GHZ  1000000000ULL
 
 /* PLL registers. */
 #define MLXBF_I2C_CORE_PLL_REG1         0x4
@@ -324,12 +323,6 @@
 		.end = (addr) + (size) - 1, \
 		.name = (str) \
 	}
-
-enum {
-	MLXBF_I2C_TIMING_100KHZ = 100000,
-	MLXBF_I2C_TIMING_400KHZ = 400000,
-	MLXBF_I2C_TIMING_1000KHZ = 1000000,
-};
 
 enum {
 	MLXBF_I2C_F_READ = BIT(0),
@@ -1051,15 +1044,16 @@ static int mlxbf_i2c_init_resource(struct platform_device *pdev,
 	if (!res || *res || type >= MLXBF_I2C_END_RES)
 		return -EINVAL;
 
-	tmp_res = devm_kzalloc(dev, sizeof(struct mlxbf_i2c_resource),
-			       GFP_KERNEL);
+	tmp_res = devm_kzalloc_obj(dev, struct mlxbf_i2c_resource);
 	if (!tmp_res)
 		return -ENOMEM;
 
 	tmp_res->io = devm_platform_get_and_ioremap_resource(pdev, type, &tmp_res->params);
 	if (IS_ERR(tmp_res->io)) {
+		int ret = PTR_ERR(tmp_res->io);
+
 		devm_kfree(dev, tmp_res);
-		return PTR_ERR(tmp_res->io);
+		return ret;
 	}
 
 	tmp_res->type = type;
@@ -1083,7 +1077,7 @@ static u32 mlxbf_i2c_get_ticks(struct mlxbf_i2c_priv *priv, u64 nanoseconds,
 	 *         Frequency
 	 */
 	frequency = priv->frequency;
-	ticks = div_u64(nanoseconds * frequency, MLXBF_I2C_FREQUENCY_1GHZ);
+	ticks = div_u64(nanoseconds * frequency, HZ_PER_GHZ);
 	/*
 	 * The number of ticks is rounded down and if minimum is equal to 1
 	 * then add one tick.
@@ -2203,10 +2197,10 @@ static struct i2c_adapter_quirks mlxbf_i2c_quirks = {
 };
 
 static const struct acpi_device_id mlxbf_i2c_acpi_ids[] = {
-	{ "MLNXBF03", (kernel_ulong_t)&mlxbf_i2c_chip[MLXBF_I2C_CHIP_TYPE_1] },
-	{ "MLNXBF23", (kernel_ulong_t)&mlxbf_i2c_chip[MLXBF_I2C_CHIP_TYPE_2] },
-	{ "MLNXBF31", (kernel_ulong_t)&mlxbf_i2c_chip[MLXBF_I2C_CHIP_TYPE_3] },
-	{},
+	{ .id = "MLNXBF03", .driver_data = (kernel_ulong_t)&mlxbf_i2c_chip[MLXBF_I2C_CHIP_TYPE_1] },
+	{ .id = "MLNXBF23", .driver_data = (kernel_ulong_t)&mlxbf_i2c_chip[MLXBF_I2C_CHIP_TYPE_2] },
+	{ .id = "MLNXBF31", .driver_data = (kernel_ulong_t)&mlxbf_i2c_chip[MLXBF_I2C_CHIP_TYPE_3] },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(acpi, mlxbf_i2c_acpi_ids);
@@ -2245,7 +2239,7 @@ static int mlxbf_i2c_probe(struct platform_device *pdev)
 	u32 resource_version;
 	int irq, ret;
 
-	priv = devm_kzalloc(dev, sizeof(struct mlxbf_i2c_priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, struct mlxbf_i2c_priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -2264,15 +2258,15 @@ static int mlxbf_i2c_probe(struct platform_device *pdev)
 	priv->resource_version = resource_version;
 
 	if (priv->chip->type < MLXBF_I2C_CHIP_TYPE_3 && resource_version == 0) {
-		priv->timer = devm_kzalloc(dev, sizeof(struct mlxbf_i2c_resource), GFP_KERNEL);
+		priv->timer = devm_kzalloc_obj(dev, struct mlxbf_i2c_resource);
 		if (!priv->timer)
 			return -ENOMEM;
 
-		priv->mst = devm_kzalloc(dev, sizeof(struct mlxbf_i2c_resource), GFP_KERNEL);
+		priv->mst = devm_kzalloc_obj(dev, struct mlxbf_i2c_resource);
 		if (!priv->mst)
 			return -ENOMEM;
 
-		priv->slv = devm_kzalloc(dev, sizeof(struct mlxbf_i2c_resource), GFP_KERNEL);
+		priv->slv = devm_kzalloc_obj(dev, struct mlxbf_i2c_resource);
 		if (!priv->slv)
 			return -ENOMEM;
 
@@ -2355,7 +2349,7 @@ static int mlxbf_i2c_probe(struct platform_device *pdev)
 			       IRQF_SHARED | IRQF_PROBE_SHARED,
 			       dev_name(dev), priv);
 	if (ret < 0)
-		return dev_err_probe(dev, ret, "Cannot get irq %d\n", irq);
+		return ret;
 
 	priv->irq = irq;
 
