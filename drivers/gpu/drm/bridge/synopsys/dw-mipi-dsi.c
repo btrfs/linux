@@ -244,7 +244,6 @@ struct debugfs_entries {
 struct dw_mipi_dsi {
 	struct drm_bridge bridge;
 	struct mipi_dsi_host dsi_host;
-	struct drm_bridge *panel_bridge;
 	struct device *dev;
 	void __iomem *base;
 
@@ -333,22 +332,27 @@ static int dw_mipi_dsi_host_attach(struct mipi_dsi_host *host,
 	dsi->format = device->format;
 	dsi->mode_flags = device->mode_flags;
 
-	bridge = devm_drm_of_get_bridge(dsi->dev, dsi->dev->of_node, 1, 0);
+	bridge = of_drm_get_bridge_by_endpoint(dsi->dev->of_node, 1, 0);
 	if (IS_ERR(bridge))
 		return PTR_ERR(bridge);
 
 	bridge->pre_enable_prev_first = true;
-	dsi->panel_bridge = bridge;
+	dsi->bridge.next_bridge = bridge;
 
 	drm_bridge_add(&dsi->bridge);
 
 	if (pdata->host_ops && pdata->host_ops->attach) {
 		ret = pdata->host_ops->attach(pdata->priv_data, device);
 		if (ret < 0)
-			return ret;
+			goto err_remove_bridge;
 	}
 
 	return 0;
+
+err_remove_bridge:
+	drm_bridge_remove(&dsi->bridge);
+	drm_bridge_clear_and_put(&dsi->bridge.next_bridge);
+	return ret;
 }
 
 static int dw_mipi_dsi_host_detach(struct mipi_dsi_host *host,
@@ -364,9 +368,8 @@ static int dw_mipi_dsi_host_detach(struct mipi_dsi_host *host,
 			return ret;
 	}
 
-	drm_of_panel_bridge_remove(host->dev->of_node, 1, 0);
-
 	drm_bridge_remove(&dsi->bridge);
+	drm_bridge_clear_and_put(&dsi->bridge.next_bridge);
 
 	return 0;
 }
@@ -561,7 +564,7 @@ dw_mipi_dsi_bridge_atomic_get_input_bus_fmts(struct drm_bridge *bridge,
 						 output_fmt, num_input_fmts);
 
 	/* Fall back to MEDIA_BUS_FMT_FIXED as the only input format. */
-	input_fmts = kmalloc(sizeof(*input_fmts), GFP_KERNEL);
+	input_fmts = kmalloc_obj(*input_fmts);
 	if (!input_fmts)
 		return NULL;
 	input_fmts[0] = MEDIA_BUS_FMT_FIXED;
@@ -935,7 +938,7 @@ static void dw_mipi_dsi_clear_err(struct dw_mipi_dsi *dsi)
 }
 
 static void dw_mipi_dsi_bridge_post_atomic_disable(struct drm_bridge *bridge,
-						   struct drm_atomic_state *state)
+						   struct drm_atomic_commit *state)
 {
 	struct dw_mipi_dsi *dsi = bridge_to_dsi(bridge);
 	const struct dw_mipi_dsi_phy_ops *phy_ops = dsi->plat_data->phy_ops;
@@ -1023,7 +1026,7 @@ static void dw_mipi_dsi_mode_set(struct dw_mipi_dsi *dsi,
 }
 
 static void dw_mipi_dsi_bridge_atomic_pre_enable(struct drm_bridge *bridge,
-						 struct drm_atomic_state *state)
+						 struct drm_atomic_commit *state)
 {
 	struct dw_mipi_dsi *dsi = bridge_to_dsi(bridge);
 
@@ -1044,7 +1047,7 @@ static void dw_mipi_dsi_bridge_mode_set(struct drm_bridge *bridge,
 }
 
 static void dw_mipi_dsi_bridge_atomic_enable(struct drm_bridge *bridge,
-					     struct drm_atomic_state *state)
+					     struct drm_atomic_commit *state)
 {
 	struct dw_mipi_dsi *dsi = bridge_to_dsi(bridge);
 
@@ -1082,7 +1085,7 @@ static int dw_mipi_dsi_bridge_attach(struct drm_bridge *bridge,
 	encoder->encoder_type = DRM_MODE_ENCODER_DSI;
 
 	/* Attach the panel-bridge to the dsi bridge */
-	return drm_bridge_attach(encoder, dsi->panel_bridge, bridge,
+	return drm_bridge_attach(encoder, dsi->bridge.next_bridge, bridge,
 				 flags);
 }
 
@@ -1091,7 +1094,7 @@ static const struct drm_bridge_funcs dw_mipi_dsi_bridge_funcs = {
 	.atomic_destroy_state	= drm_atomic_helper_bridge_destroy_state,
 	.atomic_get_input_bus_fmts = dw_mipi_dsi_bridge_atomic_get_input_bus_fmts,
 	.atomic_check		= dw_mipi_dsi_bridge_atomic_check,
-	.atomic_reset		= drm_atomic_helper_bridge_reset,
+	.atomic_create_state		= drm_atomic_helper_bridge_create_state,
 	.atomic_pre_enable	= dw_mipi_dsi_bridge_atomic_pre_enable,
 	.atomic_enable		= dw_mipi_dsi_bridge_atomic_enable,
 	.atomic_post_disable	= dw_mipi_dsi_bridge_post_atomic_disable,

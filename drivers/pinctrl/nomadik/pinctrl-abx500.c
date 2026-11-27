@@ -852,7 +852,7 @@ static int abx500_pin_config_set(struct pinctrl_dev *pctldev,
 	int ret = -EINVAL;
 	int i;
 	enum pin_config_param param;
-	enum pin_config_param argument;
+	unsigned int argument;
 
 	for (i = 0; i < num_configs; i++) {
 		param = pinconf_to_config_param(configs[i]);
@@ -995,7 +995,7 @@ static int abx500_gpio_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
-	pct = devm_kzalloc(&pdev->dev, sizeof(*pct), GFP_KERNEL);
+	pct = devm_kzalloc_obj(&pdev->dev, *pct);
 	if (!pct)
 		return -ENOMEM;
 

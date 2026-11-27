@@ -4,7 +4,6 @@
  */
 
 #include <linux/component.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -133,7 +132,7 @@ static int dc_fw_bind(struct device *dev, struct device *master, void *data)
 	struct dc_fu *fu;
 	int i, id;
 
-	fw = devm_kzalloc(dev, sizeof(*fw), GFP_KERNEL);
+	fw = devm_kzalloc_obj(dev, *fw);
 	if (!fw)
 		return -ENOMEM;
 

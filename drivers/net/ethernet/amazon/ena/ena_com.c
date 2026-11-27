@@ -1782,20 +1782,23 @@ void ena_com_phc_destroy(struct ena_com_dev *ena_dev)
 
 int ena_com_phc_get_timestamp(struct ena_com_dev *ena_dev, u64 *timestamp)
 {
-	volatile struct ena_admin_phc_resp *resp = ena_dev->phc.virt_addr;
 	const ktime_t zero_system_time = ktime_set(0, 0);
 	struct ena_com_phc_info *phc = &ena_dev->phc;
+	volatile struct ena_admin_phc_resp *resp;
 	ktime_t expire_time;
 	ktime_t block_time;
 	unsigned long flags = 0;
 	int ret = 0;
 
+	spin_lock_irqsave(&phc->lock, flags);
+
 	if (!phc->active) {
+		spin_unlock_irqrestore(&phc->lock, flags);
 		netdev_err(ena_dev->net_device, "PHC feature is not active in the device\n");
 		return -EOPNOTSUPP;
 	}
 
-	spin_lock_irqsave(&phc->lock, flags);
+	resp = ena_dev->phc.virt_addr;
 
 	/* Check if PHC is in blocked state */
 	if (unlikely(ktime_compare(phc->system_time, zero_system_time))) {
@@ -1876,6 +1879,11 @@ int ena_com_phc_get_timestamp(struct ena_com_dev *ena_dev, u64 *timestamp)
 			 */
 			continue;
 		}
+
+		/* Ensure PHC payload (timestamp, error_flags) is read
+		 * after req_id update is observed
+		 */
+		dma_rmb();
 
 		/* req_id was updated by the device which indicates that
 		 * PHC timestamp and error_flags are updated too,
@@ -1984,6 +1992,7 @@ int ena_com_admin_init(struct ena_com_dev *ena_dev,
 
 	admin_queue->q_depth = ENA_ADMIN_QUEUE_DEPTH;
 
+	admin_queue->ena_dev = ena_dev;
 	admin_queue->q_dmadev = ena_dev->dmadev;
 	admin_queue->polling = false;
 	admin_queue->curr_cmd_id = 0;
@@ -2037,7 +2046,6 @@ int ena_com_admin_init(struct ena_com_dev *ena_dev,
 	if (ret)
 		goto error;
 
-	admin_queue->ena_dev = ena_dev;
 	admin_queue->running_state = true;
 
 	return 0;

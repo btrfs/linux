@@ -48,6 +48,8 @@ struct imsic {
 
 	/* IMSIC VS-file */
 	rwlock_t vsfile_lock;
+	/* Writers hold both locks; scheduler-out only takes vsfile_hgei_lock. */
+	raw_spinlock_t vsfile_hgei_lock;
 	int vsfile_cpu;
 	int vsfile_hgei;
 	void __iomem *vsfile_va;
@@ -67,36 +69,17 @@ struct imsic {
 	__r;					\
 })
 
-#define imsic_read_switchcase(__ireg)			\
-	case __ireg:					\
-		return imsic_vs_csr_read(__ireg);
-#define imsic_read_switchcase_2(__ireg)			\
-	imsic_read_switchcase(__ireg + 0)		\
-	imsic_read_switchcase(__ireg + 1)
-#define imsic_read_switchcase_4(__ireg)			\
-	imsic_read_switchcase_2(__ireg + 0)		\
-	imsic_read_switchcase_2(__ireg + 2)
-#define imsic_read_switchcase_8(__ireg)			\
-	imsic_read_switchcase_4(__ireg + 0)		\
-	imsic_read_switchcase_4(__ireg + 4)
-#define imsic_read_switchcase_16(__ireg)		\
-	imsic_read_switchcase_8(__ireg + 0)		\
-	imsic_read_switchcase_8(__ireg + 8)
-#define imsic_read_switchcase_32(__ireg)		\
-	imsic_read_switchcase_16(__ireg + 0)		\
-	imsic_read_switchcase_16(__ireg + 16)
-#define imsic_read_switchcase_64(__ireg)		\
-	imsic_read_switchcase_32(__ireg + 0)		\
-	imsic_read_switchcase_32(__ireg + 32)
+static inline bool imsic_eix_ireg_is_valid(int ireg)
+{
+	return (ireg >= IMSIC_EIP0 && ireg <= IMSIC_EIP63) ||
+	       (ireg >= IMSIC_EIE0 && ireg <= IMSIC_EIE63);
+}
 
 static unsigned long imsic_eix_read(int ireg)
 {
-	switch (ireg) {
-	imsic_read_switchcase_64(IMSIC_EIP0)
-	imsic_read_switchcase_64(IMSIC_EIE0)
-	}
-
-	return 0;
+	if (!imsic_eix_ireg_is_valid(ireg))
+		return 0;
+	return imsic_vs_csr_read(ireg);
 }
 
 #define imsic_vs_csr_swap(__c, __v)		\
@@ -107,36 +90,11 @@ static unsigned long imsic_eix_read(int ireg)
 	__r;					\
 })
 
-#define imsic_swap_switchcase(__ireg, __v)		\
-	case __ireg:					\
-		return imsic_vs_csr_swap(__ireg, __v);
-#define imsic_swap_switchcase_2(__ireg, __v)		\
-	imsic_swap_switchcase(__ireg + 0, __v)		\
-	imsic_swap_switchcase(__ireg + 1, __v)
-#define imsic_swap_switchcase_4(__ireg, __v)		\
-	imsic_swap_switchcase_2(__ireg + 0, __v)	\
-	imsic_swap_switchcase_2(__ireg + 2, __v)
-#define imsic_swap_switchcase_8(__ireg, __v)		\
-	imsic_swap_switchcase_4(__ireg + 0, __v)	\
-	imsic_swap_switchcase_4(__ireg + 4, __v)
-#define imsic_swap_switchcase_16(__ireg, __v)		\
-	imsic_swap_switchcase_8(__ireg + 0, __v)	\
-	imsic_swap_switchcase_8(__ireg + 8, __v)
-#define imsic_swap_switchcase_32(__ireg, __v)		\
-	imsic_swap_switchcase_16(__ireg + 0, __v)	\
-	imsic_swap_switchcase_16(__ireg + 16, __v)
-#define imsic_swap_switchcase_64(__ireg, __v)		\
-	imsic_swap_switchcase_32(__ireg + 0, __v)	\
-	imsic_swap_switchcase_32(__ireg + 32, __v)
-
 static unsigned long imsic_eix_swap(int ireg, unsigned long val)
 {
-	switch (ireg) {
-	imsic_swap_switchcase_64(IMSIC_EIP0, val)
-	imsic_swap_switchcase_64(IMSIC_EIE0, val)
-	}
-
-	return 0;
+	if (!imsic_eix_ireg_is_valid(ireg))
+		return 0;
+	return imsic_vs_csr_swap(ireg, val);
 }
 
 #define imsic_vs_csr_write(__c, __v)		\
@@ -145,35 +103,10 @@ do {						\
 	csr_write(CSR_VSIREG, __v);		\
 } while (0)
 
-#define imsic_write_switchcase(__ireg, __v)		\
-	case __ireg:					\
-		imsic_vs_csr_write(__ireg, __v);	\
-		break;
-#define imsic_write_switchcase_2(__ireg, __v)		\
-	imsic_write_switchcase(__ireg + 0, __v)		\
-	imsic_write_switchcase(__ireg + 1, __v)
-#define imsic_write_switchcase_4(__ireg, __v)		\
-	imsic_write_switchcase_2(__ireg + 0, __v)	\
-	imsic_write_switchcase_2(__ireg + 2, __v)
-#define imsic_write_switchcase_8(__ireg, __v)		\
-	imsic_write_switchcase_4(__ireg + 0, __v)	\
-	imsic_write_switchcase_4(__ireg + 4, __v)
-#define imsic_write_switchcase_16(__ireg, __v)		\
-	imsic_write_switchcase_8(__ireg + 0, __v)	\
-	imsic_write_switchcase_8(__ireg + 8, __v)
-#define imsic_write_switchcase_32(__ireg, __v)		\
-	imsic_write_switchcase_16(__ireg + 0, __v)	\
-	imsic_write_switchcase_16(__ireg + 16, __v)
-#define imsic_write_switchcase_64(__ireg, __v)		\
-	imsic_write_switchcase_32(__ireg + 0, __v)	\
-	imsic_write_switchcase_32(__ireg + 32, __v)
-
 static void imsic_eix_write(int ireg, unsigned long val)
 {
-	switch (ireg) {
-	imsic_write_switchcase_64(IMSIC_EIP0, val)
-	imsic_write_switchcase_64(IMSIC_EIE0, val)
-	}
+	if (imsic_eix_ireg_is_valid(ireg))
+		imsic_vs_csr_write(ireg, val);
 }
 
 #define imsic_vs_csr_set(__c, __v)		\
@@ -182,35 +115,10 @@ do {						\
 	csr_set(CSR_VSIREG, __v);		\
 } while (0)
 
-#define imsic_set_switchcase(__ireg, __v)		\
-	case __ireg:					\
-		imsic_vs_csr_set(__ireg, __v);		\
-		break;
-#define imsic_set_switchcase_2(__ireg, __v)		\
-	imsic_set_switchcase(__ireg + 0, __v)		\
-	imsic_set_switchcase(__ireg + 1, __v)
-#define imsic_set_switchcase_4(__ireg, __v)		\
-	imsic_set_switchcase_2(__ireg + 0, __v)		\
-	imsic_set_switchcase_2(__ireg + 2, __v)
-#define imsic_set_switchcase_8(__ireg, __v)		\
-	imsic_set_switchcase_4(__ireg + 0, __v)		\
-	imsic_set_switchcase_4(__ireg + 4, __v)
-#define imsic_set_switchcase_16(__ireg, __v)		\
-	imsic_set_switchcase_8(__ireg + 0, __v)		\
-	imsic_set_switchcase_8(__ireg + 8, __v)
-#define imsic_set_switchcase_32(__ireg, __v)		\
-	imsic_set_switchcase_16(__ireg + 0, __v)	\
-	imsic_set_switchcase_16(__ireg + 16, __v)
-#define imsic_set_switchcase_64(__ireg, __v)		\
-	imsic_set_switchcase_32(__ireg + 0, __v)	\
-	imsic_set_switchcase_32(__ireg + 32, __v)
-
 static void imsic_eix_set(int ireg, unsigned long val)
 {
-	switch (ireg) {
-	imsic_set_switchcase_64(IMSIC_EIP0, val)
-	imsic_set_switchcase_64(IMSIC_EIE0, val)
-	}
+	if (imsic_eix_ireg_is_valid(ireg))
+		imsic_vs_csr_set(ireg, val);
 }
 
 static unsigned long imsic_mrif_atomic_rmw(struct imsic_mrif *mrif,
@@ -220,15 +128,11 @@ static unsigned long imsic_mrif_atomic_rmw(struct imsic_mrif *mrif,
 {
 	unsigned long old_val = 0, tmp = 0;
 
-	__asm__ __volatile__ (
-		"0:	lr.w.aq   %1, %0\n"
-		"	and       %2, %1, %3\n"
-		"	or        %2, %2, %4\n"
-		"	sc.w.rl   %2, %2, %0\n"
-		"	bnez      %2, 0b"
-		: "+A" (*ptr), "+r" (old_val), "+r" (tmp)
-		: "r" (~wr_mask), "r" (new_val & wr_mask)
-		: "memory");
+	new_val &= wr_mask;
+	old_val = READ_ONCE(*ptr);
+	do {
+		tmp = (old_val & ~wr_mask) | new_val;
+	} while (!try_cmpxchg(ptr, &old_val, tmp));
 
 	return old_val;
 }
@@ -586,6 +490,17 @@ static void imsic_vsfile_local_update(int vsfile_hgei, u32 nr_eix,
 	csr_write(CSR_VSISELECT, old_vsiselect);
 }
 
+static void imsic_vsfile_set_hgei(struct imsic *imsic, int cpu, int hgei)
+{
+	unsigned long flags;
+
+	/* Serialize the CPU/HGEI pair with scheduler-out's wakeup setup. */
+	raw_spin_lock_irqsave(&imsic->vsfile_hgei_lock, flags);
+	imsic->vsfile_cpu = cpu;
+	imsic->vsfile_hgei = hgei;
+	raw_spin_unlock_irqrestore(&imsic->vsfile_hgei_lock, flags);
+}
+
 static void imsic_vsfile_cleanup(struct imsic *imsic)
 {
 	int old_vsfile_hgei, old_vsfile_cpu;
@@ -600,7 +515,7 @@ static void imsic_vsfile_cleanup(struct imsic *imsic)
 	write_lock_irqsave(&imsic->vsfile_lock, flags);
 	old_vsfile_hgei = imsic->vsfile_hgei;
 	old_vsfile_cpu = imsic->vsfile_cpu;
-	imsic->vsfile_cpu = imsic->vsfile_hgei = -1;
+	imsic_vsfile_set_hgei(imsic, -1, -1);
 	imsic->vsfile_va = NULL;
 	imsic->vsfile_pa = 0;
 	write_unlock_irqrestore(&imsic->vsfile_lock, flags);
@@ -683,6 +598,9 @@ bool kvm_riscv_vcpu_aia_imsic_has_interrupt(struct kvm_vcpu *vcpu)
 	unsigned long flags;
 	bool ret = false;
 
+	if (!imsic)
+		return false;
+
 	/*
 	 * The IMSIC SW-file directly injects interrupt via hvip so
 	 * only check for interrupt when IMSIC VS-file is being used.
@@ -722,13 +640,16 @@ void kvm_riscv_vcpu_aia_imsic_put(struct kvm_vcpu *vcpu)
 	struct imsic *imsic = vcpu->arch.aia_context.imsic_state;
 	unsigned long flags;
 
+	if (!imsic)
+		return;
+
 	if (!kvm_vcpu_is_blocking(vcpu))
 		return;
 
-	read_lock_irqsave(&imsic->vsfile_lock, flags);
+	raw_spin_lock_irqsave(&imsic->vsfile_hgei_lock, flags);
 	if (imsic->vsfile_cpu > -1)
 		csr_set(CSR_HGEIE, BIT(imsic->vsfile_hgei));
-	read_unlock_irqrestore(&imsic->vsfile_lock, flags);
+	raw_spin_unlock_irqrestore(&imsic->vsfile_hgei_lock, flags);
 }
 
 void kvm_riscv_vcpu_aia_imsic_release(struct kvm_vcpu *vcpu)
@@ -738,11 +659,14 @@ void kvm_riscv_vcpu_aia_imsic_release(struct kvm_vcpu *vcpu)
 	int old_vsfile_hgei, old_vsfile_cpu;
 	struct imsic *imsic = vcpu->arch.aia_context.imsic_state;
 
+	if (!imsic)
+		return;
+
 	/* Read and clear IMSIC VS-file details */
 	write_lock_irqsave(&imsic->vsfile_lock, flags);
 	old_vsfile_hgei = imsic->vsfile_hgei;
 	old_vsfile_cpu = imsic->vsfile_cpu;
-	imsic->vsfile_cpu = imsic->vsfile_hgei = -1;
+	imsic_vsfile_set_hgei(imsic, -1, -1);
 	imsic->vsfile_va = NULL;
 	imsic->vsfile_pa = 0;
 	write_unlock_irqrestore(&imsic->vsfile_lock, flags);
@@ -797,6 +721,10 @@ int kvm_riscv_vcpu_aia_imsic_update(struct kvm_vcpu *vcpu)
 	if (kvm->arch.aia.mode == KVM_DEV_RISCV_AIA_MODE_EMUL)
 		return 1;
 
+	/* IMSIC vCPU state may not be initialized yet */
+	if (!imsic)
+		return 1;
+
 	/* Read old IMSIC VS-file details */
 	read_lock_irqsave(&imsic->vsfile_lock, flags);
 	old_vsfile_hgei = imsic->vsfile_hgei;
@@ -814,7 +742,7 @@ int kvm_riscv_vcpu_aia_imsic_update(struct kvm_vcpu *vcpu)
 		/* For HW acceleration mode, we can't continue */
 		if (kvm->arch.aia.mode == KVM_DEV_RISCV_AIA_MODE_HWACCEL) {
 			run->fail_entry.hardware_entry_failure_reason =
-								CSR_HSTATUS;
+								KVM_EXIT_FAIL_ENTRY_NO_VSFILE;
 			run->fail_entry.cpu = vcpu->cpu;
 			run->exit_reason = KVM_EXIT_FAIL_ENTRY;
 			return 0;
@@ -852,8 +780,7 @@ int kvm_riscv_vcpu_aia_imsic_update(struct kvm_vcpu *vcpu)
 
 	/* Update new IMSIC VS-file details in IMSIC context */
 	write_lock_irqsave(&imsic->vsfile_lock, flags);
-	imsic->vsfile_hgei = new_vsfile_hgei;
-	imsic->vsfile_cpu = vcpu->cpu;
+	imsic_vsfile_set_hgei(imsic, vcpu->cpu, new_vsfile_hgei);
 	imsic->vsfile_va = new_vsfile_va;
 	imsic->vsfile_pa = new_vsfile_pa;
 	write_unlock_irqrestore(&imsic->vsfile_lock, flags);
@@ -904,6 +831,10 @@ int kvm_riscv_vcpu_aia_imsic_rmw(struct kvm_vcpu *vcpu, unsigned long isel,
 	int r, rc = KVM_INSN_CONTINUE_NEXT_SEPC;
 	struct imsic *imsic = vcpu->arch.aia_context.imsic_state;
 
+	/* If IMSIC vCPU state not initialized then forward to user space */
+	if (!imsic)
+		return KVM_INSN_EXIT_TO_USER_SPACE;
+
 	if (isel == KVM_RISCV_AIA_IMSIC_TOPEI) {
 		/* Read pending and enabled interrupt with highest priority */
 		topei = imsic_mrif_topei(imsic->swfile, imsic->nr_eix,
@@ -952,8 +883,15 @@ int kvm_riscv_aia_imsic_rw_attr(struct kvm *kvm, unsigned long type,
 	if (!vcpu)
 		return -ENODEV;
 
-	isel = KVM_DEV_RISCV_AIA_IMSIC_GET_ISEL(type);
+	if (mutex_lock_killable(&vcpu->mutex))
+		return -EINTR;
+
 	imsic = vcpu->arch.aia_context.imsic_state;
+	if (!imsic) {
+		rc = -ENODEV;
+		goto out_unlock;
+	}
+	isel = KVM_DEV_RISCV_AIA_IMSIC_GET_ISEL(type);
 
 	read_lock_irqsave(&imsic->vsfile_lock, flags);
 
@@ -976,6 +914,8 @@ int kvm_riscv_aia_imsic_rw_attr(struct kvm *kvm, unsigned long type,
 		rc = imsic_vsfile_rw(vsfile_hgei, vsfile_cpu, imsic->nr_eix,
 				     isel, write, val);
 
+out_unlock:
+	mutex_unlock(&vcpu->mutex);
 	return rc;
 }
 
@@ -993,8 +933,11 @@ int kvm_riscv_aia_imsic_has_attr(struct kvm *kvm, unsigned long type)
 	if (!vcpu)
 		return -ENODEV;
 
-	isel = KVM_DEV_RISCV_AIA_IMSIC_GET_ISEL(type);
 	imsic = vcpu->arch.aia_context.imsic_state;
+	if (!imsic)
+		return -ENODEV;
+
+	isel = KVM_DEV_RISCV_AIA_IMSIC_GET_ISEL(type);
 	return imsic_mrif_isel_check(imsic->nr_eix, isel);
 }
 
@@ -1086,7 +1029,7 @@ int kvm_riscv_vcpu_aia_imsic_init(struct kvm_vcpu *vcpu)
 		return -EINVAL;
 
 	/* Allocate IMSIC context */
-	imsic = kzalloc(sizeof(*imsic), GFP_KERNEL);
+	imsic = kzalloc_obj(*imsic, GFP_KERNEL_ACCOUNT);
 	if (!imsic)
 		return -ENOMEM;
 	vcpu->arch.aia_context.imsic_state = imsic;
@@ -1094,12 +1037,13 @@ int kvm_riscv_vcpu_aia_imsic_init(struct kvm_vcpu *vcpu)
 	/* Setup IMSIC context  */
 	imsic->nr_msis = kvm->arch.aia.nr_ids + 1;
 	rwlock_init(&imsic->vsfile_lock);
+	raw_spin_lock_init(&imsic->vsfile_hgei_lock);
 	imsic->nr_eix = BITS_TO_U64(imsic->nr_msis);
 	imsic->nr_hw_eix = BITS_TO_U64(kvm_riscv_aia_max_ids);
 	imsic->vsfile_hgei = imsic->vsfile_cpu = -1;
 
 	/* Setup IMSIC SW-file */
-	swfile_page = alloc_pages(GFP_KERNEL | __GFP_ZERO,
+	swfile_page = alloc_pages(GFP_KERNEL_ACCOUNT | __GFP_ZERO,
 				  get_order(sizeof(*imsic->swfile)));
 	if (!swfile_page) {
 		ret = -ENOMEM;

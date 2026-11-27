@@ -1,7 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0
 #include "capstone.h"
-#include "annotate.h"
+
+#include <errno.h>
+#include <inttypes.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <dlfcn.h>
+#include <elf.h>
+#include <fcntl.h>
+#include <linux/ctype.h>
+
+#include <capstone/capstone.h>
+
 #include "addr_location.h"
+#include "annotate.h"
 #include "debug.h"
 #include "disasm.h"
 #include "dso.h"
@@ -11,73 +24,231 @@
 #include "print_insn.h"
 #include "symbol.h"
 #include "thread.h"
-#include <errno.h>
-#include <fcntl.h>
-#include <string.h>
 
-#ifdef HAVE_LIBCAPSTONE_SUPPORT
-#include <capstone/capstone.h>
+#if CS_VERSION_MAJOR < 5
+#define CS_ARCH_RISCV    15
+#define CS_MODE_RISCV32  1
+#define CS_MODE_RISCV64  2
+#define CS_MODE_RISCVC   4
 #endif
 
-#ifdef HAVE_LIBCAPSTONE_SUPPORT
-static int capstone_init(struct machine *machine, csh *cs_handle, bool is64,
+#if CS_VERSION_MAJOR < 4
+#define ARM64_GRP_BRANCH_RELATIVE  7  /* = CS_GRP_BRANCH_RELATIVE */
+#endif
+
+#ifdef LIBCAPSTONE_DLOPEN
+static void *perf_cs_dll_handle(void)
+{
+	static bool dll_handle_init;
+	static void *dll_handle;
+
+	if (!dll_handle_init) {
+		dll_handle_init = true;
+		dll_handle = dlopen("libcapstone.so", RTLD_LAZY);
+		if (!dll_handle)
+			pr_debug("dlopen failed for libcapstone.so\n");
+	}
+	return dll_handle;
+}
+#endif
+
+static enum cs_err perf_cs_open(enum cs_arch arch, enum cs_mode mode, csh *handle)
+{
+#ifndef LIBCAPSTONE_DLOPEN
+	return cs_open(arch, mode, handle);
+#else
+	static bool fn_init;
+	static enum cs_err (*fn)(enum cs_arch arch, enum cs_mode mode, csh *handle);
+
+	if (!fn_init) {
+		fn = dlsym(perf_cs_dll_handle(), "cs_open");
+		if (!fn)
+			pr_debug("dlsym failed for cs_open\n");
+		fn_init = true;
+	}
+	if (!fn)
+		return CS_ERR_HANDLE;
+	return fn(arch, mode, handle);
+#endif
+}
+
+static enum cs_err perf_cs_option(csh handle, enum cs_opt_type type, size_t value)
+{
+#ifndef LIBCAPSTONE_DLOPEN
+	return cs_option(handle, type, value);
+#else
+	static bool fn_init;
+	static enum cs_err (*fn)(csh handle, enum cs_opt_type type, size_t value);
+
+	if (!fn_init) {
+		fn = dlsym(perf_cs_dll_handle(), "cs_option");
+		if (!fn)
+			pr_debug("dlsym failed for cs_option\n");
+		fn_init = true;
+	}
+	if (!fn)
+		return CS_ERR_HANDLE;
+	return fn(handle, type, value);
+#endif
+}
+
+static size_t perf_cs_disasm(csh handle, const uint8_t *code, size_t code_size,
+			uint64_t address, size_t count, struct cs_insn **insn)
+{
+#ifndef LIBCAPSTONE_DLOPEN
+	return cs_disasm(handle, code, code_size, address, count, insn);
+#else
+	static bool fn_init;
+	static enum cs_err (*fn)(csh handle, const uint8_t *code, size_t code_size,
+				 uint64_t address, size_t count, struct cs_insn **insn);
+
+	if (!fn_init) {
+		fn = dlsym(perf_cs_dll_handle(), "cs_disasm");
+		if (!fn)
+			pr_debug("dlsym failed for cs_disasm\n");
+		fn_init = true;
+	}
+	if (!fn)
+		return CS_ERR_HANDLE;
+	return fn(handle, code, code_size, address, count, insn);
+#endif
+}
+
+static void perf_cs_free(struct cs_insn *insn, size_t count)
+{
+#ifndef LIBCAPSTONE_DLOPEN
+	cs_free(insn, count);
+#else
+	static bool fn_init;
+	static void (*fn)(struct cs_insn *insn, size_t count);
+
+	if (!fn_init) {
+		fn = dlsym(perf_cs_dll_handle(), "cs_free");
+		if (!fn)
+			pr_debug("dlsym failed for cs_free\n");
+		fn_init = true;
+	}
+	if (!fn)
+		return;
+	fn(insn, count);
+#endif
+}
+
+static enum cs_err perf_cs_close(csh *handle)
+{
+#ifndef LIBCAPSTONE_DLOPEN
+	return cs_close(handle);
+#else
+	static bool fn_init;
+	static enum cs_err (*fn)(csh *handle);
+
+	if (!fn_init) {
+		fn = dlsym(perf_cs_dll_handle(), "cs_close");
+		if (!fn)
+			pr_debug("dlsym failed for cs_close\n");
+		fn_init = true;
+	}
+	if (!fn)
+		return CS_ERR_HANDLE;
+	return fn(handle);
+#endif
+}
+
+static bool e_machine_to_capstone(uint16_t e_machine, bool is64, bool is_big_endian,
+				  enum cs_arch *arch, enum cs_mode *mode)
+{
+	*mode = is_big_endian ? CS_MODE_BIG_ENDIAN : CS_MODE_LITTLE_ENDIAN;
+
+	switch (e_machine) {
+	case EM_X86_64:
+	case EM_386:
+		*arch = CS_ARCH_X86;
+		*mode |= is64 ? CS_MODE_64 : CS_MODE_32;
+		return true;
+	case EM_AARCH64:
+		*arch = CS_ARCH_ARM64;
+		*mode |= CS_MODE_ARM;
+		return true;
+	case EM_ARM:
+		*arch = CS_ARCH_ARM;
+		*mode |= CS_MODE_ARM | CS_MODE_V8;
+		return true;
+	case EM_S390:
+		*arch = CS_ARCH_SYSZ;
+		return true;
+	case EM_MIPS:
+		*arch = CS_ARCH_MIPS;
+		*mode |= is64 ? CS_MODE_MIPS64 : CS_MODE_MIPS32;
+		return true;
+	case EM_PPC:
+		*arch = CS_ARCH_PPC;
+		return true;
+	case EM_PPC64:
+		*arch = CS_ARCH_PPC;
+		*mode |= CS_MODE_64;
+		return true;
+	case EM_SPARC:
+		*arch = CS_ARCH_SPARC;
+		return true;
+	case EM_SPARCV9:
+		*arch = CS_ARCH_SPARC;
+		*mode |= CS_MODE_V9;
+		return true;
+	case EM_RISCV:
+		*arch = CS_ARCH_RISCV;
+		*mode |= (is64 ? CS_MODE_RISCV64 : CS_MODE_RISCV32) | CS_MODE_RISCVC;
+		return true;
+	default:
+		return false;
+	}
+}
+
+static int capstone_init(uint16_t e_machine, csh *cs_handle, bool is64, bool is_big_endian,
 			 bool disassembler_style)
 {
-	cs_arch arch;
-	cs_mode mode;
+	enum cs_arch arch;
+	enum cs_mode mode;
 
-	if (machine__is(machine, "x86_64") && is64) {
-		arch = CS_ARCH_X86;
-		mode = CS_MODE_64;
-	} else if (machine__normalized_is(machine, "x86")) {
-		arch = CS_ARCH_X86;
-		mode = CS_MODE_32;
-	} else if (machine__normalized_is(machine, "arm64")) {
-		arch = CS_ARCH_ARM64;
-		mode = CS_MODE_ARM;
-	} else if (machine__normalized_is(machine, "arm")) {
-		arch = CS_ARCH_ARM;
-		mode = CS_MODE_ARM + CS_MODE_V8;
-	} else if (machine__normalized_is(machine, "s390")) {
-		arch = CS_ARCH_SYSZ;
-		mode = CS_MODE_BIG_ENDIAN;
-	} else {
+	if (!e_machine_to_capstone(e_machine, is64, is_big_endian, &arch, &mode))
 		return -1;
-	}
 
-	if (cs_open(arch, mode, cs_handle) != CS_ERR_OK) {
+	if (perf_cs_open(arch, mode, cs_handle) != CS_ERR_OK) {
 		pr_warning_once("cs_open failed\n");
 		return -1;
 	}
 
-	if (machine__normalized_is(machine, "x86")) {
+	if (arch == CS_ARCH_X86) {
 		/*
 		 * In case of using capstone_init while symbol__disassemble
 		 * setting CS_OPT_SYNTAX_ATT depends if disassembler_style opts
 		 * is set via annotation args
 		 */
 		if (disassembler_style)
-			cs_option(*cs_handle, CS_OPT_SYNTAX, CS_OPT_SYNTAX_ATT);
+			perf_cs_option(*cs_handle, CS_OPT_SYNTAX, CS_OPT_SYNTAX_ATT);
 		/*
 		 * Resolving address operands to symbols is implemented
 		 * on x86 by investigating instruction details.
 		 */
-		cs_option(*cs_handle, CS_OPT_DETAIL, CS_OPT_ON);
+		perf_cs_option(*cs_handle, CS_OPT_DETAIL, CS_OPT_ON);
+	} else if (arch == CS_ARCH_ARM64) {
+		/*
+		 * Same as x86: arm64 needs instruction details to resolve
+		 * symbolic addresses.
+		 */
+		perf_cs_option(*cs_handle, CS_OPT_DETAIL, CS_OPT_ON);
 	}
 
 	return 0;
 }
-#endif
 
-#ifdef HAVE_LIBCAPSTONE_SUPPORT
-static size_t print_insn_x86(struct thread *thread, u8 cpumode, cs_insn *insn,
+static size_t print_insn_x86(struct thread *thread, u8 cpumode, struct cs_insn *insn,
 			     int print_opts, FILE *fp)
 {
 	struct addr_location al;
 	size_t printed = 0;
 
 	if (insn->detail && insn->detail->x86.op_count == 1) {
-		cs_x86_op *op = &insn->detail->x86.operands[0];
+		struct cs_x86_op *op = &insn->detail->x86.operands[0];
 
 		addr_location__init(&al);
 		if (op->type == X86_OP_IMM &&
@@ -95,67 +266,92 @@ static size_t print_insn_x86(struct thread *thread, u8 cpumode, cs_insn *insn,
 	printed += fprintf(fp, "%s %s", insn[0].mnemonic, insn[0].op_str);
 	return printed;
 }
-#endif
 
-
-ssize_t capstone__fprintf_insn_asm(struct machine *machine __maybe_unused,
-				   struct thread *thread __maybe_unused,
-				   u8 cpumode __maybe_unused, bool is64bit __maybe_unused,
-				   const uint8_t *code __maybe_unused,
-				   size_t code_size __maybe_unused,
-				   uint64_t ip __maybe_unused, int *lenp __maybe_unused,
-				   int print_opts __maybe_unused, FILE *fp __maybe_unused)
+ssize_t capstone__fprintf_insn_asm(struct machine *machine, struct thread *thread, u8 cpumode,
+				   bool is64bit, const uint8_t *code, size_t code_size, uint64_t ip,
+				   int *lenp, int print_opts, FILE *fp)
 {
-#ifdef HAVE_LIBCAPSTONE_SUPPORT
 	size_t printed;
-	cs_insn *insn;
+	struct cs_insn *insn;
 	csh cs_handle;
 	size_t count;
+	bool is_big_endian = false;
+	uint16_t e_machine = thread__e_machine_endian(thread, machine,
+						      /*e_flags=*/NULL, &is_big_endian);
 	int ret;
 
 	/* TODO: Try to initiate capstone only once but need a proper place. */
-	ret = capstone_init(machine, &cs_handle, is64bit, true);
+	ret = capstone_init(e_machine, &cs_handle, is64bit, is_big_endian,
+			    /*disassembler_style=*/true);
 	if (ret < 0)
 		return ret;
 
-	count = cs_disasm(cs_handle, code, code_size, ip, 1, &insn);
+	count = perf_cs_disasm(cs_handle, code, code_size, ip, 1, &insn);
 	if (count > 0) {
-		if (machine__normalized_is(machine, "x86"))
+		if (e_machine == EM_X86_64 || e_machine == EM_386)
 			printed = print_insn_x86(thread, cpumode, &insn[0], print_opts, fp);
 		else
 			printed = fprintf(fp, "%s %s", insn[0].mnemonic, insn[0].op_str);
 		if (lenp)
 			*lenp = insn->size;
-		cs_free(insn, count);
+		perf_cs_free(insn, count);
 	} else {
 		printed = -1;
 	}
 
-	cs_close(&cs_handle);
+	perf_cs_close(&cs_handle);
 	return printed;
-#else
-	return -1;
-#endif
 }
 
-#ifdef HAVE_LIBCAPSTONE_SUPPORT
-static void print_capstone_detail(cs_insn *insn, char *buf, size_t len,
+static struct symbol *find_symbol_from_addr(struct map *map, u64 addr,
+					    struct map **found_map, u64 *sym_offset)
+{
+	struct symbol *sym;
+	u64 al_addr;
+	u64 ip = map__objdump_2mem(map, addr);
+
+	*found_map = NULL;
+	if (dso__kernel(map__dso(map))) {
+		/*
+		 * The kernel maps can be split into sections, let's
+		 * find the map first and then search the symbol.
+		 */
+		*found_map = maps__find(map__kmaps(map), ip);
+		if (*found_map == NULL)
+			return NULL;
+		map = *found_map;
+	}
+
+	/* convert it to map-relative address for search */
+	al_addr = map__map_ip(map, ip);
+
+	sym = map__find_symbol(map, al_addr);
+
+	if (sym == NULL) {
+		map__put(*found_map);
+		*found_map = NULL;
+		return NULL;
+	}
+
+	*sym_offset = al_addr - sym->start;
+	return sym;
+}
+
+static void print_capstone_detail(struct cs_insn *insn, char *buf, size_t len,
 				  struct annotate_args *args, u64 addr)
 {
 	int i;
-	struct map *map = args->ms.map;
+	struct map *map = args->ms->map;
 	struct symbol *sym;
-
-	/* TODO: support more architectures */
-	if (!arch__is(args->arch, "x86"))
-		return;
 
 	if (insn->detail == NULL)
 		return;
 
 	for (i = 0; i < insn->detail->x86.op_count; i++) {
-		cs_x86_op *op = &insn->detail->x86.operands[i];
+		struct cs_x86_op *op = &insn->detail->x86.operands[i];
 		u64 orig_addr;
+		struct map *found_map;
+		u64 sym_offset;
 
 		if (op->type != X86_OP_MEM)
 			continue;
@@ -166,38 +362,119 @@ static void print_capstone_detail(cs_insn *insn, char *buf, size_t len,
 
 		/* get the target address */
 		orig_addr = addr + insn->size + op->mem.disp;
-		addr = map__objdump_2mem(map, orig_addr);
-
-		if (dso__kernel(map__dso(map))) {
-			/*
-			 * The kernel maps can be split into sections, let's
-			 * find the map first and the search the symbol.
-			 */
-			map = maps__find(map__kmaps(map), addr);
-			if (map == NULL)
-				continue;
-		}
-
-		/* convert it to map-relative address for search */
-		addr = map__map_ip(map, addr);
-
-		sym = map__find_symbol(map, addr);
+		sym = find_symbol_from_addr(map, orig_addr, &found_map, &sym_offset);
 		if (sym == NULL)
 			continue;
 
-		if (addr == sym->start) {
+		if (sym_offset == 0) {
 			scnprintf(buf, len, "\t# %"PRIx64" <%s>",
 				  orig_addr, sym->name);
 		} else {
 			scnprintf(buf, len, "\t# %"PRIx64" <%s+%#"PRIx64">",
-				  orig_addr, sym->name, addr - sym->start);
+				  orig_addr, sym->name, sym_offset);
 		}
+		map__put(found_map);
 		break;
 	}
 }
-#endif
 
-#ifdef HAVE_LIBCAPSTONE_SUPPORT
+static int print_default_format(struct cs_insn *insn, char *buf, size_t len)
+{
+	return scnprintf(buf, len, "       %-7s %s",
+			 insn->mnemonic, insn->op_str);
+}
+
+static void format_capstone_insn_x86(struct cs_insn *insn, char *buf,
+				     size_t len, struct annotate_args *args,
+				     u64 addr)
+{
+	int printed;
+
+	printed = print_default_format(insn, buf, len);
+	buf += printed;
+	len -= printed;
+
+	print_capstone_detail(insn, buf, len, args, addr);
+}
+
+static bool needs_symbolic_address(struct cs_insn *insn)
+{
+	int i;
+
+	if (insn->id == ARM64_INS_ADR || insn->id == ARM64_INS_ADRP)
+		return true;
+
+	if (insn->detail == NULL)
+		return false;
+
+	for (i = 0; i < insn->detail->groups_count; i++) {
+		if (insn->detail->groups[i] == ARM64_GRP_JUMP ||
+		    insn->detail->groups[i] == ARM64_GRP_CALL ||
+		    insn->detail->groups[i] == ARM64_GRP_BRANCH_RELATIVE)
+			return true;
+	}
+
+	return false;
+}
+
+static void format_capstone_insn_arm64(struct cs_insn *insn, char *buf,
+				       size_t len, struct annotate_args *args)
+{
+	struct map *map = args->ms->map;
+	char *last_imm, *endptr;
+	u64 addr;
+
+	print_default_format(insn, buf, len);
+	/*
+	 * Adjust instructions to keep the existing behavior with objdump.
+	 *
+	 * Example conversion:
+	 * From: b #0xffff8000800114c8
+	 * To:   b ffff8000800114c8 <el0t_64_sync+0x108>
+	 */
+	if (needs_symbolic_address(insn)) {
+		struct symbol *sym;
+		struct map *found_map;
+		u64 sym_offset;
+
+		/* Extract last immediate value as address */
+		last_imm = strrchr(buf, '#');
+		if (!last_imm)
+			return;
+
+		addr = strtoull(last_imm + 1, &endptr, 16);
+		if (endptr == last_imm + 1)
+			return;
+
+		sym = find_symbol_from_addr(map, addr, &found_map, &sym_offset);
+		if (sym == NULL)
+			return;
+
+		/* Symbolize the resolved address */
+		len = len - (last_imm - buf);
+		if (sym_offset == 0) {
+			scnprintf(last_imm, len, "%"PRIx64" <%s>",
+				  addr, sym->name);
+		} else {
+			scnprintf(last_imm, len, "%"PRIx64" <%s+%#"PRIx64">",
+				  addr, sym->name, sym_offset);
+		}
+		map__put(found_map);
+	}
+}
+
+static void format_capstone_insn(struct cs_insn *insn, char *buf, size_t len,
+				 struct annotate_args *args, u64 addr)
+{
+	/* TODO: support more architectures */
+	if (arch__is_x86(args->arch))
+		format_capstone_insn_x86(insn, buf, len, args, addr);
+	else if (arch__is_arm64(args->arch))
+		format_capstone_insn_arm64(insn, buf, len, args);
+	else
+		print_default_format(insn, buf, len);
+}
+
 struct find_file_offset_data {
 	u64 ip;
 	u64 offset;
@@ -214,15 +491,12 @@ static int find_file_offset(u64 start, u64 len, u64 pgoff, void *arg)
 	}
 	return 0;
 }
-#endif
 
-int symbol__disassemble_capstone(const char *filename __maybe_unused,
-				 struct symbol *sym __maybe_unused,
-				 struct annotate_args *args __maybe_unused)
+int symbol__disassemble_capstone(const char *filename, struct symbol *sym,
+				 struct annotate_args *args)
 {
-#ifdef HAVE_LIBCAPSTONE_SUPPORT
 	struct annotation *notes = symbol__annotation(sym);
-	struct map *map = args->ms.map;
+	struct map *map = args->ms->map;
 	struct dso *dso = map__dso(map);
 	u64 start = map__rip_2objdump(map, sym->start);
 	u64 offset;
@@ -235,10 +509,12 @@ int symbol__disassemble_capstone(const char *filename __maybe_unused,
 	const u8 *buf;
 	u64 buf_len;
 	csh handle;
-	cs_insn *insn = NULL;
+	struct cs_insn *insn = NULL;
 	char disasm_buf[512];
 	struct disasm_line *dl;
 	bool disassembler_style = false;
+	uint16_t e_machine = EM_NONE;
+	bool is_big_endian = false;
 
 	if (args->options->objdump_path)
 		return -1;
@@ -256,7 +532,7 @@ int symbol__disassemble_capstone(const char *filename __maybe_unused,
 	args->line = disasm_buf;
 	args->line_nr = 0;
 	args->fileloc = NULL;
-	args->ms.sym = sym;
+	args->ms->sym = sym;
 
 	dl = disasm_line__new(args);
 	if (dl == NULL)
@@ -268,21 +544,32 @@ int symbol__disassemble_capstone(const char *filename __maybe_unused,
 	    !strcmp(args->options->disassembler_style, "att"))
 		disassembler_style = true;
 
-	if (capstone_init(maps__machine(args->ms.maps), &handle, is_64bit, disassembler_style) < 0)
+	if (args->ms->thread) {
+		e_machine = thread__e_machine_endian(args->ms->thread,
+						     /*machine=*/NULL,
+						     /*e_flags=*/NULL, &is_big_endian);
+	} else if (dso) {
+		struct maps *kmaps = (map && dso__kernel(dso)) ? map__kmaps(map) : NULL;
+		struct machine *kmap_machine = kmaps ? maps__machine(kmaps) : NULL;
+
+		e_machine = dso__e_machine_endian(dso, kmap_machine, /*e_flags=*/NULL,
+						  &is_big_endian);
+	}
+	if (!e_machine || e_machine == EM_NONE) {
+		e_machine = thread__e_machine_endian(NULL,
+						     /*machine=*/NULL,
+						     /*e_flags=*/NULL, &is_big_endian);
+	}
+	if (capstone_init(e_machine, &handle, is_64bit, is_big_endian, disassembler_style) < 0)
 		goto err;
 
 	needs_cs_close = true;
 
-	free_count = count = cs_disasm(handle, buf, buf_len, start, buf_len, &insn);
+	free_count = count = perf_cs_disasm(handle, buf, buf_len, start, buf_len, &insn);
 	for (i = 0, offset = 0; i < count; i++) {
-		int printed;
-
-		printed = scnprintf(disasm_buf, sizeof(disasm_buf),
-				    "       %-7s %s",
-				    insn[i].mnemonic, insn[i].op_str);
-		print_capstone_detail(&insn[i], disasm_buf + printed,
-				      sizeof(disasm_buf) - printed, args,
-				      start + offset);
+		format_capstone_insn(&insn[i], disasm_buf,
+				     sizeof(disasm_buf), args,
+				     start + offset);
 
 		args->offset = offset;
 		args->line = disasm_buf;
@@ -312,9 +599,9 @@ int symbol__disassemble_capstone(const char *filename __maybe_unused,
 
 out:
 	if (needs_cs_close) {
-		cs_close(&handle);
+		perf_cs_close(&handle);
 		if (free_count > 0)
-			cs_free(insn, free_count);
+			perf_cs_free(insn, free_count);
 	}
 	free(code_buf);
 	return count < 0 ? count : 0;
@@ -334,18 +621,14 @@ err:
 	}
 	count = -1;
 	goto out;
-#else
-	return -1;
-#endif
 }
 
 int symbol__disassemble_capstone_powerpc(const char *filename __maybe_unused,
 					 struct symbol *sym __maybe_unused,
 					 struct annotate_args *args __maybe_unused)
 {
-#ifdef HAVE_LIBCAPSTONE_SUPPORT
 	struct annotation *notes = symbol__annotation(sym);
-	struct map *map = args->ms.map;
+	struct map *map = args->ms->map;
 	struct dso *dso = map__dso(map);
 	struct nscookie nsc;
 	u64 start = map__rip_2objdump(map, sym->start);
@@ -364,6 +647,8 @@ int symbol__disassemble_capstone_powerpc(const char *filename __maybe_unused,
 	struct disasm_line *dl;
 	u32 *line;
 	bool disassembler_style = false;
+	uint16_t e_machine = EM_NONE;
+	bool is_big_endian = false;
 
 	if (args->options->objdump_path)
 		return -1;
@@ -382,7 +667,23 @@ int symbol__disassemble_capstone_powerpc(const char *filename __maybe_unused,
 	    !strcmp(args->options->disassembler_style, "att"))
 		disassembler_style = true;
 
-	if (capstone_init(maps__machine(args->ms.maps), &handle, is_64bit, disassembler_style) < 0)
+	if (args->ms->thread) {
+		e_machine = thread__e_machine_endian(args->ms->thread,
+						     /*machine=*/NULL,
+						     /*e_flags=*/NULL, &is_big_endian);
+	} else if (dso) {
+		struct maps *kmaps = (map && dso__kernel(dso)) ? map__kmaps(map) : NULL;
+		struct machine *kmap_machine = kmaps ? maps__machine(kmaps) : NULL;
+
+		e_machine = dso__e_machine_endian(dso, kmap_machine, /*e_flags=*/NULL,
+						  &is_big_endian);
+	}
+	if (!e_machine || e_machine == EM_NONE) {
+		e_machine = thread__e_machine_endian(NULL,
+						     /*machine=*/NULL,
+						     /*e_flags=*/NULL, &is_big_endian);
+	}
+	if (capstone_init(e_machine, &handle, is_64bit, is_big_endian, disassembler_style) < 0)
 		goto err;
 
 	needs_cs_close = true;
@@ -408,7 +709,7 @@ int symbol__disassemble_capstone_powerpc(const char *filename __maybe_unused,
 	args->line = disasm_buf;
 	args->line_nr = 0;
 	args->fileloc = NULL;
-	args->ms.sym = sym;
+	args->ms->sym = sym;
 
 	dl = disasm_line__new(args);
 	if (dl == NULL)
@@ -456,7 +757,7 @@ int symbol__disassemble_capstone_powerpc(const char *filename __maybe_unused,
 
 out:
 	if (needs_cs_close)
-		cs_close(&handle);
+		perf_cs_close(&handle);
 	free(buf);
 	return count < 0 ? count : 0;
 
@@ -465,7 +766,4 @@ err:
 		close(fd);
 	count = -1;
 	goto out;
-#else
-	return -1;
-#endif
 }

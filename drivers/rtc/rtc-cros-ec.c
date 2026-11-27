@@ -5,7 +5,6 @@
 // Author: Stephen Barber <smbarber@chromium.org>
 
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_data/cros_ec_commands.h>
 #include <linux/platform_data/cros_ec_proto.h>
@@ -316,8 +315,7 @@ static int cros_ec_rtc_probe(struct platform_device *pdev)
 	struct rtc_time tm;
 	int ret;
 
-	cros_ec_rtc = devm_kzalloc(&pdev->dev, sizeof(*cros_ec_rtc),
-				   GFP_KERNEL);
+	cros_ec_rtc = devm_kzalloc_obj(&pdev->dev, *cros_ec_rtc);
 	if (!cros_ec_rtc)
 		return -ENOMEM;
 
@@ -388,8 +386,8 @@ static void cros_ec_rtc_remove(struct platform_device *pdev)
 }
 
 static const struct platform_device_id cros_ec_rtc_id[] = {
-	{ DRV_NAME, 0 },
-	{}
+	{ .name = DRV_NAME },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, cros_ec_rtc_id);
 

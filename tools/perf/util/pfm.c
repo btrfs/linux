@@ -15,6 +15,7 @@
 #include "util/strbuf.h"
 #include "util/thread_map.h"
 
+#include <errno.h>
 #include <string.h>
 #include <linux/kernel.h>
 #include <perfmon/pfmlib_perf_event.h>
@@ -84,7 +85,7 @@ int parse_libpfm_events_option(const struct option *opt, const char *str,
 		}
 
 		pmu = perf_pmus__find_by_type((unsigned int)attr.type);
-		evsel = parse_events__add_event(evlist->core.nr_entries,
+		evsel = parse_events__add_event(evlist__nr_entries(evlist),
 						&attr, q, /*metric_id=*/NULL,
 						pmu);
 		if (evsel == NULL)
@@ -140,6 +141,7 @@ static bool is_libpfm_event_supported(const char *name, struct perf_cpu_map *cpu
 		return false;
 
 	evsel->is_libpfm_event = true;
+	evsel->support_probe = true;
 
 	ret = evsel__open(evsel, cpus, threads);
 	if (ret == -EACCES) {
@@ -158,7 +160,7 @@ static bool is_libpfm_event_supported(const char *name, struct perf_cpu_map *cpu
 		result = false;
 
 	evsel__close(evsel);
-	evsel__delete(evsel);
+	evsel__put(evsel);
 
 	return result;
 }

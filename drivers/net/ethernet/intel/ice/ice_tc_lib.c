@@ -931,7 +931,7 @@ ice_eswitch_add_tc_fltr(struct ice_vsi *vsi, struct ice_tc_flower_fltr *fltr)
 		return ice_pass_vf_tx_lldp(vsi, false);
 
 	lkups_cnt = ice_tc_count_lkups(flags, fltr);
-	list = kcalloc(lkups_cnt, sizeof(*list), GFP_ATOMIC);
+	list = kzalloc_objs(*list, lkups_cnt, GFP_ATOMIC);
 	if (!list)
 		return -ENOMEM;
 
@@ -1177,7 +1177,7 @@ ice_add_tc_flower_adv_fltr(struct ice_vsi *vsi,
 	}
 
 	lkups_cnt = ice_tc_count_lkups(flags, tc_fltr);
-	list = kcalloc(lkups_cnt, sizeof(*list), GFP_ATOMIC);
+	list = kzalloc_objs(*list, lkups_cnt, GFP_ATOMIC);
 	if (!list)
 		return -ENOMEM;
 
@@ -1202,7 +1202,8 @@ ice_add_tc_flower_adv_fltr(struct ice_vsi *vsi,
 		break;
 	case ICE_FWD_TO_Q:
 		/* HW queue number in global space */
-		rule_info.sw_act.fwd_id.q_id = tc_fltr->action.fwd.q.hw_queue;
+		rule_info.sw_act.fwd_id.q_id = tc_fltr->action.fwd.q.hw_queue +
+			hw->func_caps.common_cap.rxq_first_id;
 		rule_info.sw_act.vsi_handle = dest_vsi->idx;
 		rule_info.priority = ICE_SWITCH_FLTR_PRIO_QUEUE;
 		rule_info.sw_act.src = hw->pf_id;
@@ -2191,7 +2192,7 @@ ice_add_tc_fltr(struct net_device *netdev, struct ice_vsi *vsi,
 	/* by default, set output to be INVALID */
 	*__fltr = NULL;
 
-	fltr = kzalloc(sizeof(*fltr), GFP_KERNEL);
+	fltr = kzalloc_obj(*fltr);
 	if (!fltr)
 		return -ENOMEM;
 

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (c) 2018, Linaro Limited
 
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <sound/soc.h>
@@ -109,7 +108,7 @@ static int apq8096_platform_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	int ret;
 
-	card = devm_kzalloc(dev, sizeof(*card), GFP_KERNEL);
+	card = devm_kzalloc_obj(dev, *card);
 	if (!card)
 		return -ENOMEM;
 

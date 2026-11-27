@@ -19,6 +19,7 @@
  * calls to msleep.
  */
 
+#include <linux/cleanup.h>
 #include <linux/poll.h>
 #include <linux/slab.h>
 #include <linux/mutex.h>
@@ -89,8 +90,17 @@ static bool tpm_transmit_completed(u8 status, struct tpm_chip *chip)
 	return status_masked == chip->ops->req_complete_val;
 }
 
+static void tpm_go_idle(struct tpm_chip *chip)
+{
+	if (chip->ops->go_idle)
+		chip->ops->go_idle(chip);
+}
+
+DEFINE_FREE(tpm_go_idle, struct tpm_chip *, if (_T) tpm_go_idle(_T))
+
 static ssize_t tpm_try_transmit(struct tpm_chip *chip, void *buf, size_t bufsiz)
 {
+	struct tpm_chip *chip_idle __free(tpm_go_idle) = NULL;
 	struct tpm_header *header = buf;
 	int rc;
 	ssize_t len = 0;
@@ -112,6 +122,18 @@ static ssize_t tpm_try_transmit(struct tpm_chip *chip, void *buf, size_t bufsiz)
 			"invalid count value %x %zx\n", count, bufsiz);
 		return -E2BIG;
 	}
+
+	if (chip->ops->cmd_ready) {
+		rc = chip->ops->cmd_ready(chip);
+		if (rc) {
+			dev_err(&chip->dev,
+				"%s: cmd_ready(): error %d\n", __func__, rc);
+			return rc;
+		}
+	}
+
+	/* Ensure go_idle() is called on every exit path from here on. */
+	chip_idle = chip;
 
 	rc = chip->ops->send(chip, buf, bufsiz, count);
 	if (rc < 0) {
@@ -268,7 +290,7 @@ ssize_t tpm_transmit_cmd(struct tpm_chip *chip, struct tpm_buf *buf,
 	int err;
 	ssize_t len;
 
-	len = tpm_transmit(chip, buf->data, PAGE_SIZE);
+	len = tpm_transmit(chip, buf->data, buf->capacity);
 	if (len <  0)
 		return len;
 
@@ -313,9 +335,12 @@ int tpm_is_tpm2(struct tpm_chip *chip)
 {
 	int rc;
 
-	chip = tpm_find_get_ops(chip);
 	if (!chip)
 		return -ENODEV;
+
+	rc = tpm_try_get_ops(chip);
+	if (rc)
+		return rc;
 
 	rc = (chip->flags & TPM_CHIP_FLAG_TPM2) != 0;
 
@@ -338,9 +363,12 @@ int tpm_pcr_read(struct tpm_chip *chip, u32 pcr_idx,
 {
 	int rc;
 
-	chip = tpm_find_get_ops(chip);
 	if (!chip)
 		return -ENODEV;
+
+	rc = tpm_try_get_ops(chip);
+	if (rc)
+		return rc;
 
 	if (chip->flags & TPM_CHIP_FLAG_TPM2)
 		rc = tpm2_pcr_read(chip, pcr_idx, digest, NULL);
@@ -369,9 +397,12 @@ int tpm_pcr_extend(struct tpm_chip *chip, u32 pcr_idx,
 	int rc;
 	int i;
 
-	chip = tpm_find_get_ops(chip);
 	if (!chip)
 		return -ENODEV;
+
+	rc = tpm_try_get_ops(chip);
+	if (rc)
+		return rc;
 
 	for (i = 0; i < chip->nr_allocated_banks; i++) {
 		if (digests[i].alg_id != chip->allocated_banks[i].alg_id) {
@@ -467,12 +498,6 @@ int tpm_pm_resume(struct device *dev)
 
 	chip->flags &= ~TPM_CHIP_FLAG_SUSPENDED;
 
-	/*
-	 * Guarantee that SUSPENDED is written last, so that hwrng does not
-	 * activate before the chip has been fully resumed.
-	 */
-	wmb();
-
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tpm_pm_resume);
@@ -492,9 +517,12 @@ int tpm_get_random(struct tpm_chip *chip, u8 *out, size_t max)
 	if (!out || max > TPM_MAX_RNG_DATA)
 		return -EINVAL;
 
-	chip = tpm_find_get_ops(chip);
 	if (!chip)
 		return -ENODEV;
+
+	rc = tpm_try_get_ops(chip);
+	if (rc)
+		return rc;
 
 	if (chip->flags & TPM_CHIP_FLAG_TPM2)
 		rc = tpm2_get_random(chip, out, max);

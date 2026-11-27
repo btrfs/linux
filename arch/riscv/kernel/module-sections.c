@@ -56,17 +56,15 @@ unsigned long module_emit_plt_entry(struct module *mod, unsigned long val)
 	return (unsigned long)&plt[i];
 }
 
-#define cmp_3way(a, b)	((a) < (b) ? -1 : (a) > (b))
-
 static int cmp_rela(const void *a, const void *b)
 {
 	const Elf_Rela *x = a, *y = b;
 	int i;
 
 	/* sort by type, symbol index and addend */
-	i = cmp_3way(x->r_info, y->r_info);
+	i = cmp_int(x->r_info, y->r_info);
 	if (i == 0)
-		i = cmp_3way(x->r_addend, y->r_addend);
+		i = cmp_int(x->r_addend, y->r_addend);
 	return i;
 }
 
@@ -148,7 +146,7 @@ int module_frob_arch_sections(Elf_Ehdr *ehdr, Elf_Shdr *sechdrs,
 		return -ENOEXEC;
 	}
 
-	/* Calculate the maxinum number of entries */
+	/* Calculate the maximum number of entries */
 	for (i = 0; i < ehdr->e_shnum; i++) {
 		size_t num_relas = sechdrs[i].sh_size / sizeof(Elf_Rela);
 		Elf_Rela *relas = (void *)ehdr + sechdrs[i].sh_offset;

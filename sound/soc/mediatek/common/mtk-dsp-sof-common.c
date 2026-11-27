@@ -139,6 +139,7 @@ static int mtk_sof_check_tplg_be_dai_link_fixup(struct snd_soc_pcm_runtime *rtd,
 
 int mtk_sof_card_late_probe(struct snd_soc_card *card)
 {
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(card);
 	struct snd_soc_pcm_runtime *rtd;
 	struct snd_soc_component *sof_comp = NULL;
 	struct mtk_soc_card_data *soc_card_data =
@@ -163,9 +164,8 @@ int mtk_sof_card_late_probe(struct snd_soc_card *card)
 	/* 2. overwrite all BE fixups, and backup the existing fixup */
 	for_each_card_prelinks(card, i, dai_link) {
 		if (dai_link->be_hw_params_fixup) {
-			mtk_dai_link = devm_kzalloc(card->dev,
-						    sizeof(*mtk_dai_link),
-						    GFP_KERNEL);
+			mtk_dai_link = devm_kzalloc_obj(card->dev,
+							*mtk_dai_link);
 			if (!mtk_dai_link)
 				return -ENOMEM;
 
@@ -204,13 +204,13 @@ int mtk_sof_card_late_probe(struct snd_soc_card *card)
 					snd_soc_dapm_widget_for_each_sink_path(widget, p) {
 						route.source = conn->sof_dma;
 						route.sink = p->sink->name;
-						snd_soc_dapm_add_routes(&card->dapm, &route, 1);
+						snd_soc_dapm_add_routes(dapm, &route, 1);
 					}
 				} else if (conn->stream_dir == SNDRV_PCM_STREAM_PLAYBACK && widget) {
 					snd_soc_dapm_widget_for_each_source_path(widget, p) {
 						route.source = p->source->name;
 						route.sink = conn->sof_dma;
-						snd_soc_dapm_add_routes(&card->dapm, &route, 1);
+						snd_soc_dapm_add_routes(dapm, &route, 1);
 					}
 				} else {
 					dev_err(cpu_dai->dev, "stream dir and widget not pair\n");
@@ -227,11 +227,11 @@ int mtk_sof_card_late_probe(struct snd_soc_card *card)
 }
 EXPORT_SYMBOL_GPL(mtk_sof_card_late_probe);
 
-int mtk_sof_dailink_parse_of(struct snd_soc_card *card, struct device_node *np,
-			     const char *propname, struct snd_soc_dai_link *pre_dai_links,
-			     int pre_num_links)
+int mtk_sof_dailink_parse_of(struct device *dev, struct snd_soc_card *card,
+			     const char *propname)
 {
-	struct device *dev = card->dev;
+	struct device_node *np = dev->of_node;
+	struct snd_soc_dai_link *dai_link;
 	struct snd_soc_dai_link *parsed_dai_link;
 	const char *dai_name = NULL;
 	int i, j, ret, num_links, parsed_num_links = 0;
@@ -242,7 +242,7 @@ int mtk_sof_dailink_parse_of(struct snd_soc_card *card, struct device_node *np,
 		return -EINVAL;
 	}
 
-	parsed_dai_link = devm_kcalloc(dev, num_links, sizeof(*parsed_dai_link), GFP_KERNEL);
+	parsed_dai_link = devm_kzalloc_objs(dev, *parsed_dai_link, num_links);
 	if (!parsed_dai_link)
 		return -ENOMEM;
 
@@ -254,9 +254,9 @@ int mtk_sof_dailink_parse_of(struct snd_soc_card *card, struct device_node *np,
 			return ret;
 		}
 		dev_dbg(dev, "ASoC: Property get dai_name:%s\n", dai_name);
-		for (j = 0; j < pre_num_links; j++) {
-			if (!strcmp(dai_name, pre_dai_links[j].name)) {
-				memcpy(&parsed_dai_link[parsed_num_links++], &pre_dai_links[j],
+		for_each_card_prelinks(card, j, dai_link) {
+			if (!strcmp(dai_name, dai_link->name)) {
+				memcpy(&parsed_dai_link[parsed_num_links++], dai_link,
 				       sizeof(struct snd_soc_dai_link));
 				break;
 			}

@@ -6,7 +6,7 @@
  *
  * Copyright (c) 2009 Trond Myklebust <Trond.Myklebust@netapp.com>
  */
-#include <linux/kmod.h>
+#include <linux/umh.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/mount.h>
@@ -96,7 +96,7 @@ struct nfs_cache_defer_req *nfs_cache_defer_req_alloc(void)
 {
 	struct nfs_cache_defer_req *dreq;
 
-	dreq = kzalloc(sizeof(*dreq), GFP_KERNEL);
+	dreq = kzalloc_obj(*dreq);
 	if (dreq) {
 		init_completion(&dreq->completion);
 		refcount_set(&dreq->count, 1);

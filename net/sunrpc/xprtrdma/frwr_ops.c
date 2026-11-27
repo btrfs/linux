@@ -27,13 +27,17 @@
 
 /* Transport recovery
  *
- * frwr_map and frwr_unmap_* cannot run at the same time the transport
- * connect worker is running. The connect worker holds the transport
- * send lock, just as ->send_request does. This prevents frwr_map and
- * the connect worker from running concurrently. When a connection is
- * closed, the Receive completion queue is drained before the allowing
- * the connect worker to get control. This prevents frwr_unmap and the
- * connect worker from running concurrently.
+ * frwr_map() is serialized with the connect worker by the transport
+ * send lock.
+ *
+ * frwr_unmap_async() runs from Receive completion processing.
+ * rpcrdma_xprt_drain() drains the Receive Queue before the Send Queue,
+ * so asynchronous LOCAL_INV Work Requests are submitted before Send
+ * Queue drain.
+ *
+ * frwr_unmap_sync() runs after the transport send lock is released.
+ * rx_unmap_rwsem orders its LOCAL_INV submission before disconnect
+ * drains the QP.
  *
  * When the underlying transport disconnects, MRs that are in flight
  * are flushed and are likely unusable. Thus all MRs are destroyed.
@@ -139,7 +143,6 @@ int frwr_mr_init(struct rpcrdma_xprt *r_xprt, struct rpcrdma_mr *mr)
 	mr->mr_ibmr = frmr;
 	mr->mr_device = NULL;
 	INIT_LIST_HEAD(&mr->mr_list);
-	init_completion(&mr->mr_linv_done);
 	frwr_cid_init(ep, mr);
 
 	sg_init_table(sg, depth);
@@ -172,8 +175,9 @@ out_mr_err:
 int frwr_query_device(struct rpcrdma_ep *ep, const struct ib_device *device)
 {
 	const struct ib_device_attr *attrs = &device->attrs;
-	int max_qp_wr, depth, delta;
 	unsigned int max_sge;
+	u32 max_qp_wr;
+	int depth, delta;
 
 	if (!(attrs->device_cap_flags & IB_DEVICE_MEM_MGT_EXTENSIONS) ||
 	    attrs->max_fast_reg_page_list_len == 0) {
@@ -229,10 +233,10 @@ int frwr_query_device(struct rpcrdma_ep *ep, const struct ib_device *device)
 	}
 
 	max_qp_wr = attrs->max_qp_wr;
+	if (max_qp_wr < RPCRDMA_BACKWARD_WRS + 1 + RPCRDMA_MIN_SLOT_TABLE)
+		return -ENOMEM;
 	max_qp_wr -= RPCRDMA_BACKWARD_WRS;
 	max_qp_wr -= 1;
-	if (max_qp_wr < RPCRDMA_MIN_SLOT_TABLE)
-		return -ENOMEM;
 	if (ep->re_max_requests > max_qp_wr)
 		ep->re_max_requests = max_qp_wr;
 	ep->re_attr.cap.max_send_wr = ep->re_max_requests * depth;
@@ -244,9 +248,10 @@ int frwr_query_device(struct rpcrdma_ep *ep, const struct ib_device *device)
 	}
 	ep->re_attr.cap.max_send_wr += RPCRDMA_BACKWARD_WRS;
 	ep->re_attr.cap.max_send_wr += 1; /* for ib_drain_sq */
+	ep->re_recv_batch = ep->re_max_requests >> 2;
 	ep->re_attr.cap.max_recv_wr = ep->re_max_requests;
 	ep->re_attr.cap.max_recv_wr += RPCRDMA_BACKWARD_WRS;
-	ep->re_attr.cap.max_recv_wr += RPCRDMA_MAX_RECV_BATCH;
+	ep->re_attr.cap.max_recv_wr += ep->re_recv_batch;
 	ep->re_attr.cap.max_recv_wr += 1; /* for ib_drain_rq */
 
 	ep->re_max_rdma_segs =
@@ -268,10 +273,9 @@ int frwr_query_device(struct rpcrdma_ep *ep, const struct ib_device *device)
 }
 
 /**
- * frwr_map - Register a memory region
+ * frwr_map - Register a memory region from an xdr_buf cursor
  * @r_xprt: controlling transport
- * @seg: memory region co-ordinates
- * @nsegs: number of segments remaining
+ * @cur: cursor tracking position within the xdr_buf
  * @writing: true when RDMA Write will be used
  * @xid: XID of RPC using the registered memory
  * @mr: MR to fill in
@@ -279,34 +283,104 @@ int frwr_query_device(struct rpcrdma_ep *ep, const struct ib_device *device)
  * Prepare a REG_MR Work Request to register a memory region
  * for remote access via RDMA READ or RDMA WRITE.
  *
- * Returns the next segment or a negative errno pointer.
- * On success, @mr is filled in.
+ * Returns 0 on success (cursor advanced past consumed data,
+ * @mr populated) or a negative errno on failure.
  */
-struct rpcrdma_mr_seg *frwr_map(struct rpcrdma_xprt *r_xprt,
-				struct rpcrdma_mr_seg *seg,
-				int nsegs, bool writing, __be32 xid,
-				struct rpcrdma_mr *mr)
+int frwr_map(struct rpcrdma_xprt *r_xprt,
+	     struct rpcrdma_xdr_cursor *cur,
+	     bool writing, __be32 xid,
+	     struct rpcrdma_mr *mr)
 {
 	struct rpcrdma_ep *ep = r_xprt->rx_ep;
+	const struct xdr_buf *xdrbuf = cur->xc_buf;
+	bool sg_gaps = ep->re_mrtype == IB_MR_TYPE_SG_GAPS;
+	unsigned int max_depth = ep->re_max_fr_depth;
 	struct ib_reg_wr *reg_wr;
 	int i, n, dma_nents;
 	struct ib_mr *ibmr;
 	u8 key;
 
-	if (nsegs > ep->re_max_fr_depth)
-		nsegs = ep->re_max_fr_depth;
-	for (i = 0; i < nsegs;) {
-		sg_set_page(&mr->mr_sg[i], seg->mr_page,
-			    seg->mr_len, seg->mr_offset);
+	i = 0;
 
-		++seg;
-		++i;
-		if (ep->re_mrtype == IB_MR_TYPE_SG_GAPS)
-			continue;
-		if ((i < nsegs && seg->mr_offset) ||
-		    offset_in_page((seg-1)->mr_offset + (seg-1)->mr_len))
-			break;
+	/* Head kvec */
+	if (!(cur->xc_flags & XC_HEAD_DONE)) {
+		const struct kvec *head = &xdrbuf->head[0];
+
+		sg_set_page(&mr->mr_sg[i],
+			    virt_to_page(head->iov_base),
+			    head->iov_len,
+			    offset_in_page(head->iov_base));
+		cur->xc_flags |= XC_HEAD_DONE;
+		i++;
+		/* Without sg-gap support, each non-contiguous region
+		 * must be registered as a separate MR.  Returning
+		 * here after the head kvec causes the caller to
+		 * invoke frwr_map() again for the page list and
+		 * tail.
+		 */
+		if (!sg_gaps)
+			goto finish;
 	}
+
+	/* Page list */
+	if (!(cur->xc_flags & XC_PAGES_DONE) && xdrbuf->page_len) {
+		unsigned int page_base, remaining;
+		struct page **ppages;
+
+		remaining = xdrbuf->page_len - cur->xc_page_offset;
+		page_base = offset_in_page(xdrbuf->page_base +
+					   cur->xc_page_offset);
+		ppages = xdrbuf->pages +
+			 ((xdrbuf->page_base + cur->xc_page_offset)
+			  >> PAGE_SHIFT);
+
+		while (remaining > 0 && i < max_depth) {
+			unsigned int len;
+
+			len = min_t(unsigned int,
+				    PAGE_SIZE - page_base, remaining);
+			sg_set_page(&mr->mr_sg[i], *ppages,
+				    len, page_base);
+			cur->xc_page_offset += len;
+			i++;
+			ppages++;
+			remaining -= len;
+
+			if (!sg_gaps && remaining > 0 &&
+			    offset_in_page(page_base + len))
+				goto finish;
+			page_base = 0;
+		}
+		if (remaining == 0)
+			cur->xc_flags |= XC_PAGES_DONE;
+	} else if (!(cur->xc_flags & XC_PAGES_DONE)) {
+		cur->xc_flags |= XC_PAGES_DONE;
+	}
+
+	/* Tail kvec */
+	if (!(cur->xc_flags & XC_TAIL_DONE) && xdrbuf->tail[0].iov_len &&
+	    i < max_depth) {
+		const struct kvec *tail = &xdrbuf->tail[0];
+
+		if (!sg_gaps && i > 0) {
+			struct scatterlist *prev = &mr->mr_sg[i - 1];
+
+			if (offset_in_page(prev->offset + prev->length) ||
+			    offset_in_page(tail->iov_base))
+				goto finish;
+		}
+		sg_set_page(&mr->mr_sg[i],
+			    virt_to_page(tail->iov_base),
+			    tail->iov_len,
+			    offset_in_page(tail->iov_base));
+		cur->xc_flags |= XC_TAIL_DONE;
+		i++;
+	} else if (!(cur->xc_flags & XC_TAIL_DONE) &&
+		   !xdrbuf->tail[0].iov_len) {
+		cur->xc_flags |= XC_TAIL_DONE;
+	}
+
+finish:
 	mr->mr_dir = rpcrdma_data_dir(writing);
 	mr->mr_nents = i;
 
@@ -338,15 +412,15 @@ struct rpcrdma_mr_seg *frwr_map(struct rpcrdma_xprt *r_xprt,
 	mr->mr_offset = ibmr->iova;
 	trace_xprtrdma_mr_map(mr);
 
-	return seg;
+	return 0;
 
 out_dmamap_err:
 	trace_xprtrdma_frwr_sgerr(mr, i);
-	return ERR_PTR(-EIO);
+	return -EIO;
 
 out_mapmr_err:
 	trace_xprtrdma_frwr_maperr(mr, n);
-	return ERR_PTR(-EIO);
+	return -EIO;
 }
 
 /**
@@ -404,7 +478,7 @@ int frwr_send(struct rpcrdma_xprt *r_xprt, struct rpcrdma_req *req)
 		++num_wrs;
 	}
 
-	if ((kref_read(&req->rl_kref) > 1) || num_wrs > ep->re_send_count) {
+	if (req->rl_sendctx->sc_unmap_count || num_wrs > ep->re_send_count) {
 		send_wr->send_flags |= IB_SEND_SIGNALED;
 		ep->re_send_count = min_t(unsigned int, ep->re_send_batch,
 					  num_wrs - ep->re_send_count);
@@ -468,39 +542,59 @@ static void frwr_wc_localinv(struct ib_cq *cq, struct ib_wc *wc)
  * @cq: completion queue
  * @wc: WCE for a completed LocalInv WR
  *
- * Awaken anyone waiting for an MR to finish being fenced.
+ * Wake frwr_unmap_sync() after the final LOCAL_INV completion.
  */
 static void frwr_wc_localinv_wake(struct ib_cq *cq, struct ib_wc *wc)
 {
 	struct ib_cqe *cqe = wc->wr_cqe;
 	struct rpcrdma_mr *mr = container_of(cqe, struct rpcrdma_mr, mr_cqe);
+	struct rpcrdma_req *req = mr->mr_req;
 
 	/* WARNING: Only wr_cqe and status are reliable at this point */
 	trace_xprtrdma_wc_li_wake(wc, &mr->mr_cid);
 	frwr_mr_done(wc, mr);
-	complete(&mr->mr_linv_done);
+	complete(&req->rl_linv_done);
 
 	rpcrdma_flush_disconnect(cq->cq_context, wc);
 }
 
 /**
- * frwr_unmap_sync - invalidate memory regions that were registered for @req
+ * frwr_unmap_sync - synchronously invalidate MRs registered for @req
  * @r_xprt: controlling transport instance
- * @req: rpcrdma_req with a non-empty list of MRs to process
+ * @req: request whose registered MRs are to be invalidated
  *
- * Sleeps until it is safe for the host CPU to access the previously mapped
- * memory regions. This guarantees that registered MRs are properly fenced
- * from the server before the RPC consumer accesses the data in them. It
- * also ensures proper Send flow control: waking the next RPC waits until
- * this RPC has relinquished all its Send Queue entries.
+ * If @req still owns registered MRs after synchronizing with transport
+ * disconnect, post a chain of LOCAL_INV Work Requests and wait for the
+ * final completion. On successful completion, this fences the mapped
+ * regions from remote access and preserves Send Queue flow control.
+ *
+ * A concurrent disconnect can reset @req while this function waits for
+ * the read side. In that case the MRs have already been released and no
+ * LOCAL_INV Work Requests are posted.
+ *
+ * Context: Process context. Takes and releases
+ *	    @r_xprt->rx_unmap_rwsem for read. May sleep.
  */
 void frwr_unmap_sync(struct rpcrdma_xprt *r_xprt, struct rpcrdma_req *req)
 {
 	struct ib_send_wr *first, **prev, *last;
-	struct rpcrdma_ep *ep = r_xprt->rx_ep;
 	const struct ib_send_wr *bad_wr;
+	struct rpcrdma_ep *ep;
 	struct rpcrdma_mr *mr;
 	int rc;
+
+	/* serialize against rpcrdma_xprt_disconnect() */
+	down_read(&r_xprt->rx_unmap_rwsem);
+
+	/*
+	 * Disconnect can reset this request while we wait for the read side.
+	 * Recheck rl_registered in case rx_ep now refers to a new connection.
+	 */
+	ep = r_xprt->rx_ep;
+	if (!ep || list_empty(&req->rl_registered)) {
+		up_read(&r_xprt->rx_unmap_rwsem);
+		return;
+	}
 
 	/* ORDER: Invalidate all of the MRs first
 	 *
@@ -528,37 +622,35 @@ void frwr_unmap_sync(struct rpcrdma_xprt *r_xprt, struct rpcrdma_req *req)
 		prev = &last->next;
 	} while ((mr = rpcrdma_mr_pop(&req->rl_registered)));
 
-	mr = container_of(last, struct rpcrdma_mr, mr_invwr);
-
 	/* Strong send queue ordering guarantees that when the
 	 * last WR in the chain completes, all WRs in the chain
 	 * are complete.
 	 */
 	last->wr_cqe->done = frwr_wc_localinv_wake;
-	reinit_completion(&mr->mr_linv_done);
+	reinit_completion(&req->rl_linv_done);
 
-	/* Transport disconnect drains the receive CQ before it
-	 * replaces the QP. The RPC reply handler won't call us
-	 * unless re_id->qp is a valid pointer.
+	/*
+	 * The read side prevents disconnect from draining this QP until the
+	 * LOCAL_INV chain has been submitted.
 	 */
 	bad_wr = NULL;
 	rc = ib_post_send(ep->re_id->qp, first, &bad_wr);
+	if (rc) {
+		/* On error, the MRs get destroyed once the QP has drained. */
+		trace_xprtrdma_post_linv_err(req, rc);
+
+		/* Force a connection loss to ensure complete recovery.
+		 */
+		rpcrdma_force_disconnect(ep);
+	}
+	up_read(&r_xprt->rx_unmap_rwsem);
 
 	/* The final LOCAL_INV WR in the chain is supposed to
 	 * do the wake. If it was never posted, the wake will
 	 * not happen, so don't wait in that case.
 	 */
 	if (bad_wr != first)
-		wait_for_completion(&mr->mr_linv_done);
-	if (!rc)
-		return;
-
-	/* On error, the MRs get destroyed once the QP has drained. */
-	trace_xprtrdma_post_linv_err(req, rc);
-
-	/* Force a connection loss to ensure complete recovery.
-	 */
-	rpcrdma_force_disconnect(ep);
+		wait_for_completion(&req->rl_linv_done);
 }
 
 /**
@@ -669,9 +761,13 @@ void frwr_unmap_async(struct rpcrdma_xprt *r_xprt, struct rpcrdma_req *req)
  */
 int frwr_wp_create(struct rpcrdma_xprt *r_xprt)
 {
+	struct rpcrdma_buffer *buf = &r_xprt->rx_buf;
 	struct rpcrdma_ep *ep = r_xprt->rx_ep;
-	struct rpcrdma_mr_seg seg;
+	struct ib_reg_wr *reg_wr;
 	struct rpcrdma_mr *mr;
+	struct ib_mr *ibmr;
+	int dma_nents;
+	int ret;
 
 	mr = rpcrdma_mr_get(r_xprt);
 	if (!mr)
@@ -679,11 +775,39 @@ int frwr_wp_create(struct rpcrdma_xprt *r_xprt)
 	mr->mr_req = NULL;
 	ep->re_write_pad_mr = mr;
 
-	seg.mr_len = XDR_UNIT;
-	seg.mr_page = virt_to_page(ep->re_write_pad);
-	seg.mr_offset = offset_in_page(ep->re_write_pad);
-	if (IS_ERR(frwr_map(r_xprt, &seg, 1, true, xdr_zero, mr)))
-		return -EIO;
+	sg_init_table(mr->mr_sg, 1);
+	sg_set_page(mr->mr_sg, virt_to_page(ep->re_write_pad),
+		    XDR_UNIT, offset_in_page(ep->re_write_pad));
+
+	mr->mr_dir = DMA_FROM_DEVICE;
+	mr->mr_nents = 1;
+	dma_nents = ib_dma_map_sg(ep->re_id->device, mr->mr_sg,
+				  mr->mr_nents, mr->mr_dir);
+	if (!dma_nents) {
+		ret = -EIO;
+		goto out_mr;
+	}
+	mr->mr_device = ep->re_id->device;
+
+	ibmr = mr->mr_ibmr;
+	if (ib_map_mr_sg(ibmr, mr->mr_sg, dma_nents, NULL,
+			 PAGE_SIZE) != dma_nents) {
+		ret = -EIO;
+		goto out_unmap;
+	}
+
+	/* IOVA is not tagged with an XID; the write-pad is not RPC-specific. */
+	ib_update_fast_reg_key(ibmr, ib_inc_rkey(ibmr->rkey));
+
+	reg_wr = &mr->mr_regwr;
+	reg_wr->mr = ibmr;
+	reg_wr->key = ibmr->rkey;
+	reg_wr->access = IB_ACCESS_REMOTE_WRITE | IB_ACCESS_LOCAL_WRITE;
+
+	mr->mr_handle = ibmr->rkey;
+	mr->mr_length = ibmr->length;
+	mr->mr_offset = ibmr->iova;
+
 	trace_xprtrdma_mr_fastreg(mr);
 
 	mr->mr_cqe.done = frwr_wc_fastreg;
@@ -693,5 +817,16 @@ int frwr_wp_create(struct rpcrdma_xprt *r_xprt)
 	mr->mr_regwr.wr.opcode = IB_WR_REG_MR;
 	mr->mr_regwr.wr.send_flags = 0;
 
-	return ib_post_send(ep->re_id->qp, &mr->mr_regwr.wr, NULL);
+	ret = ib_post_send(ep->re_id->qp, &mr->mr_regwr.wr, NULL);
+	if (!ret)
+		return 0;
+
+out_unmap:
+	frwr_mr_unmap(mr);
+out_mr:
+	ep->re_write_pad_mr = NULL;
+	spin_lock(&buf->rb_lock);
+	rpcrdma_mr_push(mr, &buf->rb_mrs);
+	spin_unlock(&buf->rb_lock);
+	return ret;
 }

@@ -689,10 +689,8 @@ static int gfar_ethflow_to_filer_table(struct gfar_private *priv, u64 ethflow,
 	int j = MAX_FILER_IDX, l = 0x0;
 	int ret = 1;
 
-	local_rqfpr = kmalloc_array(MAX_FILER_IDX + 1, sizeof(unsigned int),
-				    GFP_KERNEL);
-	local_rqfcr = kmalloc_array(MAX_FILER_IDX + 1, sizeof(unsigned int),
-				    GFP_KERNEL);
+	local_rqfpr = kmalloc_objs(unsigned int, MAX_FILER_IDX + 1);
+	local_rqfcr = kmalloc_objs(unsigned int, MAX_FILER_IDX + 1);
 	if (!local_rqfpr || !local_rqfcr) {
 		ret = 0;
 		goto err;
@@ -1241,7 +1239,7 @@ static int gfar_process_filer_changes(struct gfar_private *priv)
 	s32 ret = 0;
 
 	/* So index is set to zero, too! */
-	tab = kzalloc(sizeof(*tab), GFP_KERNEL);
+	tab = kzalloc_obj(*tab);
 	if (tab == NULL)
 		return -ENOMEM;
 
@@ -1293,7 +1291,7 @@ static int gfar_add_cls(struct gfar_private *priv,
 	struct ethtool_flow_spec_container *temp, *comp;
 	int ret = 0;
 
-	temp = kmalloc(sizeof(*temp), GFP_KERNEL);
+	temp = kmalloc_obj(*temp);
 	if (temp == NULL)
 		return -ENOMEM;
 	memcpy(&temp->fs, flow, sizeof(temp->fs));
@@ -1431,6 +1429,13 @@ static int gfar_set_nfc(struct net_device *dev, struct ethtool_rxnfc *cmd)
 	return ret;
 }
 
+static u32 gfar_get_rx_ring_count(struct net_device *dev)
+{
+	struct gfar_private *priv = netdev_priv(dev);
+
+	return priv->num_rx_queues;
+}
+
 static int gfar_get_nfc(struct net_device *dev, struct ethtool_rxnfc *cmd,
 			u32 *rule_locs)
 {
@@ -1438,9 +1443,6 @@ static int gfar_get_nfc(struct net_device *dev, struct ethtool_rxnfc *cmd,
 	int ret = 0;
 
 	switch (cmd->cmd) {
-	case ETHTOOL_GRXRINGS:
-		cmd->data = priv->num_rx_queues;
-		break;
 	case ETHTOOL_GRXCLSRLCNT:
 		cmd->rule_cnt = priv->rx_list.count;
 		break;
@@ -1519,6 +1521,7 @@ const struct ethtool_ops gfar_ethtool_ops = {
 #endif
 	.set_rxnfc = gfar_set_nfc,
 	.get_rxnfc = gfar_get_nfc,
+	.get_rx_ring_count = gfar_get_rx_ring_count,
 	.set_rxfh_fields = gfar_set_rxfh_fields,
 	.get_ts_info = gfar_get_ts_info,
 	.get_link_ksettings = phy_ethtool_get_link_ksettings,

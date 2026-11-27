@@ -32,9 +32,15 @@
 
 #include <drm/ttm/ttm_placement.h>
 
-static void vmw_bo_release(struct vmw_bo *vbo)
+/**
+ * vmw_bo_free - vmw_bo destructor
+ *
+ * @bo: Pointer to the embedded struct ttm_buffer_object
+ */
+static void vmw_bo_free(struct ttm_buffer_object *bo)
 {
 	struct vmw_resource *res;
+	struct vmw_bo *vbo = to_vmw_bo(&bo->base);
 
 	WARN_ON(kref_read(&vbo->tbo.base.refcount) != 0);
 	vmw_bo_unmap(vbo);
@@ -49,6 +55,8 @@ static void vmw_bo_release(struct vmw_bo *vbo)
 			/* Reserve and switch the backing mob. */
 			mutex_lock(&res->dev_priv->cmdbuf_mutex);
 			(void)vmw_resource_reserve(res, false, true);
+			/* TTM drops the reservation before calling the destructor. */
+			dma_resv_lock(bo->base.resv, NULL);
 			vmw_resource_mob_detach(res);
 			if (res->dirty)
 				res->func->dirty_free(res);
@@ -56,26 +64,15 @@ static void vmw_bo_release(struct vmw_bo *vbo)
 				vmw_bo_dirty_release(res->guest_memory_bo);
 			res->guest_memory_bo = NULL;
 			res->guest_memory_offset = 0;
+			dma_resv_unlock(bo->base.resv);
 			vmw_resource_unreserve(res, true, false, false, NULL,
 					       0);
 			mutex_unlock(&res->dev_priv->cmdbuf_mutex);
 		}
 		vmw_surface_unreference(&vbo->dumb_surface);
 	}
-	drm_gem_object_release(&vbo->tbo.base);
-}
-
-/**
- * vmw_bo_free - vmw_bo destructor
- *
- * @bo: Pointer to the embedded struct ttm_buffer_object
- */
-static void vmw_bo_free(struct ttm_buffer_object *bo)
-{
-	struct vmw_bo *vbo = to_vmw_bo(&bo->base);
-
 	WARN_ON(!RB_EMPTY_ROOT(&vbo->res_tree));
-	vmw_bo_release(vbo);
+	drm_gem_object_release(&vbo->tbo.base);
 	WARN_ON(vbo->dirty);
 	kfree(vbo);
 }
@@ -455,7 +452,7 @@ int vmw_bo_create(struct vmw_private *vmw,
 {
 	int ret;
 
-	*p_bo = kmalloc(sizeof(**p_bo), GFP_KERNEL);
+	*p_bo = kmalloc_obj(**p_bo);
 	if (unlikely(!*p_bo)) {
 		DRM_ERROR("Failed to allocate a buffer.\n");
 		return -ENOMEM;

@@ -250,7 +250,7 @@ static int xgene_xfi_mdio_read(struct mii_bus *bus, int phy_id, int reg)
 	} while ((status & BUSY_MASK) && timeout--);
 
 	if (status & BUSY_MASK) {
-		pr_err("XGENET_MII_MGMT write failed\n");
+		pr_err("XGENET_MII_MGMT read failed\n");
 		return -EBUSY;
 	}
 
@@ -336,7 +336,7 @@ static int xgene_mdio_probe(struct platform_device *pdev)
 	if (!mdio_id)
 		return -ENODEV;
 
-	pdata = devm_kzalloc(dev, sizeof(struct xgene_mdio_pdata), GFP_KERNEL);
+	pdata = devm_kzalloc_obj(dev, struct xgene_mdio_pdata);
 	if (!pdata)
 		return -ENOMEM;
 	pdata->mdio_id = mdio_id;

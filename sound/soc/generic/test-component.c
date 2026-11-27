@@ -191,13 +191,6 @@ static int test_dai_trigger(struct snd_pcm_substream *substream, int cmd, struct
 }
 
 static const u64 test_dai_formats =
-	/*
-	 * Select below from Sound Card, not auto
-	 *	SND_SOC_POSSIBLE_DAIFMT_BP_FP
-	 *	SND_SOC_POSSIBLE_DAIFMT_BC_FP
-	 *	SND_SOC_POSSIBLE_DAIFMT_BP_FC
-	 *	SND_SOC_POSSIBLE_DAIFMT_BC_FC
-	 */
 	SND_SOC_POSSIBLE_DAIFMT_I2S	|
 	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
 	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
@@ -273,8 +266,8 @@ static int test_component_resume(struct snd_soc_component *component)
 }
 
 #define PREALLOC_BUFFER		(32 * 1024)
-static int test_component_pcm_construct(struct snd_soc_component *component,
-					struct snd_soc_pcm_runtime *rtd)
+static int test_component_pcm_new(struct snd_soc_component *component,
+				  struct snd_soc_pcm_runtime *rtd)
 {
 	mile_stone(component);
 
@@ -287,8 +280,8 @@ static int test_component_pcm_construct(struct snd_soc_component *component,
 	return 0;
 }
 
-static void test_component_pcm_destruct(struct snd_soc_component *component,
-					struct snd_pcm *pcm)
+static void test_component_pcm_free(struct snd_soc_component *component,
+				    struct snd_pcm *pcm)
 {
 	mile_stone(component);
 }
@@ -545,10 +538,10 @@ static int test_driver_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	priv	= devm_kzalloc(dev, sizeof(*priv),		GFP_KERNEL);
-	cdriv	= devm_kzalloc(dev, sizeof(*cdriv),		GFP_KERNEL);
-	ddriv	= devm_kcalloc(dev, num, sizeof(*ddriv), 	GFP_KERNEL);
-	dname	= devm_kcalloc(dev, num, sizeof(*dname), 	GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
+	cdriv = devm_kzalloc_obj(dev, *cdriv);
+	ddriv	= devm_kzalloc_objs(dev, *ddriv, num);
+	dname	= devm_kzalloc_objs(dev, *dname, num);
 	if (!priv || !cdriv || !ddriv || !dname || !adata)
 		return -EINVAL;
 
@@ -562,7 +555,7 @@ static int test_driver_probe(struct platform_device *pdev)
 
 	if (adata->is_cpu) {
 		cdriv->name			= "test_cpu";
-		cdriv->pcm_construct		= test_component_pcm_construct;
+		cdriv->pcm_new			= test_component_pcm_new;
 		cdriv->pointer			= test_component_pointer;
 		cdriv->trigger			= test_component_trigger;
 		cdriv->legacy_dai_naming	= 1;
@@ -597,7 +590,7 @@ static int test_driver_probe(struct platform_device *pdev)
 		cdriv->be_hw_params_fixup	= test_component_be_hw_params_fixup;
 
 		if (adata->is_cpu)
-			cdriv->pcm_destruct	= test_component_pcm_destruct;
+			cdriv->pcm_free	= test_component_pcm_free;
 	}
 
 	i = 0;

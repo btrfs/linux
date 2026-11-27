@@ -11,8 +11,7 @@
  *
  */
 
-#define KMSG_COMPONENT "vmlogrdr"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "vmlogrdr: " fmt
 
 #include <linux/module.h>
 #include <linux/init.h>
@@ -445,7 +444,7 @@ static int vmlogrdr_receive_data(struct vmlogrdr_priv_t *priv)
 		spin_unlock_bh(&priv->priv_lock);
 		/* An rc of 5 indicates that the record was bigger than
 		 * the buffer, which is OK for us. A 9 indicates that the
-		 * record was purged befor we could receive it.
+		 * record was purged before we could receive it.
 		 */
 		if (rc == 5)
 			rc = 0;

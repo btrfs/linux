@@ -91,6 +91,7 @@ struct thc_prd_table {
  * @dir: Direction of DMA for this config
  * @prd_tbls: PRD tables for current DMA
  * @sgls: Array of pointers to scatter-gather lists
+ * @sgls_nent_pages: Number of pages per scatter-gather list
  * @sgls_nent: Actual number of entries per scatter-gather list
  * @prd_tbl_num: Actual number of PRD tables
  * @max_packet_size: Size of the buffer needed for 1 DMA message (1 PRD table)
@@ -107,6 +108,7 @@ struct thc_dma_configuration {
 
 	struct thc_prd_table *prd_tbls;
 	struct scatterlist *sgls[PRD_TABLES_NUM];
+	u8 sgls_nent_pages[PRD_TABLES_NUM];
 	u8 sgls_nent[PRD_TABLES_NUM];
 	u8 prd_tbl_num;
 
@@ -143,6 +145,7 @@ int  thc_dma_allocate(struct thc_device *dev);
 int  thc_dma_configure(struct thc_device *dev);
 void thc_dma_unconfigure(struct thc_device *dev);
 void thc_dma_release(struct thc_device *dev);
+int  thc_rxdma_reset(struct thc_device *dev);
 int  thc_rxdma_read(struct thc_device *dev, enum thc_dma_channel dma_channel,
 		    void *read_buff, size_t *read_len, int *read_finished);
 int  thc_swdma_read(struct thc_device *dev, void *write_buff, size_t write_len,

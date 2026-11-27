@@ -1384,7 +1384,7 @@ static irqreturn_t npcm_i2c_int_slave_handler(struct npcm_i2c *bus)
 		 */
 		bus->operation = I2C_NO_OPER;
 		bus->own_slave_addr = 0xFF;
-		i2c_slave_event(bus->slave, I2C_SLAVE_STOP, 0);
+		i2c_slave_event(bus->slave, I2C_SLAVE_STOP, NULL);
 		iowrite8(NPCM_I2CST_SLVSTP, bus->reg + NPCM_I2CST);
 		if (bus->fifo_use) {
 			npcm_i2c_clear_fifo_int(bus);
@@ -2500,7 +2500,7 @@ static int npcm_i2c_probe_bus(struct platform_device *pdev)
 	int irq;
 	int ret;
 
-	bus = devm_kzalloc(&pdev->dev, sizeof(*bus), GFP_KERNEL);
+	bus = devm_kzalloc_obj(&pdev->dev, *bus);
 	if (!bus)
 		return -ENOMEM;
 

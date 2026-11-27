@@ -8,6 +8,7 @@
  * Pasha Tatashin <pasha.tatashin@soleen.com>
  */
 
+#include <linux/cfi_types.h>
 #include <linux/kexec.h>
 #include <linux/linkage.h>
 
@@ -32,11 +33,13 @@
  * new image to its final location.  To assure that the
  * arm64_relocate_new_kernel routine which does that copy is not overwritten,
  * all code and data needed by arm64_relocate_new_kernel must be between the
- * symbols arm64_relocate_new_kernel and arm64_relocate_new_kernel_end.  The
- * machine_kexec() routine will copy arm64_relocate_new_kernel to the kexec
+ * symbols __relocate_new_kernel_start and __relocate_new_kernel_end.  The
+ * machine_kexec_post_load() routine will copy that whole region to the kexec
  * safe memory that has been set up to be preserved during the copy operation.
+ *
+ * Called indirectly by machine_kexec(), this routine needs a kCFI type hash.
  */
-SYM_CODE_START(arm64_relocate_new_kernel)
+SYM_TYPED_FUNC_START(arm64_relocate_new_kernel)
 	/*
 	 * The kimage structure isn't allocated specially and may be clobbered
 	 * during relocation. We must load any values we need from it prior to
@@ -64,7 +67,8 @@ SYM_CODE_START(arm64_relocate_new_kernel)
 	mov	x19, x13
 	copy_page x13, x12, x1, x2, x3, x4, x5, x6, x7, x8
 	add	x1, x19, #PAGE_SIZE
-	dcache_by_myline_op civac, sy, x19, x1, x15, x20
+	dcache_by_myline_op_nosync civac, x19, x1, x15, x20
+	dsb	sy
 	b	.Lnext
 .Ltest_indirection:
 	tbz	x16, IND_INDIRECTION_BIT, .Ltest_destination
@@ -97,4 +101,4 @@ SYM_CODE_START(arm64_relocate_new_kernel)
 	mov	x2, xzr
 	mov	x3, xzr
 	br	x28				/* Jumps from el1 */
-SYM_CODE_END(arm64_relocate_new_kernel)
+SYM_FUNC_END(arm64_relocate_new_kernel)

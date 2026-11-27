@@ -9,7 +9,6 @@
 #include <linux/cleanup.h>
 #include <linux/iio/consumer.h>
 #include <linux/minmax.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/string_helpers.h>
@@ -131,7 +130,7 @@ static_assert(ARRAY_SIZE(routes) >= 2, "2 routes are needed");
 static int audio_iio_aux_add_dapms(struct snd_soc_component *component,
 				   struct audio_iio_aux_chan *chan)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	int ret;
 
 	/* Allocated names are not needed afterwards (duplicated in ASoC internals) */
@@ -238,7 +237,7 @@ static int audio_iio_aux_probe(struct platform_device *pdev)
 	if (count < 0)
 		return dev_err_probe(dev, count, "failed to count io-channel-names\n");
 
-	iio_aux = devm_kzalloc(dev, struct_size(iio_aux, chans, count), GFP_KERNEL);
+	iio_aux = devm_kzalloc_flex(dev, *iio_aux, chans, count);
 	if (!iio_aux)
 		return -ENOMEM;
 
@@ -246,9 +245,8 @@ static int audio_iio_aux_probe(struct platform_device *pdev)
 
 	iio_aux->num_chans = count;
 
-	const char **names __free(kfree) = kcalloc(iio_aux->num_chans,
-						   sizeof(*names),
-						   GFP_KERNEL);
+	const char **names __free(kfree) = kzalloc_objs(*names,
+							iio_aux->num_chans);
 	if (!names)
 		return -ENOMEM;
 
@@ -312,3 +310,4 @@ module_platform_driver(audio_iio_aux_driver);
 MODULE_AUTHOR("Herve Codina <herve.codina@bootlin.com>");
 MODULE_DESCRIPTION("IIO ALSA SoC aux driver");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("IIO_CONSUMER");

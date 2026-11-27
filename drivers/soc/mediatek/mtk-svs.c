@@ -9,6 +9,7 @@
 #include <linux/bits.h>
 #include <linux/clk.h>
 #include <linux/completion.h>
+#include <linux/cleanup.h>
 #include <linux/cpu.h>
 #include <linux/cpuidle.h>
 #include <linux/debugfs.h>
@@ -789,7 +790,7 @@ static ssize_t svs_enable_debug_write(struct file *filp,
 	struct svs_bank *svsb = file_inode(filp)->i_private;
 	struct svs_platform *svsp = dev_get_drvdata(svsb->dev);
 	int enabled, ret;
-	char *buf = NULL;
+	char *buf __free(kfree) = NULL;
 
 	if (count >= PAGE_SIZE)
 		return -EINVAL;
@@ -806,8 +807,6 @@ static ssize_t svs_enable_debug_write(struct file *filp,
 		svs_bank_disable_and_restore_default_volts(svsp, svsb);
 		svsb->mode_support = SVSB_MODE_ALL_DISABLE;
 	}
-
-	kfree(buf);
 
 	return count;
 }
@@ -1784,7 +1783,7 @@ static int svs_bank_resource_setup(struct svs_platform *svsp)
 			return -EINVAL;
 		}
 
-		svsb->dev = devm_kzalloc(svsp->dev, sizeof(*svsb->dev), GFP_KERNEL);
+		svsb->dev = devm_kzalloc_obj(svsp->dev, *svsb->dev);
 		if (!svsb->dev)
 			return -ENOMEM;
 
@@ -2845,7 +2844,7 @@ static int svs_probe(struct platform_device *pdev)
 
 	svsp_data = of_device_get_match_data(&pdev->dev);
 
-	svsp = devm_kzalloc(&pdev->dev, sizeof(*svsp), GFP_KERNEL);
+	svsp = devm_kzalloc_obj(&pdev->dev, *svsp);
 	if (!svsp)
 		return -ENOMEM;
 

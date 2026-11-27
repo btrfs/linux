@@ -48,7 +48,7 @@ struct ptr_ring {
  */
 static inline bool __ptr_ring_full(struct ptr_ring *r)
 {
-	return r->queue[r->producer];
+	return data_race(r->queue[r->producer]);
 }
 
 static inline bool ptr_ring_full(struct ptr_ring *r)
@@ -96,6 +96,26 @@ static inline bool ptr_ring_full_bh(struct ptr_ring *r)
 	return ret;
 }
 
+/* Report whether the next __ptr_ring_produce() has room for one entry:
+ * 0 means the single slot at r->queue[r->producer] is free, -ENOSPC means
+ * the ring is full, which is transient, and -EINVAL means r->size is 0,
+ * which is permanent. A caller that stops producing and waits for space
+ * must therefore do so only for -ENOSPC.
+ *
+ * Note: callers invoking this in a loop must use a compiler barrier,
+ * for example cpu_relax(). Callers must hold producer_lock.
+ */
+static inline int __ptr_ring_check_produce(struct ptr_ring *r)
+{
+	if (unlikely(!r->size))
+		return -EINVAL;
+
+	if (data_race(r->queue[r->producer]))
+		return -ENOSPC;
+
+	return 0;
+}
+
 /* Note: callers invoking this in a loop must use a compiler barrier,
  * for example cpu_relax(). Callers must hold producer_lock.
  * Callers are responsible for making sure pointer that is being queued
@@ -103,8 +123,10 @@ static inline bool ptr_ring_full_bh(struct ptr_ring *r)
  */
 static inline int __ptr_ring_produce(struct ptr_ring *r, void *ptr)
 {
-	if (unlikely(!r->size) || r->queue[r->producer])
-		return -ENOSPC;
+	int ret = __ptr_ring_check_produce(r);
+
+	if (ret)
+		return ret;
 
 	/* Make sure the pointer we are storing points to a valid data. */
 	/* Pairs with the dependency ordering in __ptr_ring_consume. */
@@ -194,7 +216,7 @@ static inline void *__ptr_ring_peek(struct ptr_ring *r)
 static inline bool __ptr_ring_empty(struct ptr_ring *r)
 {
 	if (likely(r->size))
-		return !r->queue[READ_ONCE(r->consumer_head)];
+		return !data_race(r->queue[READ_ONCE(r->consumer_head)]);
 	return true;
 }
 
@@ -256,7 +278,7 @@ static inline void __ptr_ring_zero_tail(struct ptr_ring *r, int consumer_head)
 	 * besides the first one until we write out all entries.
 	 */
 	while (likely(head > r->consumer_tail))
-		r->queue[--head] = NULL;
+		data_race(r->queue[--head] = NULL);
 
 	r->consumer_tail = consumer_head;
 }

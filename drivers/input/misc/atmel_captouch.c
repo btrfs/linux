@@ -177,7 +177,7 @@ static int atmel_captouch_probe(struct i2c_client *client)
 		return -EINVAL;
 	}
 
-	capdev = devm_kzalloc(dev, sizeof(*capdev), GFP_KERNEL);
+	capdev = devm_kzalloc_obj(dev, *capdev);
 	if (!capdev)
 		return -ENOMEM;
 
@@ -257,7 +257,7 @@ static const struct of_device_id atmel_captouch_of_id[] = {
 MODULE_DEVICE_TABLE(of, atmel_captouch_of_id);
 
 static const struct i2c_device_id atmel_captouch_id[] = {
-	{ "atmel_captouch" },
+	{ .name = "atmel_captouch" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, atmel_captouch_id);

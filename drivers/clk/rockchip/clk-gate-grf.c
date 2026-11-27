@@ -73,7 +73,7 @@ struct clk *rockchip_clk_register_gate_grf(const char *name,
 		u8 gate_flags)
 {
 	struct rockchip_gate_grf *gate;
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	struct clk *clk;
 
 	if (IS_ERR(regmap)) {
@@ -81,7 +81,7 @@ struct clk *rockchip_clk_register_gate_grf(const char *name,
 		return ERR_PTR(-EOPNOTSUPP);
 	}
 
-	gate = kzalloc(sizeof(*gate), GFP_KERNEL);
+	gate = kzalloc_obj(*gate);
 	if (!gate)
 		return ERR_PTR(-ENOMEM);
 

@@ -272,7 +272,7 @@ static int s32g_rtc_probe(struct platform_device *pdev)
 	unsigned long rtc_hz;
 	int ret;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -366,6 +366,7 @@ static const struct of_device_id rtc_dt_ids[] = {
 	{ .compatible = "nxp,s32g2-rtc", .data = &rtc_s32g2_data },
 	{ /* sentinel */ },
 };
+MODULE_DEVICE_TABLE(of, rtc_dt_ids);
 
 static DEFINE_SIMPLE_DEV_PM_OPS(s32g_rtc_pm_ops,
 			 s32g_rtc_suspend, s32g_rtc_resume);

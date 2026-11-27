@@ -40,12 +40,13 @@ config IOMMU_IO_PGTABLE_LPAE
 	  sizes at both stage-1 and stage-2, as well as address spaces
 	  up to 48-bits in size.
 
-config IOMMU_IO_PGTABLE_LPAE_SELFTEST
-	bool "LPAE selftests"
-	depends on IOMMU_IO_PGTABLE_LPAE
+config IOMMU_IO_PGTABLE_LPAE_KUNIT_TEST
+	tristate "KUnit tests for LPAE"
+	depends on IOMMU_IO_PGTABLE_LPAE && KUNIT
+	default KUNIT_ALL_TESTS
 	help
-	  Enable self-tests for LPAE page table allocator. This performs
-	  a series of page-table consistency checks during boot.
+	  Enable kunit tests for LPAE page table allocator. This performs
+	  a series of page-table consistency checks.
 
 	  If unsure, say N here.
 
@@ -194,6 +195,7 @@ config MSM_IOMMU
 source "drivers/iommu/amd/Kconfig"
 source "drivers/iommu/arm/Kconfig"
 source "drivers/iommu/intel/Kconfig"
+source "drivers/iommu/hyperv/Kconfig"
 source "drivers/iommu/iommufd/Kconfig"
 source "drivers/iommu/riscv/Kconfig"
 
@@ -247,7 +249,7 @@ config SUN50I_IOMMU
 
 config TEGRA_IOMMU_SMMU
 	bool "NVIDIA Tegra SMMU Support"
-	depends on ARCH_TEGRA
+	depends on ARCH_TEGRA || COMPILE_TEST
 	depends on TEGRA_AHB
 	depends on TEGRA_MC
 	select IOMMU_API
@@ -302,7 +304,7 @@ config SPAPR_TCE_IOMMU
 
 config APPLE_DART
 	tristate "Apple DART IOMMU Support"
-	depends on ARCH_APPLE || COMPILE_TEST
+	depends on ARCH_APPLE || (COMPILE_TEST && 64BIT)
 	depends on !GENERIC_ATOMIC64	# for IOMMU_IO_PGTABLE_DART
 	select IOMMU_API
 	select IOMMU_IO_PGTABLE_DART
@@ -350,15 +352,6 @@ config MTK_IOMMU_V1
 
 	  if unsure, say N here.
 
-config HYPERV_IOMMU
-	bool "Hyper-V IRQ Handling"
-	depends on HYPERV && X86
-	select IOMMU_API
-	default HYPERV
-	help
-	  Stub IOMMU driver to handle IRQs to support Hyper-V Linux
-	  guest and root partitions.
-
 config VIRTIO_IOMMU
 	tristate "Virtio IOMMU driver"
 	depends on VIRTIO
@@ -383,4 +376,51 @@ config SPRD_IOMMU
 
 	  Say Y here if you want to use the multimedia devices listed above.
 
+config VSI_IOMMU
+	tristate "Verisilicon IOMMU Support"
+	depends on (ARCH_ROCKCHIP && ARM64) || COMPILE_TEST
+	select IOMMU_API
+	help
+	  Support for IOMMUs used by Verisilicon sub-systems like video
+	  decoders or encoder hardware blocks.
+
+	  Say Y here if you want to use this IOMMU in front of these
+	  hardware blocks.
+
+config BCM2712_IOMMU
+	bool "BCM2712 IOMMU driver"
+	depends on (ARCH_BCM2835 && ARM64) || COMPILE_TEST
+	select IOMMU_API
+	select GENERIC_PT
+	select IOMMU_PT
+	select IOMMU_PT_BCM2712
+	help
+	  Support for IOMMU on BCM2712 SoC. This IOMMU can be used by the
+	  display controller and various multimedia devices to perform
+	  efficient memory management.
+
+	  Say Y here if you want to use this IOMMU in front of these
+	  hardware blocks.
+
+config IOMMU_DEBUG_PAGEALLOC
+	bool "Debug IOMMU mappings against page allocations"
+	depends on DEBUG_PAGEALLOC && IOMMU_API && PAGE_EXTENSION
+	help
+	  This enables a consistency check between the kernel page allocator and
+	  the IOMMU subsystem. It verifies that pages being allocated or freed
+	  are not currently mapped in any IOMMU domain.
+
+	  This helps detect DMA use-after-free bugs where a driver frees a page
+	  but forgets to unmap it from the IOMMU, potentially allowing a device
+	  to overwrite memory that the kernel has repurposed.
+
+	  These checks are best-effort and may not detect all problems.
+
+	  Due to performance overhead, this feature is disabled by default.
+	  You must enable "iommu.debug_pagealloc" from the kernel command
+	  line to activate the runtime checks.
+
+	  If unsure, say N.
 endif # IOMMU_SUPPORT
+
+source "drivers/iommu/generic_pt/Kconfig"

@@ -64,7 +64,7 @@ int snd_ak4113_create(struct snd_card *card, ak4113_read_t *read,
 		.dev_free =     snd_ak4113_dev_free,
 	};
 
-	chip = kzalloc(sizeof(*chip), GFP_KERNEL);
+	chip = kzalloc_obj(*chip);
 	if (chip == NULL)
 		return -ENOMEM;
 	spin_lock_init(&chip->lock);
@@ -130,7 +130,7 @@ void snd_ak4113_reinit(struct ak4113 *chip)
 	scoped_guard(mutex, &chip->reinit_mutex) {
 		ak4113_init_regs(chip);
 	}
-	/* bring up statistics / event queing */
+	/* bring up statistics / event queuing */
 	if (atomic_dec_and_test(&chip->wq_processing))
 		schedule_delayed_work(&chip->work, HZ / 10);
 }

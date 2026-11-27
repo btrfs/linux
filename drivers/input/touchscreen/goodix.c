@@ -1057,7 +1057,8 @@ static void goodix_read_config(struct goodix_ts_data *ts)
 	}
 
 	ts->int_trigger_type = ts->config[TRIGGER_LOC] & 0x03;
-	ts->max_touch_num = ts->config[MAX_CONTACTS_LOC] & 0x0f;
+	ts->max_touch_num = min(ts->config[MAX_CONTACTS_LOC] & 0x0f,
+				GOODIX_MAX_CONTACTS);
 
 	x_max = get_unaligned_le16(&ts->config[RESOLUTION_LOC]);
 	y_max = get_unaligned_le16(&ts->config[RESOLUTION_LOC + 2]);
@@ -1318,7 +1319,7 @@ static int goodix_ts_probe(struct i2c_client *client)
 		return -ENXIO;
 	}
 
-	ts = devm_kzalloc(&client->dev, sizeof(*ts), GFP_KERNEL);
+	ts = devm_kzalloc_obj(&client->dev, *ts);
 	if (!ts)
 		return -ENOMEM;
 
@@ -1523,17 +1524,17 @@ static int goodix_resume(struct device *dev)
 static DEFINE_SIMPLE_DEV_PM_OPS(goodix_pm_ops, goodix_suspend, goodix_resume);
 
 static const struct i2c_device_id goodix_ts_id[] = {
-	{ "GDIX1001:00" },
+	{ .name = "GDIX1001:00" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, goodix_ts_id);
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id goodix_acpi_match[] = {
-	{ "GDIX1001", 0 },
-	{ "GDIX1002", 0 },
-	{ "GDIX1003", 0 },
-	{ "GDX9110", 0 },
+	{ .id = "GDIX1001" },
+	{ .id = "GDIX1002" },
+	{ .id = "GDIX1003" },
+	{ .id = "GDX9110" },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, goodix_acpi_match);

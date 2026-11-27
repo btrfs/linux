@@ -13,7 +13,6 @@
 #include <linux/kernel.h>
 #include <linux/math64.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
@@ -761,13 +760,13 @@ static int vadc_get_fw_data(struct vadc_priv *vadc)
 	if (!vadc->nchannels)
 		return -EINVAL;
 
-	vadc->iio_chans = devm_kcalloc(vadc->dev, vadc->nchannels,
-				       sizeof(*vadc->iio_chans), GFP_KERNEL);
+	vadc->iio_chans = devm_kzalloc_objs(vadc->dev, *vadc->iio_chans,
+					    vadc->nchannels);
 	if (!vadc->iio_chans)
 		return -ENOMEM;
 
-	vadc->chan_props = devm_kcalloc(vadc->dev, vadc->nchannels,
-					sizeof(*vadc->chan_props), GFP_KERNEL);
+	vadc->chan_props = devm_kzalloc_objs(vadc->dev, *vadc->chan_props,
+					     vadc->nchannels);
 	if (!vadc->chan_props)
 		return -ENOMEM;
 

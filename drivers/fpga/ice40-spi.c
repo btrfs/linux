@@ -10,7 +10,6 @@
 
 #include <linux/fpga/fpga-mgr.h>
 #include <linux/gpio/consumer.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/spi/spi.h>
 #include <linux/stringify.h>
@@ -139,7 +138,7 @@ static int ice40_fpga_probe(struct spi_device *spi)
 	struct fpga_manager *mgr;
 	int ret;
 
-	priv = devm_kzalloc(&spi->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&spi->dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

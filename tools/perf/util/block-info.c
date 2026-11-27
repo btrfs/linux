@@ -303,7 +303,7 @@ static int block_range_entry(struct perf_hpp_fmt *fmt, struct perf_hpp *hpp,
 	char buf[128];
 	char *start_line, *end_line;
 
-	symbol_conf.disable_add2line_warn = true;
+	symbol_conf.addr2line_disable_warn = true;
 
 	start_line = map__srcline(he->ms.map, bi->sym->start + bi->start,
 				  he->ms.sym);
@@ -472,7 +472,7 @@ struct block_report *block_info__create_report(struct evlist *evlist,
 					       int *nr_reps)
 {
 	struct block_report *block_reports;
-	int nr_hists = evlist->core.nr_entries, i = 0;
+	int nr_hists = evlist__nr_entries(evlist), i = 0;
 	struct evsel *pos;
 
 	block_reports = calloc(nr_hists, sizeof(struct block_report));
@@ -483,7 +483,7 @@ struct block_report *block_info__create_report(struct evlist *evlist,
 		struct hists *hists = evsel__hists(pos);
 
 		process_block_report(hists, &block_reports[i], total_cycles,
-				     block_hpps, nr_hpps, evlist->nr_br_cntr);
+				     block_hpps, nr_hpps, evlist__nr_br_cntr(evlist));
 		i++;
 	}
 

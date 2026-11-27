@@ -1,6 +1,9 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0
 
+# Kselftest framework requirement - SKIP code is 4.
+ksft_skip=4
+
 if [ $EUID -ne 0 ]
 then
 	echo "Run as root"
@@ -14,6 +17,13 @@ then
 	exit $ksft_skip
 fi
 
+kmemleak="/sys/kernel/debug/kmemleak"
+if [ ! -f "$kmemleak" ]
+then
+	echo "$kmemleak not found"
+	exit $ksft_skip
+fi
+
 # ensure filter directory
 echo 1 > "$damon_sysfs/kdamonds/nr_kdamonds"
 echo 1 > "$damon_sysfs/kdamonds/0/contexts/nr_contexts"
@@ -22,22 +32,24 @@ echo 1 > "$damon_sysfs/kdamonds/0/contexts/0/schemes/0/filters/nr_filters"
 
 filter_dir="$damon_sysfs/kdamonds/0/contexts/0/schemes/0/filters/0"
 
-before_kb=$(grep Slab /proc/meminfo | awk '{print $2}')
-
-# try to leak 3000 KiB
-for i in {1..102400};
+# try to leak 128 times
+for i in {1..128};
 do
 	echo "012345678901234567890123456789" > "$filter_dir/memcg_path"
 done
 
-after_kb=$(grep Slab /proc/meminfo | awk '{print $2}')
-# expect up to 1500 KiB free from other tasks memory
-expected_after_kb_max=$((before_kb + 1500))
-
-if [ "$after_kb" -gt "$expected_after_kb_max" ]
+echo scan > "$kmemleak"
+kmemleak_report=$(cat "$kmemleak")
+if [ "$kmemleak_report" = "" ]
 then
-	echo "maybe memcg_path are leaking: $before_kb -> $after_kb"
-	exit 1
-else
 	exit 0
 fi
+if ! echo "$kmemleak_report" | grep "memcg_path_store" --quiet
+then
+	echo "[WARN] memleak found; apparently not from DAMON, though"
+	echo "$kmemleak_report"
+	exit 0
+fi
+
+echo "$kmemleak_report"
+exit 1

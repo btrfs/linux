@@ -45,6 +45,8 @@ properties:
     enum:
       - nvidia,tegra194-xusb-padctl
       - nvidia,tegra234-xusb-padctl
+      - nvidia,tegra238-xusb-padctl
+      - nvidia,tegra264-xusb-padctl
 
   reg:
     items:
@@ -230,6 +232,10 @@ properties:
           connector:
             type: object
 
+          port:
+            description: connection to a USB Type C controller
+            $ref: /schemas/graph.yaml#/properties/port
+
           mode:
             description: A string that determines the mode in which to
               run the port.
@@ -256,7 +262,12 @@ properties:
               voltage.
 
         dependencies:
-          usb-role-switch: [ connector ]
+          usb-role-switch:
+            oneOf:
+              - required:
+                  - connector
+              - required:
+                  - port
 
       usb2-1:
         type: object
@@ -267,6 +278,10 @@ properties:
           # that binding to be selected for the subnode
           connector:
             type: object
+
+          port:
+            description: connection to a USB Type C controller
+            $ref: /schemas/graph.yaml#/properties/port
 
           mode:
             description: A string that determines the mode in which to
@@ -306,6 +321,10 @@ properties:
           connector:
             type: object
 
+          port:
+            description: connection to a USB Type C controller
+            $ref: /schemas/graph.yaml#/properties/port
+
           mode:
             description: A string that determines the mode in which to
               run the port.
@@ -343,6 +362,10 @@ properties:
           # that binding to be selected for the subnode
           connector:
             type: object
+
+          port:
+            description: connection to a USB Type C controller
+            $ref: /schemas/graph.yaml#/properties/port
 
           mode:
             description: A string that determines the mode in which to
@@ -405,6 +428,10 @@ properties:
             description: A phandle to the regulator supplying the VBUS
               voltage.
 
+          port:
+            description: connection to a USB Type C controller
+            $ref: /schemas/graph.yaml#/properties/port
+
       usb3-1:
         type: object
         additionalProperties: false
@@ -437,6 +464,10 @@ properties:
           vbus-supply:
             description: A phandle to the regulator supplying the VBUS
               voltage.
+
+          port:
+            description: connection to a USB Type C controller
+            $ref: /schemas/graph.yaml#/properties/port
 
       usb3-2:
         type: object
@@ -471,6 +502,10 @@ properties:
             description: A phandle to the regulator supplying the VBUS
               voltage.
 
+          port:
+            description: connection to a USB Type C controller
+            $ref: /schemas/graph.yaml#/properties/port
+
       usb3-3:
         type: object
         additionalProperties: false
@@ -503,6 +538,47 @@ properties:
           vbus-supply:
             description: A phandle to the regulator supplying the VBUS
               voltage.
+
+          port:
+            description: connection to a USB Type C controller
+            $ref: /schemas/graph.yaml#/properties/port
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: nvidia,tegra238-xusb-padctl
+    then:
+      properties:
+        pads:
+          properties:
+            usb2:
+              properties:
+                lanes:
+                  properties:
+                    usb2-3: false
+            usb3:
+              properties:
+                lanes:
+                  properties:
+                    usb3-3: false
+        ports:
+          properties:
+            usb2-3: false
+            usb3-0:
+              properties:
+                nvidia,usb2-companion:
+                  enum: [ 0, 1, 2 ]
+            usb3-1:
+              properties:
+                nvidia,usb2-companion:
+                  enum: [ 0, 1, 2 ]
+            usb3-2:
+              properties:
+                nvidia,usb2-companion:
+                  enum: [ 0, 1, 2 ]
+            usb3-3: false
 
 additionalProperties: false
 

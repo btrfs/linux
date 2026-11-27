@@ -262,9 +262,8 @@ static int mtk_audio_hires_event(struct snd_soc_dapm_widget *w,
 	default:
 		return 0;
 	}
-	mt8195_afe_set_clk_parent(afe, clk, clk_parent);
 
-	return 0;
+	return mt8195_afe_set_clk_parent(afe, clk, clk_parent);
 }
 
 static struct mtk_dai_adda_priv *get_adda_priv_by_name(struct mtk_base_afe *afe,
@@ -484,7 +483,7 @@ static int mt8195_adda_dl_gain_get(struct snd_kcontrol *kcontrol,
 static int mt8195_adda6_only_get(struct snd_kcontrol *kcontrol,
 				 struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
 	struct mt8195_afe_private *afe_priv = afe->platform_priv;
 	struct mtkaif_param *param = &afe_priv->mtkaif_params;
@@ -496,7 +495,7 @@ static int mt8195_adda6_only_get(struct snd_kcontrol *kcontrol,
 static int mt8195_adda6_only_set(struct snd_kcontrol *kcontrol,
 				 struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
 	struct mt8195_afe_private *afe_priv = afe->platform_priv;
 	struct mtkaif_param *param = &afe_priv->mtkaif_params;
@@ -515,7 +514,7 @@ static int mt8195_adda6_only_set(struct snd_kcontrol *kcontrol,
 static int mt8195_adda_dmic_get(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
 	struct mt8195_afe_private *afe_priv = afe->platform_priv;
 	struct mtkaif_param *param = &afe_priv->mtkaif_params;
@@ -527,7 +526,7 @@ static int mt8195_adda_dmic_get(struct snd_kcontrol *kcontrol,
 static int mt8195_adda_dmic_set(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *cmpnt = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(cmpnt);
 	struct mt8195_afe_private *afe_priv = afe->platform_priv;
 	struct mtkaif_param *param = &afe_priv->mtkaif_params;
@@ -717,9 +716,7 @@ static int init_adda_priv_data(struct mtk_base_afe *afe)
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(adda_dai_list); i++) {
-		adda_priv = devm_kzalloc(afe->dev,
-					 sizeof(struct mtk_dai_adda_priv),
-					 GFP_KERNEL);
+		adda_priv = devm_kzalloc_obj(afe->dev, struct mtk_dai_adda_priv);
 		if (!adda_priv)
 			return -ENOMEM;
 
@@ -733,7 +730,7 @@ int mt8195_dai_adda_register(struct mtk_base_afe *afe)
 {
 	struct mtk_base_afe_dai *dai;
 
-	dai = devm_kzalloc(afe->dev, sizeof(*dai), GFP_KERNEL);
+	dai = devm_kzalloc_obj(afe->dev, *dai);
 	if (!dai)
 		return -ENOMEM;
 

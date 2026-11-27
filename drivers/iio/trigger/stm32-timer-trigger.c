@@ -12,7 +12,6 @@
 #include <linux/iio/timer/stm32-timer-trigger.h>
 #include <linux/iio/trigger.h>
 #include <linux/mfd/stm32-timers.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -798,7 +797,7 @@ static int stm32_timer_trigger_probe(struct platform_device *pdev)
 	if (cfg->valids_table && *cfg->valids_table[index])
 		priv = stm32_setup_counter_device(dev);
 	else
-		priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+		priv = devm_kzalloc_obj(dev, *priv);
 
 	if (!priv)
 		return -ENOMEM;

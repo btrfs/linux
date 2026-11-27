@@ -25,6 +25,8 @@ properties:
               - samsung,atna40ct06
               # Samsung 14" WQXGA+ (2880x1800 pixels) eDP AMOLED panel
               - samsung,atna40cu11
+              # Samsung 14" WQXGA+ (2880x1800 pixels) eDP AMOLED panel
+              - samsung,atna40hq08
               # Samsung 14" WQXGA+ (2880×1800 pixels) eDP AMOLED panel
               - samsung,atna40yk20
               # Samsung 14.5" WQXGA+ (2880x1800 pixels) eDP AMOLED panel
@@ -33,6 +35,8 @@ properties:
               - samsung,atna45dc02
               # Samsung 15.6" 3K (2880x1620 pixels) eDP AMOLED panel
               - samsung,atna56ac03
+              # Samsung 16.0" 3K (2880x1800 pixels) eDP AMOLED panel
+              - samsung,atna60cl08
           - const: samsung,atna33xc20
 
   enable-gpios: true
@@ -41,12 +45,12 @@ properties:
   no-hpd: true
   hpd-gpios: true
 
-additionalProperties: false
-
 required:
   - compatible
   - enable-gpios
   - power-supply
+
+additionalProperties: false
 
 examples:
   - |

@@ -234,7 +234,7 @@ static struct clk * __init cpg_pll_clk_register(const char *name,
 	struct cpg_pll_clk *pll_clk;
 	struct clk *clk;
 
-	pll_clk = kzalloc(sizeof(*pll_clk), GFP_KERNEL);
+	pll_clk = kzalloc_obj(*pll_clk);
 	if (!pll_clk)
 		return ERR_PTR(-ENOMEM);
 
@@ -257,12 +257,9 @@ static struct clk * __init cpg_pll_clk_register(const char *name,
 }
 
 /*
- * Z0 Clock & Z1 Clock
+ * Z0, Z1 and ZG Clock
  */
-#define CPG_FRQCRB			0x00000804
 #define CPG_FRQCRB_KICK			BIT(31)
-#define CPG_FRQCRC0			0x00000808
-#define CPG_FRQCRC1			0x000008e0
 
 struct cpg_z_clk {
 	struct clk_hw hw;
@@ -279,11 +276,7 @@ static unsigned long cpg_z_clk_recalc_rate(struct clk_hw *hw,
 					   unsigned long parent_rate)
 {
 	struct cpg_z_clk *zclk = to_z_clk(hw);
-	unsigned int mult;
-	u32 val;
-
-	val = readl(zclk->reg) & zclk->mask;
-	mult = 32 - (val >> __ffs(zclk->mask));
+	unsigned int mult = 32 - field_get(zclk->mask, readl(zclk->reg));
 
 	return DIV_ROUND_CLOSEST_ULL((u64)parent_rate * mult,
 				     32 * zclk->fixed_div);
@@ -334,7 +327,8 @@ static int cpg_z_clk_set_rate(struct clk_hw *hw, unsigned long rate,
 	if (readl(zclk->kick_reg) & CPG_FRQCRB_KICK)
 		return -EBUSY;
 
-	cpg_reg_modify(zclk->reg, zclk->mask, (32 - mult) << __ffs(zclk->mask));
+	cpg_reg_modify(zclk->reg, zclk->mask,
+		       field_prep(zclk->mask, 32 - mult));
 
 	/*
 	 * Set KICK bit in FRQCRB to update hardware setting and wait for
@@ -377,7 +371,7 @@ static struct clk * __init cpg_z_clk_register(const char *name,
 	struct cpg_z_clk *zclk;
 	struct clk *clk;
 
-	zclk = kzalloc(sizeof(*zclk), GFP_KERNEL);
+	zclk = kzalloc_obj(*zclk);
 	if (!zclk)
 		return ERR_PTR(-ENOMEM);
 
@@ -387,12 +381,17 @@ static struct clk * __init cpg_z_clk_register(const char *name,
 	init.parent_names = &parent_name;
 	init.num_parents = 1;
 
-	if (offset < 32) {
-		zclk->reg = reg + CPG_FRQCRC0;
-	} else {
-		zclk->reg = reg + CPG_FRQCRC1;
-		offset -= 32;
-	}
+	/*
+	 * offset 0xAAABB
+	 * AAA : reg
+	 * BB  : pos
+	 *
+	 * see
+	 *	DEF_GEN4_Z()
+	 */
+	zclk->reg = reg + (offset >> FRQCR_offset);
+	offset &= 0x1f; /* 0 - 31 */
+
 	zclk->kick_reg = reg + CPG_FRQCRB;
 	zclk->hw.init = &init;
 	zclk->mask = GENMASK(offset + 4, offset);

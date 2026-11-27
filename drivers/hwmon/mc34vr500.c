@@ -174,7 +174,7 @@ static int mc34vr500_probe(struct i2c_client *client)
 	if (IS_ERR(regmap))
 		return PTR_ERR(regmap);
 
-	data = devm_kzalloc(dev, sizeof(struct mc34vr500_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct mc34vr500_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -235,8 +235,8 @@ static int mc34vr500_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id mc34vr500_id[] = {
-	{ "mc34vr500" },
-	{ },
+	{ .name = "mc34vr500" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mc34vr500_id);
 

@@ -6,6 +6,7 @@
 #ifndef __KERN_UTIL_H__
 #define __KERN_UTIL_H__
 
+#include <linux/compiler_types.h>
 #include <sysdep/ptrace.h>
 #include <sysdep/faultinfo.h>
 
@@ -14,9 +15,6 @@ struct siginfo;
 extern int uml_exitcode;
 
 extern int kmalloc_ok;
-
-#define UML_ROUND_UP(addr) \
-	((((unsigned long) addr) + PAGE_SIZE - 1) & PAGE_MASK)
 
 extern unsigned long alloc_stack(int order, int atomic);
 extern void free_stack(unsigned long stack, int order);
@@ -40,9 +38,7 @@ extern void timer_handler(int sig, struct siginfo *unused_si, struct uml_pt_regs
 
 extern void uml_pm_wake(void);
 
-extern int start_uml(void);
-extern void paging_init(void);
-extern int parse_iomem(char *str, int *add);
+extern void __noreturn start_uml(void);
 
 extern void uml_cleanup(void);
 extern void do_uml_exitcalls(void);
@@ -55,6 +51,7 @@ extern int __uml_cant_sleep(void);
 extern int get_current_pid(void);
 extern int copy_from_user_proc(void *to, void *from, int size);
 extern char *uml_strdup(const char *string);
+int uml_need_resched(void);
 
 extern unsigned long to_irq_stack(unsigned long *mask_out);
 extern unsigned long from_irq_stack(int nested);

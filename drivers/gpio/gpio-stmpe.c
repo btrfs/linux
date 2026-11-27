@@ -149,7 +149,7 @@ static int stmpe_gpio_irq_set_type(struct irq_data *d, unsigned int type)
 	int regoffset = offset / 8;
 	int mask = BIT(offset % 8);
 
-	if (type & IRQ_TYPE_LEVEL_LOW || type & IRQ_TYPE_LEVEL_HIGH)
+	if (type & IRQ_TYPE_LEVEL_MASK)
 		return -EINVAL;
 
 	/* STMPE801 and STMPE 1600 don't have RE and FE registers */
@@ -483,7 +483,7 @@ static int stmpe_gpio_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	stmpe_gpio = devm_kzalloc(dev, sizeof(*stmpe_gpio), GFP_KERNEL);
+	stmpe_gpio = devm_kzalloc_obj(dev, *stmpe_gpio);
 	if (!stmpe_gpio)
 		return -ENOMEM;
 

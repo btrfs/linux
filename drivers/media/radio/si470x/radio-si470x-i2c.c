@@ -10,7 +10,7 @@
 
 
 /* driver definitions */
-#define DRIVER_AUTHOR "Joonyoung Shim <jy0922.shim@samsung.com>";
+#define DRIVER_AUTHOR "Joonyoung Shim <jy0922.shim@samsung.com>"
 #define DRIVER_CARD "Silicon Labs Si470x FM Radio"
 #define DRIVER_DESC "I2C radio driver for Si470x FM Radio Receivers"
 #define DRIVER_VERSION "1.0.2"
@@ -28,7 +28,7 @@
 /* I2C Device ID List */
 static const struct i2c_device_id si470x_i2c_id[] = {
 	/* Generic Entry */
-	{ "si470x" },
+	{ .name = "si470x" },
 	/* Terminating entry */
 	{ }
 };
@@ -336,7 +336,7 @@ static int si470x_i2c_probe(struct i2c_client *client)
 	int retval = 0;
 
 	/* private data allocation and initialization */
-	radio = devm_kzalloc(&client->dev, sizeof(*radio), GFP_KERNEL);
+	radio = devm_kzalloc_obj(&client->dev, *radio);
 	if (!radio) {
 		retval = -ENOMEM;
 		goto err_initial;

@@ -78,7 +78,7 @@ static void run_vcpu(struct kvm_vcpu *vcpu, int stage)
 		else
 			ksft_test_result_fail(
 				"stage %d: Unexpected register values vmexit, got %lx",
-				stage + 1, (ulong)uc.args[1]);
+				stage + 1, (unsigned long)uc.args[1]);
 		return;
 	case UCALL_DONE:
 		ksft_test_result_pass("stage %d passed\n", stage + 1);
@@ -95,7 +95,7 @@ int main(void)
 {
 	struct kvm_vcpu *vcpu;
 	struct kvm_vm *vm;
-	uint64_t val;
+	u64 val;
 
 	ksft_print_header();
 	ksft_set_plan(5);

@@ -21,6 +21,7 @@
 #include "mds_client.h"
 #include "cache.h"
 #include "crypto.h"
+#include "subvolume_metrics.h"
 
 #include <linux/ceph/ceph_features.h>
 #include <linux/ceph/decode.h>
@@ -29,6 +30,9 @@
 #include <linux/ceph/debugfs.h>
 
 #include <uapi/linux/magic.h>
+
+#define CREATE_TRACE_POINTS
+#include <trace/events/ceph.h>
 
 static DEFINE_SPINLOCK(ceph_fsc_lock);
 static LIST_HEAD(ceph_fsc_list);
@@ -173,6 +177,8 @@ enum {
 	Opt_wsync,
 	Opt_pagecache,
 	Opt_sparseread,
+	Opt_nearfull_sync,
+	Opt_lazyio,
 };
 
 enum ceph_recover_session_mode {
@@ -199,8 +205,10 @@ static const struct fs_parameter_spec ceph_mount_parameters[] = {
 	fsparam_flag_no	("fsc",				Opt_fscache), // fsc|nofsc
 	fsparam_string	("fsc",				Opt_fscache), // fsc=...
 	fsparam_flag_no ("ino32",			Opt_ino32),
+	fsparam_flag_no	("lazyio",			Opt_lazyio),
 	fsparam_string	("mds_namespace",		Opt_mds_namespace),
 	fsparam_string	("mon_addr",			Opt_mon_addr),
+	fsparam_flag_no	("nearfull_sync",		Opt_nearfull_sync),
 	fsparam_flag_no ("poolperm",			Opt_poolperm),
 	fsparam_flag_no ("quotadf",			Opt_quotadf),
 	fsparam_u32	("rasize",			Opt_rasize),
@@ -388,13 +396,18 @@ static int ceph_parse_mon_addr(struct fs_parameter *param,
 {
 	struct ceph_parse_opts_ctx *pctx = fc->fs_private;
 	struct ceph_mount_options *fsopt = pctx->opts;
+	int ret;
+
+	ret = ceph_parse_mon_ips(param->string, strlen(param->string),
+				 pctx->copts, fc->log.log, '/');
+	if (ret)
+		return ret;
 
 	kfree(fsopt->mon_addr);
 	fsopt->mon_addr = param->string;
 	param->string = NULL;
 
-	return ceph_parse_mon_ips(fsopt->mon_addr, strlen(fsopt->mon_addr),
-				  pctx->copts, fc->log.log, '/');
+	return 0;
 }
 
 static int ceph_parse_mount_param(struct fs_context *fc,
@@ -589,6 +602,18 @@ static int ceph_parse_mount_param(struct fs_context *fc,
 		else
 			fsopt->flags |= CEPH_MOUNT_OPT_SPARSEREAD;
 		break;
+	case Opt_nearfull_sync:
+		if (result.negated)
+			fsopt->flags &= ~CEPH_MOUNT_OPT_NEARFULL_SYNC;
+		else
+			fsopt->flags |= CEPH_MOUNT_OPT_NEARFULL_SYNC;
+		break;
+	case Opt_lazyio:
+		if (result.negated)
+			fsopt->flags &= ~CEPH_MOUNT_OPT_LAZYIO;
+		else
+			fsopt->flags |= CEPH_MOUNT_OPT_LAZYIO;
+		break;
 	case Opt_test_dummy_encryption:
 #ifdef CONFIG_FS_ENCRYPTION
 		fscrypt_free_dummy_policy(&fsopt->dummy_enc_policy);
@@ -745,6 +770,10 @@ static int ceph_show_options(struct seq_file *m, struct dentry *root)
 		seq_puts(m, ",nopagecache");
 	if (fsopt->flags & CEPH_MOUNT_OPT_SPARSEREAD)
 		seq_puts(m, ",sparseread");
+	if (fsopt->flags & CEPH_MOUNT_OPT_NEARFULL_SYNC)
+		seq_puts(m, ",nearfull_sync");
+	if (fsopt->flags & CEPH_MOUNT_OPT_LAZYIO)
+		seq_puts(m, ",lazyio");
 
 	fscrypt_show_test_dummy_encryption(m, ',', root->d_sb);
 
@@ -806,7 +835,7 @@ static struct ceph_fs_client *create_fs_client(struct ceph_mount_options *fsopt,
 	struct ceph_fs_client *fsc;
 	int err;
 
-	fsc = kzalloc(sizeof(*fsc), GFP_KERNEL);
+	fsc = kzalloc_obj(*fsc);
 	if (!fsc) {
 		err = -ENOMEM;
 		goto fail;
@@ -963,8 +992,14 @@ static int __init init_caches(void)
 	if (!ceph_wb_pagevec_pool)
 		goto bad_pagevec_pool;
 
+	error = ceph_subvolume_metrics_cache_init();
+	if (error)
+		goto bad_subvol_metrics;
+
 	return 0;
 
+bad_subvol_metrics:
+	mempool_destroy(ceph_wb_pagevec_pool);
 bad_pagevec_pool:
 	kmem_cache_destroy(ceph_mds_request_cachep);
 bad_mds_req:
@@ -1001,6 +1036,7 @@ static void destroy_caches(void)
 	kmem_cache_destroy(ceph_dir_file_cachep);
 	kmem_cache_destroy(ceph_mds_request_cachep);
 	mempool_destroy(ceph_wb_pagevec_pool);
+	ceph_subvolume_metrics_cache_destroy();
 }
 
 static void __ceph_umount_begin(struct ceph_fs_client *fsc)
@@ -1028,7 +1064,7 @@ static const struct super_operations ceph_super_ops = {
 	.alloc_inode	= ceph_alloc_inode,
 	.free_inode	= ceph_free_inode,
 	.write_inode    = ceph_write_inode,
-	.drop_inode	= inode_just_drop,
+	.drop_inode	= ceph_drop_inode,
 	.evict_inode	= ceph_evict_inode,
 	.sync_fs        = ceph_sync_fs,
 	.put_super	= ceph_put_super,
@@ -1347,6 +1383,15 @@ static int ceph_get_tree(struct fs_context *fc)
 	doutc(fsc->client, "root %p inode %p ino %llx.%llx\n", res,
 		    d_inode(res), ceph_vinop(d_inode(res)));
 	fc->root = fsc->sb->s_root;
+
+	/*
+	 * The mount is up.  sget_fc() leaves SB_ACTIVE unset, and, unlike
+	 * filesystems that go through vfs_get_super(), nothing else sets
+	 * it here, so iput_final() would always evict an inode whose
+	 * ->drop_inode() asks to retain it.  Set it like nfs_get_tree()
+	 * does.
+	 */
+	sb->s_flags |= SB_ACTIVE;
 	return 0;
 
 out_splat:
@@ -1399,6 +1444,16 @@ static int ceph_reconfigure_fc(struct fs_context *fc)
 	else
 		ceph_clear_mount_opt(fsc, SPARSEREAD);
 
+	if (fsopt->flags & CEPH_MOUNT_OPT_NEARFULL_SYNC)
+		ceph_set_mount_opt(fsc, NEARFULL_SYNC);
+	else
+		ceph_clear_mount_opt(fsc, NEARFULL_SYNC);
+
+	if (fsopt->flags & CEPH_MOUNT_OPT_LAZYIO)
+		ceph_set_mount_opt(fsc, LAZYIO);
+	else
+		ceph_clear_mount_opt(fsc, LAZYIO);
+
 	if (strcmp_null(fsc->mount_options->mon_addr, fsopt->mon_addr)) {
 		kfree(fsc->mount_options->mon_addr);
 		fsc->mount_options->mon_addr = fsopt->mon_addr;
@@ -1426,7 +1481,7 @@ static int ceph_init_fs_context(struct fs_context *fc)
 	struct ceph_parse_opts_ctx *pctx;
 	struct ceph_mount_options *fsopt;
 
-	pctx = kzalloc(sizeof(*pctx), GFP_KERNEL);
+	pctx = kzalloc_obj(*pctx);
 	if (!pctx)
 		return -ENOMEM;
 
@@ -1434,7 +1489,7 @@ static int ceph_init_fs_context(struct fs_context *fc)
 	if (!pctx->copts)
 		goto nomem;
 
-	pctx->opts = kzalloc(sizeof(*pctx->opts), GFP_KERNEL);
+	pctx->opts = kzalloc_obj(*pctx->opts);
 	if (!pctx->opts)
 		goto nomem;
 

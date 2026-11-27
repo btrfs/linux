@@ -33,6 +33,11 @@ struct mlx5dr_icm_pool {
 	u64 hot_memory_size;
 	/* hot memory size threshold for triggering sync */
 	u64 th;
+	/* Set when a sync to HW fails - no new chunks are served, freed
+	 * chunks are no longer queued, and their ICM is not returned to
+	 * the buddy allocator.
+	 */
+	bool error_state;
 };
 
 struct mlx5dr_icm_dm {
@@ -116,7 +121,7 @@ dr_icm_pool_mr_create(struct mlx5dr_icm_pool *pool)
 	size_t log_align_base = 0;
 	int err;
 
-	icm_mr = kvzalloc(sizeof(*icm_mr), GFP_KERNEL);
+	icm_mr = kvzalloc_obj(*icm_mr);
 	if (!icm_mr)
 		return NULL;
 
@@ -227,8 +232,7 @@ static int dr_icm_buddy_init_ste_cache(struct mlx5dr_icm_buddy_mem *buddy)
 	int num_of_entries =
 		mlx5dr_icm_pool_chunk_size_to_entries(buddy->pool->max_log_chunk_sz);
 
-	buddy->ste_arr = kvcalloc(num_of_entries,
-				  sizeof(struct mlx5dr_ste), GFP_KERNEL);
+	buddy->ste_arr = kvzalloc_objs(struct mlx5dr_ste, num_of_entries);
 	if (!buddy->ste_arr)
 		return -ENOMEM;
 
@@ -240,7 +244,7 @@ static int dr_icm_buddy_init_ste_cache(struct mlx5dr_icm_buddy_mem *buddy)
 	if (!buddy->hw_ste_arr)
 		goto free_ste_arr;
 
-	buddy->miss_list = kvmalloc(num_of_entries * sizeof(struct list_head), GFP_KERNEL);
+	buddy->miss_list = kvmalloc_objs(struct list_head, num_of_entries);
 	if (!buddy->miss_list)
 		goto free_hw_ste_arr;
 
@@ -269,7 +273,7 @@ static int dr_icm_buddy_create(struct mlx5dr_icm_pool *pool)
 	if (!icm_mr)
 		return -ENOMEM;
 
-	buddy = kvzalloc(sizeof(*buddy), GFP_KERNEL);
+	buddy = kvzalloc_obj(*buddy);
 	if (!buddy)
 		goto free_mr;
 
@@ -369,7 +373,15 @@ static int dr_icm_pool_sync_all_buddy_pools(struct mlx5dr_icm_pool *pool)
 
 	err = mlx5dr_cmd_sync_steering(pool->dmn->mdev);
 	if (err) {
-		mlx5dr_err(pool->dmn, "Failed to sync to HW (err: %d)\n", err);
+		/* The hot chunks could not be flushed. Put the pool in an
+		 * error state so that no further chunks are queued (which
+		 * would overflow hot_chunks_arr), and no new chunks are
+		 * served. The sync is not retried.
+		 */
+		mlx5dr_err(pool->dmn,
+			   "Failed to sync to HW (err: %d), disabling ICM pool\n",
+			   err);
+		pool->error_state = true;
 		return err;
 	}
 
@@ -444,6 +456,10 @@ mlx5dr_icm_alloc_chunk(struct mlx5dr_icm_pool *pool,
 		return NULL;
 
 	mutex_lock(&pool->mutex);
+
+	if (pool->error_state)
+		goto out;
+
 	/* find mem, get back the relevant buddy pool and seg in that mem */
 	ret = dr_icm_handle_buddies_get_mem(pool, chunk_size, &buddy, &seg);
 	if (ret)
@@ -476,6 +492,14 @@ void mlx5dr_icm_free_chunk(struct mlx5dr_icm_chunk *chunk)
 	/* move the chunk to the waiting chunks array, AKA "hot" memory */
 	mutex_lock(&pool->mutex);
 
+	/* If the pool is in an error state, the chunk must not be queued.
+	 * ICM memory is not returned to the buddy allocator - it is
+	 * reclaimed only when the pool is destroyed.
+	 * Just free the chunk's bookkeeping struct.
+	 */
+	if (pool->error_state)
+		goto out;
+
 	pool->hot_memory_size += mlx5dr_icm_pool_get_chunk_byte_size(chunk);
 
 	hot_chunk = &pool->hot_chunks_arr[pool->hot_chunks_num++];
@@ -483,11 +507,12 @@ void mlx5dr_icm_free_chunk(struct mlx5dr_icm_chunk *chunk)
 	hot_chunk->seg = chunk->seg;
 	hot_chunk->size = chunk->size;
 
-	kmem_cache_free(chunks_cache, chunk);
-
 	/* Check if we have chunks that are waiting for sync-ste */
 	if (dr_icm_pool_is_sync_required(pool))
 		dr_icm_pool_sync_all_buddy_pools(pool);
+
+out:
+	kmem_cache_free(chunks_cache, chunk);
 
 	mutex_unlock(&pool->mutex);
 }
@@ -509,7 +534,7 @@ struct mlx5dr_icm_pool *mlx5dr_icm_pool_create(struct mlx5dr_domain *dmn,
 	struct mlx5dr_icm_pool *pool;
 	u32 max_hot_size = 0;
 
-	pool = kvzalloc(sizeof(*pool), GFP_KERNEL);
+	pool = kvzalloc_obj(*pool);
 	if (!pool)
 		return NULL;
 
@@ -548,9 +573,8 @@ struct mlx5dr_icm_pool *mlx5dr_icm_pool_create(struct mlx5dr_domain *dmn,
 	num_of_chunks = DIV_ROUND_UP(max_hot_size, entry_size) + 1;
 	pool->th = max_hot_size;
 
-	pool->hot_chunks_arr = kvcalloc(num_of_chunks,
-					sizeof(struct mlx5dr_icm_hot_chunk),
-					GFP_KERNEL);
+	pool->hot_chunks_arr = kvzalloc_objs(struct mlx5dr_icm_hot_chunk,
+					     num_of_chunks);
 	if (!pool->hot_chunks_arr)
 		goto free_pool;
 

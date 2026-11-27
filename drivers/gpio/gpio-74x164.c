@@ -112,7 +112,7 @@ static int gen_74x164_probe(struct spi_device *spi)
 {
 	struct device *dev = &spi->dev;
 	struct gen_74x164_chip *chip;
-	u32 nregs;
+	u32 nregs, init_state;
 	int ret;
 
 	/*
@@ -128,11 +128,26 @@ static int gen_74x164_probe(struct spi_device *spi)
 	if (ret)
 		return dev_err_probe(dev, ret, "Missing 'registers-number' property.\n");
 
-	chip = devm_kzalloc(dev, struct_size(chip, buffer, nregs), GFP_KERNEL);
+	chip = devm_kzalloc_flex(dev, *chip, buffer, nregs);
 	if (!chip)
 		return -ENOMEM;
 
 	chip->registers = nregs;
+
+	/*
+	 * Optionally seed the chain with a board-specified pattern so the
+	 * outputs come up in a known state on the first SPI write. The
+	 * property follows the nxp,pcf8575 convention where bit N maps to
+	 * GPIO line N. On this output-only device, bit=0 drives the line
+	 * low and bit=1 drives it high. The bitmask covers up to 32 lines;
+	 * any further outputs come up zeroed by devm_kzalloc().
+	 */
+	if (!device_property_read_u32(dev, "lines-initial-states", &init_state)) {
+		unsigned int i;
+
+		for (i = 0; i < min(nregs, 4U); i++)
+			chip->buffer[nregs - 1 - i] = (init_state >> (i * 8)) & 0xff;
+	}
 
 	chip->gpiod_oe = devm_gpiod_get_optional(dev, "enable", GPIOD_OUT_LOW);
 	if (IS_ERR(chip->gpiod_oe))

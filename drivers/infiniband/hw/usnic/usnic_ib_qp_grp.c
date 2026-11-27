@@ -78,8 +78,17 @@ int usnic_ib_qp_grp_dump_rows(void *obj, char *buf, int buf_sz)
 	struct usnic_ib_qp_grp *qp_grp = obj;
 	struct usnic_ib_qp_grp_flow *default_flow;
 	if (obj) {
-		default_flow = list_first_entry(&qp_grp->flows_lst,
-					struct usnic_ib_qp_grp_flow, link);
+		default_flow = list_first_entry_or_null(&qp_grp->flows_lst,
+							struct usnic_ib_qp_grp_flow,
+							link);
+		if (!default_flow)
+			return scnprintf(buf, buf_sz,
+					"|%d\t|%s\t|%d\t|%hu\t|N/A",
+					qp_grp->ibqp.qp_num,
+					usnic_ib_qp_grp_state_to_string(
+							qp_grp->state),
+					qp_grp->owner_pid,
+					usnic_vnic_get_index(qp_grp->vf->vnic));
 		return scnprintf(buf, buf_sz, "|%d\t|%s\t|%d\t|%hu\t|%d",
 					qp_grp->ibqp.qp_num,
 					usnic_ib_qp_grp_state_to_string(
@@ -232,7 +241,7 @@ create_roce_custom_flow(struct usnic_ib_qp_grp *qp_grp,
 	}
 
 	/* Create Flow Handle */
-	qp_flow = kzalloc(sizeof(*qp_flow), GFP_ATOMIC);
+	qp_flow = kzalloc_obj(*qp_flow, GFP_ATOMIC);
 	if (!qp_flow) {
 		err = -ENOMEM;
 		goto out_dealloc_flow;
@@ -305,7 +314,7 @@ create_udp_flow(struct usnic_ib_qp_grp *qp_grp,
 	}
 
 	/* Create qp_flow */
-	qp_flow = kzalloc(sizeof(*qp_flow), GFP_ATOMIC);
+	qp_flow = kzalloc_obj(*qp_flow, GFP_ATOMIC);
 	if (!qp_flow) {
 		err = -ENOMEM;
 		goto out_dealloc_flow;
@@ -542,8 +551,8 @@ alloc_res_chunk_list(struct usnic_vnic *vnic,
 		/* Do Nothing */
 	}
 
-	res_chunk_list = kcalloc(res_lst_sz + 1, sizeof(*res_chunk_list),
-					GFP_ATOMIC);
+	res_chunk_list = kzalloc_objs(*res_chunk_list, res_lst_sz + 1,
+				      GFP_ATOMIC);
 	if (!res_chunk_list)
 		return ERR_PTR(-ENOMEM);
 

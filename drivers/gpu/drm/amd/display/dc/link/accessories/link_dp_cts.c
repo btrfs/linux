@@ -66,6 +66,7 @@ static void dp_retrain_link_dp_test(struct dc_link *link,
 			struct dc_link_settings *link_setting,
 			bool skip_video_pattern)
 {
+	(void)skip_video_pattern;
 	struct pipe_ctx *pipes[MAX_PIPES];
 	struct dc_state *state = link->dc->current_state;
 	struct dc_stream_update stream_update = { 0 };
@@ -81,7 +82,8 @@ static void dp_retrain_link_dp_test(struct dc_link *link,
 	struct dc *dc = (struct dc *)link->dc;
 
 	needs_divider_update = (link->dc->link_srv->dp_get_encoding_format(link_setting) !=
-	link->dc->link_srv->dp_get_encoding_format((const struct dc_link_settings *) &link->cur_link_settings));
+		link->dc->link_srv->dp_get_encoding_format((const struct dc_link_settings *) &link->cur_link_settings))
+		|| link->ep_type == DISPLAY_ENDPOINT_USB4_DPIA;
 
 	udelay(100);
 
@@ -143,6 +145,8 @@ static void dp_retrain_link_dp_test(struct dc_link *link,
 	// Set DPMS on with stream update
 	// Cache all streams on current link since dc_update_planes_and_stream might kill current_state
 	for (i = 0; i < MAX_PIPES; i++) {
+		if (state->streams[i] && state->streams[i]->is_phantom)
+			continue;
 		if (state->streams[i] && state->streams[i]->link && state->streams[i]->link == link)
 			streams_on_link[num_streams_on_link++] = state->streams[i];
 	}
@@ -197,7 +201,6 @@ static void dp_test_get_audio_test_data(struct dc_link *link, bool disable_video
 	unsigned int channel_count;
 	unsigned int channel = 0;
 	unsigned int modes = 0;
-	unsigned int sampling_rate_in_hz = 0;
 
 	// get audio test mode and test pattern parameters
 	core_link_read_dpcd(
@@ -230,38 +233,10 @@ static void dp_test_get_audio_test_data(struct dc_link *link, bool disable_video
 		}
 	}
 
-	// translate sampling rate
-	switch (dpcd_test_mode.bits.sampling_rate) {
-	case AUDIO_SAMPLING_RATE_32KHZ:
-		sampling_rate_in_hz = 32000;
-		break;
-	case AUDIO_SAMPLING_RATE_44_1KHZ:
-		sampling_rate_in_hz = 44100;
-		break;
-	case AUDIO_SAMPLING_RATE_48KHZ:
-		sampling_rate_in_hz = 48000;
-		break;
-	case AUDIO_SAMPLING_RATE_88_2KHZ:
-		sampling_rate_in_hz = 88200;
-		break;
-	case AUDIO_SAMPLING_RATE_96KHZ:
-		sampling_rate_in_hz = 96000;
-		break;
-	case AUDIO_SAMPLING_RATE_176_4KHZ:
-		sampling_rate_in_hz = 176400;
-		break;
-	case AUDIO_SAMPLING_RATE_192KHZ:
-		sampling_rate_in_hz = 192000;
-		break;
-	default:
-		sampling_rate_in_hz = 0;
-		break;
-	}
-
 	link->audio_test_data.flags.test_requested = 1;
 	link->audio_test_data.flags.disable_video = disable_video;
-	link->audio_test_data.sampling_rate = sampling_rate_in_hz;
-	link->audio_test_data.channel_count = channel_count;
+	link->audio_test_data.sampling_rate = (uint8_t)dpcd_test_mode.bits.sampling_rate;
+	link->audio_test_data.channel_count = (uint8_t)channel_count;
 	link->audio_test_data.pattern_type = test_pattern;
 
 	if (test_pattern == DP_TEST_PATTERN_AUDIO_SAWTOOTH) {
@@ -482,6 +457,7 @@ static void set_crtc_test_pattern(struct dc_link *link,
 				enum dp_test_pattern test_pattern,
 				enum dp_test_pattern_color_space test_pattern_color_space)
 {
+	(void)test_pattern_color_space;
 	enum controller_dp_test_pattern controller_test_pattern;
 	enum dc_color_depth color_depth = pipe_ctx->
 		stream->timing.display_color_depth;
@@ -877,12 +853,12 @@ bool dp_set_test_pattern(
 			return false;
 
 		if (pipe_ctx->stream_res.tg->funcs->lock_doublebuffer_enable) {
-			if (should_use_dmub_lock(pipe_ctx->stream->link)) {
+			if (should_use_dmub_inbox1_lock(pipe_ctx->stream->link->dc, pipe_ctx->stream->link)) {
 				union dmub_hw_lock_flags hw_locks = { 0 };
 				struct dmub_hw_lock_inst_flags inst_flags = { 0 };
 
 				hw_locks.bits.lock_dig = 1;
-				inst_flags.dig_inst = pipe_ctx->stream_res.tg->inst;
+				inst_flags.dig_inst = (uint8_t)pipe_ctx->stream_res.tg->inst;
 
 				dmub_hw_lock_mgr_cmd(link->ctx->dmub_srv,
 							true,
@@ -925,12 +901,12 @@ bool dp_set_test_pattern(
 				CRTC_STATE_VACTIVE);
 
 		if (pipe_ctx->stream_res.tg->funcs->lock_doublebuffer_disable) {
-			if (should_use_dmub_lock(pipe_ctx->stream->link)) {
+			if (should_use_dmub_inbox1_lock(pipe_ctx->stream->link->dc, pipe_ctx->stream->link)) {
 				union dmub_hw_lock_flags hw_locks = { 0 };
 				struct dmub_hw_lock_inst_flags inst_flags = { 0 };
 
 				hw_locks.bits.lock_dig = 1;
-				inst_flags.dig_inst = pipe_ctx->stream_res.tg->inst;
+				inst_flags.dig_inst = (uint8_t)pipe_ctx->stream_res.tg->inst;
 
 				dmub_hw_lock_mgr_cmd(link->ctx->dmub_srv,
 							false,

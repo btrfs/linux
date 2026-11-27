@@ -7,6 +7,7 @@
  */
 
 #include <linux/bitops.h>
+#include <linux/err.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/rational.h>
@@ -81,6 +82,9 @@ static void byt_set_termios(struct uart_port *p, struct ktermios *termios,
 
 	/* Gracefully handle the B0 case: fall back to B9600 */
 	fuart = fuart ? fuart : 9600 * 16;
+
+	/* Fuart <= Fref: leave it to the core to refuse a higher baud rate */
+	fuart = min(fuart, fref);
 
 	/* Get Fuart closer to Fref */
 	fuart *= rounddown_pow_of_two(fref / fuart);
@@ -183,9 +187,8 @@ static int ehl_serial_setup(struct lpss8250 *lpss, struct uart_port *port)
 
 static void ehl_serial_exit(struct lpss8250 *lpss)
 {
-	struct uart_8250_port *up = serial8250_get_port(lpss->data.line);
-
-	up->dma = NULL;
+	if (lpss->data.uport)
+		lpss->data.uport->dma = NULL;
 }
 
 #ifdef CONFIG_SERIAL_8250_DMA
@@ -320,7 +323,7 @@ static int lpss8250_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	pci_set_master(pdev);
 
-	lpss = devm_kzalloc(&pdev->dev, sizeof(*lpss), GFP_KERNEL);
+	lpss = devm_kzalloc_obj(&pdev->dev, *lpss);
 	if (!lpss)
 		return -ENOMEM;
 
@@ -356,11 +359,12 @@ static int lpss8250_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (ret)
 		goto err_exit;
 
-	ret = serial8250_register_8250_port(&uart);
-	if (ret < 0)
+	struct uart_8250_port *uport = serial8250_register_8250_port(&uart);
+	if (IS_ERR(uport)) {
+		ret = PTR_ERR(uport);
 		goto err_exit;
-
-	lpss->data.line = ret;
+	}
+	lpss->data.uport = uport;
 
 	pci_set_drvdata(pdev, lpss);
 	return 0;
@@ -375,7 +379,7 @@ static void lpss8250_remove(struct pci_dev *pdev)
 {
 	struct lpss8250 *lpss = pci_get_drvdata(pdev);
 
-	serial8250_unregister_port(lpss->data.line);
+	serial8250_unregister_port(lpss->data.uport);
 
 	lpss->board->exit(lpss);
 	pci_free_irq_vectors(pdev);

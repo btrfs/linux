@@ -18,6 +18,8 @@
 #include <linux/fcntl.h>
 #include <linux/file.h>
 #include <linux/fs.h>
+#include <linux/fs_struct.h>
+#include <linux/kthread.h>
 #include <scsi/scsi_proto.h>
 #include <linux/unaligned.h>
 
@@ -856,9 +858,16 @@ static int core_alua_write_tpg_metadata(
 	unsigned char *md_buf,
 	u32 md_buf_len)
 {
-	struct file *file = filp_open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+	struct file *file;
 	loff_t pos = 0;
 	int ret;
+
+	if (tsk_is_kthread(current)) {
+		scoped_with_init_fs()
+			file = filp_open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+	} else {
+		file = filp_open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+	}
 
 	if (IS_ERR(file)) {
 		pr_err("filp_open(%s) for ALUA metadata failed\n", path);
@@ -1072,8 +1081,15 @@ int core_alua_do_port_transition(
 		return -EINVAL;
 
 	local_lu_gp_mem = l_dev->dev_alua_lu_gp_mem;
+	if (!local_lu_gp_mem)
+		return -ENODEV;
+
 	spin_lock(&local_lu_gp_mem->lu_gp_mem_lock);
 	lu_gp = local_lu_gp_mem->lu_gp;
+	if (!lu_gp) {
+		spin_unlock(&local_lu_gp_mem->lu_gp_mem_lock);
+		return -ENODEV;
+	}
 	atomic_inc(&lu_gp->lu_gp_ref_cnt);
 	spin_unlock(&local_lu_gp_mem->lu_gp_mem_lock);
 	/*

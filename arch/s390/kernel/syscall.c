@@ -13,6 +13,7 @@
  */
 
 #include <linux/cpufeature.h>
+#include <linux/nospec.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
@@ -38,6 +39,16 @@
 #include <asm/vtime.h>
 
 #include "entry.h"
+
+#define __SYSCALL(nr, sym) long __s390x_##sym(struct pt_regs *);
+#include <asm/syscall_table.h>
+#undef __SYSCALL
+
+#define __SYSCALL(nr, sym) [nr] = (__s390x_##sym),
+const sys_call_ptr_t sys_call_table[__NR_syscalls] = {
+#include <asm/syscall_table.h>
+};
+#undef __SYSCALL
 
 #ifdef CONFIG_SYSVIPC
 /*
@@ -82,12 +93,13 @@ SYSCALL_DEFINE0(ni_syscall)
 	return -ENOSYS;
 }
 
-void noinstr __do_syscall(struct pt_regs *regs, int per_trap)
+void noinstr __do_syscall(struct pt_regs *regs, unsigned long flags)
 {
 	unsigned long nr;
+	bool permit;
 
-	add_random_kstack_offset();
-	enter_from_user_mode(regs);
+	enter_from_user_mode_randomize_stack(regs);
+
 	regs->psw = get_lowcore()->svc_old_psw;
 	regs->int_code = get_lowcore()->svc_int_code;
 	update_timer_sys();
@@ -95,7 +107,7 @@ void noinstr __do_syscall(struct pt_regs *regs, int per_trap)
 		current->thread.last_break = regs->last_break;
 	local_irq_enable();
 	regs->orig_gpr2 = regs->gprs[2];
-	if (unlikely(per_trap))
+	if (unlikely(flags & SYSCALL_FLAG_PER_TRAP))
 		set_thread_flag(TIF_PER_TRAP);
 	regs->flags = 0;
 	set_pt_regs_flag(regs, PIF_SYSCALL);
@@ -105,24 +117,26 @@ void noinstr __do_syscall(struct pt_regs *regs, int per_trap)
 		regs->int_code &= ~0xffffUL;
 		regs->int_code |= nr;
 	}
-	regs->gprs[2] = nr;
 	if (nr == __NR_restart_syscall && !(current->restart_block.arch_data & 1)) {
 		regs->psw.addr = current->restart_block.arch_data;
 		current->restart_block.arch_data = 1;
 	}
-	nr = syscall_enter_from_user_mode_work(regs, nr);
 	/*
-	 * In the s390 ptrace ABI, both the syscall number and the return value
-	 * use gpr2. However, userspace puts the syscall number either in the
-	 * svc instruction itself, or uses gpr1. To make at least skipping syscalls
-	 * work, the ptrace code sets PIF_SYSCALL_RET_SET, which is checked here
-	 * and if set, the syscall will be skipped.
+	 * gpr2 is the return value register. Set it to -ENOSYS so that a
+	 * skipped system call gets a defined default return value.
+	 * Set PIF_SYSCALL_ENTRY so that ptrace reads and writes to gpr2
+	 * are redirected to the system call number in int_code.
 	 */
-	if (unlikely(test_and_clear_pt_regs_flag(regs, PIF_SYSCALL_RET_SET)))
+	syscall_set_return_value(current, regs, -ENOSYS, 0);
+	set_pt_regs_flag(regs, PIF_SYSCALL_ENTRY);
+	permit = syscall_enter_from_user_mode_work(regs, &nr);
+	clear_pt_regs_flag(regs, PIF_SYSCALL_ENTRY);
+	if (unlikely(!permit))
 		goto out;
-	regs->gprs[2] = -ENOSYS;
-	if (likely(nr < NR_syscalls))
-		regs->gprs[2] = current->thread.sys_call_table[nr](regs);
+	if (likely(nr < NR_syscalls)) {
+		nr = array_index_nospec(nr, NR_syscalls);
+		regs->gprs[2] = sys_call_table[nr](regs);
+	}
 out:
 	syscall_exit_to_user_mode(regs);
 }

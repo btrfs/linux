@@ -130,14 +130,14 @@ struct mlx5_rsc_dump_cmd *mlx5_rsc_dump_cmd_create(struct mlx5_core_dev *dev,
 	struct mlx5_rsc_dump_cmd *cmd;
 	int sgmt_type;
 
-	if (IS_ERR_OR_NULL(dev->rsc_dump))
+	if (!dev->rsc_dump)
 		return ERR_PTR(-EOPNOTSUPP);
 
 	sgmt_type = dev->rsc_dump->fw_segment_type[key->rsc];
 	if (!sgmt_type && key->rsc != MLX5_SGMT_TYPE_MENU)
 		return ERR_PTR(-EOPNOTSUPP);
 
-	cmd = kzalloc(sizeof(*cmd), GFP_KERNEL);
+	cmd = kzalloc_obj(*cmd);
 	if (!cmd) {
 		mlx5_core_err(dev, "Resource dump: Failed to allocate command\n");
 		return ERR_PTR(-ENOMEM);
@@ -165,7 +165,7 @@ int mlx5_rsc_dump_next(struct mlx5_core_dev *dev, struct mlx5_rsc_dump_cmd *cmd,
 	bool more_dump;
 	int err;
 
-	if (IS_ERR_OR_NULL(dev->rsc_dump))
+	if (!dev->rsc_dump)
 		return -EOPNOTSUPP;
 
 	err = mlx5_rsc_dump_trigger(dev, cmd, page);
@@ -255,16 +255,16 @@ struct mlx5_rsc_dump *mlx5_rsc_dump_create(struct mlx5_core_dev *dev)
 		mlx5_core_dbg(dev, "Resource dump: capability not present\n");
 		return NULL;
 	}
-	rsc_dump = kzalloc(sizeof(*rsc_dump), GFP_KERNEL);
+	rsc_dump = kzalloc_obj(*rsc_dump);
 	if (!rsc_dump)
-		return ERR_PTR(-ENOMEM);
+		return NULL;
 
 	return rsc_dump;
 }
 
 void mlx5_rsc_dump_destroy(struct mlx5_core_dev *dev)
 {
-	if (IS_ERR_OR_NULL(dev->rsc_dump))
+	if (!dev->rsc_dump)
 		return;
 	kfree(dev->rsc_dump);
 }
@@ -274,7 +274,7 @@ int mlx5_rsc_dump_init(struct mlx5_core_dev *dev)
 	struct mlx5_rsc_dump *rsc_dump = dev->rsc_dump;
 	int err;
 
-	if (IS_ERR_OR_NULL(dev->rsc_dump))
+	if (!dev->rsc_dump)
 		return 0;
 
 	err = mlx5_core_alloc_pd(dev, &rsc_dump->pdn);
@@ -303,7 +303,7 @@ free_pd:
 
 void mlx5_rsc_dump_cleanup(struct mlx5_core_dev *dev)
 {
-	if (IS_ERR_OR_NULL(dev->rsc_dump))
+	if (!dev->rsc_dump)
 		return;
 
 	mlx5_core_destroy_mkey(dev, dev->rsc_dump->mkey);

@@ -20,6 +20,7 @@
 
 #include <drm/drm_fourcc.h>
 #include <drm/drm_framebuffer.h>
+#include <drm/drm_print.h>
 #include <drm/drm_vblank.h>
 #include <drm/exynos_drm.h>
 
@@ -687,7 +688,7 @@ static int decon_probe(struct platform_device *pdev)
 	if (!dev->of_node)
 		return -ENODEV;
 
-	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
+	ctx = devm_kzalloc_obj(dev, *ctx);
 	if (!ctx)
 		return -ENOMEM;
 

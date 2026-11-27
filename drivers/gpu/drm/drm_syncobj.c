@@ -199,6 +199,7 @@
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/sched/signal.h>
+#include <linux/sizes.h>
 #include <linux/sync_file.h>
 #include <linux/uaccess.h>
 
@@ -208,7 +209,7 @@
 #include <drm/drm_gem.h>
 #include <drm/drm_print.h>
 #include <drm/drm_syncobj.h>
-#include <drm/drm_utils.h>
+#include <drm/drm_timeout.h>
 
 #include "drm_internal.h"
 
@@ -219,6 +220,16 @@ struct syncobj_wait_entry {
 	struct dma_fence_cb fence_cb;
 	u64    point;
 };
+
+/*
+ * Upper limit for the number of handles passed to a single ioctl. This is a
+ * fixed number so that the limit is the same on all architectures. The
+ * largest per-handle allocation is the wait entry array, which must stay
+ * below the INT_MAX size limit of kvmalloc().
+ */
+#define DRM_SYNCOBJ_MAX_HANDLES	SZ_1M
+static_assert(DRM_SYNCOBJ_MAX_HANDLES <=
+	      INT_MAX / sizeof(struct syncobj_wait_entry));
 
 static void syncobj_wait_syncobj_func(struct drm_syncobj *syncobj,
 				      struct syncobj_wait_entry *wait);
@@ -250,14 +261,14 @@ struct drm_syncobj *drm_syncobj_find(struct drm_file *file_private,
 {
 	struct drm_syncobj *syncobj;
 
-	spin_lock(&file_private->syncobj_table_lock);
+	xa_lock(&file_private->syncobj_xa);
 
 	/* Check if we currently have a reference on the object */
-	syncobj = idr_find(&file_private->syncobj_idr, handle);
+	syncobj = xa_load(&file_private->syncobj_xa, handle);
 	if (syncobj)
 		drm_syncobj_get(syncobj);
 
-	spin_unlock(&file_private->syncobj_table_lock);
+	xa_unlock(&file_private->syncobj_xa);
 
 	return syncobj;
 }
@@ -442,13 +453,15 @@ int drm_syncobj_find_fence(struct drm_file *file_private,
 	u64 timeout = nsecs_to_jiffies64(DRM_SYNCOBJ_WAIT_FOR_SUBMIT_TIMEOUT);
 	int ret;
 
-	if (flags & ~DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT)
-		return -EINVAL;
-
 	if (!syncobj)
 		return -ENOENT;
 
-	/* Waiting for userspace with locks help is illegal cause that can
+	if (flags & ~DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	/* Waiting for userspace with locks held is illegal cause that can
 	 * trivial deadlock with page faults for example. Make lockdep complain
 	 * about it early on.
 	 */
@@ -557,7 +570,7 @@ int drm_syncobj_create(struct drm_syncobj **out_syncobj, uint32_t flags,
 	int ret;
 	struct drm_syncobj *syncobj;
 
-	syncobj = kzalloc(sizeof(struct drm_syncobj), GFP_KERNEL);
+	syncobj = kzalloc_obj(struct drm_syncobj);
 	if (!syncobj)
 		return -ENOMEM;
 
@@ -598,23 +611,15 @@ int drm_syncobj_get_handle(struct drm_file *file_private,
 {
 	int ret;
 
-	/* take a reference to put in the idr */
+	/* take a reference to put in the xarray */
 	drm_syncobj_get(syncobj);
 
-	idr_preload(GFP_KERNEL);
-	spin_lock(&file_private->syncobj_table_lock);
-	ret = idr_alloc(&file_private->syncobj_idr, syncobj, 1, 0, GFP_NOWAIT);
-	spin_unlock(&file_private->syncobj_table_lock);
-
-	idr_preload_end();
-
-	if (ret < 0) {
+	ret = xa_alloc(&file_private->syncobj_xa, handle, syncobj, xa_limit_32b,
+		       GFP_KERNEL);
+	if (ret)
 		drm_syncobj_put(syncobj);
-		return ret;
-	}
 
-	*handle = ret;
-	return 0;
+	return ret;
 }
 EXPORT_SYMBOL(drm_syncobj_get_handle);
 
@@ -638,10 +643,7 @@ static int drm_syncobj_destroy(struct drm_file *file_private,
 {
 	struct drm_syncobj *syncobj;
 
-	spin_lock(&file_private->syncobj_table_lock);
-	syncobj = idr_remove(&file_private->syncobj_idr, handle);
-	spin_unlock(&file_private->syncobj_table_lock);
-
+	syncobj = xa_erase(&file_private->syncobj_xa, handle);
 	if (!syncobj)
 		return -EINVAL;
 
@@ -722,20 +724,13 @@ static int drm_syncobj_fd_to_handle(struct drm_file *file_private,
 	if (fd_file(f)->f_op != &drm_syncobj_file_fops)
 		return -EINVAL;
 
-	/* take a reference to put in the idr */
+	/* take a reference to put in the xarray */
 	syncobj = fd_file(f)->private_data;
 	drm_syncobj_get(syncobj);
 
-	idr_preload(GFP_KERNEL);
-	spin_lock(&file_private->syncobj_table_lock);
-	ret = idr_alloc(&file_private->syncobj_idr, syncobj, 1, 0, GFP_NOWAIT);
-	spin_unlock(&file_private->syncobj_table_lock);
-	idr_preload_end();
-
-	if (ret > 0) {
-		*handle = ret;
-		ret = 0;
-	} else
+	ret = xa_alloc(&file_private->syncobj_xa, handle, syncobj, xa_limit_32b,
+		       GFP_KERNEL);
+	if (ret)
 		drm_syncobj_put(syncobj);
 
 	return ret;
@@ -814,17 +809,7 @@ err_put_fd:
 void
 drm_syncobj_open(struct drm_file *file_private)
 {
-	idr_init_base(&file_private->syncobj_idr, 1);
-	spin_lock_init(&file_private->syncobj_table_lock);
-}
-
-static int
-drm_syncobj_release_handle(int id, void *ptr, void *data)
-{
-	struct drm_syncobj *syncobj = ptr;
-
-	drm_syncobj_put(syncobj);
-	return 0;
+	xa_init_flags(&file_private->syncobj_xa, XA_FLAGS_ALLOC1);
 }
 
 /**
@@ -838,9 +823,12 @@ drm_syncobj_release_handle(int id, void *ptr, void *data)
 void
 drm_syncobj_release(struct drm_file *file_private)
 {
-	idr_for_each(&file_private->syncobj_idr,
-		     &drm_syncobj_release_handle, file_private);
-	idr_destroy(&file_private->syncobj_idr);
+	struct drm_syncobj *syncobj;
+	unsigned long handle;
+
+	xa_for_each(&file_private->syncobj_xa, handle, syncobj)
+		drm_syncobj_put(syncobj);
+	xa_destroy(&file_private->syncobj_xa);
 }
 
 int
@@ -1074,7 +1062,7 @@ static signed long drm_syncobj_array_wait_timeout(struct drm_syncobj **syncobjs,
 		lockdep_assert_none_held_once();
 	}
 
-	points = kmalloc_array(count, sizeof(*points), GFP_KERNEL);
+	points = kvmalloc_objs(*points, count);
 	if (points == NULL)
 		return -ENOMEM;
 
@@ -1087,7 +1075,7 @@ static signed long drm_syncobj_array_wait_timeout(struct drm_syncobj **syncobjs,
 		goto err_free_points;
 	}
 
-	entries = kcalloc(count, sizeof(*entries), GFP_KERNEL);
+	entries = kvzalloc_objs(*entries, count);
 	if (!entries) {
 		timeout = -ENOMEM;
 		goto err_free_points;
@@ -1208,46 +1196,13 @@ cleanup_entries:
 						  &entries[i].fence_cb);
 		dma_fence_put(entries[i].fence);
 	}
-	kfree(entries);
+	kvfree(entries);
 
 err_free_points:
-	kfree(points);
+	kvfree(points);
 
 	return timeout;
 }
-
-/**
- * drm_timeout_abs_to_jiffies - calculate jiffies timeout from absolute value
- *
- * @timeout_nsec: timeout nsec component in ns, 0 for poll
- *
- * Calculate the timeout in jiffies from an absolute time in sec/nsec.
- */
-signed long drm_timeout_abs_to_jiffies(int64_t timeout_nsec)
-{
-	ktime_t abs_timeout, now;
-	u64 timeout_ns, timeout_jiffies64;
-
-	/* make 0 timeout means poll - absolute 0 doesn't seem valid */
-	if (timeout_nsec == 0)
-		return 0;
-
-	abs_timeout = ns_to_ktime(timeout_nsec);
-	now = ktime_get();
-
-	if (!ktime_after(abs_timeout, now))
-		return 0;
-
-	timeout_ns = ktime_to_ns(ktime_sub(abs_timeout, now));
-
-	timeout_jiffies64 = nsecs_to_jiffies64(timeout_ns);
-	/*  clamp timeout to avoid infinite timeout */
-	if (timeout_jiffies64 >= MAX_SCHEDULE_TIMEOUT - 1)
-		return MAX_SCHEDULE_TIMEOUT - 1;
-
-	return timeout_jiffies64 + 1;
-}
-EXPORT_SYMBOL(drm_timeout_abs_to_jiffies);
 
 static int drm_syncobj_array_wait(struct drm_device *dev,
 				  struct drm_file *file_private,
@@ -1294,7 +1249,10 @@ static int drm_syncobj_array_find(struct drm_file *file_private,
 	struct drm_syncobj **syncobjs;
 	int ret;
 
-	handles = kmalloc_array(count_handles, sizeof(*handles), GFP_KERNEL);
+	if (count_handles > DRM_SYNCOBJ_MAX_HANDLES)
+		return -EINVAL;
+
+	handles = kvmalloc_objs(*handles, count_handles);
 	if (handles == NULL)
 		return -ENOMEM;
 
@@ -1304,7 +1262,7 @@ static int drm_syncobj_array_find(struct drm_file *file_private,
 		goto err_free_handles;
 	}
 
-	syncobjs = kmalloc_array(count_handles, sizeof(*syncobjs), GFP_KERNEL);
+	syncobjs = kvmalloc_objs(*syncobjs, count_handles);
 	if (syncobjs == NULL) {
 		ret = -ENOMEM;
 		goto err_free_handles;
@@ -1318,16 +1276,16 @@ static int drm_syncobj_array_find(struct drm_file *file_private,
 		}
 	}
 
-	kfree(handles);
+	kvfree(handles);
 	*syncobjs_out = syncobjs;
 	return 0;
 
 err_put_syncobjs:
 	while (i-- > 0)
 		drm_syncobj_put(syncobjs[i]);
-	kfree(syncobjs);
+	kvfree(syncobjs);
 err_free_handles:
-	kfree(handles);
+	kvfree(handles);
 
 	return ret;
 }
@@ -1339,7 +1297,7 @@ static void drm_syncobj_array_free(struct drm_syncobj **syncobjs,
 
 	for (i = 0; i < count; i++)
 		drm_syncobj_put(syncobjs[i]);
-	kfree(syncobjs);
+	kvfree(syncobjs);
 }
 
 int
@@ -1510,7 +1468,7 @@ drm_syncobj_eventfd_ioctl(struct drm_device *dev, void *data,
 		goto err_fdget;
 	}
 
-	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	entry = kzalloc_obj(*entry);
 	if (!entry) {
 		ret = -ENOMEM;
 		goto err_kzalloc;
@@ -1628,8 +1586,7 @@ drm_syncobj_timeline_signal_ioctl(struct drm_device *dev, void *data,
 	if (ret < 0)
 		return ret;
 
-	points = kmalloc_array(args->count_handles, sizeof(*points),
-			       GFP_KERNEL);
+	points = kvmalloc_objs(*points, args->count_handles);
 	if (!points) {
 		ret = -ENOMEM;
 		goto out;
@@ -1642,7 +1599,7 @@ drm_syncobj_timeline_signal_ioctl(struct drm_device *dev, void *data,
 		goto err_points;
 	}
 
-	chains = kmalloc_array(args->count_handles, sizeof(void *), GFP_KERNEL);
+	chains = kvmalloc_objs(*chains, args->count_handles);
 	if (!chains) {
 		ret = -ENOMEM;
 		goto err_points;
@@ -1665,9 +1622,9 @@ drm_syncobj_timeline_signal_ioctl(struct drm_device *dev, void *data,
 		dma_fence_put(fence);
 	}
 err_chains:
-	kfree(chains);
+	kvfree(chains);
 err_points:
-	kfree(points);
+	kvfree(points);
 out:
 	drm_syncobj_array_free(syncobjs, args->count_handles);
 

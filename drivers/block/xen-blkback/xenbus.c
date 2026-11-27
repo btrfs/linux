@@ -127,14 +127,22 @@ out:
 	return;
 }
 
-static int xen_blkif_alloc_rings(struct xen_blkif *blkif)
+static int xen_blkif_alloc_rings(struct xen_blkif *blkif,
+				 unsigned int nr_rings)
 {
 	unsigned int r;
+	struct xen_blkif_ring *rings;
 
-	blkif->rings = kcalloc(blkif->nr_rings, sizeof(struct xen_blkif_ring),
-			       GFP_KERNEL);
-	if (!blkif->rings)
+	rings = kzalloc_objs(struct xen_blkif_ring, nr_rings);
+	if (!rings)
 		return -ENOMEM;
+
+	write_lock(&blkif->rings_lock);
+
+	blkif->rings = rings;
+	blkif->nr_rings = nr_rings;
+
+	write_unlock(&blkif->rings_lock);
 
 	for (r = 0; r < blkif->nr_rings; r++) {
 		struct xen_blkif_ring *ring = &blkif->rings[r];
@@ -175,6 +183,7 @@ static struct xen_blkif *xen_blkif_alloc(domid_t domid)
 	blkif->domid = domid;
 	atomic_set(&blkif->refcnt, 1);
 	init_completion(&blkif->drain_complete);
+	rwlock_init(&blkif->rings_lock);
 
 	/*
 	 * Because freeing back to the cache may be deferred, it is not
@@ -269,6 +278,7 @@ static int xen_blkif_disconnect(struct xen_blkif *blkif)
 	struct pending_req *req, *n;
 	unsigned int j, r;
 	bool busy = false;
+	struct xen_blkif_ring *rings;
 
 	for (r = 0; r < blkif->nr_rings; r++) {
 		struct xen_blkif_ring *ring = &blkif->rings[r];
@@ -335,9 +345,15 @@ static int xen_blkif_disconnect(struct xen_blkif *blkif)
 	 * blkif->rings was allocated in connect_ring, so we should free it in
 	 * here.
 	 */
-	kfree(blkif->rings);
+	write_lock(&blkif->rings_lock);
+
+	rings = blkif->rings;
 	blkif->rings = NULL;
 	blkif->nr_rings = 0;
+
+	write_unlock(&blkif->rings_lock);
+
+	kfree(rings);
 
 	return 0;
 }
@@ -386,6 +402,7 @@ void xen_blkif_interface_fini(void)
 		unsigned int i;						\
 		unsigned long long result = 0;				\
 									\
+		read_lock(&blkif->rings_lock);				\
 		if (!blkif->rings)				\
 			goto out;					\
 									\
@@ -396,6 +413,7 @@ void xen_blkif_interface_fini(void)
 		}							\
 									\
 out:									\
+		read_unlock(&blkif->rings_lock);			\
 		return sprintf(buf, format, result);			\
 	}								\
 	static DEVICE_ATTR(name, 0444, show_##name, NULL)
@@ -628,8 +646,7 @@ static int xen_blkbk_probe(struct xenbus_device *dev,
 			   const struct xenbus_device_id *id)
 {
 	int err;
-	struct backend_info *be = kzalloc(sizeof(struct backend_info),
-					  GFP_KERNEL);
+	struct backend_info *be = kzalloc_obj(struct backend_info);
 
 	/* match the pr_debug in xen_blkbk_remove */
 	pr_debug("%s %p %d\n", __func__, dev, dev->otherend_id);
@@ -1010,18 +1027,17 @@ static int read_per_ring_refs(struct xen_blkif_ring *ring, const char *dir)
 
 	err = -ENOMEM;
 	for (i = 0; i < nr_grefs * XEN_BLKIF_REQS_PER_PAGE; i++) {
-		req = kzalloc(sizeof(*req), GFP_KERNEL);
+		req = kzalloc_obj(*req);
 		if (!req)
 			goto fail;
 		list_add_tail(&req->free_list, &ring->pending_free);
 		for (j = 0; j < MAX_INDIRECT_SEGMENTS; j++) {
-			req->segments[j] = kzalloc(sizeof(*req->segments[0]), GFP_KERNEL);
+			req->segments[j] = kzalloc_obj(*req->segments[0]);
 			if (!req->segments[j])
 				goto fail;
 		}
 		for (j = 0; j < MAX_INDIRECT_PAGES; j++) {
-			req->indirect_pages[j] = kzalloc(sizeof(*req->indirect_pages[0]),
-							 GFP_KERNEL);
+			req->indirect_pages[j] = kzalloc_obj(*req->indirect_pages[0]);
 			if (!req->indirect_pages[j])
 				goto fail;
 		}
@@ -1105,8 +1121,7 @@ static int connect_ring(struct backend_info *be)
 				requested_num_queues, xenblk_max_queues);
 		return -ENOSYS;
 	}
-	blkif->nr_rings = requested_num_queues;
-	if (xen_blkif_alloc_rings(blkif))
+	if (xen_blkif_alloc_rings(blkif, requested_num_queues))
 		return -ENOMEM;
 
 	pr_info("%s: using %d queues, protocol %d (%s) %s\n", dev->nodename,

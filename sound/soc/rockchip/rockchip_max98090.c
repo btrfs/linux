@@ -108,7 +108,7 @@ static int rk_jack_event(struct notifier_block *nb, unsigned long event,
 			 void *data)
 {
 	struct snd_soc_jack *jack = (struct snd_soc_jack *)data;
-	struct snd_soc_dapm_context *dapm = &jack->card->dapm;
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(jack->card);
 
 	if (event & SND_JACK_MICROPHONE) {
 		snd_soc_dapm_force_enable_pin(dapm, "MICBIAS");
@@ -191,12 +191,23 @@ static int rk_aif1_hw_params(struct snd_pcm_substream *substream,
 
 static int rk_aif1_startup(struct snd_pcm_substream *substream)
 {
+	int ret;
 	/*
 	 * Set period size to 240 because pl330 has issue
 	 * dealing with larger period in stress testing.
 	 */
-	return snd_pcm_hw_constraint_minmax(substream->runtime,
-			SNDRV_PCM_HW_PARAM_PERIOD_SIZE, 240, 240);
+	ret = snd_pcm_hw_constraint_minmax(substream->runtime,
+					   SNDRV_PCM_HW_PARAM_PERIOD_SIZE,
+					   240, 240);
+	if (ret < 0)
+		return ret;
+
+	/*
+	 * ASoC only marks the DAI link as started when .startup() returns 0.
+	 * Since snd_pcm_hw_constraint_minmax() may return 1, explicitly
+	 * return 0 to ensure the DAI link is correctly marked as started.
+	 */
+	return 0;
 }
 
 static const struct snd_soc_ops rk_aif1_ops = {
@@ -428,11 +439,8 @@ static int snd_rk_mc_probe(struct platform_device *pdev)
 
 	/* Parse card name. */
 	ret = snd_soc_of_parse_card_name(card, "rockchip,model");
-	if (ret) {
-		dev_err(&pdev->dev,
-			"Soc parse card name failed %d\n", ret);
+	if (ret)
 		return ret;
-	}
 
 	/* register the soc card */
 	ret = devm_snd_soc_register_card(&pdev->dev, card);

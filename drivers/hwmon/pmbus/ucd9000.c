@@ -8,6 +8,7 @@
 
 #include <linux/debugfs.h>
 #include <linux/delay.h>
+#include <linux/hex.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -142,14 +143,14 @@ static int ucd9000_read_byte_data(struct i2c_client *client, int page, int reg)
 }
 
 static const struct i2c_device_id ucd9000_id[] = {
-	{"ucd9000", ucd9000},
-	{"ucd90120", ucd90120},
-	{"ucd90124", ucd90124},
-	{"ucd90160", ucd90160},
-	{"ucd90320", ucd90320},
-	{"ucd9090", ucd9090},
-	{"ucd90910", ucd90910},
-	{}
+	{ .name = "ucd9000", .driver_data = ucd9000 },
+	{ .name = "ucd90120", .driver_data = ucd90120 },
+	{ .name = "ucd90124", .driver_data = ucd90124 },
+	{ .name = "ucd90160", .driver_data = ucd90160 },
+	{ .name = "ucd90320", .driver_data = ucd90320 },
+	{ .name = "ucd9090", .driver_data = ucd9090 },
+	{ .name = "ucd90910", .driver_data = ucd90910 },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ucd9000_id);
 
@@ -467,9 +468,7 @@ static int ucd9000_init_debugfs(struct i2c_client *client,
 	    mid->driver_data == ucd90320 || mid->driver_data == ucd90910) {
 		gpi_count = mid->driver_data == ucd90320 ? UCD90320_GPI_COUNT
 							 : UCD9000_GPI_COUNT;
-		entries = devm_kcalloc(&client->dev,
-				       gpi_count, sizeof(*entries),
-				       GFP_KERNEL);
+		entries = devm_kzalloc_objs(&client->dev, *entries, gpi_count);
 		if (!entries)
 			return -ENOMEM;
 
@@ -541,8 +540,7 @@ static int ucd9000_probe(struct i2c_client *client)
 			   "Device mismatch: Configured %s, detected %s\n",
 			   client->name, mid->name);
 
-	data = devm_kzalloc(&client->dev, sizeof(struct ucd9000_data),
-			    GFP_KERNEL);
+	data = devm_kzalloc_obj(&client->dev, struct ucd9000_data);
 	if (!data)
 		return -ENOMEM;
 	info = &data->info;

@@ -138,7 +138,7 @@ void host1x_job_add_wait(struct host1x_job *job, u32 id, u32 thresh,
 }
 EXPORT_SYMBOL(host1x_job_add_wait);
 
-static unsigned int pin_job(struct host1x *host, struct host1x_job *job)
+static int pin_job(struct host1x *host, struct host1x_job *job)
 {
 	unsigned long mask = HOST1X_RELOC_READ | HOST1X_RELOC_WRITE;
 	struct host1x_client *client = job->client;
@@ -235,6 +235,8 @@ static unsigned int pin_job(struct host1x *host, struct host1x_job *job)
 		}
 
 		if (host->domain) {
+			ssize_t map_err;
+
 			for_each_sgtable_sg(map->sgt, sg, j)
 				gather_size += sg->length;
 
@@ -248,11 +250,11 @@ static unsigned int pin_job(struct host1x *host, struct host1x_job *job)
 				goto put;
 			}
 
-			err = iommu_map_sgtable(host->domain, iova_dma_addr(&host->iova, alloc),
-						map->sgt, IOMMU_READ);
-			if (err == 0) {
+			map_err = iommu_map_sgtable(host->domain, iova_dma_addr(&host->iova, alloc),
+						    map->sgt, IOMMU_READ);
+			if (map_err < 0) {
 				__free_iova(&host->iova, alloc);
-				err = -EINVAL;
+				err = map_err;
 				goto put;
 			}
 

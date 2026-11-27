@@ -16,7 +16,6 @@
 #include <linux/iio/trigger_consumer.h>
 #include <linux/iio/triggered_buffer.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_data/cros_ec_commands.h>
 #include <linux/platform_data/cros_ec_proto.h>
@@ -71,7 +70,7 @@ static int cros_ec_sensors_read(struct iio_dev *indio_dev,
 		break;
 	case IIO_CHAN_INFO_CALIBSCALE:
 		st->core.param.cmd = MOTIONSENSE_CMD_SENSOR_SCALE;
-		st->core.param.sensor_offset.flags = 0;
+		st->core.param.sensor_scale.flags = 0;
 
 		ret = cros_ec_motion_send_host_cmd(&st->core, 0);
 		if (ret == -EPROTO || ret == -EOPNOTSUPP) {
@@ -106,7 +105,7 @@ static int cros_ec_sensors_read(struct iio_dev *indio_dev,
 		switch (st->core.type) {
 		case MOTIONSENSE_TYPE_ACCEL:
 			/*
-			 * EC returns data in g, iio exepects m/s^2.
+			 * EC returns data in g, IIO expects m/s^2.
 			 * Do not use IIO_G_TO_M_S_2 to avoid precision loss.
 			 */
 			*val = div_s64(val64 * 980665, 10);
@@ -179,8 +178,7 @@ static int cros_ec_sensors_write(struct iio_dev *indio_dev,
 		/* Send to EC for each axis, even if not complete */
 
 		st->core.param.cmd = MOTIONSENSE_CMD_SENSOR_SCALE;
-		st->core.param.sensor_offset.flags =
-			MOTION_SENSE_SET_OFFSET;
+		st->core.param.sensor_scale.flags = MOTION_SENSE_SET_OFFSET;
 		for (i = CROS_EC_SENSOR_X; i < CROS_EC_SENSOR_MAX_AXIS; i++)
 			st->core.param.sensor_scale.scale[i] =
 				st->core.calib[i].scale;
@@ -279,13 +277,7 @@ static int cros_ec_sensors_probe(struct platform_device *pdev)
 		}
 	}
 
-	/* Timestamp */
-	channel->type = IIO_TIMESTAMP;
-	channel->channel = -1;
-	channel->scan_index = CROS_EC_SENSOR_MAX_AXIS;
-	channel->scan_type.sign = 's';
-	channel->scan_type.realbits = 64;
-	channel->scan_type.storagebits = 64;
+	*channel = IIO_CHAN_SOFT_TIMESTAMP(CROS_EC_SENSOR_MAX_AXIS);
 
 	indio_dev->channels = state->channels;
 	indio_dev->num_channels = CROS_EC_SENSORS_MAX_CHANNELS;
@@ -318,7 +310,7 @@ MODULE_DEVICE_TABLE(platform, cros_ec_sensors_ids);
 static struct platform_driver cros_ec_sensors_platform_driver = {
 	.driver = {
 		.name	= "cros-ec-sensors",
-		.pm	= &cros_ec_sensors_pm_ops,
+		.pm	= pm_sleep_ptr(&cros_ec_sensors_pm_ops),
 	},
 	.probe		= cros_ec_sensors_probe,
 	.id_table	= cros_ec_sensors_ids,

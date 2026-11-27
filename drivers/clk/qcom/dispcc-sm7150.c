@@ -6,7 +6,6 @@
  */
 
 #include <linux/clk-provider.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -20,6 +19,7 @@
 #include "clk-regmap-divider.h"
 #include "common.h"
 #include "gdsc.h"
+#include "reset.h"
 
 enum {
 	DT_BI_TCXO,
@@ -356,7 +356,7 @@ static struct clk_rcg2 dispcc_mdss_pclk0_clk_src = {
 		.name = "dispcc_mdss_pclk0_clk_src",
 		.parent_data = dispcc_parent_data_4,
 		.num_parents = ARRAY_SIZE(dispcc_parent_data_4),
-		.flags = CLK_SET_RATE_PARENT,
+		.flags = CLK_SET_RATE_PARENT | CLK_OPS_PARENT_ENABLE,
 		.ops = &clk_pixel_ops,
 	},
 };
@@ -370,7 +370,7 @@ static struct clk_rcg2 dispcc_mdss_pclk1_clk_src = {
 		.name = "dispcc_mdss_pclk1_clk_src",
 		.parent_data = dispcc_parent_data_4,
 		.num_parents = ARRAY_SIZE(dispcc_parent_data_4),
-		.flags = CLK_SET_RATE_PARENT,
+		.flags = CLK_SET_RATE_PARENT | CLK_OPS_PARENT_ENABLE,
 		.ops = &clk_pixel_ops,
 	},
 };
@@ -951,6 +951,10 @@ static struct gdsc *dispcc_sm7150_gdscs[] = {
 	[MDSS_GDSC] = &mdss_gdsc,
 };
 
+static const struct qcom_reset_map dispcc_sm7150_resets[] = {
+	[DISPCC_MDSS_CORE_BCR] = { 0x2000 },
+};
+
 static const struct regmap_config dispcc_sm7150_regmap_config = {
 	.reg_bits	= 32,
 	.reg_stride	= 4,
@@ -959,12 +963,24 @@ static const struct regmap_config dispcc_sm7150_regmap_config = {
 	.fast_io	= true,
 };
 
+static const u32 dispcc_sm7150_critical_cbcrs[] = {
+	0x605c, /* DISPCC_XO_CLK */
+};
+
+static const struct qcom_cc_driver_data dispcc_sm7150_driver_data = {
+	.clk_cbcrs = dispcc_sm7150_critical_cbcrs,
+	.num_clk_cbcrs = ARRAY_SIZE(dispcc_sm7150_critical_cbcrs),
+};
+
 static const struct qcom_cc_desc dispcc_sm7150_desc = {
+	.driver_data = &dispcc_sm7150_driver_data,
 	.config = &dispcc_sm7150_regmap_config,
 	.clks = dispcc_sm7150_clocks,
 	.num_clks = ARRAY_SIZE(dispcc_sm7150_clocks),
 	.gdscs = dispcc_sm7150_gdscs,
 	.num_gdscs = ARRAY_SIZE(dispcc_sm7150_gdscs),
+	.resets = dispcc_sm7150_resets,
+	.num_resets = ARRAY_SIZE(dispcc_sm7150_resets),
 };
 
 static const struct of_device_id dispcc_sm7150_match_table[] = {
@@ -984,9 +1000,6 @@ static int dispcc_sm7150_probe(struct platform_device *pdev)
 	clk_fabia_pll_configure(&dispcc_pll0, regmap, &dispcc_pll0_config);
 	/* Enable clock gating for DSI and MDP clocks */
 	regmap_update_bits(regmap, 0x8000, 0x7f0, 0x7f0);
-
-	/* Keep some clocks always-on */
-	qcom_branch_set_clk_en(regmap, 0x605c); /* DISPCC_XO_CLK */
 
 	return qcom_cc_really_probe(&pdev->dev, &dispcc_sm7150_desc, regmap);
 }

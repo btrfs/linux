@@ -69,7 +69,7 @@ static int afs_do_silly_rename(struct afs_vnode *dvnode, struct afs_vnode *vnode
 	if (IS_ERR(op))
 		return PTR_ERR(op);
 
-	op->more_files = kvcalloc(2, sizeof(struct afs_vnode_param), GFP_KERNEL);
+	op->more_files = kvzalloc_objs(struct afs_vnode_param, 2);
 	if (!op->more_files) {
 		afs_put_operation(op);
 		return -ENOMEM;
@@ -248,13 +248,11 @@ int afs_silly_iput(struct dentry *dentry, struct inode *inode)
 	struct dentry *alias;
 	int ret;
 
-	DECLARE_WAIT_QUEUE_HEAD_ONSTACK(wq);
-
 	_enter("%p{%pd},%llx", dentry, dentry, vnode->fid.vnode);
 
 	down_read(&dvnode->rmdir_lock);
 
-	alias = d_alloc_parallel(dentry->d_parent, &dentry->d_name, &wq);
+	alias = d_alloc_parallel(dentry->d_parent, &dentry->d_name);
 	if (IS_ERR(alias)) {
 		up_read(&dvnode->rmdir_lock);
 		return 0;

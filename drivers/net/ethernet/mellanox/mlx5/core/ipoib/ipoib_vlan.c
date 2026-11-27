@@ -31,6 +31,7 @@
  */
 
 #include <linux/hash.h>
+#include <linux/rculist.h>
 #include "ipoib.h"
 
 #define MLX5I_MAX_LOG_PKEY_SUP 7
@@ -39,11 +40,12 @@ struct qpn_to_netdev {
 	struct net_device *netdev;
 	struct hlist_node hlist;
 	u32 underlay_qpn;
+	struct rcu_head rcu;
 };
 
 struct mlx5i_pkey_qpn_ht {
 	struct hlist_head buckets[1 << MLX5I_MAX_LOG_PKEY_SUP];
-	spinlock_t ht_lock; /* Synchronise with NAPI */
+	spinlock_t ht_lock; /* Serialize hash table updates */
 };
 
 int mlx5i_pkey_qpn_ht_init(struct net_device *netdev)
@@ -51,7 +53,7 @@ int mlx5i_pkey_qpn_ht_init(struct net_device *netdev)
 	struct mlx5i_priv *ipriv = netdev_priv(netdev);
 	struct mlx5i_pkey_qpn_ht *qpn_htbl;
 
-	qpn_htbl = kzalloc(sizeof(*qpn_htbl), GFP_KERNEL);
+	qpn_htbl = kzalloc_obj(*qpn_htbl);
 	if (!qpn_htbl)
 		return -ENOMEM;
 
@@ -68,13 +70,14 @@ void mlx5i_pkey_qpn_ht_cleanup(struct net_device *netdev)
 	kfree(ipriv->qpn_htbl);
 }
 
-static struct qpn_to_netdev *mlx5i_find_qpn_to_netdev_node(struct hlist_head *buckets,
-							   u32 qpn)
+static struct qpn_to_netdev *
+mlx5i_find_qpn_to_netdev_node(struct mlx5i_pkey_qpn_ht *ht, u32 qpn)
 {
-	struct hlist_head *h = &buckets[hash_32(qpn, MLX5I_MAX_LOG_PKEY_SUP)];
+	struct hlist_head *h = &ht->buckets[hash_32(qpn, MLX5I_MAX_LOG_PKEY_SUP)];
 	struct qpn_to_netdev *node;
 
-	hlist_for_each_entry(node, h, hlist) {
+	hlist_for_each_entry_rcu(node, h, hlist,
+				 lockdep_is_held(&ht->ht_lock)) {
 		if (node->underlay_qpn == qpn)
 			return node;
 	}
@@ -89,14 +92,14 @@ int mlx5i_pkey_add_qpn(struct net_device *netdev, u32 qpn)
 	u8 key = hash_32(qpn, MLX5I_MAX_LOG_PKEY_SUP);
 	struct qpn_to_netdev *new_node;
 
-	new_node = kzalloc(sizeof(*new_node), GFP_KERNEL);
+	new_node = kzalloc_obj(*new_node);
 	if (!new_node)
 		return -ENOMEM;
 
 	new_node->netdev = netdev;
 	new_node->underlay_qpn = qpn;
 	spin_lock_bh(&ht->ht_lock);
-	hlist_add_head(&new_node->hlist, &ht->buckets[key]);
+	hlist_add_head_rcu(&new_node->hlist, &ht->buckets[key]);
 	spin_unlock_bh(&ht->ht_lock);
 
 	return 0;
@@ -109,16 +112,17 @@ int mlx5i_pkey_del_qpn(struct net_device *netdev, u32 qpn)
 	struct mlx5i_pkey_qpn_ht *ht = ipriv->qpn_htbl;
 	struct qpn_to_netdev *node;
 
-	node = mlx5i_find_qpn_to_netdev_node(ht->buckets, qpn);
+	spin_lock_bh(&ht->ht_lock);
+	node = mlx5i_find_qpn_to_netdev_node(ht, qpn);
 	if (!node) {
+		spin_unlock_bh(&ht->ht_lock);
 		mlx5_core_warn(epriv->mdev, "QPN to netdev delete from HT failed\n");
 		return -EINVAL;
 	}
 
-	spin_lock_bh(&ht->ht_lock);
-	hlist_del_init(&node->hlist);
+	hlist_del_rcu(&node->hlist);
 	spin_unlock_bh(&ht->ht_lock);
-	kfree(node);
+	kfree_rcu(node, rcu);
 
 	return 0;
 }
@@ -128,7 +132,7 @@ struct net_device *mlx5i_pkey_get_netdev(struct net_device *netdev, u32 qpn)
 	struct mlx5i_priv *ipriv = netdev_priv(netdev);
 	struct qpn_to_netdev *node;
 
-	node = mlx5i_find_qpn_to_netdev_node(ipriv->qpn_htbl->buckets, qpn);
+	node = mlx5i_find_qpn_to_netdev_node(ipriv->qpn_htbl, qpn);
 	if (!node)
 		return NULL;
 
@@ -140,7 +144,6 @@ static int mlx5i_pkey_close(struct net_device *netdev);
 static int mlx5i_pkey_dev_init(struct net_device *dev);
 static void mlx5i_pkey_dev_cleanup(struct net_device *netdev);
 static int mlx5i_pkey_change_mtu(struct net_device *netdev, int new_mtu);
-static int mlx5i_pkey_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd);
 
 static const struct net_device_ops mlx5i_pkey_netdev_ops = {
 	.ndo_open                = mlx5i_pkey_open,
@@ -149,7 +152,8 @@ static const struct net_device_ops mlx5i_pkey_netdev_ops = {
 	.ndo_get_stats64         = mlx5i_get_stats,
 	.ndo_uninit              = mlx5i_pkey_dev_cleanup,
 	.ndo_change_mtu          = mlx5i_pkey_change_mtu,
-	.ndo_eth_ioctl            = mlx5i_pkey_ioctl,
+	.ndo_hwtstamp_get        = mlx5i_hwtstamp_get,
+	.ndo_hwtstamp_set        = mlx5i_hwtstamp_set,
 };
 
 /* Child NDOs */
@@ -182,11 +186,6 @@ static int mlx5i_pkey_dev_init(struct net_device *dev)
 	ipriv->qpn_htbl = parent_ipriv->qpn_htbl;
 
 	return mlx5i_dev_init(dev);
-}
-
-static int mlx5i_pkey_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
-{
-	return mlx5i_ioctl(dev, ifr, cmd);
 }
 
 static void mlx5i_pkey_dev_cleanup(struct net_device *netdev)

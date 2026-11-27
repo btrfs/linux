@@ -55,8 +55,8 @@ s64 ipu7_isys_csi2_get_link_freq(struct ipu7_isys_csi2 *csi2)
 	src_pad = media_entity_remote_source_pad_unique(&csi2->asd.sd.entity);
 	if (IS_ERR(src_pad)) {
 		dev_err(&csi2->isys->adev->auxdev.dev,
-			"can't get source pad of %s (%ld)\n",
-			csi2->asd.sd.name, PTR_ERR(src_pad));
+			"can't get source pad of %s (%pe)\n",
+			csi2->asd.sd.name, src_pad);
 		return PTR_ERR(src_pad);
 	}
 
@@ -190,6 +190,7 @@ static int ipu7_isys_csi2_enable_stream(struct ipu7_isys_csi2 *csi2)
 }
 
 static int ipu7_isys_csi2_set_sel(struct v4l2_subdev *sd,
+				  const struct v4l2_subdev_client_info *ci,
 				  struct v4l2_subdev_state *state,
 				  struct v4l2_subdev_selection *sel)
 {
@@ -241,6 +242,7 @@ static int ipu7_isys_csi2_set_sel(struct v4l2_subdev *sd,
 }
 
 static int ipu7_isys_csi2_get_sel(struct v4l2_subdev *sd,
+				  const struct v4l2_subdev_client_info *ci,
 				  struct v4l2_subdev_state *state,
 				  struct v4l2_subdev_selection *sel)
 {

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright (C) 2020-2025 Intel Corporation
+ * Copyright (C) 2020-2026 Intel Corporation
  */
 
 #ifndef __IVPU_DRV_H__
@@ -12,6 +12,8 @@
 #include <drm/drm_mm.h>
 #include <drm/drm_print.h>
 
+#include <linux/hashtable.h>
+#include <linux/llist.h>
 #include <linux/pci.h>
 #include <linux/xarray.h>
 #include <uapi/drm/ivpu_accel.h>
@@ -25,33 +27,24 @@
 #define PCI_DEVICE_ID_MTL	0x7d1d
 #define PCI_DEVICE_ID_ARL	0xad1d
 #define PCI_DEVICE_ID_LNL	0x643e
-#define PCI_DEVICE_ID_PTL_P	0xb03e
+#define PCI_DEVICE_ID_PTL	0xb03e
 #define PCI_DEVICE_ID_WCL	0xfd3e
-
-#define IVPU_HW_IP_37XX 37
-#define IVPU_HW_IP_40XX 40
-#define IVPU_HW_IP_50XX 50
-#define IVPU_HW_IP_60XX 60
+#define PCI_DEVICE_ID_NVL	0xd71d
 
 #define IVPU_HW_IP_REV_LNL_B0 4
-
-#define IVPU_HW_BTRS_MTL 1
-#define IVPU_HW_BTRS_LNL 2
+#define IVPU_HW_IP_REV_NVL_A0 0
 
 #define IVPU_GLOBAL_CONTEXT_MMU_SSID   0
 /* SSID 1 is used by the VPU to represent reserved context */
 #define IVPU_RESERVED_CONTEXT_MMU_SSID 1
 #define IVPU_USER_CONTEXT_MIN_SSID     2
-#define IVPU_USER_CONTEXT_MAX_SSID     (IVPU_USER_CONTEXT_MIN_SSID + 63)
+#define IVPU_USER_CONTEXT_MAX_SSID     (IVPU_USER_CONTEXT_MIN_SSID + 128)
 
 #define IVPU_MIN_DB 1
 #define IVPU_MAX_DB 255
 
 #define IVPU_JOB_ID_JOB_MASK		GENMASK(7, 0)
 #define IVPU_JOB_ID_CONTEXT_MASK	GENMASK(31, 8)
-
-#define IVPU_NUM_PRIORITIES    4
-#define IVPU_NUM_CMDQS_PER_CTX (IVPU_NUM_PRIORITIES)
 
 #define IVPU_CMDQ_MIN_ID 1
 #define IVPU_CMDQ_MAX_ID 255
@@ -78,6 +71,7 @@
 #define IVPU_DBG_KREF	 BIT(11)
 #define IVPU_DBG_RPM	 BIT(12)
 #define IVPU_DBG_MMU_MAP BIT(13)
+#define IVPU_DBG_IOCTL   BIT(14)
 
 #define ivpu_err(vdev, fmt, ...) \
 	drm_err(&(vdev)->drm, "%s(): " fmt, __func__, ##__VA_ARGS__)
@@ -89,7 +83,7 @@
 	drm_warn(&(vdev)->drm, "%s(): " fmt, __func__, ##__VA_ARGS__)
 
 #define ivpu_warn_ratelimited(vdev, fmt, ...) \
-	drm_err_ratelimited(&(vdev)->drm, "%s(): " fmt, __func__, ##__VA_ARGS__)
+	drm_warn_ratelimited(&(vdev)->drm, "%s(): " fmt, __func__, ##__VA_ARGS__)
 
 #define ivpu_info(vdev, fmt, ...) drm_info(&(vdev)->drm, fmt, ##__VA_ARGS__)
 
@@ -105,12 +99,22 @@
 		ivpu_dbg(vdev, MISC, "Using WA: " #wa_name "\n");	\
 } while (0)
 
+enum vpu_hw_ip {
+	IVPU_HW_IP_37XX = 37,
+	IVPU_HW_IP_40XX = 40,
+	IVPU_HW_IP_50XX = 50,
+	IVPU_HW_IP_60XX = 60,
+};
+
+enum vpu_hw_btrs {
+	IVPU_HW_BTRS_MTL = 1,
+	IVPU_HW_BTRS_LNL = 2,
+};
+
 struct ivpu_wa_table {
 	bool punit_disabled;
 	bool clear_runtime_mem;
-	bool interrupt_clear_with_0;
 	bool disable_clock_relinquish;
-	bool disable_d0i3_msg;
 	bool wp0_during_power_up;
 	bool disable_d0i2;
 };
@@ -121,10 +125,22 @@ struct ivpu_fw_info;
 struct ivpu_ipc_info;
 struct ivpu_pm_info;
 
+struct ivpu_user_limits {
+	struct hlist_node hash_node;
+	struct ivpu_device *vdev;
+	struct kref ref;
+	u32 max_ctx_count;
+	u32 max_db_count;
+	u32 uid;
+	atomic_t db_count;
+};
+
 struct ivpu_device {
 	struct drm_device drm;
 	void __iomem *regb;
 	void __iomem *regv;
+	enum vpu_hw_ip hw_ip_gen;
+	enum vpu_hw_btrs btrs_gen;
 	u32 platform;
 	u32 irq;
 
@@ -140,14 +156,18 @@ struct ivpu_device {
 	struct mutex context_list_lock; /* Protects user context addition/removal */
 	struct xarray context_xa;
 	struct xa_limit context_xa_limit;
+	DECLARE_HASHTABLE(user_limits, 8);
+	struct mutex user_limits_lock; /* Protects user_limits */
 
 	struct xarray db_xa;
 	struct xa_limit db_limit;
 	u32 db_next;
 
-	struct work_struct irq_ipc_work;
 	struct work_struct irq_dct_work;
 	struct work_struct context_abort_work;
+	struct llist_head job_destroy_list;
+	struct work_struct job_destroy_work;
+	struct workqueue_struct *job_destroy_wq;
 
 	struct mutex bo_list_lock; /* Protects bo_list */
 	struct list_head bo_list;
@@ -156,6 +176,7 @@ struct ivpu_device {
 	struct xarray submitted_jobs_xa;
 	struct ivpu_ipc_consumer job_done_consumer;
 	atomic_t job_timeout_counter;
+	atomic_t job_timeout_detected;
 
 	atomic64_t unique_id_counter;
 
@@ -170,6 +191,9 @@ struct ivpu_device {
 		int autosuspend;
 		int d0i3_entry_msg;
 		int state_dump_msg;
+		int mmu_reg;
+		int mmu_queue;
+		int pwr_island_status;
 	} timeout;
 };
 
@@ -187,6 +211,7 @@ struct ivpu_file_priv {
 	struct list_head ms_instance_list;
 	struct ivpu_bo *ms_info_bo;
 	struct xa_limit job_limit;
+	struct ivpu_user_limits *user_limits;
 	u32 job_id_next;
 	struct xa_limit cmdq_limit;
 	u32 cmdq_id_next;
@@ -205,8 +230,7 @@ extern bool ivpu_force_snoop;
 #define IVPU_TEST_MODE_FW_TEST            BIT(0)
 #define IVPU_TEST_MODE_NULL_HW            BIT(1)
 #define IVPU_TEST_MODE_NULL_SUBMISSION    BIT(2)
-#define IVPU_TEST_MODE_D0I3_MSG_DISABLE   BIT(4)
-#define IVPU_TEST_MODE_D0I3_MSG_ENABLE    BIT(5)
+#define IVPU_TEST_MODE_FREQ_CHANGE_ENABLE BIT(3)
 #define IVPU_TEST_MODE_MIP_DISABLE        BIT(6)
 #define IVPU_TEST_MODE_DISABLE_TIMEOUTS   BIT(8)
 #define IVPU_TEST_MODE_TURBO_ENABLE       BIT(9)
@@ -229,44 +253,24 @@ static inline u8 ivpu_revision(struct ivpu_device *vdev)
 	return to_pci_dev(vdev->drm.dev)->revision;
 }
 
+static inline u16 ivpu_vendor_id(struct ivpu_device *vdev)
+{
+	return to_pci_dev(vdev->drm.dev)->vendor;
+}
+
 static inline u16 ivpu_device_id(struct ivpu_device *vdev)
 {
 	return to_pci_dev(vdev->drm.dev)->device;
 }
 
-static inline int ivpu_hw_ip_gen(struct ivpu_device *vdev)
+static inline enum vpu_hw_ip ivpu_hw_ip_gen(struct ivpu_device *vdev)
 {
-	switch (ivpu_device_id(vdev)) {
-	case PCI_DEVICE_ID_MTL:
-	case PCI_DEVICE_ID_ARL:
-		return IVPU_HW_IP_37XX;
-	case PCI_DEVICE_ID_LNL:
-		return IVPU_HW_IP_40XX;
-	case PCI_DEVICE_ID_PTL_P:
-	case PCI_DEVICE_ID_WCL:
-		return IVPU_HW_IP_50XX;
-	default:
-		dump_stack();
-		ivpu_err(vdev, "Unknown NPU IP generation\n");
-		return 0;
-	}
+	return vdev->hw_ip_gen;
 }
 
-static inline int ivpu_hw_btrs_gen(struct ivpu_device *vdev)
+static inline enum vpu_hw_btrs ivpu_hw_btrs_gen(struct ivpu_device *vdev)
 {
-	switch (ivpu_device_id(vdev)) {
-	case PCI_DEVICE_ID_MTL:
-	case PCI_DEVICE_ID_ARL:
-		return IVPU_HW_BTRS_MTL;
-	case PCI_DEVICE_ID_LNL:
-	case PCI_DEVICE_ID_PTL_P:
-	case PCI_DEVICE_ID_WCL:
-		return IVPU_HW_BTRS_LNL;
-	default:
-		dump_stack();
-		ivpu_err(vdev, "Unknown buttress generation\n");
-		return 0;
-	}
+	return vdev->btrs_gen;
 }
 
 static inline struct ivpu_device *to_ivpu_device(struct drm_device *dev)
@@ -279,6 +283,13 @@ static inline u32 ivpu_get_context_count(struct ivpu_device *vdev)
 	struct xa_limit ctx_limit = vdev->context_xa_limit;
 
 	return (ctx_limit.max - ctx_limit.min + 1);
+}
+
+static inline u32 ivpu_get_doorbell_count(struct ivpu_device *vdev)
+{
+	struct xa_limit db_limit = vdev->db_limit;
+
+	return (db_limit.max - db_limit.min + 1);
 }
 
 static inline u32 ivpu_get_platform(struct ivpu_device *vdev)

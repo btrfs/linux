@@ -36,7 +36,7 @@
 
 unsigned long kvmppc_booke_handlers;
 
-const struct _kvm_stats_desc kvm_vm_stats_desc[] = {
+const struct kvm_stats_desc kvm_vm_stats_desc[] = {
 	KVM_GENERIC_VM_STATS(),
 	STATS_DESC_ICOUNTER(VM, num_2M_pages),
 	STATS_DESC_ICOUNTER(VM, num_1G_pages)
@@ -51,7 +51,7 @@ const struct kvm_stats_header kvm_vm_stats_header = {
 		       sizeof(kvm_vm_stats_desc),
 };
 
-const struct _kvm_stats_desc kvm_vcpu_stats_desc[] = {
+const struct kvm_stats_desc kvm_vcpu_stats_desc[] = {
 	KVM_GENERIC_VCPU_STATS(),
 	STATS_DESC_COUNTER(VCPU, sum_exits),
 	STATS_DESC_COUNTER(VCPU, mmio_exits),
@@ -86,26 +86,25 @@ const struct kvm_stats_header kvm_vcpu_stats_header = {
 		       sizeof(kvm_vcpu_stats_desc),
 };
 
-/* TODO: use vcpu_printf() */
 void kvmppc_dump_vcpu(struct kvm_vcpu *vcpu)
 {
 	int i;
 
-	printk("pc:   %08lx msr:  %08llx\n", vcpu->arch.regs.nip,
-			vcpu->arch.shared->msr);
-	printk("lr:   %08lx ctr:  %08lx\n", vcpu->arch.regs.link,
-			vcpu->arch.regs.ctr);
-	printk("srr0: %08llx srr1: %08llx\n", vcpu->arch.shared->srr0,
-					    vcpu->arch.shared->srr1);
+	vcpu_err(vcpu, "pc:   %08lx msr:  %08llx\n", vcpu->arch.regs.nip,
+		 vcpu->arch.shared->msr);
+	vcpu_err(vcpu, "lr:   %08lx ctr:  %08lx\n", vcpu->arch.regs.link,
+		 vcpu->arch.regs.ctr);
+	vcpu_err(vcpu, "srr0: %08llx srr1: %08llx\n", vcpu->arch.shared->srr0,
+		 vcpu->arch.shared->srr1);
 
-	printk("exceptions: %08lx\n", vcpu->arch.pending_exceptions);
+	vcpu_err(vcpu, "exceptions: %08lx\n", vcpu->arch.pending_exceptions);
 
 	for (i = 0; i < 32; i += 4) {
-		printk("gpr%02d: %08lx %08lx %08lx %08lx\n", i,
-		       kvmppc_get_gpr(vcpu, i),
-		       kvmppc_get_gpr(vcpu, i+1),
-		       kvmppc_get_gpr(vcpu, i+2),
-		       kvmppc_get_gpr(vcpu, i+3));
+		vcpu_err(vcpu, "gpr%02d: %08lx %08lx %08lx %08lx\n", i,
+			 kvmppc_get_gpr(vcpu, i),
+			 kvmppc_get_gpr(vcpu, i+1),
+			 kvmppc_get_gpr(vcpu, i+2),
+			 kvmppc_get_gpr(vcpu, i+3));
 	}
 }
 
@@ -598,7 +597,7 @@ static unsigned long watchdog_next_timeout(struct kvm_vcpu *vcpu)
 	if (do_div(nr_jiffies, tb_ticks_per_jiffy))
 		nr_jiffies++;
 
-	return min_t(unsigned long long, nr_jiffies, TIMER_NEXT_MAX_DELTA);
+	return min(nr_jiffies, TIMER_NEXT_MAX_DELTA);
 }
 
 static void arm_next_watchdog(struct kvm_vcpu *vcpu)
@@ -650,7 +649,7 @@ static void kvmppc_watchdog_func(struct timer_list *t)
 	if (new_tsr & TSR_WIS) {
 		smp_wmb();
 		kvm_make_request(KVM_REQ_PENDING_TIMER, vcpu);
-		kvm_vcpu_kick(vcpu);
+		kvmppc_vcpu_kick(vcpu);
 	}
 
 	/*
@@ -661,7 +660,7 @@ static void kvmppc_watchdog_func(struct timer_list *t)
 	    vcpu->arch.watchdog_enabled) {
 		smp_wmb();
 		kvm_make_request(KVM_REQ_WATCHDOG, vcpu);
-		kvm_vcpu_kick(vcpu);
+		kvmppc_vcpu_kick(vcpu);
 	}
 
 	/*
@@ -692,7 +691,7 @@ static void kvmppc_core_check_exceptions(struct kvm_vcpu *vcpu)
 	unsigned long *pending = &vcpu->arch.pending_exceptions;
 	unsigned int priority;
 
-	priority = __ffs(*pending);
+	priority = find_first_bit(pending, BITS_PER_BYTE * sizeof(*pending));
 	while (priority < BOOKE_IRQPRIO_MAX) {
 		if (kvmppc_booke_irqprio_deliver(vcpu, priority))
 			break;
@@ -737,10 +736,8 @@ int kvmppc_core_check_requests(struct kvm_vcpu *vcpu)
 
 	if (kvm_check_request(KVM_REQ_PENDING_TIMER, vcpu))
 		update_timer_ints(vcpu);
-#if defined(CONFIG_KVM_E500V2) || defined(CONFIG_KVM_E500MC)
 	if (kvm_check_request(KVM_REQ_TLB_FLUSH, vcpu))
 		kvmppc_core_flush_tlb(vcpu);
-#endif
 
 	if (kvm_check_request(KVM_REQ_WATCHDOG, vcpu)) {
 		vcpu->run->exit_reason = KVM_EXIT_WATCHDOG;
@@ -1403,10 +1400,9 @@ out:
 		if (s <= 0)
 			r = (s << 2) | RESUME_HOST | (r & RESUME_FLAG_NV);
 		else {
-			/* interrupts now hard-disabled */
-			kvmppc_fix_ee_before_entry();
 			kvmppc_load_guest_fp(vcpu);
 			kvmppc_load_guest_altivec(vcpu);
+			kvmppc_fix_ee_before_entry();
 		}
 	}
 
@@ -1845,6 +1841,14 @@ void kvmppc_core_commit_memory_region(struct kvm *kvm,
 
 void kvmppc_core_flush_memslot(struct kvm *kvm, struct kvm_memory_slot *memslot)
 {
+	struct kvm_gfn_range range = {
+		.slot = memslot,
+		.start = memslot->base_gfn,
+		.end = memslot->base_gfn + memslot->npages,
+	};
+
+	if (kvm_unmap_gfn_range(kvm, &range))
+		kvm_flush_remote_tlbs(kvm);
 }
 
 void kvmppc_set_epcr(struct kvm_vcpu *vcpu, u32 new_epcr)
@@ -1871,7 +1875,7 @@ void kvmppc_set_tsr_bits(struct kvm_vcpu *vcpu, u32 tsr_bits)
 	set_bits(tsr_bits, &vcpu->arch.tsr);
 	smp_wmb();
 	kvm_make_request(KVM_REQ_PENDING_TIMER, vcpu);
-	kvm_vcpu_kick(vcpu);
+	kvmppc_vcpu_kick(vcpu);
 }
 
 void kvmppc_clr_tsr_bits(struct kvm_vcpu *vcpu, u32 tsr_bits)

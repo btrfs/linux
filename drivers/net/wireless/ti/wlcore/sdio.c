@@ -267,13 +267,13 @@ static int wl1271_probe(struct sdio_func *func,
 	if (func->num != 0x02)
 		return -ENODEV;
 
-	pdev_data = devm_kzalloc(&func->dev, sizeof(*pdev_data), GFP_KERNEL);
+	pdev_data = devm_kzalloc_obj(&func->dev, *pdev_data);
 	if (!pdev_data)
 		return -ENOMEM;
 
 	pdev_data->if_ops = &sdio_ops;
 
-	glue = devm_kzalloc(&func->dev, sizeof(*glue), GFP_KERNEL);
+	glue = devm_kzalloc_obj(&func->dev, *glue);
 	if (!glue)
 		return -ENOMEM;
 
@@ -370,7 +370,6 @@ static void wl1271_remove(struct sdio_func *func)
 	platform_device_unregister(glue->core);
 }
 
-#ifdef CONFIG_PM
 static int wl1271_suspend(struct device *dev)
 {
 	/* Tell MMC/SDIO core it's OK to power down the card
@@ -422,18 +421,15 @@ static const struct dev_pm_ops wl1271_sdio_pm_ops = {
 	.suspend	= wl1271_suspend,
 	.resume		= wl1271_resume,
 };
-#endif
 
 static struct sdio_driver wl1271_sdio_driver = {
 	.name		= "wl1271_sdio",
 	.id_table	= wl1271_devices,
 	.probe		= wl1271_probe,
 	.remove		= wl1271_remove,
-#ifdef CONFIG_PM
 	.drv = {
-		.pm = &wl1271_sdio_pm_ops,
+		.pm = pm_ptr(&wl1271_sdio_pm_ops),
 	},
-#endif
 };
 
 module_sdio_driver(wl1271_sdio_driver);

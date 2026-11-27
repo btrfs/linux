@@ -571,7 +571,7 @@ static int ad7944_chain_mode_alloc(struct device *dev,
 
 	/* 1 channel for each device in chain plus 1 for soft timestamp */
 
-	chan = devm_kcalloc(dev, n_chain_dev + 1, sizeof(*chan), GFP_KERNEL);
+	chan = devm_kzalloc_objs(dev, *chan, n_chain_dev + 1);
 	if (!chan)
 		return -ENOMEM;
 
@@ -612,7 +612,7 @@ static int ad7944_chain_mode_alloc(struct device *dev,
 		return dev_err_probe(dev, -EINVAL,
 				     "chain is limited to 32 devices\n");
 
-	scan_masks = devm_kcalloc(dev, 2, sizeof(*scan_masks), GFP_KERNEL);
+	scan_masks = devm_kzalloc_objs(dev, *scan_masks, 2);
 	if (!scan_masks)
 		return -ENOMEM;
 
@@ -865,9 +865,9 @@ static const struct of_device_id ad7944_of_match[] = {
 MODULE_DEVICE_TABLE(of, ad7944_of_match);
 
 static const struct spi_device_id ad7944_spi_id[] = {
-	{ "ad7944", (kernel_ulong_t)&ad7944_chip_info },
-	{ "ad7985", (kernel_ulong_t)&ad7985_chip_info },
-	{ "ad7986", (kernel_ulong_t)&ad7986_chip_info },
+	{ .name = "ad7944", .driver_data = (kernel_ulong_t)&ad7944_chip_info },
+	{ .name = "ad7985", .driver_data = (kernel_ulong_t)&ad7985_chip_info },
+	{ .name = "ad7986", .driver_data = (kernel_ulong_t)&ad7986_chip_info },
 	{ }
 
 };

@@ -177,10 +177,13 @@ superio_exit(int ioreg)
 #define NCT6683_CUSTOMER_ID_MSI3	0x207
 #define NCT6683_CUSTOMER_ID_MSI4	0x20d
 #define NCT6683_CUSTOMER_ID_AMD		0x162b
-#define NCT6683_CUSTOMER_ID_ASROCK		0xe2c
+#define NCT6683_CUSTOMER_ID_ASROCK	0xe2c
 #define NCT6683_CUSTOMER_ID_ASROCK2	0xe1b
 #define NCT6683_CUSTOMER_ID_ASROCK3	0x1631
 #define NCT6683_CUSTOMER_ID_ASROCK4	0x163e
+#define NCT6683_CUSTOMER_ID_ASROCK5	0x1621
+#define NCT6683_CUSTOMER_ID_ASROCK6	0x1633
+#define NCT6683_CUSTOMER_ID_ASROCK7	0x163d
 
 #define NCT6683_REG_BUILD_YEAR		0x604
 #define NCT6683_REG_BUILD_MONTH		0x605
@@ -430,12 +433,11 @@ nct6683_create_attr_group(struct device *dev,
 	if (count == 0)
 		return ERR_PTR(-EINVAL);
 
-	group = devm_kzalloc(dev, sizeof(*group), GFP_KERNEL);
+	group = devm_kzalloc_obj(dev, *group);
 	if (group == NULL)
 		return ERR_PTR(-ENOMEM);
 
-	attrs = devm_kcalloc(dev, repeat * count + 1, sizeof(*attrs),
-			     GFP_KERNEL);
+	attrs = devm_kzalloc_objs(dev, *attrs, repeat * count + 1);
 	if (attrs == NULL)
 		return ERR_PTR(-ENOMEM);
 
@@ -917,7 +919,7 @@ static ssize_t
 show_pwm(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct nct6683_data *data = nct6683_update_device(dev);
-	struct sensor_device_attribute_2 *sattr = to_sensor_dev_attr_2(attr);
+	struct sensor_device_attribute *sattr = to_sensor_dev_attr(attr);
 	int index = sattr->index;
 
 	return sprintf(buf, "%d\n", data->pwm[index]);
@@ -927,7 +929,7 @@ static ssize_t
 store_pwm(struct device *dev, struct device_attribute *attr, const char *buf,
 	  size_t count)
 {
-	struct sensor_device_attribute_2 *sattr = to_sensor_dev_attr_2(attr);
+	struct sensor_device_attribute *sattr = to_sensor_dev_attr(attr);
 	struct nct6683_data *data = dev_get_drvdata(dev);
 	int index = sattr->index;
 	unsigned long val;
@@ -1206,7 +1208,7 @@ static int nct6683_probe(struct platform_device *pdev)
 	if (!devm_request_region(dev, res->start, IOREGION_LENGTH, DRVNAME))
 		return -EBUSY;
 
-	data = devm_kzalloc(dev, sizeof(struct nct6683_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct nct6683_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -1241,6 +1243,12 @@ static int nct6683_probe(struct platform_device *pdev)
 	case NCT6683_CUSTOMER_ID_ASROCK3:
 		break;
 	case NCT6683_CUSTOMER_ID_ASROCK4:
+		break;
+	case NCT6683_CUSTOMER_ID_ASROCK5:
+		break;
+	case NCT6683_CUSTOMER_ID_ASROCK6:
+		break;
+	case NCT6683_CUSTOMER_ID_ASROCK7:
 		break;
 	default:
 		if (!force)

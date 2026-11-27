@@ -23,6 +23,11 @@ typedef enum {
 	__GFP_HIGH
 } gfp_t;
 
+#ifdef __SIZEOF_INT128__
+typedef __signed__ __int128 __s128 __attribute__((aligned(16)));
+typedef unsigned __int128 __u128 __attribute__((aligned(16)));
+#endif
+
 /*
  * We define u64 as uint64_t for every architecture
  * so that we can print it with "%"PRIx64 without getting warnings.
@@ -86,6 +91,14 @@ typedef struct {
 
 #ifndef __aligned_u64
 # define __aligned_u64 __u64 __attribute__((aligned(8)))
+#endif
+
+#ifndef __aligned_be64
+# define __aligned_be64 __be64 __attribute__((aligned(8)))
+#endif
+
+#ifndef __aligned_le64
+# define __aligned_le64 __le64 __attribute__((aligned(8)))
 #endif
 
 struct list_head {

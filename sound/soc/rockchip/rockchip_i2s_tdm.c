@@ -22,6 +22,7 @@
 
 #define DRV_NAME "rockchip-i2s-tdm"
 
+#define DEFAULT_MCLK_FS				256
 #define CH_GRP_MAX				4  /* The max channel 8 / 2 */
 #define MULTIPLEX_CH_MAX			10
 
@@ -242,6 +243,21 @@ static void rockchip_snd_xfer_clear(struct rk_i2s_tdm_dev *i2s_tdm,
 		regmap_read(i2s_tdm->regmap, I2S_CLR, &val);
 		retry--;
 		if (!retry) {
+			/*
+			 * In consumer mode the clear only completes while the
+			 * provider runs the bit clock, which it may have
+			 * stopped, e.g. an HDMI receiver whose source sends
+			 * no audio. Resetting the controller while the clear
+			 * is pending can leave it unable to transfer data
+			 * until the next reboot, so leave the clear pending.
+			 * rockchip_i2s_tdm_prepare() waits for it to complete
+			 * before the next start.
+			 */
+			if (!i2s_tdm->is_master_mode) {
+				dev_dbg(i2s_tdm->dev,
+					"clear pending, no bit clock\n");
+				break;
+			}
 			dev_warn(i2s_tdm->dev, "clear failed, reset %s%s\n",
 				 tx ? "tx" : "", rx ? "rx" : "");
 			if (rx && tx)
@@ -284,9 +300,8 @@ static void rockchip_snd_txrxctrl(struct snd_pcm_substream *substream,
 				  struct snd_soc_dai *dai, int on)
 {
 	struct rk_i2s_tdm_dev *i2s_tdm = to_info(dai);
-	unsigned long flags;
 
-	spin_lock_irqsave(&i2s_tdm->lock, flags);
+	guard(spinlock_irqsave)(&i2s_tdm->lock);
 	if (on) {
 		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
 			rockchip_enable_tde(i2s_tdm->regmap);
@@ -312,7 +327,6 @@ static void rockchip_snd_txrxctrl(struct snd_pcm_substream *substream,
 						I2S_CLR_TXC | I2S_CLR_RXC);
 		}
 	}
-	spin_unlock_irqrestore(&i2s_tdm->lock, flags);
 }
 
 static void rockchip_snd_txctrl(struct rk_i2s_tdm_dev *i2s_tdm, int on)
@@ -586,12 +600,11 @@ static int rockchip_i2s_trcm_mode(struct snd_pcm_substream *substream,
 				  unsigned int fmt)
 {
 	struct rk_i2s_tdm_dev *i2s_tdm = to_info(dai);
-	unsigned long flags;
 
 	if (!i2s_tdm->clk_trcm)
 		return 0;
 
-	spin_lock_irqsave(&i2s_tdm->lock, flags);
+	guard(spinlock_irqsave)(&i2s_tdm->lock);
 	if (i2s_tdm->refcount)
 		rockchip_i2s_tdm_xfer_pause(substream, i2s_tdm);
 
@@ -613,7 +626,6 @@ static int rockchip_i2s_trcm_mode(struct snd_pcm_substream *substream,
 
 	if (i2s_tdm->refcount)
 		rockchip_i2s_tdm_xfer_resume(substream, i2s_tdm);
-	spin_unlock_irqrestore(&i2s_tdm->lock, flags);
 
 	return 0;
 }
@@ -664,6 +676,15 @@ static int rockchip_i2s_tdm_hw_params(struct snd_pcm_substream *substream,
 			mclk = i2s_tdm->mclk_rx;
 			mclk_rate = i2s_tdm->mclk_rx_freq;
 		}
+
+		/*
+		 * When the dai/component driver doesn't need to set mclk-fs for a specific
+		 * clock, it can skip the call to set_sysclk() for that clock.
+		 * In that case, simply use the clock rate from the params and multiply it by
+		 * the default mclk-fs value.
+		 */
+		if (!mclk_rate)
+			mclk_rate = DEFAULT_MCLK_FS * params_rate(params);
 
 		err = clk_set_rate(mclk, mclk_rate);
 		if (err)
@@ -775,6 +796,37 @@ static int rockchip_i2s_tdm_trigger(struct snd_pcm_substream *substream,
 	return 0;
 }
 
+static int rockchip_i2s_tdm_prepare(struct snd_pcm_substream *substream,
+				    struct snd_soc_dai *dai)
+{
+	struct rk_i2s_tdm_dev *i2s_tdm = to_info(dai);
+	unsigned int clr, val;
+	int ret;
+
+	if (i2s_tdm->clk_trcm)
+		clr = I2S_CLR_TXC | I2S_CLR_RXC;
+	else if (substream->stream == SNDRV_PCM_STREAM_CAPTURE)
+		clr = I2S_CLR_RXC;
+	else
+		clr = I2S_CLR_TXC;
+
+	/*
+	 * A clear left pending by rockchip_snd_xfer_clear() completes once
+	 * the provider runs the bit clock again, usually within a few ms
+	 * of its own hw_params. Wait for it rather than starting the
+	 * transfer while it is pending, and fail if the clock does not
+	 * come back.
+	 */
+	ret = regmap_read_poll_timeout(i2s_tdm->regmap, I2S_CLR, val,
+				       !(val & clr), 1000, 100000);
+	if (ret)
+		dev_err_ratelimited(i2s_tdm->dev,
+				    "clear still pending (%#x), no bit clock?\n",
+				    val);
+
+	return ret;
+}
+
 static int rockchip_i2s_tdm_dai_probe(struct snd_soc_dai *dai)
 {
 	struct rk_i2s_tdm_dev *i2s_tdm = snd_soc_dai_get_drvdata(dai);
@@ -820,14 +872,28 @@ static int rockchip_i2s_tdm_set_bclk_ratio(struct snd_soc_dai *dai,
 	return 0;
 }
 
+static const u64 rockchip_dai_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF;
+
 static const struct snd_soc_dai_ops rockchip_i2s_tdm_dai_ops = {
-	.probe = rockchip_i2s_tdm_dai_probe,
-	.hw_params = rockchip_i2s_tdm_hw_params,
-	.set_bclk_ratio	= rockchip_i2s_tdm_set_bclk_ratio,
-	.set_fmt = rockchip_i2s_tdm_set_fmt,
-	.set_sysclk = rockchip_i2s_tdm_set_sysclk,
-	.set_tdm_slot = rockchip_dai_tdm_slot,
-	.trigger = rockchip_i2s_tdm_trigger,
+	.probe				= rockchip_i2s_tdm_dai_probe,
+	.hw_params			= rockchip_i2s_tdm_hw_params,
+	.prepare			= rockchip_i2s_tdm_prepare,
+	.set_bclk_ratio			= rockchip_i2s_tdm_set_bclk_ratio,
+	.set_fmt			= rockchip_i2s_tdm_set_fmt,
+	.set_sysclk			= rockchip_i2s_tdm_set_sysclk,
+	.set_tdm_slot			= rockchip_dai_tdm_slot,
+	.trigger			= rockchip_i2s_tdm_trigger,
+	.auto_selectable_formats	= &rockchip_dai_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 static const struct snd_soc_component_driver rockchip_i2s_tdm_component = {
@@ -1030,6 +1096,7 @@ static const struct of_device_id rockchip_i2s_tdm_match[] = {
 	{ .compatible = "rockchip,rv1126-i2s-tdm", .data = &rv1126_i2s_soc_data },
 	{},
 };
+MODULE_DEVICE_TABLE(of, rockchip_i2s_tdm_match);
 
 static const struct snd_soc_dai_driver i2s_tdm_dai = {
 	.ops = &rockchip_i2s_tdm_dai_ops,
@@ -1227,7 +1294,7 @@ static int rockchip_i2s_tdm_probe(struct platform_device *pdev)
 	void __iomem *regs;
 	int ret;
 
-	i2s_tdm = devm_kzalloc(&pdev->dev, sizeof(*i2s_tdm), GFP_KERNEL);
+	i2s_tdm = devm_kzalloc_obj(&pdev->dev, *i2s_tdm);
 	if (!i2s_tdm)
 		return -ENOMEM;
 
@@ -1256,16 +1323,14 @@ static int rockchip_i2s_tdm_probe(struct platform_device *pdev)
 	i2s_tdm->tx_reset = devm_reset_control_get_optional_exclusive(&pdev->dev,
 								      "tx-m");
 	if (IS_ERR(i2s_tdm->tx_reset)) {
-		ret = PTR_ERR(i2s_tdm->tx_reset);
-		return dev_err_probe(i2s_tdm->dev, ret,
+		return dev_err_probe(i2s_tdm->dev, PTR_ERR(i2s_tdm->tx_reset),
 				     "Error in tx-m reset control\n");
 	}
 
 	i2s_tdm->rx_reset = devm_reset_control_get_optional_exclusive(&pdev->dev,
 								      "rx-m");
 	if (IS_ERR(i2s_tdm->rx_reset)) {
-		ret = PTR_ERR(i2s_tdm->rx_reset);
-		return dev_err_probe(i2s_tdm->dev, ret,
+		return dev_err_probe(i2s_tdm->dev, PTR_ERR(i2s_tdm->rx_reset),
 				     "Error in rx-m reset control\n");
 	}
 
@@ -1337,8 +1402,7 @@ static int rockchip_i2s_tdm_probe(struct platform_device *pdev)
 
 	ret = i2s_tdm_prepare_enable_mclk(i2s_tdm);
 	if (ret) {
-		ret = dev_err_probe(i2s_tdm->dev, ret,
-				    "Failed to enable one or more mclks\n");
+		dev_err_probe(i2s_tdm->dev, ret, "Failed to enable one or more mclks\n");
 		goto err_disable_hclk;
 	}
 
@@ -1357,17 +1421,12 @@ static int rockchip_i2s_tdm_probe(struct platform_device *pdev)
 	ret = devm_snd_soc_register_component(&pdev->dev,
 					      &rockchip_i2s_tdm_component,
 					      i2s_tdm->dai, 1);
-
-	if (ret) {
-		dev_err(&pdev->dev, "Could not register DAI\n");
+	if (ret)
 		goto err_suspend;
-	}
 
 	ret = devm_snd_dmaengine_pcm_register(&pdev->dev, NULL, 0);
-	if (ret) {
-		dev_err(&pdev->dev, "Could not register PCM\n");
+	if (ret)
 		goto err_suspend;
-	}
 
 	return 0;
 
@@ -1433,4 +1492,3 @@ MODULE_DESCRIPTION("ROCKCHIP I2S/TDM ASoC Interface");
 MODULE_AUTHOR("Sugar Zhang <sugar.zhang@rock-chips.com>");
 MODULE_LICENSE("GPL v2");
 MODULE_ALIAS("platform:" DRV_NAME);
-MODULE_DEVICE_TABLE(of, rockchip_i2s_tdm_match);

@@ -1073,7 +1073,7 @@ static int vdec_av1_slice_setup_lat_from_src_buf(struct vdec_av1_slice_instance 
 
 	lat_buf->src_buf_req = src->vb2_buf.req_obj.req;
 	dst = &lat_buf->ts_info;
-	v4l2_m2m_buf_copy_metadata(src, dst, true);
+	v4l2_m2m_buf_copy_metadata(src, dst);
 	vsi->frame.cur_ts = dst->vb2_buf.timestamp;
 
 	return 0;
@@ -1299,11 +1299,12 @@ static void vdec_av1_slice_setup_tile(struct vdec_av1_slice_frame *frame,
 	tile->uniform_tile_spacing_flag =
 		BIT_FLAG(ctrl_tile, V4L2_AV1_TILE_INFO_FLAG_UNIFORM_TILE_SPACING);
 
-	for (i = 0; i < tile->tile_cols + 1; i++)
+	/* Bound the copy to the mi_col_starts[]/mi_row_starts[] capacity. */
+	for (i = 0; i < tile->tile_cols + 1 && i < V4L2_AV1_MAX_TILE_COLS + 1; i++)
 		tile->mi_col_starts[i] =
 			ALIGN(ctrl_tile->mi_col_starts[i], BIT(mib_size_log2)) >> mib_size_log2;
 
-	for (i = 0; i < tile->tile_rows + 1; i++)
+	for (i = 0; i < tile->tile_rows + 1 && i < V4L2_AV1_MAX_TILE_ROWS + 1; i++)
 		tile->mi_row_starts[i] =
 			ALIGN(ctrl_tile->mi_row_starts[i], BIT(mib_size_log2)) >> mib_size_log2;
 }
@@ -1780,7 +1781,7 @@ static int vdec_av1_slice_setup_core_to_dst_buf(struct vdec_av1_slice_instance *
 	if (!dst)
 		return -EINVAL;
 
-	v4l2_m2m_buf_copy_metadata(&lat_buf->ts_info, dst, true);
+	v4l2_m2m_buf_copy_metadata(&lat_buf->ts_info, dst);
 
 	return 0;
 }
@@ -1810,8 +1811,6 @@ static int vdec_av1_slice_setup_core_buffer(struct vdec_av1_slice_instance *inst
 
 	/* reference buffers */
 	vq = v4l2_m2m_get_vq(instance->ctx->m2m_ctx, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
-	if (!vq)
-		return -EINVAL;
 
 	/* get current output buffer */
 	vb = &v4l2_m2m_next_dst_buf(instance->ctx->m2m_ctx)->vb2_buf;
@@ -1881,7 +1880,7 @@ static int vdec_av1_slice_init(struct mtk_vcodec_dec_ctx *ctx)
 	struct vdec_av1_slice_init_vsi *vsi;
 	int ret;
 
-	instance = kzalloc(sizeof(*instance), GFP_KERNEL);
+	instance = kzalloc_obj(*instance);
 	if (!instance)
 		return -ENOMEM;
 

@@ -5,7 +5,6 @@
 #include <linux/bits.h>
 #include <linux/gpio/driver.h>
 #include <linux/gpio/generic.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -80,7 +79,7 @@ static int airoha_gpio_probe(struct platform_device *pdev)
 	struct airoha_gpio_ctrl *ctrl;
 	int err;
 
-	ctrl = devm_kzalloc(dev, sizeof(*ctrl), GFP_KERNEL);
+	ctrl = devm_kzalloc_obj(dev, *ctrl);
 	if (!ctrl)
 		return -ENOMEM;
 

@@ -841,7 +841,7 @@ static int abb5zes3_probe(struct i2c_client *client)
 	if (ret)
 		return ret;
 
-	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, *data);
 	if (!data)
 		return -ENOMEM;
 
@@ -933,7 +933,7 @@ MODULE_DEVICE_TABLE(of, abb5zes3_dt_match);
 #endif
 
 static const struct i2c_device_id abb5zes3_id[] = {
-	{ "abb5zes3" },
+	{ .name = "abb5zes3" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, abb5zes3_id);

@@ -293,7 +293,7 @@ static int gemini_sata_probe(struct platform_device *pdev)
 	u32 gmask;
 	int ret;
 
-	sg = devm_kzalloc(dev, sizeof(*sg), GFP_KERNEL);
+	sg = devm_kzalloc_obj(dev, *sg);
 	if (!sg)
 		return -ENOMEM;
 	sg->dev = dev;
@@ -353,7 +353,7 @@ static int gemini_sata_probe(struct platform_device *pdev)
 	if (sg->ide_pins) {
 		ret = gemini_setup_ide_pins(dev);
 		if (ret)
-			return ret;
+			goto out_unprep_clk;
 	}
 
 	dev_info(dev, "set up the Gemini IDE/SATA nexus\n");

@@ -325,8 +325,7 @@ static int pruss_clk_mux_setup(struct pruss *pruss, struct clk *clk_mux,
 		goto put_clk_mux_np;
 	}
 
-	parent_names = devm_kcalloc(dev, sizeof(*parent_names), num_parents,
-				    GFP_KERNEL);
+	parent_names = devm_kzalloc_objs(dev, *parent_names, num_parents);
 	if (!parent_names) {
 		ret = -ENOMEM;
 		goto put_clk_mux_np;
@@ -366,12 +365,10 @@ static int pruss_clk_mux_setup(struct pruss *pruss, struct clk *clk_mux,
 
 	ret = devm_add_action_or_reset(dev, pruss_of_free_clk_provider,
 				       clk_mux_np);
-	if (ret) {
+	if (ret)
 		dev_err(dev, "failed to add clkmux free action %d", ret);
-		goto put_clk_mux_np;
-	}
 
-	return 0;
+	return ret;
 
 put_clk_mux_np:
 	of_node_put(clk_mux_np);
@@ -512,7 +509,7 @@ static int pruss_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	pruss = devm_kzalloc(dev, sizeof(*pruss), GFP_KERNEL);
+	pruss = devm_kzalloc_obj(dev, *pruss);
 	if (!pruss)
 		return -ENOMEM;
 

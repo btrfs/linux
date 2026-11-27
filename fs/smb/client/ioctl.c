@@ -10,10 +10,10 @@
 
 #include <linux/fs.h>
 #include <linux/file.h>
+#include <linux/fileattr.h>
 #include <linux/mount.h>
 #include <linux/mm.h>
 #include <linux/pagemap.h>
-#include "cifspdu.h"
 #include "cifsglob.h"
 #include "cifsproto.h"
 #include "cifs_debug.h"
@@ -65,6 +65,177 @@ static long cifs_ioctl_query_info(unsigned int xid, struct file *filep,
 	if (utf16_path != &root_path)
 		kfree(utf16_path);
 	free_dentry_path(page);
+	return rc;
+}
+
+static int cifs_set_compression_by_path(unsigned int xid, struct dentry *dentry,
+					struct cifs_tcon *tcon,
+					__u16 compression_state)
+{
+	struct inode *inode = d_inode(dentry);
+	struct cifs_sb_info *cifs_sb = CIFS_SB(inode->i_sb);
+	struct TCP_Server_Info *server = tcon->ses->server;
+	struct cifs_open_parms oparms;
+	struct cifs_open_info_data data = {};
+	struct cifsFileInfo *tmp_cfile = NULL;
+	struct cifs_fid fid = {};
+	const char *full_path;
+	__u32 oplock = 0;
+	u64 uniqueid;
+	void *page;
+	int rc;
+
+	if (!server->ops->open || !server->ops->close ||
+	    !server->ops->query_file_info)
+		return -EOPNOTSUPP;
+
+	if (!(cifs_sb_flags(cifs_sb) & CIFS_MOUNT_SERVER_INUM) ||
+	    cifs_sb->mnt_cifs_serverino_autodisabled)
+		return -EOPNOTSUPP;
+
+	if (d_unhashed(dentry))
+		return -ESTALE;
+
+	page = alloc_dentry_path();
+	full_path = build_path_from_dentry(dentry, page);
+	if (IS_ERR(full_path)) {
+		free_dentry_path(page);
+		return PTR_ERR(full_path);
+	}
+
+	oparms = CIFS_OPARMS(cifs_sb, tcon, full_path, FILE_WRITE_DATA |
+			     FILE_READ_ATTRIBUTES,
+			     FILE_OPEN, 0, ACL_NO_MODE);
+	oparms.fid = &fid;
+
+	rc = server->ops->open(xid, &oparms, &oplock, NULL);
+	if (rc)
+		goto out;
+
+	tmp_cfile = kzalloc_obj(*tmp_cfile);
+	if (!tmp_cfile) {
+		rc = -ENOMEM;
+		goto close;
+	}
+
+	tmp_cfile->fid = fid;
+	rc = server->ops->query_file_info(xid, tcon, tmp_cfile, &data);
+	if (rc)
+		goto close;
+
+	uniqueid = le64_to_cpu(data.fi.IndexNumber);
+	if (!uniqueid) {
+		rc = -EOPNOTSUPP;
+		goto close;
+	}
+	if (uniqueid != CIFS_I(inode)->uniqueid) {
+		rc = -ESTALE;
+		goto close;
+	}
+
+	rc = server->ops->set_compression(xid, tcon, tmp_cfile,
+					 compression_state);
+
+close:
+	server->ops->close(xid, tcon, &fid);
+	kfree(tmp_cfile);
+	cifs_free_open_info(&data);
+out:
+	free_dentry_path(page);
+	return rc;
+}
+
+static int cifs_set_compression(unsigned int xid, struct dentry *dentry,
+				struct cifs_tcon *tcon,
+				struct cifsFileInfo *cfile,
+				__u16 compression_state)
+{
+	struct cifsFileInfo *wfile;
+	struct cifs_tcon *wtcon;
+	struct inode *inode = d_inode(dentry);
+	int rc;
+
+	if (!tcon->ses->server->ops->set_compression)
+		return -EOPNOTSUPP;
+
+	if (cfile && (cfile->fid.access & FILE_WRITE_DATA)) {
+		rc = tcon->ses->server->ops->set_compression(xid, tcon, cfile,
+							       compression_state);
+		if (rc != -EACCES)
+			return rc;
+	}
+
+	rc = cifs_get_writable_file(CIFS_I(inode), FIND_FSUID_ONLY, &wfile);
+	if (!rc) {
+		wtcon = tlink_tcon(wfile->tlink);
+		rc = wtcon->ses->server->ops->set_compression(xid, wtcon, wfile,
+							       compression_state);
+		cifsFileInfo_put(wfile);
+		if (rc != -EACCES)
+			return rc;
+	} else if (rc != -EBADF) {
+		return rc;
+	}
+
+	return cifs_set_compression_by_path(xid, dentry, tcon,
+					    compression_state);
+}
+
+int cifs_fileattr_set(const struct mnt_idmap *idmap, struct dentry *dentry,
+		      struct file_kattr *fa)
+{
+	struct cifs_sb_info *cifs_sb = CIFS_SB(dentry);
+	struct inode *inode = d_inode(dentry);
+	struct file_kattr current_fa = {};
+	u32 allowed = FS_COMPR_FL;
+	struct tcon_link *tlink;
+	__u16 compression_state;
+	bool enable_compression;
+	struct cifs_tcon *tcon;
+	unsigned int xid;
+	int rc;
+
+	if (!fa->flags_valid)
+		return -EOPNOTSUPP;
+
+	/*
+	 * chattr writes back all flags returned by fileattr_get(). Accept
+	 * FS_CASEFOLD_FL only when it reflects the share's casefold state.
+	 */
+	if (fa->flags & FS_CASEFOLD_FL) {
+		rc = cifs_fileattr_get(dentry, &current_fa);
+		if (rc)
+			return rc;
+		if (current_fa.flags & FS_CASEFOLD_FL)
+			allowed |= FS_CASEFOLD_FL;
+	}
+	if (fa->flags & ~allowed)
+		return -EOPNOTSUPP;
+
+	enable_compression = fa->flags & FS_COMPR_FL;
+	compression_state = enable_compression ? COMPRESSION_FORMAT_DEFAULT :
+						 COMPRESSION_FORMAT_NONE;
+
+	tlink = cifs_sb_tlink(cifs_sb);
+	if (IS_ERR(tlink))
+		return PTR_ERR(tlink);
+	tcon = tlink_tcon(tlink);
+
+	xid = get_xid();
+	rc = cifs_set_compression(xid, dentry, tcon, NULL, compression_state);
+	free_xid(xid);
+	cifs_put_tlink(tlink);
+
+	if (!rc) {
+		spin_lock(&inode->i_lock);
+		if (enable_compression)
+			CIFS_I(inode)->cifsAttrs |= FILE_ATTRIBUTE_COMPRESSED;
+		else
+			CIFS_I(inode)->cifsAttrs &= ~FILE_ATTRIBUTE_COMPRESSED;
+		spin_unlock(&inode->i_lock);
+	}
+
+	cifs_dbg(FYI, "set compress flag rc %d\n", rc);
 	return rc;
 }
 
@@ -134,7 +305,7 @@ static long smb_mnt_get_fsinfo(unsigned int xid, struct cifs_tcon *tcon,
 	int rc = 0;
 	struct smb_mnt_fs_info *fsinf;
 
-	fsinf = kzalloc(sizeof(struct smb_mnt_fs_info), GFP_KERNEL);
+	fsinf = kzalloc_obj(struct smb_mnt_fs_info);
 	if (fsinf == NULL)
 		return -ENOMEM;
 
@@ -217,7 +388,7 @@ static int cifs_shutdown(struct super_block *sb, unsigned long arg)
 	 */
 	case CIFS_GOING_FLAGS_LOGFLUSH:
 	case CIFS_GOING_FLAGS_NOLOGFLUSH:
-		sbi->mnt_cifs_flags |= CIFS_MOUNT_SHUTDOWN;
+		atomic_or(CIFS_MOUNT_SHUTDOWN, &sbi->mnt_cifs_flags);
 		goto shutdown_good;
 	default:
 		rc = -EINVAL;
@@ -297,7 +468,7 @@ search_end:
 		break;
 	case SMB2_ENCRYPTION_AES256_CCM:
 	case SMB2_ENCRYPTION_AES256_GCM:
-		out.session_key_length = CIFS_SESS_KEY_SIZE;
+		out.session_key_length = ses->auth_key.len;
 		out.server_in_key_length = out.server_out_key_length = SMB3_GCM256_CRYPTKEY_SIZE;
 		break;
 	default:
@@ -356,12 +527,6 @@ long cifs_ioctl(struct file *filep, unsigned int command, unsigned long arg)
 	struct cifs_tcon *tcon;
 	struct tcon_link *tlink;
 	struct cifs_sb_info *cifs_sb;
-	__u64	ExtAttrBits = 0;
-#ifdef CONFIG_CIFS_POSIX
-#ifdef CONFIG_CIFS_ALLOW_INSECURE_LEGACY
-	__u64   caps;
-#endif /* CONFIG_CIFS_ALLOW_INSECURE_LEGACY */
-#endif /* CONFIG_CIFS_POSIX */
 
 	xid = get_xid();
 
@@ -372,67 +537,6 @@ long cifs_ioctl(struct file *filep, unsigned int command, unsigned long arg)
 		trace_smb3_ioctl(xid, pSMBFile->fid.persistent_fid, command);
 
 	switch (command) {
-		case FS_IOC_GETFLAGS:
-			if (pSMBFile == NULL)
-				break;
-			tcon = tlink_tcon(pSMBFile->tlink);
-#ifdef CONFIG_CIFS_POSIX
-#ifdef CONFIG_CIFS_ALLOW_INSECURE_LEGACY
-			caps = le64_to_cpu(tcon->fsUnixInfo.Capability);
-			if (CIFS_UNIX_EXTATTR_CAP & caps) {
-				__u64	ExtAttrMask = 0;
-				rc = CIFSGetExtAttr(xid, tcon,
-						    pSMBFile->fid.netfid,
-						    &ExtAttrBits, &ExtAttrMask);
-				if (rc == 0)
-					rc = put_user(ExtAttrBits &
-						FS_FL_USER_VISIBLE,
-						(int __user *)arg);
-				if (rc != -EOPNOTSUPP)
-					break;
-			}
-#endif /* CONFIG_CIFS_ALLOW_INSECURE_LEGACY */
-#endif /* CONFIG_CIFS_POSIX */
-			rc = 0;
-			if (CIFS_I(inode)->cifsAttrs & ATTR_COMPRESSED) {
-				/* add in the compressed bit */
-				ExtAttrBits = FS_COMPR_FL;
-				rc = put_user(ExtAttrBits & FS_FL_USER_VISIBLE,
-					      (int __user *)arg);
-			}
-			break;
-		case FS_IOC_SETFLAGS:
-			if (pSMBFile == NULL)
-				break;
-			tcon = tlink_tcon(pSMBFile->tlink);
-			/* caps = le64_to_cpu(tcon->fsUnixInfo.Capability); */
-
-			if (get_user(ExtAttrBits, (int __user *)arg)) {
-				rc = -EFAULT;
-				break;
-			}
-
-			/*
-			 * if (CIFS_UNIX_EXTATTR_CAP & caps)
-			 *	rc = CIFSSetExtAttr(xid, tcon,
-			 *		       pSMBFile->fid.netfid,
-			 *		       extAttrBits,
-			 *		       &ExtAttrMask);
-			 * if (rc != -EOPNOTSUPP)
-			 *	break;
-			 */
-
-			/* Currently only flag we can set is compressed flag */
-			if ((ExtAttrBits & FS_COMPR_FL) == 0)
-				break;
-
-			/* Try to set compress flag */
-			if (tcon->ses->server->ops->set_compression) {
-				rc = tcon->ses->server->ops->set_compression(
-							xid, tcon, pSMBFile);
-				cifs_dbg(FYI, "set compress flag rc %d\n", rc);
-			}
-			break;
 		case CIFS_IOC_COPYCHUNK_FILE:
 			rc = cifs_ioctl_copychunk(xid, filep, arg);
 			break;
@@ -588,6 +692,9 @@ long cifs_ioctl(struct file *filep, unsigned int command, unsigned long arg)
 			break;
 		default:
 			cifs_dbg(FYI, "unsupported ioctl\n");
+			trace_smb3_unsupported_ioctl(xid,
+				pSMBFile ? pSMBFile->fid.persistent_fid : 0,
+				command);
 			break;
 	}
 cifs_ioc_exit:

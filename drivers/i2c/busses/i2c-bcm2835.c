@@ -137,12 +137,14 @@ static int clk_bcm2835_i2c_set_rate(struct clk_hw *hw, unsigned long rate,
 	return 0;
 }
 
-static long clk_bcm2835_i2c_round_rate(struct clk_hw *hw, unsigned long rate,
-				unsigned long *parent_rate)
+static int clk_bcm2835_i2c_determine_rate(struct clk_hw *hw,
+					  struct clk_rate_request *req)
 {
-	u32 divider = clk_bcm2835_i2c_calc_divider(rate, *parent_rate);
+	u32 divider = clk_bcm2835_i2c_calc_divider(req->rate, req->best_parent_rate);
 
-	return DIV_ROUND_UP(*parent_rate, divider);
+	req->rate = DIV_ROUND_UP(req->best_parent_rate, divider);
+
+	return 0;
 }
 
 static unsigned long clk_bcm2835_i2c_recalc_rate(struct clk_hw *hw,
@@ -156,7 +158,7 @@ static unsigned long clk_bcm2835_i2c_recalc_rate(struct clk_hw *hw,
 
 static const struct clk_ops clk_bcm2835_i2c_ops = {
 	.set_rate = clk_bcm2835_i2c_set_rate,
-	.round_rate = clk_bcm2835_i2c_round_rate,
+	.determine_rate = clk_bcm2835_i2c_determine_rate,
 	.recalc_rate = clk_bcm2835_i2c_recalc_rate,
 };
 
@@ -164,7 +166,7 @@ static struct clk *bcm2835_i2c_register_div(struct device *dev,
 					struct clk *mclk,
 					struct bcm2835_i2c_dev *i2c_dev)
 {
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	struct clk_bcm2835_i2c *priv;
 	char name[32];
 	const char *mclk_name;
@@ -179,7 +181,7 @@ static struct clk *bcm2835_i2c_register_div(struct device *dev,
 	init.num_parents = 1;
 	init.flags = 0;
 
-	priv = devm_kzalloc(dev, sizeof(struct clk_bcm2835_i2c), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, struct clk_bcm2835_i2c);
 	if (priv == NULL)
 		return ERR_PTR(-ENOMEM);
 
@@ -411,7 +413,7 @@ static int bcm2835_i2c_probe(struct platform_device *pdev)
 	struct clk *mclk;
 	u32 bus_clk_rate;
 
-	i2c_dev = devm_kzalloc(&pdev->dev, sizeof(*i2c_dev), GFP_KERNEL);
+	i2c_dev = devm_kzalloc_obj(&pdev->dev, *i2c_dev);
 	if (!i2c_dev)
 		return -ENOMEM;
 	platform_set_drvdata(pdev, i2c_dev);

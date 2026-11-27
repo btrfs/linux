@@ -11,6 +11,12 @@
 #include "mgmt_util.h"
 #include "mgmt_config.h"
 
+#define HDEV_PARAM_U32(_param_name_) \
+	struct {\
+		struct mgmt_tlv_hdr entry; \
+		__le32 value; \
+	} __packed _param_name_
+
 #define HDEV_PARAM_U16(_param_name_) \
 	struct {\
 		struct mgmt_tlv_hdr entry; \
@@ -27,6 +33,12 @@
 	{ \
 		{ cpu_to_le16(_param_code_), sizeof(__u16) }, \
 		cpu_to_le16(hdev->_param_name_) \
+	}
+
+#define TLV_SET_U32(_param_code_, _param_name_) \
+	{ \
+		{ cpu_to_le16(_param_code_), sizeof(__u32) }, \
+		cpu_to_le32(hdev->_param_name_) \
 	}
 
 #define TLV_SET_U8(_param_code_, _param_name_) \
@@ -78,6 +90,7 @@ int read_def_system_config(struct sock *sk, struct hci_dev *hdev, void *data,
 		HDEV_PARAM_U16(advmon_allowlist_duration);
 		HDEV_PARAM_U16(advmon_no_filter_duration);
 		HDEV_PARAM_U8(enable_advmon_interleave_scan);
+		HDEV_PARAM_U32(idle_timeout);
 	} __packed rp = {
 		TLV_SET_U16(0x0000, def_page_scan_type),
 		TLV_SET_U16(0x0001, def_page_scan_int),
@@ -111,6 +124,7 @@ int read_def_system_config(struct sock *sk, struct hci_dev *hdev, void *data,
 		TLV_SET_U16(0x001d, advmon_allowlist_duration),
 		TLV_SET_U16(0x001e, advmon_no_filter_duration),
 		TLV_SET_U8(0x001f, enable_advmon_interleave_scan),
+		TLV_SET_U32(0x0020, idle_timeout),
 	};
 
 	bt_dev_dbg(hdev, "sock %p", sk);
@@ -122,6 +136,7 @@ int read_def_system_config(struct sock *sk, struct hci_dev *hdev, void *data,
 }
 
 #define TO_TLV(x)		((struct mgmt_tlv *)(x))
+#define TLV_GET_LE32(tlv)	le32_to_cpu(*((__le32 *)(TO_TLV(tlv)->value)))
 #define TLV_GET_LE16(tlv)	le16_to_cpu(*((__le16 *)(TO_TLV(tlv)->value)))
 #define TLV_GET_U8(tlv)		(*((__u8 *)(TO_TLV(tlv)->value)))
 
@@ -191,6 +206,9 @@ int set_def_system_config(struct sock *sk, struct hci_dev *hdev, void *data,
 		case 0x001f:
 			exp_type_len = sizeof(u8);
 			break;
+		case 0x0020:
+			exp_type_len = sizeof(u32);
+			break;
 		default:
 			exp_type_len = 0;
 			bt_dev_warn(hdev, "unsupported parameter %u", type);
@@ -205,6 +223,14 @@ int set_def_system_config(struct sock *sk, struct hci_dev *hdev, void *data,
 				MGMT_OP_SET_DEF_SYSTEM_CONFIG,
 				MGMT_STATUS_INVALID_PARAMS);
 		}
+
+		/* A zero rotation duration would make the advertising instance
+		 * scheduler requeue itself with no delay.
+		 */
+		if (type == 0x000c && !TLV_GET_LE16(buffer))
+			return mgmt_cmd_status(sk, hdev->id,
+				MGMT_OP_SET_DEF_SYSTEM_CONFIG,
+				MGMT_STATUS_INVALID_PARAMS);
 
 		buffer_left -= exp_len;
 		buffer += exp_len;
@@ -314,6 +340,9 @@ int set_def_system_config(struct sock *sk, struct hci_dev *hdev, void *data,
 		case 0x0001f:
 			hdev->enable_advmon_interleave_scan = TLV_GET_U8(buffer);
 			break;
+		case 0x00020:
+			hdev->idle_timeout = TLV_GET_LE32(buffer);
+			break;
 		default:
 			bt_dev_warn(hdev, "unsupported parameter %u", type);
 			break;
@@ -341,6 +370,6 @@ int set_def_runtime_config(struct sock *sk, struct hci_dev *hdev, void *data,
 {
 	bt_dev_dbg(hdev, "sock %p", sk);
 
-	return mgmt_cmd_status(sk, hdev->id, MGMT_OP_SET_DEF_SYSTEM_CONFIG,
+	return mgmt_cmd_status(sk, hdev->id, MGMT_OP_SET_DEF_RUNTIME_CONFIG,
 			       MGMT_STATUS_INVALID_PARAMS);
 }

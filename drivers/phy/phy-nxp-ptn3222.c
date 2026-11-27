@@ -66,7 +66,7 @@ static int ptn3222_probe(struct i2c_client *client)
 	struct ptn3222 *ptn3222;
 	int ret;
 
-	ptn3222 = devm_kzalloc(dev, sizeof(*ptn3222), GFP_KERNEL);
+	ptn3222 = devm_kzalloc_obj(dev, *ptn3222);
 	if (!ptn3222)
 		return -ENOMEM;
 
@@ -97,7 +97,7 @@ static int ptn3222_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ptn3222_table[] = {
-	{ "ptn3222" },
+	{ .name = "ptn3222" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ptn3222_table);

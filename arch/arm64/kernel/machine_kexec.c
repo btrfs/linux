@@ -6,6 +6,7 @@
  * Copyright (C) Huawei Futurewei Technologies.
  */
 
+#include <linux/arm-rmi-cmds.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/kernel.h>
@@ -56,6 +57,16 @@ int machine_kexec_prepare(struct kimage *kimage)
 {
 	if (kimage->type != KEXEC_TYPE_CRASH && cpus_are_stuck_in_kernel()) {
 		pr_err("Can't kexec: CPUs are stuck in the kernel.\n");
+		return -EBUSY;
+	}
+
+	/*
+	 * We will be able to allow kdump to proceed, once we have the support
+	 * for handling GPF from vmcore accesses to delegated pages. Until then
+	 * block kexec completely.
+	 */
+	if (is_rmm_active()) {
+		pr_err("Can't kexec: RMM is active.\n");
 		return -EBUSY;
 	}
 
@@ -129,18 +140,19 @@ int machine_kexec_post_load(struct kimage *kimage)
 	}
 
 	/* Create a copy of the linear map */
-	trans_pgd = kexec_page_alloc(kimage);
-	if (!trans_pgd)
-		return -ENOMEM;
-	rc = trans_pgd_create_copy(&info, &trans_pgd, PAGE_OFFSET, PAGE_END);
+	rc = trans_pgd_create_copy(&info, &trans_pgd,
+				   _PAGE_OFFSET(vabits_actual), PAGE_END);
 	if (rc)
 		return rc;
 	kimage->arch.ttbr1 = __pa(trans_pgd);
 	kimage->arch.zero_page = __pa_symbol(empty_zero_page);
 
+	/* Copy the whole section: a kCFI hash may precede the entry point */
 	reloc_size = __relocate_new_kernel_end - __relocate_new_kernel_start;
 	memcpy(reloc_code, __relocate_new_kernel_start, reloc_size);
-	kimage->arch.kern_reloc = __pa(reloc_code);
+	kimage->arch.kern_reloc = __pa(reloc_code) +
+		((unsigned long)arm64_relocate_new_kernel -
+		 (unsigned long)__relocate_new_kernel_start);
 	rc = trans_pgd_idmap_page(&info, &kimage->arch.ttbr0,
 				  &kimage->arch.t0sz, reloc_code);
 	if (rc)
@@ -195,7 +207,7 @@ void machine_kexec(struct kimage *kimage)
 		restart(is_hyp_nvhe(), kimage->start, kimage->arch.dtb_mem,
 			0, 0);
 	} else {
-		void (*kernel_reloc)(struct kimage *kimage);
+		typeof(arm64_relocate_new_kernel) *kernel_reloc;
 
 		if (is_hyp_nvhe())
 			__hyp_set_vectors(kimage->arch.el2_vectors);
@@ -251,7 +263,7 @@ void crash_post_resume(void)
  * marked as Reserved as memory was allocated via memblock_reserve().
  *
  * In hibernation, the pages which are Reserved and yet "nosave" are excluded
- * from the hibernation iamge. crash_is_nosave() does thich check for crash
+ * from the hibernation image. crash_is_nosave() does thich check for crash
  * dump kernel and will reduce the total size of hibernation image.
  */
 

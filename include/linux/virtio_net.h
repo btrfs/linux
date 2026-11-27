@@ -5,7 +5,11 @@
 #include <linux/if_vlan.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
+#include <linux/netdevice.h>
 #include <linux/udp.h>
+#include <net/ip.h>
+#include <net/ipv6.h>
+#include <net/tcp.h>
 #include <uapi/linux/tcp.h>
 #include <uapi/linux/virtio_net.h>
 
@@ -45,6 +49,145 @@ static inline int virtio_net_hdr_set_proto(struct sk_buff *skb,
 	}
 
 	return 0;
+}
+
+/* TODO: nothing virtio specific here, move to ip.h */
+
+/*
+ * Pull and minimally validate the IPv4 header at @nhoff.
+ * Returns the header and stores the transport header offset in
+ * @thoff, or NULL if truncated or malformed.  The whole header,
+ * options included, is guaranteed linear on return.
+ */
+static inline struct iphdr *virtio_net_ip4_parse(struct sk_buff *skb,
+						  unsigned int nhoff,
+						  unsigned int *thoff)
+{
+	unsigned int ihl;
+	struct iphdr *iph;
+
+	if (!pskb_may_pull(skb, nhoff + sizeof(struct iphdr)))
+		return NULL;
+
+	iph = (struct iphdr *)(skb->data + nhoff);
+	if (iph->version != 4 ||
+	    iph->ihl < sizeof(struct iphdr) / sizeof(u32))
+		return NULL;
+
+	ihl = iph->ihl * sizeof(u32);
+	*thoff = nhoff + ihl;
+	/* Pull the options as well: the transport header offset
+	 * returned above must be within the linear data.  iph goes
+	 * stale across the pull.
+	 */
+	if (!pskb_may_pull(skb, nhoff + ihl))
+		return NULL;
+
+	return (struct iphdr *)(skb->data + nhoff);
+}
+
+/* Where does the L3 header start, and what protocol is it?
+ * With @has_eth, the frame starts with an Ethernet header, possibly
+ * followed by VLAN tags. Otherwise the L3 header starts at the network
+ * header offset the caller set up.
+ *
+ * The caller knows how the frame will be parsed later: the device
+ * type does not tell, as tun can change it with TUNSETLINK.
+ */
+static inline bool
+virtio_net_l3_start(struct sk_buff *skb, bool has_eth, int *nhoff,
+		    __be16 *proto)
+{
+	if (has_eth) {
+		__be16 h_proto;
+
+		if (!pskb_may_pull(skb, ETH_HLEN))
+			return false;
+		h_proto = eth_hdr(skb)->h_proto;
+		/* skb->protocol is a sender claim, and parts of the
+		 * stack parse the packet per it: when it disagrees with
+		 * the frame we do not know which view the packet will
+		 * be parsed as, so do not validate.
+		 */
+		if (skb->protocol && skb->protocol != h_proto)
+			return false;
+		*nhoff = ETH_HLEN;
+		*proto = h_proto;
+		if (eth_type_vlan(*proto)) {
+			*proto = __vlan_get_protocol(skb, *proto, nhoff);
+			if (!*proto)
+				return false;
+		}
+	} else {
+		const struct iphdr *iph;
+
+		*nhoff = skb_network_offset(skb);
+		/* An unset network header shows up as an offset
+		 * outside of the packet.
+		 */
+		if (*nhoff < 0 || (unsigned int)*nhoff >= skb->len)
+			return false;
+		/* No L2 header to cross-check with: take the protocol
+		 * from the IP version at the network header.
+		 */
+		if (!pskb_may_pull(skb, *nhoff + 1))
+			return false;
+		iph = (const struct iphdr *)(skb->data + *nhoff);
+		if (iph->version == 4)
+			*proto = htons(ETH_P_IP);
+		else if (iph->version == 6)
+			*proto = htons(ETH_P_IPV6);
+		else
+			return false;
+		if (skb->protocol && skb->protocol != *proto)
+			return false;
+	}
+	return true;
+}
+
+/* Walk the L3 header at @nhoff: where does its transport header
+ * start, and which protocol is it?  Returns false if the header
+ * is truncated, malformed or fragmented.
+ */
+static inline bool
+virtio_net_l4_start(struct sk_buff *skb, unsigned int nhoff, __be16 proto,
+		    unsigned int *thoff, int *ip_proto)
+{
+	if (proto == htons(ETH_P_IP)) {
+		const struct iphdr *iph = virtio_net_ip4_parse(skb, nhoff, thoff);
+
+		if (!iph || ip_is_fragment(iph))
+			return false;
+		*ip_proto = iph->protocol;
+		return true;
+	}
+
+	if (proto == htons(ETH_P_IPV6)) {
+		const struct ipv6hdr *iph;
+		int flags = IP6_FH_F_AUTH;
+
+		if (!pskb_may_pull(skb, nhoff + sizeof(*iph)))
+			return false;
+		iph = (const void *)(skb->data + nhoff);
+		if (iph->version != 6)
+			return false;
+		*thoff = nhoff + sizeof(*iph);
+		*ip_proto = iph->nexthdr;
+		if (*ip_proto != IPPROTO_TCP && *ip_proto != IPPROTO_UDP) {
+			*thoff = nhoff;
+			/* Find the transport header behind any
+			 * extension headers. IP6_FH_F_AUTH stops
+			 * the walk at AH, so frames with AH are rejected.
+			 */
+			*ip_proto = ipv6_find_hdr(skb, thoff, -1, NULL,
+						  &flags);
+			if (*ip_proto < 0 || flags & IP6_FH_F_FRAG)
+				return false;
+		}
+		return true;
+	}
+
+	return false;
 }
 
 static inline int __virtio_net_hdr_to_skb(struct sk_buff *skb,
@@ -110,48 +253,38 @@ static inline int __virtio_net_hdr_to_skb(struct sk_buff *skb,
 		p_off = nh_min_len + thlen;
 		if (!pskb_may_pull(skb, p_off))
 			return -EINVAL;
-	} else {
+	} else if (gso_type) {
 		/* gso packets without NEEDS_CSUM do not set transport_offset.
 		 * probe and drop if does not match one of the above types.
 		 */
-		if (gso_type && skb->network_header) {
-			struct flow_keys_basic keys;
+		struct flow_keys_basic keys;
 
-			if (!skb->protocol) {
-				__be16 protocol = dev_parse_header_protocol(skb);
-
-				if (!protocol)
-					virtio_net_hdr_set_proto(skb, hdr);
-				else if (!virtio_net_hdr_match_proto(protocol,
-								 hdr_gso_type))
-					return -EINVAL;
-				else
-					skb->protocol = protocol;
-			}
-retry:
-			if (!skb_flow_dissect_flow_keys_basic(NULL, skb, &keys,
-							      NULL, 0, 0, 0,
-							      0)) {
-				/* UFO does not specify ipv4 or 6: try both */
-				if (gso_type & SKB_GSO_UDP &&
-				    skb->protocol == htons(ETH_P_IP)) {
-					skb->protocol = htons(ETH_P_IPV6);
-					goto retry;
-				}
-				return -EINVAL;
-			}
-
-			p_off = keys.control.thoff + thlen;
-			if (!pskb_may_pull(skb, p_off) ||
-			    keys.basic.ip_proto != ip_proto)
-				return -EINVAL;
-
-			skb_set_transport_header(skb, keys.control.thoff);
-		} else if (gso_type) {
-			p_off = nh_min_len + thlen;
-			if (!pskb_may_pull(skb, p_off))
-				return -EINVAL;
+		if (!skb->protocol) {
+			skb->protocol = dev_parse_header_protocol(skb);
+			if (!skb->protocol)
+				virtio_net_hdr_set_proto(skb, hdr);
 		}
+retry:
+		if (!skb_flow_dissect_flow_keys_basic(NULL, skb, &keys,
+						      NULL, 0, 0, 0,
+						      0)) {
+			/* UFO does not specify ipv4 or 6: try both */
+			if (gso_type & SKB_GSO_UDP &&
+			    skb->protocol == htons(ETH_P_IP)) {
+				skb->protocol = htons(ETH_P_IPV6);
+				goto retry;
+			}
+			return -EINVAL;
+		}
+
+		p_off = keys.control.thoff + thlen;
+		if (!pskb_may_pull(skb, p_off) ||
+		    keys.basic.ip_proto != ip_proto ||
+		    !virtio_net_hdr_match_proto(keys.basic.n_proto,
+						hdr_gso_type))
+			return -EINVAL;
+
+		skb_set_transport_header(skb, keys.control.thoff);
 	}
 
 	if (hdr_gso_type != VIRTIO_NET_HDR_GSO_NONE) {
@@ -179,6 +312,9 @@ retry:
 			if (skb->ip_summed == CHECKSUM_PARTIAL &&
 			    skb->csum_offset != offsetof(struct tcphdr, check))
 				return -EINVAL;
+
+			BUILD_BUG_ON(TCP_MIN_GSO_SIZE * GSO_MAX_SEGS < GSO_MAX_SIZE);
+			gso_size = max(gso_size, TCP_MIN_GSO_SIZE);
 			break;
 		}
 
@@ -205,6 +341,39 @@ static inline int virtio_net_hdr_to_skb(struct sk_buff *skb,
 					bool little_endian)
 {
 	return __virtio_net_hdr_to_skb(skb, hdr, little_endian, hdr->gso_type);
+}
+
+/* This function must be called after virtio_net_hdr_from_skb(). */
+static inline void __virtio_net_set_hdrlen(const struct sk_buff *skb,
+					   struct virtio_net_hdr *hdr,
+					   bool little_endian)
+{
+	u16 hdr_len;
+
+	hdr_len = skb_transport_offset(skb);
+
+	if (hdr->gso_type == VIRTIO_NET_HDR_GSO_UDP_L4)
+		hdr_len += sizeof(struct udphdr);
+	else
+		hdr_len += tcp_hdrlen(skb);
+
+	hdr->hdr_len = __cpu_to_virtio16(little_endian, hdr_len);
+}
+
+/* This function must be called after virtio_net_hdr_from_skb(). */
+static inline void __virtio_net_set_tnl_hdrlen(const struct sk_buff *skb,
+					       struct virtio_net_hdr *hdr)
+{
+	u16 hdr_len;
+
+	hdr_len = skb_inner_transport_offset(skb);
+
+	if (hdr->gso_type == VIRTIO_NET_HDR_GSO_UDP_L4)
+		hdr_len += sizeof(struct udphdr);
+	else
+		hdr_len += inner_tcp_hdrlen(skb);
+
+	hdr->hdr_len = __cpu_to_virtio16(true, hdr_len);
 }
 
 static inline int virtio_net_hdr_from_skb(const struct sk_buff *skb,
@@ -255,9 +424,33 @@ static inline unsigned int virtio_l3min(bool is_ipv6)
 	return is_ipv6 ? sizeof(struct ipv6hdr) : sizeof(struct iphdr);
 }
 
+/* Do the tunnel offsets match the outer headers in the frame?
+ * The L3 header the tunnel claims must be the one the frame
+ * carries, with UDP following it at @outer_th.
+ */
+static inline bool
+virtio_net_tnl_offsets_ok(struct sk_buff *skb, bool has_eth, bool outer_isv6,
+			  unsigned int outer_th)
+{
+	int nhoff;
+	__be16 proto;
+	unsigned int thoff;
+	int ip_proto;
+
+	if (!virtio_net_l3_start(skb, has_eth, &nhoff, &proto))
+		return false;
+	if (outer_isv6 != (proto == htons(ETH_P_IPV6)))
+		return false;
+	if (!virtio_net_l4_start(skb, nhoff, proto, &thoff, &ip_proto))
+		return false;
+
+	return ip_proto == IPPROTO_UDP && outer_th == thoff;
+}
+
 static inline int
 virtio_net_hdr_tnl_to_skb(struct sk_buff *skb,
 			  const struct virtio_net_hdr_v1_hash_tunnel *vhdr,
+			  bool has_eth,
 			  bool tnl_hdr_negotiated,
 			  bool tnl_csum_negotiated,
 			  bool little_endian)
@@ -310,6 +503,9 @@ virtio_net_hdr_tnl_to_skb(struct sk_buff *skb,
 				      hdr->gso_type & ~gso_tunnel_type);
 	if (ret)
 		return ret;
+
+	if (!virtio_net_tnl_offsets_ok(skb, has_eth, outer_isv6, outer_th))
+		return -EINVAL;
 
 	/* In case of USO, the inner protocol is still unknown and
 	 * `inner_isv6` is just a guess, additional parsing is needed.
@@ -385,7 +581,8 @@ virtio_net_hdr_tnl_from_skb(const struct sk_buff *skb,
 			    bool tnl_hdr_negotiated,
 			    bool little_endian,
 			    int vlan_hlen,
-			    bool has_data_valid)
+			    bool has_data_valid,
+			    bool feature_hdrlen)
 {
 	struct virtio_net_hdr *hdr = (struct virtio_net_hdr *)vhdr;
 	unsigned int inner_nh, outer_th;
@@ -394,9 +591,17 @@ virtio_net_hdr_tnl_from_skb(const struct sk_buff *skb,
 
 	tnl_gso_type = skb_shinfo(skb)->gso_type & (SKB_GSO_UDP_TUNNEL |
 						    SKB_GSO_UDP_TUNNEL_CSUM);
-	if (!tnl_gso_type)
-		return virtio_net_hdr_from_skb(skb, hdr, little_endian,
-					       has_data_valid, vlan_hlen);
+	if (!tnl_gso_type) {
+		ret = virtio_net_hdr_from_skb(skb, hdr, little_endian,
+					      has_data_valid, vlan_hlen);
+		if (ret)
+			return ret;
+
+		if (feature_hdrlen && hdr->hdr_len)
+			__virtio_net_set_hdrlen(skb, hdr, little_endian);
+
+		return ret;
+	}
 
 	/* Tunnel support not negotiated but skb ask for it. */
 	if (!tnl_hdr_negotiated)
@@ -414,7 +619,13 @@ virtio_net_hdr_tnl_from_skb(const struct sk_buff *skb,
 	if (ret)
 		return ret;
 
-	if (skb->protocol == htons(ETH_P_IPV6))
+	if (feature_hdrlen && hdr->hdr_len)
+		__virtio_net_set_tnl_hdrlen(skb, hdr);
+
+	/* skb->protocol is the VLAN protocol when the tag is in the
+	 * packet data.
+	 */
+	if (vlan_get_protocol(skb) == htons(ETH_P_IPV6))
 		hdr->gso_type |= VIRTIO_NET_HDR_GSO_UDP_TUNNEL_IPV6;
 	else
 		hdr->gso_type |= VIRTIO_NET_HDR_GSO_UDP_TUNNEL_IPV4;
@@ -422,8 +633,11 @@ virtio_net_hdr_tnl_from_skb(const struct sk_buff *skb,
 	if (skb_shinfo(skb)->gso_type & SKB_GSO_UDP_TUNNEL_CSUM)
 		hdr->flags |= VIRTIO_NET_HDR_F_UDP_TUNNEL_CSUM;
 
-	inner_nh = skb->inner_network_header - skb_headroom(skb);
-	outer_th = skb->transport_header - skb_headroom(skb);
+	/* Like csum_start, the offsets must account for a VLAN tag
+	 * the caller inserts in the frame.
+	 */
+	inner_nh = skb->inner_network_header - skb_headroom(skb) + vlan_hlen;
+	outer_th = skb->transport_header - skb_headroom(skb) + vlan_hlen;
 	vhdr->inner_nh_offset = cpu_to_le16(inner_nh);
 	vhdr->outer_th_offset = cpu_to_le16(outer_th);
 	return 0;

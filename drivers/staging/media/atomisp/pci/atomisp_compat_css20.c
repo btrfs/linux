@@ -27,6 +27,7 @@
 
 #include <linux/io.h>
 #include <linux/pm_runtime.h>
+#include <linux/string_choices.h>
 
 /* Assume max number of ACC stages */
 #define MAX_ACC_STAGES	20
@@ -841,7 +842,7 @@ int atomisp_css_irq_enable(struct atomisp_device *isp,
 {
 	dev_dbg(isp->dev, "%s: css irq info 0x%08x: %s (%d).\n",
 		__func__, info,
-		enable ? "enable" : "disable", enable);
+		str_enable_disable(enable), enable);
 	if (ia_css_irq_enable(info, enable)) {
 		dev_warn(isp->dev, "%s:Invalid irq info: 0x%08x when %s.\n",
 			 __func__, info,
@@ -1116,8 +1117,11 @@ int atomisp_css_allocate_stat_buffers(struct atomisp_sub_device   *asd,
 					dvs_grid_info);
 		if (!dis_buf->dis_data) {
 			dev_err(isp->dev, "dvs buf allocation failed.\n");
-			if (s3a_buf)
+			if (s3a_buf) {
+				hmm_vunmap(s3a_buf->s3a_data->data_ptr);
+				ia_css_isp_3a_statistics_map_free(s3a_buf->s3a_map);
 				ia_css_isp_3a_statistics_free(s3a_buf->s3a_data);
+			}
 			return -EINVAL;
 		}
 
@@ -1131,10 +1135,16 @@ int atomisp_css_allocate_stat_buffers(struct atomisp_sub_device   *asd,
 		md_buf->metadata = ia_css_metadata_allocate(
 				       &asd->stream_env[stream_id].stream_info.metadata_info);
 		if (!md_buf->metadata) {
-			if (s3a_buf)
+			if (s3a_buf) {
+				hmm_vunmap(s3a_buf->s3a_data->data_ptr);
+				ia_css_isp_3a_statistics_map_free(s3a_buf->s3a_map);
 				ia_css_isp_3a_statistics_free(s3a_buf->s3a_data);
-			if (dis_buf)
+			}
+			if (dis_buf) {
+				hmm_vunmap(dis_buf->dis_data->data_ptr);
+				ia_css_isp_dvs_statistics_map_free(dis_buf->dvs_map);
 				ia_css_isp_dvs2_statistics_free(dis_buf->dis_data);
+			}
 			dev_err(isp->dev, "metadata buf allocation failed.\n");
 			return -EINVAL;
 		}
@@ -1957,7 +1967,7 @@ static void __configure_capture_pp_input(struct atomisp_sub_device *asd,
 
 /*
  * For CSS2.1, preview pipe could support bayer downscaling, yuv decimation and
- * yuv downscaling, which needs addtional configurations.
+ * yuv downscaling, which needs additional configurations.
  */
 static void __configure_preview_pp_input(struct atomisp_sub_device *asd,
 	unsigned int width, unsigned int height,
@@ -2044,7 +2054,7 @@ static void __configure_preview_pp_input(struct atomisp_sub_device *asd,
 		}
 	}
 	/*
-	 * calculate YUV Decimation, YUV downscaling facor:
+	 * calculate YUV Decimation, YUV downscaling factor:
 	 * YUV Downscaling factor must not exceed 2.
 	 * YUV Decimation factor could be 2, 4.
 	 */
@@ -2085,7 +2095,7 @@ static void __configure_preview_pp_input(struct atomisp_sub_device *asd,
 
 /*
  * For CSS2.1, offline video pipe could support bayer decimation, and
- * yuv downscaling, which needs addtional configurations.
+ * yuv downscaling, which needs additional configurations.
  */
 static void __configure_video_pp_input(struct atomisp_sub_device *asd,
 				       unsigned int width, unsigned int height,
@@ -2108,7 +2118,6 @@ static void __configure_video_pp_input(struct atomisp_sub_device *asd,
 	static const struct bayer_ds_factor bds_factors[] = {
 		{8, 1}, {6, 1}, {4, 1}, {3, 1}, {2, 1}, {3, 2}
 	};
-	unsigned int i;
 
 	if (width == 0 && height == 0)
 		return;
@@ -2150,8 +2159,7 @@ static void __configure_video_pp_input(struct atomisp_sub_device *asd,
 	bayer_ds_out_res->width = effective_res->width;
 	bayer_ds_out_res->height = effective_res->height;
 
-	for (i = 0; i < sizeof(bds_factors) / sizeof(struct bayer_ds_factor);
-	     i++) {
+	for (unsigned int i = 0; i < ARRAY_SIZE(bds_factors); i++) {
 		if (effective_res->width >= out_width *
 		    bds_factors[i].numerator / bds_factors[i].denominator &&
 		    effective_res->height >= out_height *
@@ -3002,7 +3010,7 @@ int atomisp_css_get_zoom_factor(struct atomisp_sub_device *asd,
 }
 
 /*
- * Function to set/get image stablization statistics
+ * Function to set/get image stabilization statistics
  */
 int atomisp_css_get_dis_stat(struct atomisp_sub_device *asd,
 			     struct atomisp_dis_statistics *stats)

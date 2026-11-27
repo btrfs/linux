@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: ISC */
+/* SPDX-License-Identifier: BSD-3-Clause-Clear */
 /* Copyright (C) 2020 MediaTek Inc. */
 
 #ifndef __MT7921_H
@@ -7,6 +7,13 @@
 #include "../mt792x.h"
 #include "regs.h"
 
+#define MT7921_FILTER_FCSFAIL		BIT(2)
+#define MT7921_FILTER_CONTROL		BIT(5)
+#define MT7921_FILTER_OTHER_BSS		BIT(6)
+#define MT7921_FILTER_ENABLE		BIT(31)
+
+#define MT7921_MAX_AID                  20
+
 #define MT7921_TX_RING_SIZE		2048
 #define MT7921_TX_MCU_RING_SIZE		256
 #define MT7921_TX_FWDL_RING_SIZE	128
@@ -14,6 +21,9 @@
 #define MT7921_RX_RING_SIZE		1536
 #define MT7921_RX_MCU_RING_SIZE		8
 #define MT7921_RX_MCU_WA_RING_SIZE	512
+
+/* MT7902 Rx Ring0 is for both Rx Event and Tx Done Event */
+#define MT7902_RX_MCU_RING_SIZE		512
 
 #define MT7921_EEPROM_SIZE		3584
 #define MT7921_TOKEN_SIZE		8192
@@ -115,6 +125,17 @@ enum mt7921_rxq_id {
 	MT7921_RXQ_BAND0 = 0,
 	MT7921_RXQ_BAND1,
 	MT7921_RXQ_MCU_WM = 0,
+};
+
+/* MT7902 assigns its MCU-WM TXQ at index 15 */
+enum mt7902_txq_id {
+	MT7902_TXQ_MCU_WM = 15,
+};
+
+struct mt7921_dma_layout {
+	u8 mcu_wm_txq;
+	u16 mcu_rxdone_ring_size;
+	bool has_mcu_wa;
 };
 
 enum {
@@ -244,7 +265,6 @@ mt7921_l1_rmw(struct mt792x_dev *dev, u32 addr, u32 mask, u32 val)
 #define mt7921_l1_set(dev, addr, val)	mt7921_l1_rmw(dev, addr, 0, val)
 #define mt7921_l1_clear(dev, addr, val)	mt7921_l1_rmw(dev, addr, val, 0)
 
-void mt7921_regd_update(struct mt792x_dev *dev);
 int mt7921_mac_init(struct mt792x_dev *dev);
 bool mt7921_mac_wtbl_update(struct mt792x_dev *dev, int idx, u32 mask);
 int mt7921_mac_sta_add(struct mt76_dev *mdev, struct ieee80211_vif *vif,
@@ -309,6 +329,7 @@ int mt7921_mcu_set_sniffer(struct mt792x_dev *dev, struct ieee80211_vif *vif,
 int mt7921_mcu_config_sniffer(struct mt792x_vif *vif,
 			      struct ieee80211_chanctx_conf *ctx);
 int mt7921_mcu_get_temperature(struct mt792x_phy *phy);
+int mt7921_mcu_set_thermal_protect(struct mt792x_dev *dev);
 
 int mt7921_usb_sdio_tx_prepare_skb(struct mt76_dev *mdev, void *txwi_ptr,
 				   enum mt76_txq_id qid, struct mt76_wcid *wcid,

@@ -9,8 +9,7 @@
  */
 #define arch_max_pkey() (cpu_feature_enabled(X86_FEATURE_OSPKE) ? 16 : 1)
 
-extern int arch_set_user_pkey_access(struct task_struct *tsk, int pkey,
-		unsigned long init_val);
+extern int arch_set_user_pkey_access(int pkey, unsigned long init_val);
 
 static inline bool arch_pkeys_enabled(void)
 {
@@ -88,6 +87,9 @@ int mm_pkey_alloc(struct mm_struct *mm)
 	 */
 	u16 all_pkeys_mask = ((1U << arch_max_pkey()) - 1);
 	int ret;
+
+	if (!arch_pkeys_enabled())
+		return -1;
 
 	/*
 	 * Are we out of pkeys?  We must handle this specially

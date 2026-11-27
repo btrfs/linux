@@ -10,6 +10,7 @@
 #include <linux/pci.h>
 #include <linux/stddef.h>
 
+#include <asm/cpuid/api.h>
 #include <asm/efi.h>
 #include <asm/e820/types.h>
 #include <asm/setup.h>
@@ -17,6 +18,7 @@
 #include <asm/boot.h>
 #include <asm/kaslr.h>
 #include <asm/sev.h>
+#include <asm/shared/tdx.h>
 
 #include "efistub.h"
 #include "x86-stub.h"
@@ -114,9 +116,9 @@ preserve_pci_rom_image(efi_pci_io_protocol_t *pci, struct pci_setup_rom **__rom)
  */
 static void setup_efi_pci(struct boot_params *params)
 {
+	static efi_guid_t pci_proto = EFI_PCI_IO_PROTOCOL_GUID;
 	efi_status_t status;
 	efi_handle_t *pci_handle __free(efi_pool) = NULL;
-	efi_guid_t pci_proto = EFI_PCI_IO_PROTOCOL_GUID;
 	struct setup_data *data;
 	unsigned long num;
 	efi_handle_t h;
@@ -155,7 +157,7 @@ static void setup_efi_pci(struct boot_params *params)
 
 static void retrieve_apple_device_properties(struct boot_params *boot_params)
 {
-	efi_guid_t guid = APPLE_PROPERTIES_PROTOCOL_GUID;
+	static efi_guid_t guid = APPLE_PROPERTIES_PROTOCOL_GUID;
 	struct setup_data *data, *new;
 	efi_status_t status;
 	u32 size = 0;
@@ -203,6 +205,104 @@ static void retrieve_apple_device_properties(struct boot_params *boot_params)
 	}
 }
 
+struct smbios_entry_point {
+	u8	anchor[4];
+	u8	ep_checksum;
+	u8	ep_length;
+	u8	major_version;
+	u8	minor_version;
+	u16	max_size_entry;
+	u8	ep_rev;
+	u8	reserved[5];
+
+	struct __packed {
+		u8	anchor[5];
+		u8	checksum;
+		u16	st_length;
+		u32	st_address;
+		u16	number_of_entries;
+		u8	bcd_rev;
+	} intm;
+};
+
+static bool verify_ep_checksum(const void *ptr, int length)
+{
+	u8 sum = 0;
+
+	for (int i = 0; i < length; i++)
+		sum += ((u8 *)ptr)[i];
+
+	return sum == 0;
+}
+
+static bool verify_ep_integrity(const struct smbios_entry_point *ep)
+{
+	if (memcmp(ep->anchor, "_SM_", sizeof(ep->anchor)) != 0)
+		return false;
+
+	if (memcmp(ep->intm.anchor, "_DMI_", sizeof(ep->intm.anchor)) != 0)
+		return false;
+
+	if (!verify_ep_checksum(ep, ep->ep_length) ||
+	    !verify_ep_checksum(&ep->intm, sizeof(ep->intm)))
+		return false;
+
+	return true;
+}
+
+static const struct efi_smbios_record *search_record(void *table, u32 length,
+						     u8 type)
+{
+	const u8 *p, *end;
+
+	p = (u8 *)table;
+	end = p + length;
+
+	while (p + sizeof(struct efi_smbios_record) < end) {
+		const struct efi_smbios_record *hdr =
+			(struct efi_smbios_record *)p;
+		const u8 *next;
+
+		if (hdr->type == type)
+			return hdr;
+
+		/* Type 127 = End-of-Table */
+		if (hdr->type == 0x7F)
+			return NULL;
+
+		/* Jumping to the unformed section */
+		next = p + hdr->length;
+
+		/* Unformed section ends with 0000h */
+		while ((next[0] != 0 || next[1] != 0) && next + 1 < end)
+			next++;
+
+		next += 2;
+		p = next;
+	}
+
+	return NULL;
+}
+
+static const struct efi_smbios_record *get_table_record(u8 type)
+{
+	const struct smbios_entry_point *ep;
+
+	/*
+	 * Locate the legacy 32-bit SMBIOS entrypoint in memory, and parse it
+	 * directly. Needed by some Macs that do not implement the EFI protocol.
+	 */
+	ep = get_efi_config_table(SMBIOS_TABLE_GUID);
+	if (!ep)
+		return NULL;
+
+	if (!verify_ep_integrity(ep))
+		return NULL;
+
+	return search_record((void *)(unsigned long)ep->intm.st_address,
+			     ep->intm.st_length, type);
+}
+
 static bool apple_match_product_name(void)
 {
 	static const char type1_product_matches[][15] = {
@@ -218,7 +318,8 @@ static bool apple_match_product_name(void)
 	const struct efi_smbios_type1_record *record;
 	const u8 *product;
 
-	record = (struct efi_smbios_type1_record *)efi_get_smbios_record(1);
+	record = (struct efi_smbios_type1_record *)
+			(efi_get_smbios_record(1) ?: get_table_record(1));
 	if (!record)
 		return false;
 
@@ -236,6 +337,7 @@ static bool apple_match_product_name(void)
 
 static void apple_set_os(void)
 {
+	static efi_guid_t apple_set_os_guid = APPLE_SET_OS_PROTOCOL_GUID;
 	struct {
 		unsigned long version;
 		efi_status_t (__efiapi *set_os_version)(const char *);
@@ -246,7 +348,7 @@ static void apple_set_os(void)
 	if (!efi_is_64bit() || !apple_match_product_name())
 		return;
 
-	status = efi_bs_call(locate_protocol, &APPLE_SET_OS_PROTOCOL_GUID, NULL,
+	status = efi_bs_call(locate_protocol, &apple_set_os_guid, NULL,
 			     (void **)&set_os);
 	if (status != EFI_SUCCESS)
 		return;
@@ -345,7 +447,7 @@ efi_status_t efi_adjust_memory_range_protection(unsigned long start,
 
 static void setup_unaccepted_memory(void)
 {
-	efi_guid_t mem_acceptance_proto = OVMF_SEV_MEMORY_ACCEPTANCE_PROTOCOL_GUID;
+	static efi_guid_t mem_acceptance_proto = OVMF_SEV_MEMORY_ACCEPTANCE_PROTOCOL_GUID;
 	sev_memory_acceptance_protocol_t *proto;
 	efi_status_t status;
 
@@ -388,8 +490,9 @@ static void setup_quirks(struct boot_params *boot_params)
 static void setup_graphics(struct boot_params *boot_params)
 {
 	struct screen_info *si = memset(&boot_params->screen_info, 0, sizeof(*si));
+	struct edid_info *edid = memset(&boot_params->edid_info, 0, sizeof(*edid));
 
-	efi_setup_gop(si);
+	efi_setup_graphics(si, edid);
 }
 
 static void __noreturn efi_exit(efi_handle_t handle, efi_status_t status)
@@ -407,7 +510,7 @@ static void __noreturn efi_exit(efi_handle_t handle, efi_status_t status)
 static efi_status_t efi_allocate_bootparams(efi_handle_t handle,
 					    struct boot_params **bp)
 {
-	efi_guid_t proto = LOADED_IMAGE_PROTOCOL_GUID;
+	static efi_guid_t proto = LOADED_IMAGE_PROTOCOL_GUID;
 	struct boot_params *boot_params;
 	struct setup_header *hdr;
 	efi_status_t status;
@@ -548,7 +651,7 @@ setup_e820(struct boot_params *params, struct setup_data *e820ext, u32 e820ext_s
 		}
 
 		if (nr_entries == ARRAY_SIZE(params->e820_table)) {
-			u32 need = (nr_desc - i) * sizeof(struct e820_entry) +
+			u32 need = (nr_desc - i) * sizeof(struct boot_e820_entry) +
 				   sizeof(struct setup_data);
 
 			if (!e820ext || e820ext_size < need)
@@ -584,7 +687,7 @@ static efi_status_t alloc_e820ext(u32 nr_desc, struct setup_data **e820ext,
 	unsigned long size;
 
 	size = sizeof(struct setup_data) +
-		sizeof(struct e820_entry) * nr_desc;
+		sizeof(struct boot_e820_entry) * nr_desc;
 
 	if (*e820ext) {
 		efi_bs_call(free_pool, *e820ext);
@@ -809,12 +912,13 @@ static void __noreturn enter_kernel(unsigned long kernel_addr,
  * return.  On failure, it will exit to the firmware via efi_exit() instead of
  * returning.
  */
+MIXED_EXTERN
 void __noreturn efi_stub_entry(efi_handle_t handle,
 			       efi_system_table_t *sys_table_arg,
 			       struct boot_params *boot_params)
 
 {
-	efi_guid_t guid = EFI_MEMORY_ATTRIBUTE_PROTOCOL_GUID;
+	static efi_guid_t guid = EFI_MEMORY_ATTRIBUTE_PROTOCOL_GUID;
 	const struct linux_efi_initrd *initrd = NULL;
 	unsigned long kernel_entry;
 	struct setup_header *hdr;
@@ -914,6 +1018,7 @@ void __noreturn efi_stub_entry(efi_handle_t handle,
 	efi_random_get_seed();
 
 	efi_retrieve_eventlog();
+	efi_bli_set_variables(image);
 
 	setup_graphics(boot_params);
 
@@ -951,6 +1056,7 @@ efi_status_t __efiapi efi_pe_entry(efi_handle_t handle,
 }
 
 #ifdef CONFIG_EFI_HANDOVER_PROTOCOL
+MIXED_EXTERN
 void efi_handover_entry(efi_handle_t handle, efi_system_table_t *sys_table_arg,
 			struct boot_params *boot_params)
 {
@@ -967,4 +1073,41 @@ extern __alias(efi_handover_entry)
 void efi64_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table_arg,
 		      struct boot_params *boot_params);
 #endif
+#endif
+
+#ifdef CONFIG_UNACCEPTED_MEMORY
+/*
+ * process_unaccepted_memory() is called after ExitBootServices(), and so these
+ * memory acceptance routines cannot rely on EFI protocols for detecting the
+ * presence of TDX or SEV-SNP, or emit any kind of output if any error
+ * conditions are detected.
+ */
+static bool early_is_tdx_guest(void)
+{
+	static bool once;
+	static bool is_tdx;
+
+	if (!IS_ENABLED(CONFIG_INTEL_TDX_GUEST))
+		return false;
+
+	if (!once) {
+		u32 eax = TDX_CPUID_LEAF_ID, sig[3] = {};
+
+		native_cpuid(&eax, &sig[0], &sig[2], &sig[1]);
+		is_tdx = !memcmp(TDX_IDENT, sig, sizeof(sig));
+		once = true;
+	}
+
+	return is_tdx;
+}
+
+void arch_accept_memory(phys_addr_t start, phys_addr_t end)
+{
+	if (early_is_tdx_guest()) {
+		if (!tdx_accept_memory(start, end))
+			tdx_panic("Failed to accept memory");
+	} else if (early_is_sevsnp_guest()) {
+		snp_accept_memory(start, end);
+	}
+}
 #endif

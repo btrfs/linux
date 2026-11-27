@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2005-2015, 2018-2025 Intel Corporation
+ * Copyright (C) 2005-2015, 2018-2026 Intel Corporation
  * Copyright (C) 2016-2017 Intel Deutschland GmbH
  */
 #ifndef __iwl_nvm_parse_h__
@@ -9,6 +9,9 @@
 #include <net/cfg80211.h>
 #include "iwl-nvm-utils.h"
 #include "mei/iwl-mei.h"
+
+#define NUM_2GHZ_CHANNELS		14
+#define NUM_5GHZ_CHANNELS		37
 
 /**
  * enum iwl_nvm_sbands_flags - modification flags for the channel profiles
@@ -19,6 +22,19 @@
 enum iwl_nvm_sbands_flags {
 	IWL_NVM_SBANDS_FLAGS_LAR		= BIT(0),
 	IWL_NVM_SBANDS_FLAGS_NO_WIDE_IN_5GHZ	= BIT(1),
+};
+
+/**
+ * enum iwl_puncturing_status - EHT puncturing status from MCC capabilities
+ * @IWL_PUNCTURING_STATUS_UNKNOWN: puncturing status is not provided by FW
+ *	or is not initialized yet
+ * @IWL_PUNCTURING_STATUS_ENABLED: puncturing is enabled for the current MCC
+ * @IWL_PUNCTURING_STATUS_DISABLED: puncturing is disabled for the current MCC
+ */
+enum iwl_puncturing_status {
+	IWL_PUNCTURING_STATUS_UNKNOWN,
+	IWL_PUNCTURING_STATUS_ENABLED,
+	IWL_PUNCTURING_STATUS_DISABLED,
 };
 
 /**
@@ -35,6 +51,9 @@ enum iwl_nvm_sbands_flags {
  *	for this regulatory domain (valid only in 6 Ghz).
  * @disable_11ax: 11ax is forbidden for this regulatory domain.
  * @disable_11be: 11be is forbidden for this regulatory domain.
+ * @disable_11bn: UHR/11bn is not allowed for this regulatory domain
+ * @puncturing_status: EHT puncturing status for the current MCC.
+ *	See &enum iwl_puncturing_status.
  */
 struct iwl_reg_capa {
 	bool allow_40mhz;
@@ -43,6 +62,8 @@ struct iwl_reg_capa {
 	bool allow_320mhz;
 	bool disable_11ax;
 	bool disable_11be;
+	bool disable_11bn;
+	enum iwl_puncturing_status puncturing_status;
 };
 
 /**
@@ -64,7 +85,7 @@ struct iwl_reg_capa {
  * @NVM_CHANNEL_40MHZ: 40 MHz channel okay
  * @NVM_CHANNEL_80MHZ: 80 MHz channel okay
  * @NVM_CHANNEL_160MHZ: 160 MHz channel okay
- * @NVM_CHANNEL_DC_HIGH: DC HIGH required/allowed (?)
+ * @NVM_CHANNEL_320MHZ: 320 MHz channel okay
  * @NVM_CHANNEL_VLP: client support connection to UHB VLP AP
  * @NVM_CHANNEL_AFC: client support connection to UHB AFC AP
  * @NVM_CHANNEL_VLP_AP_NOT_ALLOWED: UHB VLP AP not allowed,
@@ -83,7 +104,7 @@ enum iwl_nvm_channel_flags {
 	NVM_CHANNEL_40MHZ			= BIT(9),
 	NVM_CHANNEL_80MHZ			= BIT(10),
 	NVM_CHANNEL_160MHZ			= BIT(11),
-	NVM_CHANNEL_DC_HIGH			= BIT(12),
+	NVM_CHANNEL_320MHZ			= BIT(12),
 	NVM_CHANNEL_VLP				= BIT(13),
 	NVM_CHANNEL_AFC				= BIT(14),
 	NVM_CHANNEL_VLP_AP_NOT_ALLOWED		= BIT(15),
@@ -115,11 +136,12 @@ iwl_parse_nvm_data(struct iwl_trans *trans, const struct iwl_rf_cfg *cfg,
  * iwl_parse_nvm_mcc_info - parse MCC (mobile country code) info coming from FW
  *
  * This function parses the regulatory channel data received as a
- * MCC_UPDATE_CMD command. It returns a newly allocation regulatory domain,
- * to be fed into the regulatory core. In case the geo_info is set handle
- * accordingly. An ERR_PTR is returned on error.
- * If not given to the regulatory core, the user is responsible for freeing
- * the regdomain returned here with kfree.
+ * MCC_UPDATE_CMD command.
+ *
+ * Return: a newly allocation regulatory domain, to be given to the regulatory
+ *	core. In case the geo_info is set handle accordingly. An ERR_PTR is
+ *	returned on error. If not given to the regulatory core, the user is
+ *	responsible for freeing the regdomain returned here with kfree().
  *
  * @trans: the transport
  * @num_of_ch: the number of channels
@@ -128,11 +150,13 @@ iwl_parse_nvm_data(struct iwl_trans *trans, const struct iwl_rf_cfg *cfg,
  * @geo_info: geo info value
  * @cap: capability
  * @resp_ver: FW response version
+ * @puncturing_status: FW puncturing status for current MCC, when available
  */
 struct ieee80211_regdomain *
 iwl_parse_nvm_mcc_info(struct iwl_trans *trans,
 		       int num_of_ch, __le32 *channels, u16 fw_mcc,
-		       u16 geo_info, u32 cap, u8 resp_ver);
+		       u16 geo_info, u32 cap, u8 resp_ver,
+		       enum iwl_puncturing_status *puncturing_status);
 
 /**
  * struct iwl_nvm_section - describes an NVM section in memory.
@@ -140,6 +164,8 @@ iwl_parse_nvm_mcc_info(struct iwl_trans *trans,
  * This struct holds an NVM section read from the NIC using NVM_ACCESS_CMD,
  * and saved for later use by the driver. Not all NVM sections are saved
  * this way, only the needed ones.
+ * @length: length of the section
+ * @data: section data
  */
 struct iwl_nvm_section {
 	u16 length;
@@ -148,6 +174,10 @@ struct iwl_nvm_section {
 
 /**
  * iwl_read_external_nvm - Reads external NVM from a file into nvm_sections
+ * @trans: the transport
+ * @nvm_file_name: the filename to request
+ * @nvm_sections: sections data to fill
+ * Return: 0 on success or an error code
  */
 int iwl_read_external_nvm(struct iwl_trans *trans,
 			  const char *nvm_file_name,

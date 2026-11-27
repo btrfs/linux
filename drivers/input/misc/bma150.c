@@ -435,7 +435,7 @@ static int bma150_probe(struct i2c_client *client)
 		return -EINVAL;
 	}
 
-	bma150 = devm_kzalloc(&client->dev, sizeof(*bma150), GFP_KERNEL);
+	bma150 = devm_kzalloc_obj(&client->dev, *bma150);
 	if (!bma150)
 		return -ENOMEM;
 
@@ -536,9 +536,9 @@ static int __maybe_unused bma150_resume(struct device *dev)
 static UNIVERSAL_DEV_PM_OPS(bma150_pm, bma150_suspend, bma150_resume, NULL);
 
 static const struct i2c_device_id bma150_id[] = {
-	{ "bma150" },
-	{ "smb380" },
-	{ "bma023" },
+	{ .name = "bma150" },
+	{ .name = "smb380" },
+	{ .name = "bma023" },
 	{ }
 };
 

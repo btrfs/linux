@@ -35,11 +35,11 @@ aarch64)
 	ARCH="arm64"
 	;;
 riscv64)
-	# required qemu version v7.2.0+
+	# required qemu version v8.2.0+
 	QEMU_BINARY=qemu-system-riscv64
 	QEMU_CONSOLE="ttyS0,115200"
 	HOST_FLAGS=(-M virt -cpu host -enable-kvm -smp 8)
-	CROSS_FLAGS=(-M virt -cpu rv64,sscofpmf=true -smp 8)
+	CROSS_FLAGS=(-M virt -cpu max,sscofpmf=false -smp 8)
 	BZIMAGE="arch/riscv/boot/Image"
 	ARCH="riscv"
 	;;
@@ -65,7 +65,7 @@ OUTPUT_DIR="$HOME/.bpf_selftests"
 KCONFIG_REL_PATHS=("tools/testing/selftests/bpf/config"
 	"tools/testing/selftests/bpf/config.vm"
 	"tools/testing/selftests/bpf/config.${PLATFORM}")
-INDEX_URL="https://raw.githubusercontent.com/libbpf/ci/master/INDEX"
+INDEX_URL="https://raw.githubusercontent.com/libbpf/ci/main/INDEX"
 NUM_COMPILE_JOBS="$(nproc)"
 LOG_FILE_BASE="$(date +"bpf_selftests.%Y-%m-%d_%H-%M-%S")"
 LOG_FILE="${LOG_FILE_BASE}.log"
@@ -107,6 +107,14 @@ Options:
 	-s)		Instead of powering off the VM, start an interactive
 			shell. If <command> is specified, the shell runs after
 			the command finishes executing
+
+Environment variables:
+
+	KERNEL_CMDLINE_EXTRA
+			Extra arguments to append to the guest kernel command
+			line, for tests that need a boot-time setting. e.g:
+
+	  KERNEL_CMDLINE_EXTRA="bpf.keyring_unsealed=1" $0 -- ./test_progs -t signed_loader
 EOF
 }
 
@@ -286,6 +294,12 @@ EOF
 		QEMU_FLAGS=("${HOST_FLAGS[@]}")
 	fi
 
+	local kernel_cmdline="root=/dev/vda rw console=${QEMU_CONSOLE}"
+
+	if [[ -n "${KERNEL_CMDLINE_EXTRA:-}" ]]; then
+		kernel_cmdline+=" ${KERNEL_CMDLINE_EXTRA}"
+	fi
+
 	${QEMU_BINARY} \
 		-nodefaults \
 		-display none \
@@ -294,7 +308,7 @@ EOF
 		-m 4G \
 		-drive file="${rootfs_img}",format=raw,index=1,media=disk,if=virtio,cache=none \
 		-kernel "${kernel_bzimage}" \
-		-append "root=/dev/vda rw console=${QEMU_CONSOLE}"
+		-append "${kernel_cmdline}"
 }
 
 copy_logs()
@@ -382,7 +396,7 @@ main()
 	local exit_command="poweroff -f"
 	local debug_shell="no"
 
-	while getopts ':hskl:id:j:' opt; do
+	while getopts ':hsl:id:j:' opt; do
 		case ${opt} in
 		l)
 			LOCAL_ROOTFS_IMAGE="$OPTARG"
@@ -428,8 +442,17 @@ main()
 
 	if [[ $# -eq 0  && "${debug_shell}" == "no" ]]; then
 		echo "No command specified, will run ${DEFAULT_COMMAND} in the vm"
-	else
-		command="$@"
+	elif [[ $# -gt 0 ]]; then
+		# Quote each argument so the command survives into the guest: the
+		# host expands ${command} into the generated init script, which
+		# the guest bash then parses as shell source. Without the %q
+		# escapes an argument with a space or a glob (e.g. -a 'verifier_*')
+		# is re-split and expanded against /root/bpf there.
+		#
+		# Skip this when there is no command: printf '%q ' would still
+		# apply the format once and emit '', which is not the empty
+		# command that -s (debug shell) expects.
+		command=$(printf '%q ' "$@")
 	fi
 
 	local kconfig_file="${OUTPUT_DIR}/latest.config"

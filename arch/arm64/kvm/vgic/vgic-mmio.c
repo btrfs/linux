@@ -820,7 +820,7 @@ void vgic_write_irq_line_level_info(struct kvm_vcpu *vcpu, u32 intid,
 
 static int match_region(const void *key, const void *elt)
 {
-	const unsigned int offset = (unsigned long)key;
+	const u64 offset = (unsigned long)key;
 	const struct vgic_register_region *region = elt;
 
 	if (offset < region->reg_offset)
@@ -834,7 +834,7 @@ static int match_region(const void *key, const void *elt)
 
 const struct vgic_register_region *
 vgic_find_mmio_region(const struct vgic_register_region *regions,
-		      int nr_regions, unsigned int offset)
+		      int nr_regions, u64 offset)
 {
 	return bsearch((void *)(uintptr_t)offset, regions, nr_regions,
 		       sizeof(regions[0]), match_region);
@@ -842,18 +842,46 @@ vgic_find_mmio_region(const struct vgic_register_region *regions,
 
 void vgic_set_vmcr(struct kvm_vcpu *vcpu, struct vgic_vmcr *vmcr)
 {
-	if (kvm_vgic_global_state.type == VGIC_V2)
-		vgic_v2_set_vmcr(vcpu, vmcr);
-	else
+	const struct vgic_dist *dist = &vcpu->kvm->arch.vgic;
+
+	switch (dist->vgic_model) {
+	case KVM_DEV_TYPE_ARM_VGIC_V5:
+		vgic_v5_set_vmcr(vcpu, vmcr);
+		break;
+	case KVM_DEV_TYPE_ARM_VGIC_V3:
 		vgic_v3_set_vmcr(vcpu, vmcr);
+		break;
+	case KVM_DEV_TYPE_ARM_VGIC_V2:
+		if (static_branch_unlikely(&kvm_vgic_global_state.gicv3_cpuif))
+			vgic_v3_set_vmcr(vcpu, vmcr);
+		else
+			vgic_v2_set_vmcr(vcpu, vmcr);
+		break;
+	default:
+		BUG();
+	}
 }
 
 void vgic_get_vmcr(struct kvm_vcpu *vcpu, struct vgic_vmcr *vmcr)
 {
-	if (kvm_vgic_global_state.type == VGIC_V2)
-		vgic_v2_get_vmcr(vcpu, vmcr);
-	else
+	const struct vgic_dist *dist = &vcpu->kvm->arch.vgic;
+
+	switch (dist->vgic_model) {
+	case KVM_DEV_TYPE_ARM_VGIC_V5:
+		vgic_v5_get_vmcr(vcpu, vmcr);
+		break;
+	case KVM_DEV_TYPE_ARM_VGIC_V3:
 		vgic_v3_get_vmcr(vcpu, vmcr);
+		break;
+	case KVM_DEV_TYPE_ARM_VGIC_V2:
+		if (static_branch_unlikely(&kvm_vgic_global_state.gicv3_cpuif))
+			vgic_v3_get_vmcr(vcpu, vmcr);
+		else
+			vgic_v2_get_vmcr(vcpu, vmcr);
+		break;
+	default:
+		BUG();
+	}
 }
 
 /*
@@ -1037,6 +1065,9 @@ static int dispatch_mmio_read(struct kvm_vcpu *vcpu, struct kvm_io_device *dev,
 	case IODEV_ITS:
 		data = region->its_read(vcpu->kvm, iodev->its, addr, len);
 		break;
+	case IODEV_GICV5_IRS:
+		data = region->read(vcpu, addr, len);
+		break;
 	}
 
 	vgic_data_host_to_mmio_bus(val, len, data);
@@ -1066,6 +1097,9 @@ static int dispatch_mmio_write(struct kvm_vcpu *vcpu, struct kvm_io_device *dev,
 		break;
 	case IODEV_ITS:
 		region->its_write(vcpu->kvm, iodev->its, addr, len, data);
+		break;
+	case IODEV_GICV5_IRS:
+		region->write(vcpu, addr, len, data);
 		break;
 	}
 

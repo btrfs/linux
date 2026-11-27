@@ -35,7 +35,7 @@ static int dac124s085_set_brightness(struct led_classdev *ldev,
 {
 	struct dac124s085_led *led = container_of(ldev, struct dac124s085_led,
 						  ldev);
-	u16 word;
+	__le16 word;
 	int ret;
 
 	mutex_lock(&led->mutex);
@@ -53,7 +53,7 @@ static int dac124s085_probe(struct spi_device *spi)
 	struct dac124s085_led	*led;
 	int i, ret;
 
-	dac = devm_kzalloc(&spi->dev, sizeof(*dac), GFP_KERNEL);
+	dac = devm_kzalloc_obj(&spi->dev, *dac);
 	if (!dac)
 		return -ENOMEM;
 

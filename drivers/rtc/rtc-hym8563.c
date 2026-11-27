@@ -376,8 +376,8 @@ static struct clk *hym8563_clkout_register_clk(struct hym8563 *hym8563)
 {
 	struct i2c_client *client = hym8563->client;
 	struct device_node *node = client->dev.of_node;
+	struct clk_init_data init = {};
 	struct clk *clk;
-	struct clk_init_data init;
 	int ret;
 
 	ret = i2c_smbus_write_byte_data(client, HYM8563_CLKOUT,
@@ -417,7 +417,7 @@ static irqreturn_t hym8563_irq(int irq, void *dev_id)
 	struct i2c_client *client = hym8563->client;
 	int data, ret;
 
-	rtc_lock(hym8563->rtc);
+	guard(rtc_ops)(hym8563->rtc);
 
 	/* Clear the alarm flag */
 
@@ -425,7 +425,7 @@ static irqreturn_t hym8563_irq(int irq, void *dev_id)
 	if (data < 0) {
 		dev_err(&client->dev, "%s: error reading i2c data %d\n",
 			__func__, data);
-		goto out;
+		return IRQ_HANDLED;
 	}
 
 	data &= ~HYM8563_CTL2_AF;
@@ -436,8 +436,6 @@ static irqreturn_t hym8563_irq(int irq, void *dev_id)
 			__func__, ret);
 	}
 
-out:
-	rtc_unlock(hym8563->rtc);
 	return IRQ_HANDLED;
 }
 
@@ -505,7 +503,7 @@ static int hym8563_probe(struct i2c_client *client)
 	struct hym8563 *hym8563;
 	int ret;
 
-	hym8563 = devm_kzalloc(&client->dev, sizeof(*hym8563), GFP_KERNEL);
+	hym8563 = devm_kzalloc_obj(&client->dev, *hym8563);
 	if (!hym8563)
 		return -ENOMEM;
 
@@ -564,8 +562,8 @@ static int hym8563_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id hym8563_id[] = {
-	{ "hym8563" },
-	{}
+	{ .name = "hym8563" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, hym8563_id);
 

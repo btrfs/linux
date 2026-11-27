@@ -8,6 +8,7 @@
  */
 
 #include <linux/kernel_stat.h>
+#include <linux/hex.h>
 #include <linux/init.h>
 #include <linux/memblock.h>
 #include <linux/err.h>
@@ -276,7 +277,7 @@ static struct airq_info *new_airq_info(int index)
 	struct airq_info *info;
 	int rc;
 
-	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	info = kzalloc_obj(*info);
 	if (!info)
 		return NULL;
 	rwlock_init(&info->lock);
@@ -565,7 +566,7 @@ static struct virtqueue *virtio_ccw_setup_vq(struct virtio_device *vdev,
 		notify = virtio_ccw_kvm_notify;
 
 	/* Allocate queue. */
-	info = kzalloc(sizeof(struct virtio_ccw_vq_info), GFP_KERNEL);
+	info = kzalloc_obj(struct virtio_ccw_vq_info);
 	if (!info) {
 		dev_warn(&vcdev->cdev->dev, "no info\n");
 		err = -ENOMEM;
@@ -1061,7 +1062,7 @@ static void virtio_ccw_synchronize_cbs(struct virtio_device *vdev)
 	struct virtio_ccw_device *vcdev = to_vc_device(vdev);
 	struct airq_info *info = vcdev->airq_info;
 
-	if (info) {
+	if (vcdev->is_thinint && info) {
 		/*
 		 * This device uses adapter interrupts: synchronize with
 		 * vring_interrupt() called by virtio_airq_handler()
@@ -1203,13 +1204,11 @@ static void virtio_ccw_int_handler(struct ccw_device *cdev,
 			vcdev->err = -EIO;
 	}
 	virtio_ccw_check_activity(vcdev, activity);
-#ifdef CONFIG_VIRTIO_HARDEN_NOTIFICATION
 	/*
 	 * Paired with virtio_ccw_synchronize_cbs() and interrupts are
 	 * disabled here.
 	 */
 	read_lock(&vcdev->irq_lock);
-#endif
 	for_each_set_bit(i, indicators(vcdev),
 			 sizeof(*indicators(vcdev)) * BITS_PER_BYTE) {
 		/* The bit clear must happen before the vring kick. */
@@ -1218,9 +1217,7 @@ static void virtio_ccw_int_handler(struct ccw_device *cdev,
 		vq = virtio_ccw_vq_by_ind(vcdev, i);
 		vring_interrupt(0, vq);
 	}
-#ifdef CONFIG_VIRTIO_HARDEN_NOTIFICATION
 	read_unlock(&vcdev->irq_lock);
-#endif
 	if (test_bit(0, indicators2(vcdev))) {
 		virtio_config_changed(&vcdev->vdev);
 		clear_bit(0, indicators2(vcdev));
@@ -1369,7 +1366,7 @@ static int virtio_ccw_online(struct ccw_device *cdev)
 	struct virtio_ccw_device *vcdev;
 	unsigned long flags;
 
-	vcdev = kzalloc(sizeof(*vcdev), GFP_KERNEL);
+	vcdev = kzalloc_obj(*vcdev);
 	if (!vcdev) {
 		dev_warn(&cdev->dev, "Could not get memory for virtio\n");
 		ret = -ENOMEM;

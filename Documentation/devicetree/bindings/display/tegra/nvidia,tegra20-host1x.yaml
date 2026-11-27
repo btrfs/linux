@@ -25,6 +25,7 @@ properties:
           - nvidia,tegra186-host1x
           - nvidia,tegra194-host1x
           - nvidia,tegra234-host1x
+          - nvidia,tegra264-host1x
 
       - items:
           - const: nvidia,tegra132-host1x
@@ -57,7 +58,8 @@ properties:
     enum: [1, 2]
 
   ranges:
-    maxItems: 1
+    minItems: 1
+    maxItems: 2
 
   clocks:
     description: Must contain one entry, for the module clock. See
@@ -95,6 +97,18 @@ properties:
   power-domains:
     items:
       - description: phandle to the HEG or core power domain
+
+  nvidia,channels:
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    minItems: 2
+    maxItems: 2
+    description: Describes range of usable Host1x channels as a <base count> tuple.
+
+  nvidia,syncpoints:
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    minItems: 2
+    maxItems: 2
+    description: Describes range of writable Host1x syncpoints as a <base count> tuple.
 
 required:
   - compatible
@@ -145,14 +159,20 @@ allOf:
     then:
       properties:
         reg-names:
-          items:
-            - const: hypervisor
-            - const: vm
+          oneOf:
+            - items:
+                - const: hypervisor
+                - const: vm
+            - items:
+                - const: vm
 
         reg:
-          items:
-            - description: region used by the hypervisor
-            - description: region assigned to the virtual machine
+          oneOf:
+            - items:
+                - description: region used by the hypervisor
+                - description: region assigned to the virtual machine
+            - items:
+                - description: region assigned to the virtual machine
 
         resets:
           maxItems: 1
@@ -192,19 +212,26 @@ allOf:
           contains:
             enum:
               - nvidia,tegra234-host1x
+              - nvidia,tegra264-host1x
     then:
       properties:
         reg-names:
-          items:
-            - const: common
-            - const: hypervisor
-            - const: vm
+          oneOf:
+            - items:
+                - const: common
+                - const: hypervisor
+                - const: vm
+            - items:
+                - const: vm
 
         reg:
-          items:
-            - description: region used by host1x server
-            - description: region used by the hypervisor
-            - description: region assigned to the virtual machine
+          oneOf:
+            - items:
+                - description: region used by host1x server
+                - description: region used by the hypervisor
+                - description: region assigned to the virtual machine
+            - items:
+                - description: region assigned to the virtual machine
 
         interrupts:
           items:
@@ -239,6 +266,21 @@ allOf:
 
       required:
         - reg-names
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - nvidia,tegra264-host1x
+    then:
+      properties:
+        ranges:
+          minItems: 2
+          maxItems: 2
+    else:
+      properties:
+        ranges:
+          maxItems: 1
 
 examples:
   - |

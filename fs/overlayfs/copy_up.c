@@ -72,6 +72,18 @@ static int ovl_copy_acl(struct ovl_fs *ofs, const struct path *path,
 	return err;
 }
 
+static ssize_t ovl_getxattr_value(const struct path *path, char *name,
+				  char **value, ssize_t *value_size);
+
+/*
+ * Any user can store an empty security.capability, which fails to read with
+ * -EINVAL.  It grants no capability, so treat it as none, like no xattr.
+ */
+static bool ovl_no_fscap(ssize_t err)
+{
+	return err == -ENODATA || err == -EOPNOTSUPP || err == -EINVAL;
+}
+
 int ovl_copy_xattr(struct super_block *sb, const struct path *oldpath, struct dentry *new)
 {
 	struct dentry *old = oldpath->dentry;
@@ -129,28 +141,14 @@ int ovl_copy_xattr(struct super_block *sb, const struct path *oldpath, struct de
 			break;
 		}
 
-retry:
-		size = ovl_do_getxattr(oldpath, name, value, value_size);
-		if (size == -ERANGE)
-			size = ovl_do_getxattr(oldpath, name, NULL, 0);
-
+		size = ovl_getxattr_value(oldpath, name, &value, &value_size);
 		if (size < 0) {
+			if (!strcmp(name, XATTR_NAME_CAPS) && ovl_no_fscap(size)) {
+				error = 0;
+				continue;
+			}
 			error = size;
 			break;
-		}
-
-		if (size > value_size) {
-			void *new;
-
-			new = kvmalloc(size, GFP_KERNEL);
-			if (!new) {
-				error = -ENOMEM;
-				break;
-			}
-			kvfree(value);
-			value = new;
-			value_size = size;
-			goto retry;
 		}
 
 		error = ovl_do_setxattr(OVL_FS(sb), new, name, value, size, 0);
@@ -476,8 +474,12 @@ struct ovl_fh *ovl_get_origin_fh(struct ovl_fs *ofs, struct dentry *origin)
 	 * When lower layer doesn't support export operations store a 'null' fh,
 	 * so we can use the overlay.origin xattr to distignuish between a copy
 	 * up and a pure upper inode.
+	 *
+	 * With index enabled, mount already found that all layers can decode
+	 * file handles.  Do not ask again, because an LSM may change its answer
+	 * about CAP_DAC_READ_SEARCH and index users cannot cope with a 'null' fh.
 	 */
-	if (!ovl_can_decode_fh(origin->d_sb))
+	if (!ofs->config.index && !ovl_can_decode_fh(origin->d_sb))
 		return NULL;
 
 	return ovl_encode_real_fh(ofs, d_inode(origin), false);
@@ -523,8 +525,8 @@ static int ovl_create_index(struct dentry *dentry, const struct ovl_fh *fh,
 {
 	struct ovl_fs *ofs = OVL_FS(dentry->d_sb);
 	struct dentry *indexdir = ovl_indexdir(dentry->d_sb);
-	struct dentry *index = NULL;
 	struct dentry *temp = NULL;
+	struct renamedata rd = {};
 	struct qstr name = { };
 	int err;
 
@@ -556,17 +558,15 @@ static int ovl_create_index(struct dentry *dentry, const struct ovl_fh *fh,
 	if (err)
 		goto out;
 
-	err = ovl_parent_lock(indexdir, temp);
+	rd.mnt_idmap = ovl_upper_mnt_idmap(ofs);
+	rd.old_parent = indexdir;
+	rd.new_parent = indexdir;
+	err = start_renaming_dentry(&rd, 0, temp, &name);
 	if (err)
 		goto out;
-	index = ovl_lookup_upper(ofs, name.name, indexdir, name.len);
-	if (IS_ERR(index)) {
-		err = PTR_ERR(index);
-	} else {
-		err = ovl_do_rename(ofs, indexdir, temp, indexdir, index, 0);
-		dput(index);
-	}
-	ovl_parent_unlock(indexdir);
+
+	err = ovl_do_rename_rd(&rd);
+	end_renaming(&rd);
 out:
 	if (err)
 		ovl_cleanup(ofs, indexdir, temp);
@@ -613,9 +613,9 @@ static int ovl_link_up(struct ovl_copy_up_ctx *c)
 	if (err)
 		goto out;
 
-	inode_lock_nested(udir, I_MUTEX_PARENT);
-	upper = ovl_lookup_upper(ofs, c->dentry->d_name.name, upperdir,
-				 c->dentry->d_name.len);
+	upper = ovl_start_creating_upper(ofs, upperdir,
+					 &QSTR_LEN(c->dentry->d_name.name,
+						   c->dentry->d_name.len));
 	err = PTR_ERR(upper);
 	if (!IS_ERR(upper)) {
 		err = ovl_do_link(ofs, ovl_dentry_upper(c->dentry), udir, upper);
@@ -626,9 +626,8 @@ static int ovl_link_up(struct ovl_copy_up_ctx *c)
 			ovl_dentry_set_upper_alias(c->dentry);
 			ovl_dentry_update_reval(c->dentry, upper);
 		}
-		dput(upper);
+		end_creating(upper);
 	}
-	inode_unlock(udir);
 	if (err)
 		goto out;
 
@@ -727,33 +726,32 @@ static int ovl_copy_up_metadata(struct ovl_copy_up_ctx *c, struct dentry *temp)
 	return err;
 }
 
-struct ovl_cu_creds {
-	const struct cred *old;
-	struct cred *new;
-};
-
-static int ovl_prep_cu_creds(struct dentry *dentry, struct ovl_cu_creds *cc)
+static const struct cred *ovl_prepare_copy_up_creds(struct dentry *dentry)
 {
+	struct cred *copy_up_cred = NULL;
 	int err;
 
-	cc->old = cc->new = NULL;
-	err = security_inode_copy_up(dentry, &cc->new);
+	err = security_inode_copy_up(dentry, &copy_up_cred);
 	if (err < 0)
-		return err;
+		return ERR_PTR(err);
 
-	if (cc->new)
-		cc->old = override_creds(cc->new);
+	if (!copy_up_cred)
+		return NULL;
 
-	return 0;
+	return override_creds(copy_up_cred);
 }
 
-static void ovl_revert_cu_creds(struct ovl_cu_creds *cc)
+static void ovl_revert_copy_up_creds(const struct cred *orig_cred)
 {
-	if (cc->new) {
-		revert_creds(cc->old);
-		put_cred(cc->new);
-	}
+	const struct cred *copy_up_cred;
+
+	copy_up_cred = revert_creds(orig_cred);
+	put_cred(copy_up_cred);
 }
+
+DEFINE_CLASS(copy_up_creds, const struct cred *,
+	     if (!IS_ERR_OR_NULL(_T)) ovl_revert_copy_up_creds(_T),
+	     ovl_prepare_copy_up_creds(dentry), struct dentry *dentry)
 
 /*
  * Copyup using workdir to prepare temp file.  Used when copying up directories,
@@ -764,8 +762,8 @@ static int ovl_copy_up_workdir(struct ovl_copy_up_ctx *c)
 	struct ovl_fs *ofs = OVL_FS(c->dentry->d_sb);
 	struct inode *inode;
 	struct path path = { .mnt = ovl_upper_mnt(ofs) };
-	struct dentry *temp, *upper, *trap;
-	struct ovl_cu_creds cc;
+	struct renamedata rd = {};
+	struct dentry *temp;
 	int err;
 	struct ovl_cattr cattr = {
 		/* Can't properly set mode on creation because of the umask */
@@ -774,14 +772,14 @@ static int ovl_copy_up_workdir(struct ovl_copy_up_ctx *c)
 		.link = c->link
 	};
 
-	err = ovl_prep_cu_creds(c->dentry, &cc);
-	if (err)
-		return err;
+	scoped_class(copy_up_creds, copy_up_creds, c->dentry) {
+		if (IS_ERR(copy_up_creds))
+			return PTR_ERR(copy_up_creds);
 
-	ovl_start_write(c->dentry);
-	temp = ovl_create_temp(ofs, c->workdir, &cattr);
-	ovl_end_write(c->dentry);
-	ovl_revert_cu_creds(&cc);
+		ovl_start_write(c->dentry);
+		temp = ovl_create_temp(ofs, c->workdir, &cattr);
+		ovl_end_write(c->dentry);
+	}
 
 	if (IS_ERR(temp))
 		return PTR_ERR(temp);
@@ -808,29 +806,25 @@ static int ovl_copy_up_workdir(struct ovl_copy_up_ctx *c)
 	 * ovl_copy_up_data(), so lock workdir and destdir and make sure that
 	 * temp wasn't moved before copy up completion or cleanup.
 	 */
-	trap = lock_rename(c->workdir, c->destdir);
-	if (trap || temp->d_parent != c->workdir) {
-		/* temp or workdir moved underneath us? abort without cleanup */
-		dput(temp);
+	rd.mnt_idmap = ovl_upper_mnt_idmap(ofs);
+	rd.old_parent = c->workdir;
+	rd.new_parent = c->destdir;
+	rd.flags = 0;
+	/* The name may have been taken since lookup, never replace it */
+	err = start_renaming_dentry(&rd, LOOKUP_EXCL, temp,
+				    &QSTR_LEN(c->destname.name, c->destname.len));
+	if (err && err != -EEXIST) {
+		/* temp or workdir moved underneath us? map to -EIO */
 		err = -EIO;
-		if (!IS_ERR(trap))
-			unlock_rename(c->workdir, c->destdir);
-		goto out;
 	}
+	if (err)
+		goto cleanup_unlocked;
 
 	err = ovl_copy_up_metadata(c, temp);
-	if (err)
-		goto cleanup;
+	if (!err)
+		err = ovl_do_rename_rd(&rd);
+	end_renaming(&rd);
 
-	upper = ovl_lookup_upper(ofs, c->destname.name, c->destdir,
-				 c->destname.len);
-	err = PTR_ERR(upper);
-	if (IS_ERR(upper))
-		goto cleanup;
-
-	err = ovl_do_rename(ofs, c->workdir, temp, c->destdir, upper, 0);
-	unlock_rename(c->workdir, c->destdir);
-	dput(upper);
 	if (err)
 		goto cleanup_unlocked;
 
@@ -843,16 +837,14 @@ static int ovl_copy_up_workdir(struct ovl_copy_up_ctx *c)
 
 	if (!c->metacopy)
 		ovl_set_upperdata(inode);
-	ovl_inode_update(inode, temp);
 	if (S_ISDIR(inode->i_mode))
 		ovl_set_flag(OVL_WHITEOUTS, inode);
+	ovl_inode_update(inode, temp);
 out:
 	ovl_end_write(c->dentry);
 
 	return err;
 
-cleanup:
-	unlock_rename(c->workdir, c->destdir);
 cleanup_unlocked:
 	ovl_cleanup(ofs, c->workdir, temp);
 	dput(temp);
@@ -864,19 +856,19 @@ static int ovl_copy_up_tmpfile(struct ovl_copy_up_ctx *c)
 {
 	struct ovl_fs *ofs = OVL_FS(c->dentry->d_sb);
 	struct inode *udir = d_inode(c->destdir);
-	struct dentry *temp, *upper;
+	struct dentry *temp, *upper, *newdentry = NULL;
 	struct file *tmpfile;
-	struct ovl_cu_creds cc;
 	int err;
 
-	err = ovl_prep_cu_creds(c->dentry, &cc);
-	if (err)
-		return err;
+	scoped_class(copy_up_creds, copy_up_creds, c->dentry) {
+		if (IS_ERR(copy_up_creds))
+			return PTR_ERR(copy_up_creds);
 
-	ovl_start_write(c->dentry);
-	tmpfile = ovl_do_tmpfile(ofs, c->workdir, c->stat.mode);
-	ovl_end_write(c->dentry);
-	ovl_revert_cu_creds(&cc);
+		ovl_start_write(c->dentry);
+		tmpfile = ovl_do_tmpfile(ofs, c->workdir, c->stat.mode);
+		ovl_end_write(c->dentry);
+	}
+
 	if (IS_ERR(tmpfile))
 		return PTR_ERR(tmpfile);
 
@@ -894,16 +886,22 @@ static int ovl_copy_up_tmpfile(struct ovl_copy_up_ctx *c)
 	if (err)
 		goto out;
 
-	inode_lock_nested(udir, I_MUTEX_PARENT);
-
-	upper = ovl_lookup_upper(ofs, c->destname.name, c->destdir,
-				 c->destname.len);
+	upper = ovl_start_creating_upper(ofs, c->destdir,
+					 &QSTR_LEN(c->destname.name,
+						   c->destname.len));
 	err = PTR_ERR(upper);
 	if (!IS_ERR(upper)) {
 		err = ovl_do_link(ofs, temp, udir, upper);
-		dput(upper);
+		if (!err) {
+			/*
+			 * Record the linked dentry -- not the disconnected
+			 * O_TMPFILE dentry -- so that ->d_revalidate() on
+			 * the upper fs sees the real parent/name.
+			 */
+			newdentry = dget(upper);
+		}
+		end_creating(upper);
 	}
-	inode_unlock(udir);
 
 	if (err)
 		goto out;
@@ -916,7 +914,7 @@ static int ovl_copy_up_tmpfile(struct ovl_copy_up_ctx *c)
 
 	if (!c->metacopy)
 		ovl_set_upperdata(d_inode(c->dentry));
-	ovl_inode_update(d_inode(c->dentry), dget(temp));
+	ovl_inode_update(d_inode(c->dentry), newdentry);
 
 out:
 	ovl_end_write(c->dentry);
@@ -940,6 +938,7 @@ static int ovl_do_copy_up(struct ovl_copy_up_ctx *c)
 	struct ovl_fs *ofs = OVL_FS(c->dentry->d_sb);
 	struct dentry *origin = c->lowerpath.dentry;
 	struct ovl_fh *fh = NULL;
+	struct name_snapshot name;
 	bool to_index = false;
 
 	/*
@@ -977,12 +976,15 @@ static int ovl_do_copy_up(struct ovl_copy_up_ctx *c)
 		goto out_free_fh;
 	} else {
 		/*
-		 * c->dentry->d_name is stabilzed by ovl_copy_up_start(),
-		 * because if we got here, it means that c->dentry has no upper
-		 * alias and changing ->d_name means going through ovl_rename()
-		 * that will call ovl_copy_up() on source and target dentry.
+		 * ovl_copy_up_start() keeps ovl_rename() away from c->dentry,
+		 * because ovl_rename() calls ovl_copy_up() on source and target
+		 * dentry.  It does not stop d_splice_alias() from moving a
+		 * directory that a lookup found under another name after a
+		 * change to the lower layer.  That move frees an external name,
+		 * so take a snapshot.
 		 */
-		c->destname = c->dentry->d_name;
+		take_dentry_name_snapshot(&name, c->dentry);
+		c->destname = name.name;
 		/*
 		 * Mark parent "impure" because it may now contain non-pure
 		 * upper
@@ -991,7 +993,7 @@ static int ovl_do_copy_up(struct ovl_copy_up_ctx *c)
 		err = ovl_set_impure(c->parent, c->destdir);
 		ovl_end_write(c->dentry);
 		if (err)
-			goto out_free_fh;
+			goto out;
 	}
 
 	/* Should we copyup with O_TMPFILE or with workdir? */
@@ -1025,6 +1027,8 @@ static int ovl_do_copy_up(struct ovl_copy_up_ctx *c)
 out:
 	if (to_index)
 		kfree(c->destname.name);
+	else
+		release_dentry_name_snapshot(&name);
 out_free_fh:
 	kfree(fh);
 	return err;
@@ -1060,26 +1064,39 @@ static bool ovl_need_meta_copy_up(struct dentry *dentry, umode_t mode,
 	return true;
 }
 
-static ssize_t ovl_getxattr_value(const struct path *path, char *name, char **value)
+static ssize_t ovl_getxattr_value(const struct path *path, char *name,
+				  char **value, ssize_t *value_size)
 {
 	ssize_t res;
 	char *buf;
 
-	res = ovl_do_getxattr(path, name, NULL, 0);
-	if (res == -ENODATA || res == -EOPNOTSUPP)
-		res = 0;
+	res = ovl_do_getxattr(path, name, *value, *value_size);
+	if (res == -ERANGE) {
+		res = ovl_do_getxattr(path, name, NULL, 0);
+		/* Xattr changed underneath us? */
+		if (res >= 0 && res <= *value_size)
+			return -EIO;
+	}
 
-	if (res > 0) {
-		buf = kzalloc(res, GFP_KERNEL);
+	if (res > *value_size) {
+		buf = kvmalloc(res, GFP_KERNEL);
 		if (!buf)
 			return -ENOMEM;
 
 		res = ovl_do_getxattr(path, name, buf, res);
-		if (res < 0)
-			kfree(buf);
-		else
-			*value = buf;
+		if (res < 0) {
+			kvfree(buf);
+			/* Xattr changed underneath us? */
+			if (res == -ERANGE)
+				return -EIO;
+			return res;
+		}
+
+		kvfree(*value);
+		*value = buf;
+		*value_size = res;
 	}
+
 	return res;
 }
 
@@ -1090,7 +1107,7 @@ static int ovl_copy_up_meta_inode_data(struct ovl_copy_up_ctx *c)
 	struct path upperpath;
 	int err;
 	char *capability = NULL;
-	ssize_t cap_size;
+	ssize_t cap_size = 0;
 
 	ovl_path_upper(c->dentry, &upperpath);
 	if (WARN_ON(upperpath.dentry == NULL))
@@ -1098,8 +1115,10 @@ static int ovl_copy_up_meta_inode_data(struct ovl_copy_up_ctx *c)
 
 	if (c->stat.size) {
 		err = cap_size = ovl_getxattr_value(&upperpath, XATTR_NAME_CAPS,
-						    &capability);
-		if (cap_size < 0)
+						    &capability, &cap_size);
+		if (ovl_no_fscap(cap_size))
+			cap_size = 0;
+		else if (cap_size < 0)
 			goto out;
 	}
 
@@ -1128,7 +1147,7 @@ static int ovl_copy_up_meta_inode_data(struct ovl_copy_up_ctx *c)
 	ovl_clear_flag(OVL_VERIFIED_DIGEST, d_inode(c->dentry));
 	ovl_set_upperdata(d_inode(c->dentry));
 out_free:
-	kfree(capability);
+	kvfree(capability);
 out:
 	return err;
 }
@@ -1159,15 +1178,15 @@ static int ovl_copy_up_one(struct dentry *parent, struct dentry *dentry,
 		return -EOVERFLOW;
 
 	/*
-	 * With metacopy disabled, we fsync after final metadata copyup, for
+	 * With "fsync=strict", we fsync after final metadata copyup, for
 	 * both regular files and directories to get atomic copyup semantics
 	 * on filesystems that do not use strict metadata ordering (e.g. ubifs).
 	 *
-	 * With metacopy enabled we want to avoid fsync on all meta copyup
+	 * By default, we want to avoid fsync on all meta copyup, because
 	 * that will hurt performance of workloads such as chown -R, so we
 	 * only fsync on data copyup as legacy behavior.
 	 */
-	ctx.metadata_fsync = !OVL_FS(dentry->d_sb)->config.metacopy &&
+	ctx.metadata_fsync = ovl_should_sync_metadata(OVL_FS(dentry->d_sb)) &&
 			     (S_ISREG(ctx.stat.mode) || S_ISDIR(ctx.stat.mode));
 	ctx.metacopy = ovl_need_meta_copy_up(dentry, ctx.stat.mode, flags);
 
@@ -1214,7 +1233,6 @@ static int ovl_copy_up_one(struct dentry *parent, struct dentry *dentry,
 static int ovl_copy_up_flags(struct dentry *dentry, int flags)
 {
 	int err = 0;
-	const struct cred *old_cred;
 	bool disconnected = (dentry->d_flags & DCACHE_DISCONNECTED);
 
 	/*
@@ -1234,7 +1252,6 @@ static int ovl_copy_up_flags(struct dentry *dentry, int flags)
 	if (err)
 		return err;
 
-	old_cred = ovl_override_creds(dentry->d_sb);
 	while (!err) {
 		struct dentry *next;
 		struct dentry *parent = NULL;
@@ -1254,12 +1271,12 @@ static int ovl_copy_up_flags(struct dentry *dentry, int flags)
 			next = parent;
 		}
 
-		err = ovl_copy_up_one(parent, next, flags);
+		with_ovl_creds(dentry->d_sb)
+			err = ovl_copy_up_one(parent, next, flags);
 
 		dput(parent);
 		dput(next);
 	}
-	ovl_revert_creds(old_cred);
 
 	return err;
 }

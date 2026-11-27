@@ -4,11 +4,10 @@
  *
  * sysfs attributes.
  *
- * Copyright IBM Corp. 2008, 2020
+ * Copyright IBM Corp. 2008, 2026
  */
 
-#define KMSG_COMPONENT "zfcp"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "zfcp: " fmt
 
 #include <linux/slab.h>
 #include "zfcp_diag.h"
@@ -271,7 +270,7 @@ static bool zfcp_sysfs_port_in_use(struct zfcp_port *const port)
 	if (atomic_read(&port->units) > 0)
 		goto unlock_port_units_mutex; /* zfcp_unit(s) under port */
 
-	spin_lock_irqsave(adapter->scsi_host->host_lock, flags);
+	spin_lock_irqsave(&adapter->scsi_host->host_lock, flags);
 	__shost_for_each_device(sdev, adapter->scsi_host) {
 		const struct zfcp_scsi_dev *zsdev = sdev_to_zfcp(sdev);
 
@@ -289,7 +288,7 @@ static bool zfcp_sysfs_port_in_use(struct zfcp_port *const port)
 	in_use = false;
 
 unlock_host_lock:
-	spin_unlock_irqrestore(adapter->scsi_host->host_lock, flags);
+	spin_unlock_irqrestore(&adapter->scsi_host->host_lock, flags);
 unlock_port_units_mutex:
 	mutex_unlock(&zfcp_sysfs_port_units_mutex);
 	return in_use;
@@ -443,17 +442,24 @@ static ssize_t zfcp_sysfs_unit_add_store(struct device *dev,
 					 const char *buf, size_t count)
 {
 	struct zfcp_port *port = container_of(dev, struct zfcp_port, dev);
-	u64 fcp_lun;
-	int retval;
+	struct zfcp_adapter *adapter = port->adapter;
+	u64 fcp_lun = 0;
+	int retval = -EINVAL;
 
-	if (kstrtoull(buf, 0, (unsigned long long *) &fcp_lun))
-		return -EINVAL;
+	if (kstrtoull(buf, 0, (unsigned long long *)&fcp_lun)) {
+		zfcp_dbf_hba_uas("syuast1", 3, adapter, port->wwpn,
+				 fcp_lun, retval);
+		return retval;
+	}
 
 	flush_work(&port->rport_work);
 
 	retval = zfcp_unit_add(port, fcp_lun);
-	if (retval)
+	if (retval) {
+		zfcp_dbf_hba_uas("syuast2", 3, adapter, port->wwpn,
+				 fcp_lun, retval);
 		return retval;
+	}
 
 	return count;
 }
@@ -709,7 +715,7 @@ static ssize_t zfcp_sysfs_adapter_util_show(struct device *dev,
 	if (!(adapter->adapter_features & FSF_FEATURE_MEASUREMENT_DATA))
 		return -EOPNOTSUPP;
 
-	qtcb_port = kzalloc(sizeof(struct fsf_qtcb_bottom_port), GFP_KERNEL);
+	qtcb_port = kzalloc_obj(struct fsf_qtcb_bottom_port);
 	if (!qtcb_port)
 		return -ENOMEM;
 
@@ -734,8 +740,7 @@ static int zfcp_sysfs_adapter_ex_config(struct device *dev,
 	if (!(adapter->adapter_features & FSF_FEATURE_MEASUREMENT_DATA))
 		return -EOPNOTSUPP;
 
-	qtcb_config = kzalloc(sizeof(struct fsf_qtcb_bottom_config),
-			      GFP_KERNEL);
+	qtcb_config = kzalloc_obj(struct fsf_qtcb_bottom_config);
 	if (!qtcb_config)
 		return -ENOMEM;
 

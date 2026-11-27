@@ -4,9 +4,13 @@
 #include <linux/fs.h>
 #include <linux/quotaops.h>
 #include <linux/buffer_head.h>
+#include <linux/string_choices.h>
+#include <kunit/static_stub.h>
 
 #include "ext4.h"
 #include "ext4_jbd2.h"
+
+#define EXT4_MAX_ORPHAN_FILE_BLOCKS 512
 
 static int ext4_orphan_file_add(handle_t *handle, struct inode *inode)
 {
@@ -104,10 +108,12 @@ int ext4_orphan_add(handle_t *handle, struct inode *inode)
 	int err = 0, rc;
 	bool dirty = false;
 
+	KUNIT_STATIC_STUB_REDIRECT(ext4_orphan_add, handle, inode);
+
 	if (!sbi->s_journal || is_bad_inode(inode))
 		return 0;
 
-	WARN_ON_ONCE(!(inode->i_state & (I_NEW | I_FREEING)) &&
+	WARN_ON_ONCE(!(inode_state_read_once(inode) & (I_NEW | I_FREEING)) &&
 		     !inode_is_locked(inode));
 	if (ext4_inode_orphan_tracked(inode))
 		return 0;
@@ -177,13 +183,14 @@ int ext4_orphan_add(handle_t *handle, struct inode *inode)
 	} else
 		brelse(iloc.bh);
 
-	ext4_debug("superblock will point to %lu\n", inode->i_ino);
-	ext4_debug("orphan inode %lu will point to %d\n",
+	ext4_debug("superblock will point to %llu\n", inode->i_ino);
+	ext4_debug("orphan inode %llu will point to %d\n",
 			inode->i_ino, NEXT_ORPHAN(inode));
 out:
 	ext4_std_error(sb, err);
 	return err;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_orphan_add);
 
 static int ext4_orphan_file_del(handle_t *handle, struct inode *inode)
 {
@@ -229,10 +236,12 @@ int ext4_orphan_del(handle_t *handle, struct inode *inode)
 	struct ext4_iloc iloc;
 	int err = 0;
 
+	KUNIT_STATIC_STUB_REDIRECT(ext4_orphan_del, handle, inode);
+
 	if (!sbi->s_journal && !(sbi->s_mount_state & EXT4_ORPHAN_FS))
 		return 0;
 
-	WARN_ON_ONCE(!(inode->i_state & (I_NEW | I_FREEING)) &&
+	WARN_ON_ONCE(!(inode_state_read_once(inode) & (I_NEW | I_FREEING)) &&
 		     !inode_is_locked(inode));
 	if (ext4_test_inode_state(inode, EXT4_STATE_ORPHAN_FILE))
 		return ext4_orphan_file_del(handle, inode);
@@ -247,7 +256,7 @@ int ext4_orphan_del(handle_t *handle, struct inode *inode)
 	}
 
 	mutex_lock(&sbi->s_orphan_lock);
-	ext4_debug("remove inode %lu from orphan list\n", inode->i_ino);
+	ext4_debug("remove inode %llu from orphan list\n", inode->i_ino);
 
 	prev = ei->i_orphan.prev;
 	list_del_init(&ei->i_orphan);
@@ -282,7 +291,7 @@ int ext4_orphan_del(handle_t *handle, struct inode *inode)
 		struct inode *i_prev =
 			&list_entry(prev, struct ext4_inode_info, i_orphan)->vfs_inode;
 
-		ext4_debug("orphan inode %lu will point to %u\n",
+		ext4_debug("orphan inode %llu will point to %u\n",
 			  i_prev->i_ino, ino_next);
 		err = ext4_reserve_inode_write(handle, i_prev, &iloc2);
 		if (err) {
@@ -305,6 +314,7 @@ out_brelse:
 	brelse(iloc.bh);
 	goto out_err;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_orphan_del);
 
 #ifdef CONFIG_QUOTA
 static int ext4_quota_on_mount(struct super_block *sb, int type)
@@ -326,9 +336,9 @@ static void ext4_process_orphan(struct inode *inode,
 	if (inode->i_nlink) {
 		if (test_opt(sb, DEBUG))
 			ext4_msg(sb, KERN_DEBUG,
-				"%s: truncating inode %lu to %lld bytes",
+				"%s: truncating inode %llu to %lld bytes",
 				__func__, inode->i_ino, inode->i_size);
-		ext4_debug("truncating inode %lu to %lld bytes\n",
+		ext4_debug("truncating inode %llu to %lld bytes\n",
 			   inode->i_ino, inode->i_size);
 		inode_lock(inode);
 		truncate_inode_pages(inode->i_mapping, inode->i_size);
@@ -347,9 +357,9 @@ static void ext4_process_orphan(struct inode *inode,
 	} else {
 		if (test_opt(sb, DEBUG))
 			ext4_msg(sb, KERN_DEBUG,
-				"%s: deleting unreferenced inode %lu",
+				"%s: deleting unreferenced inode %llu",
 				__func__, inode->i_ino);
-		ext4_debug("deleting unreferenced inode %lu\n",
+		ext4_debug("deleting unreferenced inode %llu\n",
 			   inode->i_ino);
 		(*nr_orphans)++;
 	}
@@ -386,7 +396,7 @@ void ext4_orphan_cleanup(struct super_block *sb, struct ext4_super_block *es)
 	struct ext4_orphan_info *oi = &EXT4_SB(sb)->s_orphan_info;
 	int inodes_per_ob = ext4_inodes_per_orphan_block(sb);
 
-	if (!es->s_last_orphan && !oi->of_blocks) {
+	if (!es->s_last_orphan && ext4_orphan_file_empty(sb)) {
 		ext4_debug("no orphan inodes to clean up\n");
 		return;
 	}
@@ -484,14 +494,12 @@ void ext4_orphan_cleanup(struct super_block *sb, struct ext4_super_block *es)
 		}
 	}
 
-#define PLURAL(x) (x), ((x) == 1) ? "" : "s"
-
 	if (nr_orphans)
 		ext4_msg(sb, KERN_INFO, "%d orphan inode%s deleted",
-		       PLURAL(nr_orphans));
+			 nr_orphans, str_plural(nr_orphans));
 	if (nr_truncates)
 		ext4_msg(sb, KERN_INFO, "%d truncate%s cleaned up",
-		       PLURAL(nr_truncates));
+			 nr_truncates, str_plural(nr_truncates));
 #ifdef CONFIG_QUOTA
 	/* Turn off quotas if they were enabled for orphan cleanup */
 	if (quota_update) {
@@ -503,6 +511,7 @@ void ext4_orphan_cleanup(struct super_block *sb, struct ext4_super_block *es)
 #endif
 	sb->s_flags = s_flags; /* Restore SB_RDONLY status */
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_orphan_cleanup);
 
 void ext4_release_orphan_info(struct super_block *sb)
 {
@@ -515,6 +524,7 @@ void ext4_release_orphan_info(struct super_block *sb)
 		brelse(oi->of_binfo[i].ob_bh);
 	kvfree(oi->of_binfo);
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_release_orphan_info);
 
 static struct ext4_orphan_block_tail *ext4_orphan_block_tail(
 						struct super_block *sb,
@@ -562,6 +572,7 @@ void ext4_orphan_file_block_trigger(struct jbd2_buffer_trigger_type *triggers,
 	ot = ext4_orphan_block_tail(sb, bh);
 	ot->ob_checksum = cpu_to_le32(csum);
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_orphan_file_block_trigger);
 
 int ext4_init_orphan_info(struct super_block *sb)
 {
@@ -570,10 +581,12 @@ int ext4_init_orphan_info(struct super_block *sb)
 	int i, j;
 	int ret;
 	int free;
+	int loaded = 0;
 	__le32 *bdata;
 	int inodes_per_ob = ext4_inodes_per_orphan_block(sb);
 	struct ext4_orphan_block_tail *ot;
 	ino_t orphan_ino = le32_to_cpu(EXT4_SB(sb)->s_es->s_orphan_file_inum);
+	loff_t max_size;
 
 	if (!ext4_has_feature_orphan_file(sb))
 		return 0;
@@ -587,8 +600,13 @@ int ext4_init_orphan_info(struct super_block *sb)
 	 * This is just an artificial limit to prevent corrupted fs from
 	 * consuming absurd amounts of memory when pinning blocks of orphan
 	 * file in memory.
+	 *
+	 * e2fsprogs 1.47.4 produces 2MB orphan files by default regardless
+	 * of the number of blocks so that's where the second limit comes from.
 	 */
-	if (inode->i_size > 8 << 20) {
+	max_size = max(EXT4_MAX_ORPHAN_FILE_BLOCKS << inode->i_blkbits,
+		       2 << 20);
+	if (inode->i_size > max_size) {
 		ext4_msg(sb, KERN_ERR, "orphan file too big: %llu",
 			 (unsigned long long)inode->i_size);
 		ret = -EFSCORRUPTED;
@@ -596,9 +614,7 @@ int ext4_init_orphan_info(struct super_block *sb)
 	}
 	oi->of_blocks = inode->i_size >> sb->s_blocksize_bits;
 	oi->of_csum_seed = EXT4_I(inode)->i_csum_seed;
-	oi->of_binfo = kvmalloc_array(oi->of_blocks,
-				     sizeof(struct ext4_orphan_block),
-				     GFP_KERNEL);
+	oi->of_binfo = kvmalloc_objs(struct ext4_orphan_block, oi->of_blocks);
 	if (!oi->of_binfo) {
 		ret = -ENOMEM;
 		goto out_put;
@@ -613,6 +629,7 @@ int ext4_init_orphan_info(struct super_block *sb)
 			ret = -EIO;
 			goto out_free;
 		}
+		loaded++;
 		ot = ext4_orphan_block_tail(sb, oi->of_binfo[i].ob_bh);
 		if (le32_to_cpu(ot->ob_magic) != EXT4_ORPHAN_BLOCK_MAGIC) {
 			ext4_error(sb, "orphan file block %d: bad magic", i);
@@ -635,13 +652,16 @@ int ext4_init_orphan_info(struct super_block *sb)
 	iput(inode);
 	return 0;
 out_free:
-	for (i--; i >= 0; i--)
-		brelse(oi->of_binfo[i].ob_bh);
+	while (loaded > 0) {
+		loaded--;
+		brelse(oi->of_binfo[loaded].ob_bh);
+	}
 	kvfree(oi->of_binfo);
 out_put:
 	iput(inode);
 	return ret;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_init_orphan_info);
 
 int ext4_orphan_file_empty(struct super_block *sb)
 {
@@ -657,3 +677,4 @@ int ext4_orphan_file_empty(struct super_block *sb)
 			return 0;
 	return 1;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_orphan_file_empty);

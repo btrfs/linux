@@ -70,14 +70,14 @@ struct clk_hw *imx_clk_hw_fixup_mux(const char *name, void __iomem *reg,
 			      int num_parents, void (*fixup)(u32 *val))
 {
 	struct clk_fixup_mux *fixup_mux;
+	struct clk_init_data init = {};
 	struct clk_hw *hw;
-	struct clk_init_data init;
 	int ret;
 
 	if (!fixup)
 		return ERR_PTR(-EINVAL);
 
-	fixup_mux = kzalloc(sizeof(*fixup_mux), GFP_KERNEL);
+	fixup_mux = kzalloc_obj(*fixup_mux);
 	if (!fixup_mux)
 		return ERR_PTR(-ENOMEM);
 

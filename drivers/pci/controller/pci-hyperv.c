@@ -501,7 +501,6 @@ struct hv_pcibus_device {
 	struct resource *low_mmio_res;
 	struct resource *high_mmio_res;
 	struct completion *survey_event;
-	struct pci_bus *pci_bus;
 	spinlock_t config_lock;	/* Avoid two threads writing index page */
 	spinlock_t device_list_lock;	/* Protect lists below */
 	void __iomem *cfg_addr;
@@ -642,10 +641,7 @@ static void hv_irq_retarget_interrupt(struct irq_data *data)
 	params->int_entry.source = HV_INTERRUPT_SOURCE_MSI;
 	params->int_entry.msi_entry.address.as_uint32 = int_desc->address & 0xffffffff;
 	params->int_entry.msi_entry.data.as_uint32 = int_desc->data;
-	params->device_id = (hbus->hdev->dev_instance.b[5] << 24) |
-			   (hbus->hdev->dev_instance.b[4] << 16) |
-			   (hbus->hdev->dev_instance.b[7] << 8) |
-			   (hbus->hdev->dev_instance.b[6] & 0xf8) |
+	params->device_id = hv_build_logical_dev_id_prefix(hbus->hdev) |
 			   PCI_FUNC(pdev->devfn);
 	params->int_target.vector = hv_msi_get_int_vector(data);
 
@@ -946,7 +942,7 @@ static int hv_pci_irqchip_init(void)
 	struct irq_domain *irq_domain_parent = NULL;
 	int ret = -ENOMEM;
 
-	chip_data = kzalloc(sizeof(*chip_data), GFP_KERNEL);
+	chip_data = kzalloc_obj(*chip_data);
 	if (!chip_data)
 		return ret;
 
@@ -1041,19 +1037,38 @@ static void put_pcichild(struct hv_pci_dev *hpdev)
 
 /*
  * There is no good way to get notified from vmbus_onoffer_rescind(),
- * so let's use polling here, since this is not a hot path.
+ * so let's use polling here, since this is not a hot path. If
+ * wait_for_response() has been polling for 2 minutes
+ * without either a rescind or completion, add a warning.
  */
+#define PCI_RESPONSE_WARN_POLL_COUNT 1200
+
 static int wait_for_response(struct hv_device *hdev,
-			     struct completion *comp)
+			     struct completion *comp,
+			     const char *msg_type)
 {
+	u64 counter = 0;
+
 	while (true) {
 		if (hdev->channel->rescind) {
 			dev_warn_once(&hdev->device, "The device is gone.\n");
 			return -ENODEV;
 		}
 
-		if (wait_for_completion_timeout(comp, HZ / 10))
+		counter++;
+
+		if (wait_for_completion_timeout(comp, HZ / 10)) {
+			if (counter > PCI_RESPONSE_WARN_POLL_COUNT)
+				dev_warn(&hdev->device,
+					 "Late %s completion arrived.\n", msg_type);
 			break;
+		}
+
+		if (counter == PCI_RESPONSE_WARN_POLL_COUNT) {
+			dev_err(&hdev->device,
+				"%s stuck waiting for response, relid = %u\n",
+				msg_type, hdev->channel->offermsg.child_relid);
+		}
 	}
 
 	return 0;
@@ -1519,7 +1534,8 @@ static int hv_read_config_block(struct pci_dev *pdev, void *buf,
 	if (ret)
 		return ret;
 
-	ret = wait_for_response(hbus->hdev, &comp_pkt.comp_pkt.host_event);
+	ret = wait_for_response(hbus->hdev, &comp_pkt.comp_pkt.host_event,
+				"PCI_READ_BLOCK");
 	if (ret)
 		return ret;
 
@@ -1608,7 +1624,8 @@ static int hv_write_config_block(struct pci_dev *pdev, void *buf,
 	if (ret)
 		return ret;
 
-	ret = wait_for_response(hbus->hdev, &comp_pkt.host_event);
+	ret = wait_for_response(hbus->hdev, &comp_pkt.host_event,
+				"PCI_WRITE_BLOCK");
 	if (ret)
 		return ret;
 
@@ -1933,7 +1950,7 @@ static void hv_compose_msi_msg(struct irq_data *data, struct msi_msg *msg)
 		hv_int_desc_free(hpdev, int_desc);
 	}
 
-	int_desc = kzalloc(sizeof(*int_desc), GFP_ATOMIC);
+	int_desc = kzalloc_obj(*int_desc, GFP_ATOMIC);
 	if (!int_desc)
 		goto drop_reference;
 
@@ -2120,6 +2137,7 @@ static bool hv_pcie_init_dev_msi_info(struct device *dev, struct irq_domain *dom
 	info->ops->msi_prepare = hv_msi_prepare;
 
 	chip->irq_set_affinity = irq_chip_set_affinity_parent;
+	chip->irq_retrigger = irq_chip_retrigger_hierarchy;
 
 	if (IS_ENABLED(CONFIG_X86))
 		chip->flags |= IRQCHIP_MOVE_DEFERRED;
@@ -2486,6 +2504,14 @@ static void hv_pci_assign_numa_node(struct hv_pcibus_device *hbus)
 		if (!hv_dev)
 			continue;
 
+		/*
+		 * If the Hyper-V host doesn't provide a NUMA node for the
+		 * device, default to node 0. With NUMA_NO_NODE the kernel
+		 * may spread work across NUMA nodes, which degrades
+		 * performance on Hyper-V.
+		 */
+		set_dev_node(&dev->dev, 0);
+
 		if (hv_dev->desc.flags & HV_PCI_DEVICE_FLAG_NUMA_AFFINITY &&
 		    hv_dev->desc.virtual_numa_node < num_possible_nodes())
 			/*
@@ -2593,7 +2619,7 @@ static struct hv_pci_dev *new_pcichild_device(struct hv_pcibus_device *hbus,
 	unsigned long flags;
 	int ret;
 
-	hpdev = kzalloc(sizeof(*hpdev), GFP_KERNEL);
+	hpdev = kzalloc_obj(*hpdev);
 	if (!hpdev)
 		return NULL;
 
@@ -2616,7 +2642,8 @@ static struct hv_pci_dev *new_pcichild_device(struct hv_pcibus_device *hbus,
 	if (ret)
 		goto error;
 
-	if (wait_for_response(hbus->hdev, &comp_pkt.host_event))
+	if (wait_for_response(hbus->hdev, &comp_pkt.host_event,
+			      "PCI_QUERY_RESOURCE_REQUIREMENTS"))
 		goto error;
 
 	hpdev->desc = *desc;
@@ -2832,7 +2859,7 @@ static int hv_pci_start_relations_work(struct hv_pcibus_device *hbus,
 		return -ENOENT;
 	}
 
-	dr_wrk = kzalloc(sizeof(*dr_wrk), GFP_NOWAIT);
+	dr_wrk = kzalloc_obj(*dr_wrk, GFP_NOWAIT);
 	if (!dr_wrk)
 		return -ENOMEM;
 
@@ -2872,8 +2899,7 @@ static void hv_pci_devices_present(struct hv_pcibus_device *hbus,
 	struct hv_dr_state *dr;
 	int i;
 
-	dr = kzalloc(struct_size(dr, func, relations->device_count),
-		     GFP_NOWAIT);
+	dr = kzalloc_flex(*dr, func, relations->device_count, GFP_NOWAIT);
 	if (!dr)
 		return;
 
@@ -2907,8 +2933,7 @@ static void hv_pci_devices_present2(struct hv_pcibus_device *hbus,
 	struct hv_dr_state *dr;
 	int i;
 
-	dr = kzalloc(struct_size(dr, func, relations->device_count),
-		     GFP_NOWAIT);
+	dr = kzalloc_flex(*dr, func, relations->device_count, GFP_NOWAIT);
 	if (!dr)
 		return;
 
@@ -3250,7 +3275,8 @@ static int hv_pci_protocol_negotiation(struct hv_device *hdev,
 				(unsigned long)pkt, VM_PKT_DATA_INBAND,
 				VMBUS_DATA_PACKET_FLAG_COMPLETION_REQUESTED);
 		if (!ret)
-			ret = wait_for_response(hdev, &comp_pkt.host_event);
+			ret = wait_for_response(hdev, &comp_pkt.host_event,
+						"PCI_QUERY_PROTOCOL_VERSION");
 
 		if (ret) {
 			dev_err(&hdev->device,
@@ -3470,7 +3496,8 @@ enter_d0_retry:
 			       (unsigned long)pkt, VM_PKT_DATA_INBAND,
 			       VMBUS_DATA_PACKET_FLAG_COMPLETION_REQUESTED);
 	if (!ret)
-		ret = wait_for_response(hdev, &comp_pkt.host_event);
+		ret = wait_for_response(hdev, &comp_pkt.host_event,
+					"PCI_BUS_D0ENTRY");
 
 	if (ret)
 		goto exit;
@@ -3547,7 +3574,8 @@ static int hv_pci_query_relations(struct hv_device *hdev)
 	ret = vmbus_sendpacket(hdev->channel, &message, sizeof(message),
 			       0, VM_PKT_DATA_INBAND, 0);
 	if (!ret)
-		ret = wait_for_response(hdev, &comp);
+		ret = wait_for_response(hdev, &comp,
+					"PCI_QUERY_BUS_RELATIONS");
 
 	/*
 	 * In the case of fast device addition/removal, it's possible that
@@ -3638,7 +3666,8 @@ static int hv_send_resources_allocated(struct hv_device *hdev)
 				VM_PKT_DATA_INBAND,
 				VMBUS_DATA_PACKET_FLAG_COMPLETION_REQUESTED);
 		if (!ret)
-			ret = wait_for_response(hdev, &comp_pkt.host_event);
+			ret = wait_for_response(hdev, &comp_pkt.host_event,
+						"PCI_RESOURCE_ASSIGNED");
 		if (ret)
 			break;
 
@@ -3696,48 +3725,6 @@ static int hv_send_resources_released(struct hv_device *hdev)
 	return 0;
 }
 
-#define HVPCI_DOM_MAP_SIZE (64 * 1024)
-static DECLARE_BITMAP(hvpci_dom_map, HVPCI_DOM_MAP_SIZE);
-
-/*
- * PCI domain number 0 is used by emulated devices on Gen1 VMs, so define 0
- * as invalid for passthrough PCI devices of this driver.
- */
-#define HVPCI_DOM_INVALID 0
-
-/**
- * hv_get_dom_num() - Get a valid PCI domain number
- * Check if the PCI domain number is in use, and return another number if
- * it is in use.
- *
- * @dom: Requested domain number
- *
- * return: domain number on success, HVPCI_DOM_INVALID on failure
- */
-static u16 hv_get_dom_num(u16 dom)
-{
-	unsigned int i;
-
-	if (test_and_set_bit(dom, hvpci_dom_map) == 0)
-		return dom;
-
-	for_each_clear_bit(i, hvpci_dom_map, HVPCI_DOM_MAP_SIZE) {
-		if (test_and_set_bit(i, hvpci_dom_map) == 0)
-			return i;
-	}
-
-	return HVPCI_DOM_INVALID;
-}
-
-/**
- * hv_put_dom_num() - Mark the PCI domain number as free
- * @dom: Domain number to be freed
- */
-static void hv_put_dom_num(u16 dom)
-{
-	clear_bit(dom, hvpci_dom_map);
-}
-
 /**
  * hv_pci_probe() - New VMBus channel probe, for a root PCI bus
  * @hdev:	VMBus's tracking struct for this root PCI bus
@@ -3750,15 +3737,16 @@ static int hv_pci_probe(struct hv_device *hdev,
 {
 	struct pci_host_bridge *bridge;
 	struct hv_pcibus_device *hbus;
-	u16 dom_req, dom;
+	int ret, dom;
+	u16 dom_req;
+	u32 prefix;
 	char *name;
-	int ret;
 
 	bridge = devm_pci_alloc_host_bridge(&hdev->device, 0);
 	if (!bridge)
 		return -ENOMEM;
 
-	hbus = kzalloc(sizeof(*hbus), GFP_KERNEL);
+	hbus = kzalloc_obj(*hbus);
 	if (!hbus)
 		return -ENOMEM;
 
@@ -3779,11 +3767,14 @@ static int hv_pci_probe(struct hv_device *hdev,
 	 * PCI bus (which is actually emulated by the hypervisor) is domain 0.
 	 * (2) There will be no overlap between domains (after fixing possible
 	 * collisions) in the same VM.
+	 *
+	 * Because Gen1 VMs use domain 0, don't allow picking domain 0 here,
+	 * even if bytes 4 and 5 of the instance GUID are both zero. For wider
+	 * userspace compatibility, limit the domain ID to a 16-bit value.
 	 */
 	dom_req = hdev->dev_instance.b[5] << 8 | hdev->dev_instance.b[4];
-	dom = hv_get_dom_num(dom_req);
-
-	if (dom == HVPCI_DOM_INVALID) {
+	dom = pci_bus_find_emul_domain_nr(dom_req, 1, U16_MAX);
+	if (dom < 0) {
 		dev_err(&hdev->device,
 			"Unable to use dom# 0x%x or other numbers", dom_req);
 		ret = -EINVAL;
@@ -3820,7 +3811,7 @@ static int hv_pci_probe(struct hv_device *hdev,
 					   hbus->bridge->domain_nr);
 	if (!hbus->wq) {
 		ret = -ENOMEM;
-		goto free_dom;
+		goto free_bus;
 	}
 
 	hdev->channel->next_request_id_callback = vmbus_next_request_id;
@@ -3891,13 +3882,22 @@ static int hv_pci_probe(struct hv_device *hdev,
 
 	hbus->state = hv_pcibus_probed;
 
-	ret = create_root_hv_pci_bus(hbus);
+	/* Register the bus before scanning any devices on it. */
+	prefix = hv_build_logical_dev_id_prefix(hdev);
+
+	ret = hv_pci_register_dev_id(dom, prefix);
 	if (ret)
 		goto free_windows;
+
+	ret = create_root_hv_pci_bus(hbus);
+	if (ret)
+		goto unregister_pci_bus;
 
 	mutex_unlock(&hbus->state_lock);
 	return 0;
 
+unregister_pci_bus:
+	hv_pci_unregister_dev_id(dom);
 free_windows:
 	hv_pci_free_bridge_windows(hbus);
 exit_d0:
@@ -3916,8 +3916,6 @@ close:
 	vmbus_close(hdev->channel);
 destroy_wq:
 	destroy_workqueue(hbus->wq);
-free_dom:
-	hv_put_dom_num(hbus->bridge->domain_nr);
 free_bus:
 	kfree(hbus);
 	return ret;
@@ -4013,6 +4011,8 @@ static void hv_pci_remove(struct hv_device *hdev)
 
 	hbus = hv_get_drvdata(hdev);
 	if (hbus->state == hv_pcibus_installed) {
+		int dom = hbus->bridge->domain_nr;
+
 		tasklet_disable(&hdev->channel->callback_event);
 		hbus->state = hv_pcibus_removing;
 		tasklet_enable(&hdev->channel->callback_event);
@@ -4030,6 +4030,8 @@ static void hv_pci_remove(struct hv_device *hdev)
 		hv_pci_remove_slots(hbus);
 		pci_remove_root_bus(hbus->bridge->bus);
 		pci_unlock_rescan_remove();
+
+		hv_pci_unregister_dev_id(dom);
 	}
 
 	hv_pci_bus_exit(hdev, false);
@@ -4041,8 +4043,6 @@ static void hv_pci_remove(struct hv_device *hdev)
 	hv_pci_free_bridge_windows(hbus);
 	irq_domain_remove(hbus->irq_domain);
 	irq_domain_free_fwnode(hbus->fwnode);
-
-	hv_put_dom_num(hbus->bridge->domain_nr);
 
 	kfree(hbus);
 }
@@ -4192,6 +4192,9 @@ static struct hv_driver hv_pci_drv = {
 	.remove		= hv_pci_remove,
 	.suspend	= hv_pci_suspend,
 	.resume		= hv_pci_resume,
+	.driver = {
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
+	},
 };
 
 static void __exit exit_hv_pci_drv(void)
@@ -4210,15 +4213,12 @@ static int __init init_hv_pci_drv(void)
 	if (!hv_is_hyperv_initialized())
 		return -ENODEV;
 
-	if (hv_root_partition() && !hv_nested)
+	if (!hv_vmbus_exists())
 		return -ENODEV;
 
 	ret = hv_pci_irqchip_init();
 	if (ret)
 		return ret;
-
-	/* Set the invalid domain number's bit, so it will not be used */
-	set_bit(HVPCI_DOM_INVALID, hvpci_dom_map);
 
 	/* Initialize PCI block r/w interface */
 	hvpci_block_ops.read_block = hv_read_config_block;

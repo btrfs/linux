@@ -386,6 +386,14 @@ static const struct dmi_system_id acpisleep_dmi_table[] __initconst = {
 		DMI_MATCH(DMI_PRODUCT_NAME, "80E1"),
 		},
 	},
+	{
+	.callback = init_nvs_save_s3,
+	.ident = "Lenovo G70-35",
+	.matches = {
+		DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+		DMI_MATCH(DMI_PRODUCT_NAME, "80Q5"),
+		},
+	},
 	/*
 	 * ThinkPad X1 Tablet(2016) cannot do suspend-to-idle using
 	 * the Low Power S0 Idle firmware interface (see
@@ -540,7 +548,6 @@ static void acpi_pm_end(void)
 	acpi_sleep_tts_switch(acpi_target_sleep_state);
 }
 #else /* !CONFIG_ACPI_SLEEP */
-#define sleep_no_lps0	(1)
 #define acpi_target_sleep_state	ACPI_STATE_S0
 #define acpi_sleep_default_s3	(1)
 static inline void acpi_sleep_dmi_check(void) {}
@@ -642,7 +649,7 @@ static int acpi_suspend_enter(suspend_state_t pm_state)
 	/*
 	 * Disable all GPE and clear their status bits before interrupts are
 	 * enabled. Some GPEs (like wakeup GPEs) have no handlers and this can
-	 * prevent them from producing spurious interrups.
+	 * prevent them from producing spurious interrupts.
 	 *
 	 * acpi_leave_sleep_state() will reenable specific GPEs later.
 	 *
@@ -753,6 +760,8 @@ bool acpi_s2idle_wake(void)
 		return pm_wakeup_pending();
 
 	while (pm_wakeup_pending()) {
+		int ret;
+
 		/*
 		 * If IRQD_WAKEUP_ARMED is set for the SCI at this point, the
 		 * SCI has not triggered while suspended, so bail out (the
@@ -781,10 +790,15 @@ bool acpi_s2idle_wake(void)
 
 		/*
 		 * Check non-EC GPE wakeups and if there are none, cancel the
-		 * SCI-related wakeup and dispatch the EC GPE.
+		 * SCI-related wakeup and dispatch the EC GPE.  If there is no
+		 * EC to consult, check the GPEs armed for wakeup via _Ixx
+		 * methods instead.
 		 */
-		if (acpi_ec_dispatch_gpe()) {
+		ret = acpi_ec_dispatch_gpe();
+		if (ret > 0) {
 			pm_pr_dbg("ACPI non-EC GPE wakeup\n");
+			return true;
+		} else if (ret < 0 && acpi_x86_s2idle_check_ixx_gpes()) {
 			return true;
 		}
 
@@ -884,13 +898,13 @@ bool acpi_s2idle_wakeup(void)
 #ifdef CONFIG_PM_SLEEP
 static u32 saved_bm_rld;
 
-static int  acpi_save_bm_rld(void)
+static int  acpi_save_bm_rld(void *data)
 {
 	acpi_read_bit_register(ACPI_BITREG_BUS_MASTER_RLD, &saved_bm_rld);
 	return 0;
 }
 
-static void  acpi_restore_bm_rld(void)
+static void  acpi_restore_bm_rld(void *data)
 {
 	u32 resumed_bm_rld = 0;
 
@@ -901,14 +915,18 @@ static void  acpi_restore_bm_rld(void)
 	acpi_write_bit_register(ACPI_BITREG_BUS_MASTER_RLD, saved_bm_rld);
 }
 
-static struct syscore_ops acpi_sleep_syscore_ops = {
+static const struct syscore_ops acpi_sleep_syscore_ops = {
 	.suspend = acpi_save_bm_rld,
 	.resume = acpi_restore_bm_rld,
 };
 
+static struct syscore acpi_sleep_syscore = {
+	.ops = &acpi_sleep_syscore_ops,
+};
+
 static void acpi_sleep_syscore_init(void)
 {
-	register_syscore_ops(&acpi_sleep_syscore_ops);
+	register_syscore(&acpi_sleep_syscore);
 }
 #else
 static inline void acpi_sleep_syscore_init(void) {}

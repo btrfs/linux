@@ -15,7 +15,6 @@
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/log2.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/pm.h>
 #include <linux/property.h>
@@ -223,7 +222,7 @@ static const struct iio_chan_spec_ext_info sx9324_channel_ext_info[] = {
 	.scan_index = idx,					 \
 	.scan_type = {						 \
 		.sign = 's',					 \
-		.realbits = 12,					 \
+		.realbits = 16,					 \
 		.storagebits = 16,				 \
 		.endianness = IIO_BE,				 \
 	},							 \
@@ -280,10 +279,19 @@ static const struct {
 	{ 0, 250000 },  /* 11111: 4 s */
 };
 
+/*
+ * The scan period of the SX9324 is selected by the 5-bit wide
+ * SX9324_REG_GNRL_CTRL0_SCANPERIOD field. The values below are the scan
+ * periods in ms of the corresponding sx9324_samp_freq_table[] entries.
+ */
 static const unsigned int sx9324_scan_period_table[] = {
-	2,   15,  30,  45,   60,   90,	 120,  200,
-	400, 600, 800, 1000, 2000, 3000, 4000, 5000,
+	1, 2, 4, 6, 8, 10, 14, 18,			/* 0x00 - 0x07 */
+	22, 26, 30, 34, 38, 42, 46, 50,			/* 0x08 - 0x0f */
+	56, 62, 68, 74, 80, 90, 100, 200,		/* 0x10 - 0x17 */
+	300, 400, 600, 800, 1000, 2000, 3000, 4000,	/* 0x18 - 0x1f */
 };
+
+static_assert(ARRAY_SIZE(sx9324_scan_period_table) == ARRAY_SIZE(sx9324_samp_freq_table));
 
 static const struct regmap_range sx9324_writable_reg_ranges[] = {
 	/*
@@ -821,7 +829,7 @@ static const struct sx_common_reg_default sx9324_default_regs[] = {
 	{ SX9324_REG_ADV_CTRL10, 0x00, "adv_ctrl10" },
 	{ SX9324_REG_ADV_CTRL11, 0x00, "adv_ctrl11" },
 	{ SX9324_REG_ADV_CTRL12, 0x00, "adv_ctrl12" },
-	/* TODO(gwendal): SAR currenly disabled */
+	/* TODO(gwendal): SAR currently disabled */
 	{ SX9324_REG_ADV_CTRL13, 0x00, "adv_ctrl13" },
 	{ SX9324_REG_ADV_CTRL14, 0x00, "adv_ctrl14" },
 	{ SX9324_REG_ADV_CTRL15, 0x00, "adv_ctrl15" },
@@ -1123,19 +1131,19 @@ static int sx9324_resume(struct device *dev)
 static DEFINE_SIMPLE_DEV_PM_OPS(sx9324_pm_ops, sx9324_suspend, sx9324_resume);
 
 static const struct acpi_device_id sx9324_acpi_match[] = {
-	{ "STH9324", SX9324_WHOAMI_VALUE },
+	{ .id = "STH9324" },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, sx9324_acpi_match);
 
 static const struct of_device_id sx9324_of_match[] = {
-	{ .compatible = "semtech,sx9324", (void *)SX9324_WHOAMI_VALUE },
+	{ .compatible = "semtech,sx9324" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, sx9324_of_match);
 
 static const struct i2c_device_id sx9324_id[] = {
-	{ "sx9324", SX9324_WHOAMI_VALUE },
+	{ .name = "sx9324" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, sx9324_id);

@@ -390,19 +390,18 @@ static struct dma_async_tx_descriptor *adm_prep_slave_sg(struct dma_chan *chan,
 	}
 
 	/* iterate through sgs and compute allocation size of structures */
-	for_each_sg(sgl, sg, sg_len, i) {
-		if (achan->slave.device_fc) {
+	if (achan->slave.device_fc) {
+		for_each_sg(sgl, sg, sg_len, i) {
 			box_count += DIV_ROUND_UP(sg_dma_len(sg) / burst,
 						  ADM_MAX_ROWS);
 			if (sg_dma_len(sg) % burst)
 				single_count++;
-		} else {
-			single_count += DIV_ROUND_UP(sg_dma_len(sg),
-						     ADM_MAX_XFER);
 		}
+	} else {
+		single_count = sg_nents_for_dma(sgl, sg_len, ADM_MAX_XFER);
 	}
 
-	async_desc = kzalloc(sizeof(*async_desc), GFP_NOWAIT);
+	async_desc = kzalloc_obj(*async_desc, GFP_NOWAIT);
 	if (!async_desc) {
 		dev_err(adev->dev, "not enough memory for async_desc struct\n");
 		return NULL;
@@ -749,7 +748,7 @@ static int adm_dma_probe(struct platform_device *pdev)
 	int ret;
 	u32 i;
 
-	adev = devm_kzalloc(&pdev->dev, sizeof(*adev), GFP_KERNEL);
+	adev = devm_kzalloc_obj(&pdev->dev, *adev);
 	if (!adev)
 		return -ENOMEM;
 
@@ -825,8 +824,8 @@ static int adm_dma_probe(struct platform_device *pdev)
 	reset_control_deassert(adev->c1_reset);
 	reset_control_deassert(adev->c2_reset);
 
-	adev->channels = devm_kcalloc(adev->dev, ADM_MAX_CHANNELS,
-				      sizeof(*adev->channels), GFP_KERNEL);
+	adev->channels = devm_kzalloc_objs(adev->dev, *adev->channels,
+					   ADM_MAX_CHANNELS);
 
 	if (!adev->channels) {
 		ret = -ENOMEM;

@@ -7,14 +7,17 @@
  * set of CPUs in a system, one bit position per CPU number.  In general,
  * only nr_cpu_ids (<= NR_CPUS) bits are valid.
  */
-#include <linux/cleanup.h>
-#include <linux/kernel.h>
-#include <linux/bitmap.h>
-#include <linux/cpumask_types.h>
 #include <linux/atomic.h>
-#include <linux/bug.h>
+#include <linux/bitmap.h>
+#include <linux/cleanup.h>
+#include <linux/cpumask_types.h>
 #include <linux/gfp_types.h>
 #include <linux/numa.h>
+#include <linux/threads.h>
+#include <linux/types.h>
+#include <vdso/page.h>
+
+#include <asm/bug.h>
 
 /**
  * cpumask_pr_args - printf args to output a cpumask
@@ -118,14 +121,23 @@ extern struct cpumask __cpu_enabled_mask;
 extern struct cpumask __cpu_present_mask;
 extern struct cpumask __cpu_active_mask;
 extern struct cpumask __cpu_dying_mask;
+
+#ifdef CONFIG_PREFERRED_CPU
+extern struct cpumask __cpu_preferred_mask;
+#else
+#define __cpu_preferred_mask __cpu_active_mask
+#endif
+
 #define cpu_possible_mask ((const struct cpumask *)&__cpu_possible_mask)
 #define cpu_online_mask   ((const struct cpumask *)&__cpu_online_mask)
 #define cpu_enabled_mask   ((const struct cpumask *)&__cpu_enabled_mask)
 #define cpu_present_mask  ((const struct cpumask *)&__cpu_present_mask)
 #define cpu_active_mask   ((const struct cpumask *)&__cpu_active_mask)
 #define cpu_dying_mask    ((const struct cpumask *)&__cpu_dying_mask)
+#define cpu_preferred_mask ((const struct cpumask *)&__cpu_preferred_mask)
 
 extern atomic_t __num_online_cpus;
+extern unsigned int __num_possible_cpus;
 
 extern cpumask_t cpus_booted_once_mask;
 
@@ -729,6 +741,22 @@ void cpumask_or(struct cpumask *dstp, const struct cpumask *src1p,
 }
 
 /**
+ * cpumask_weighted_or - *dstp = *src1p | *src2p and return the weight of the result
+ * @dstp: the cpumask result
+ * @src1p: the first input
+ * @src2p: the second input
+ *
+ * Return: The number of bits set in the resulting cpumask @dstp
+ */
+static __always_inline
+unsigned int cpumask_weighted_or(struct cpumask *dstp, const struct cpumask *src1p,
+				 const struct cpumask *src2p)
+{
+	return bitmap_weighted_or(cpumask_bits(dstp), cpumask_bits(src1p),
+				  cpumask_bits(src2p), small_cpumask_bits);
+}
+
+/**
  * cpumask_xor - *dstp = *src1p ^ *src2p
  * @dstp: the cpumask result
  * @src1p: the first input
@@ -802,6 +830,24 @@ bool cpumask_intersects(const struct cpumask *src1p, const struct cpumask *src2p
 {
 	return bitmap_intersects(cpumask_bits(src1p), cpumask_bits(src2p),
 						      small_cpumask_bits);
+}
+
+/**
+ * cpumask_intersects_and - (*src1p & *src2p & *src3p) != 0
+ * @src1p: the first input
+ * @src2p: the second input
+ * @src3p: the third input
+ *
+ * Return: true if AND of the three cpumasks is non-empty,
+ *	   otherwise false
+ */
+static __always_inline
+bool cpumask_intersects_and(const struct cpumask *src1p,
+			    const struct cpumask *src2p,
+			    const struct cpumask *src3p)
+{
+	return bitmap_intersects_and(cpumask_bits(src1p), cpumask_bits(src2p),
+				 cpumask_bits(src3p), small_cpumask_bits);
 }
 
 /**
@@ -1005,6 +1051,7 @@ static __always_inline unsigned int cpumask_size(void)
 
 #define this_cpu_cpumask_var_ptr(x)	this_cpu_read(x)
 #define __cpumask_var_read_mostly	__read_mostly
+#define CPUMASK_VAR_NULL		NULL
 
 bool alloc_cpumask_var_node(cpumask_var_t *mask, gfp_t flags, int node);
 
@@ -1051,6 +1098,7 @@ static __always_inline bool cpumask_available(cpumask_var_t mask)
 
 #define this_cpu_cpumask_var_ptr(x) this_cpu_ptr(x)
 #define __cpumask_var_read_mostly
+#define CPUMASK_VAR_NULL {}
 
 static __always_inline bool alloc_cpumask_var(cpumask_var_t *mask, gfp_t flags)
 {
@@ -1136,13 +1184,19 @@ void init_cpu_possible(const struct cpumask *src);
 #define __assign_cpu(cpu, mask, val)	\
 	__assign_bit(cpumask_check(cpu), cpumask_bits(mask), (val))
 
-#define set_cpu_possible(cpu, possible)	assign_cpu((cpu), &__cpu_possible_mask, (possible))
 #define set_cpu_enabled(cpu, enabled)	assign_cpu((cpu), &__cpu_enabled_mask, (enabled))
 #define set_cpu_present(cpu, present)	assign_cpu((cpu), &__cpu_present_mask, (present))
 #define set_cpu_active(cpu, active)	assign_cpu((cpu), &__cpu_active_mask, (active))
 #define set_cpu_dying(cpu, dying)	assign_cpu((cpu), &__cpu_dying_mask, (dying))
 
+#ifdef CONFIG_PREFERRED_CPU
+#define set_cpu_preferred(cpu, preferred) assign_cpu((cpu), &__cpu_preferred_mask, (preferred))
+#else
+#define set_cpu_preferred(cpu, preferred) do { } while (0)
+#endif
+
 void set_cpu_online(unsigned int cpu, bool online);
+void set_cpu_possible(unsigned int cpu, bool possible);
 
 /**
  * to_cpumask - convert a NR_CPUS bitmap to a struct cpumask *
@@ -1195,7 +1249,12 @@ static __always_inline unsigned int num_online_cpus(void)
 {
 	return raw_atomic_read(&__num_online_cpus);
 }
-#define num_possible_cpus()	cpumask_weight(cpu_possible_mask)
+
+static __always_inline unsigned int num_possible_cpus(void)
+{
+	return __num_possible_cpus;
+}
+
 #define num_enabled_cpus()	cpumask_weight(cpu_enabled_mask)
 #define num_present_cpus()	cpumask_weight(cpu_present_mask)
 #define num_active_cpus()	cpumask_weight(cpu_active_mask)
@@ -1228,6 +1287,11 @@ static __always_inline bool cpu_active(unsigned int cpu)
 static __always_inline bool cpu_dying(unsigned int cpu)
 {
 	return cpumask_test_cpu(cpu, cpu_dying_mask);
+}
+
+static __always_inline bool cpu_preferred(unsigned int cpu)
+{
+	return cpumask_test_cpu(cpu, cpu_preferred_mask);
 }
 
 #else
@@ -1268,6 +1332,11 @@ static __always_inline bool cpu_dying(unsigned int cpu)
 	return false;
 }
 
+static __always_inline bool cpu_preferred(unsigned int cpu)
+{
+	return cpu == 0;
+}
+
 #endif /* NR_CPUS > 1 */
 
 #define cpu_is_offline(cpu)	unlikely(!cpu_online(cpu))
@@ -1286,23 +1355,6 @@ static __always_inline bool cpu_dying(unsigned int cpu)
 	[BITS_TO_LONGS(NR_CPUS)-1] = BITMAP_LAST_WORD_MASK(NR_CPUS)	\
 }
 #endif /* NR_CPUS > BITS_PER_LONG */
-
-/**
- * cpumap_print_to_pagebuf  - copies the cpumask into the buffer either
- *	as comma-separated list of cpus or hex values of cpumask
- * @list: indicates whether the cpumap must be list
- * @mask: the cpumask to copy
- * @buf: the buffer to copy into
- *
- * Return: the length of the (null-terminated) @buf string, zero if
- * nothing is copied.
- */
-static __always_inline ssize_t
-cpumap_print_to_pagebuf(bool list, char *buf, const struct cpumask *mask)
-{
-	return bitmap_print_to_pagebuf(list, buf, cpumask_bits(mask),
-				      nr_cpu_ids);
-}
 
 /**
  * cpumap_print_bitmask_to_buf  - copies the cpumask into the buffer as

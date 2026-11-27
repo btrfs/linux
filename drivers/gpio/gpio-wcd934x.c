@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (c) 2019, Linaro Limited
 
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/gpio/driver.h>
 #include <linux/platform_device.h>
@@ -83,7 +82,7 @@ static int wcd_gpio_probe(struct platform_device *pdev)
 	struct wcd_gpio_data *data;
 	struct gpio_chip *chip;
 
-	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, *data);
 	if (!data)
 		return -ENOMEM;
 

@@ -18,7 +18,7 @@ KBUILD_CFLAGS += -fno-PIE -mno-space-regs -mdisable-fpregs -Os
 ifndef CONFIG_64BIT
 KBUILD_CFLAGS += -mfast-indirect-calls
 endif
-KBUILD_CFLAGS += -std=gnu11
+KBUILD_CFLAGS += $(CC_FLAGS_DIALECT)
 
 LDFLAGS_vmlinux := -X -e startup --as-needed -T
 $(obj)/vmlinux: $(obj)/vmlinux.lds $(addprefix $(obj)/, $(OBJECTS)) $(LIBGCC) FORCE
@@ -55,7 +55,7 @@ suffix-$(CONFIG_KERNEL_LZO)  := lzo
 suffix-$(CONFIG_KERNEL_XZ)  := xz
 
 $(obj)/vmlinux.bin.gz: $(obj)/vmlinux.bin FORCE
-	$(call if_changed,gzip)
+	+$(call if_changed,gzip)
 $(obj)/vmlinux.bin.bz2: $(obj)/vmlinux.bin FORCE
 	$(call if_changed,bzip2_with_size)
 $(obj)/vmlinux.bin.lz4: $(obj)/vmlinux.bin FORCE

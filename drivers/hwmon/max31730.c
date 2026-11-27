@@ -302,7 +302,7 @@ max31730_probe(struct i2c_client *client)
 			I2C_FUNC_SMBUS_BYTE_DATA | I2C_FUNC_SMBUS_WORD_DATA))
 		return -EIO;
 
-	data = devm_kzalloc(dev, sizeof(struct max31730_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct max31730_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -345,7 +345,7 @@ max31730_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id max31730_ids[] = {
-	{ "max31730" },
+	{ .name = "max31730" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max31730_ids);

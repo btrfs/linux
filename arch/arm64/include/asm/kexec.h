@@ -25,7 +25,7 @@
 
 #define KEXEC_ARCH KEXEC_ARCH_AARCH64
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 /**
  * crash_setup_regs() - save registers for the panic kernel
@@ -100,6 +100,8 @@ void cpu_soft_restart(unsigned long el2_switch, unsigned long entry,
 		      unsigned long arg0, unsigned long arg1,
 		      unsigned long arg2);
 
+void arm64_relocate_new_kernel(struct kimage *kimage);
+
 int machine_kexec_post_load(struct kimage *image);
 #define machine_kexec_post_load machine_kexec_post_load
 #endif
@@ -130,6 +132,6 @@ extern int load_other_segments(struct kimage *image,
 		char *cmdline);
 #endif
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 #endif

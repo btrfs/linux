@@ -94,13 +94,22 @@ static void __hyp_attach_page(struct hyp_pool *pool,
 			      struct hyp_page *p)
 {
 	phys_addr_t phys = hyp_page_to_phys(p);
-	u8 order = p->order;
 	struct hyp_page *buddy;
+	bool coalesce = true;
+	u8 order = p->order;
 
-	memset(hyp_page_to_virt(p), 0, PAGE_SIZE << p->order);
+	/*
+	 * 'external' pages are never coalesced and their ->order field
+	 * untrusted as they bypass hyp_pool_init(). Enforce order-0.
+	 */
+	if (phys < pool->range_start || phys >= pool->range_end) {
+		order = 0;
+		coalesce = false;
+	}
 
-	/* Skip coalescing for 'external' pages being freed into the pool. */
-	if (phys < pool->range_start || phys >= pool->range_end)
+	memset(hyp_page_to_virt(p), 0, PAGE_SIZE << order);
+
+	if (!coalesce)
 		goto insert;
 
 	/*
@@ -220,12 +229,12 @@ void *hyp_alloc_pages(struct hyp_pool *pool, u8 order)
 	return hyp_page_to_virt(p);
 }
 
-int hyp_pool_init(struct hyp_pool *pool, u64 pfn, unsigned int nr_pages,
-		  unsigned int reserved_pages)
+int hyp_pool_init(struct hyp_pool *pool, u64 pfn, unsigned long nr_pages,
+		  unsigned long reserved_pages)
 {
 	phys_addr_t phys = hyp_pfn_to_phys(pfn);
 	struct hyp_page *p;
-	int i;
+	unsigned long i;
 
 	hyp_spin_lock_init(&pool->lock);
 	pool->max_order = min(MAX_PAGE_ORDER,
@@ -237,8 +246,10 @@ int hyp_pool_init(struct hyp_pool *pool, u64 pfn, unsigned int nr_pages,
 
 	/* Init the vmemmap portion */
 	p = hyp_phys_to_page(phys);
-	for (i = 0; i < nr_pages; i++)
+	for (i = 0; i < nr_pages; i++) {
 		hyp_set_page_refcounted(&p[i]);
+		p[i].order = 0;
+	}
 
 	/* Attach the unused pages to the buddy tree */
 	for (i = reserved_pages; i < nr_pages; i++)

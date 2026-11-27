@@ -47,6 +47,33 @@ static int mpq8785_identify(struct i2c_client *client,
 	return 0;
 };
 
+static int mpq8785_read_byte_data(struct i2c_client *client, int page, int reg)
+{
+	int ret;
+
+	switch (reg) {
+	case PMBUS_VOUT_MODE:
+		ret = pmbus_read_byte_data(client, page, reg);
+		if (ret < 0)
+			return ret;
+
+		if ((ret >> 5) == 1) {
+			/*
+			 * The MPQ8785 chip reports VOUT_MODE as VID mode, but the driver
+			 * treats VID as direct mode. Without this, identification would fail
+			 * due to mode mismatch.
+			 * This override ensures the reported mode matches the driver
+			 * configuration, allowing successful initialization.
+			 */
+			return PB_VOUT_MODE_DIRECT;
+		}
+
+		return ret;
+	default:
+		return -ENODATA;
+	}
+}
+
 static int mpm82504_read_word_data(struct i2c_client *client, int page,
 				   int phase, int reg)
 {
@@ -83,11 +110,11 @@ static struct pmbus_driver_info mpq8785_info = {
 };
 
 static const struct i2c_device_id mpq8785_id[] = {
-	{ "mpm3695", mpm3695 },
-	{ "mpm3695-25", mpm3695_25 },
-	{ "mpm82504", mpm82504 },
-	{ "mpq8785", mpq8785 },
-	{ },
+	{ .name = "mpm3695", .driver_data = mpm3695 },
+	{ .name = "mpm3695-25", .driver_data = mpm3695_25 },
+	{ .name = "mpm82504", .driver_data = mpm82504 },
+	{ .name = "mpq8785", .driver_data = mpq8785 },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mpq8785_id);
 
@@ -129,6 +156,7 @@ static int mpq8785_probe(struct i2c_client *client)
 		break;
 	case mpq8785:
 		info->identify = mpq8785_identify;
+		info->read_byte_data = mpq8785_read_byte_data;
 		break;
 	default:
 		return -ENODEV;

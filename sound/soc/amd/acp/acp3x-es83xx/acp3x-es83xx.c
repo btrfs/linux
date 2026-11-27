@@ -10,14 +10,15 @@
 #include <sound/soc-dapm.h>
 #include <sound/jack.h>
 #include <sound/soc-acpi.h>
+#include <acpi/acpi_bus.h>
 #include <linux/clk.h>
-#include <linux/gpio.h>
 #include <linux/gpio/consumer.h>
 #include <linux/module.h>
 #include <linux/i2c.h>
 #include <linux/input.h>
 #include <linux/io.h>
 #include <linux/acpi.h>
+#include <linux/delay.h>
 #include <linux/dmi.h>
 #include <linux/string_choices.h>
 #include "../acp-mach.h"
@@ -42,6 +43,11 @@ struct acp3x_es83xx_private {
 	struct snd_soc_dapm_route mic_map[2];
 };
 
+static void acp3x_es83xx_put_codec_device(void *data)
+{
+	put_device(data);
+}
+
 static const unsigned int channels[] = {
 	DUAL_CHANNEL,
 };
@@ -54,6 +60,8 @@ static const struct snd_pcm_hw_constraint_list constraints_channels = {
 
 #define ES83xx_12288_KHZ_MCLK_FREQ   (48000 * 256)
 #define ES83xx_48_MHZ_MCLK_FREQ      (48000 * 1000)
+
+#define ES83XX_AMP_ON_DELAY_MS	50
 
 static int acp3x_es83xx_headphone_power_event(struct snd_soc_dapm_widget *w,
 					    struct snd_kcontrol *kcontrol, int event);
@@ -109,16 +117,13 @@ static struct snd_soc_jack_pin es83xx_jack_pins[] = {
 };
 
 static const struct snd_soc_dapm_widget acp3x_es83xx_widgets[] = {
-	SND_SOC_DAPM_SPK("Speaker", NULL),
+	SND_SOC_DAPM_SPK("Speaker", acp3x_es83xx_speaker_power_event),
 	SND_SOC_DAPM_HP("Headphone", NULL),
 	SND_SOC_DAPM_MIC("Headset Mic", NULL),
 	SND_SOC_DAPM_MIC("Internal Mic", NULL),
 
 	SND_SOC_DAPM_SUPPLY("Headphone Power", SND_SOC_NOPM, 0, 0,
 			    acp3x_es83xx_headphone_power_event,
-			    SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMU),
-	SND_SOC_DAPM_SUPPLY("Speaker Power", SND_SOC_NOPM, 0, 0,
-			    acp3x_es83xx_speaker_power_event,
 			    SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMU),
 };
 
@@ -133,7 +138,6 @@ static const struct snd_soc_dapm_route acp3x_es83xx_audio_map[] = {
 	 */
 	{"Speaker", NULL, "HPOL"},
 	{"Speaker", NULL, "HPOR"},
-	{"Speaker", NULL, "Speaker Power"},
 };
 
 
@@ -159,7 +163,8 @@ static int acp3x_es83xx_configure_widgets(struct snd_soc_card *card)
 static int acp3x_es83xx_headphone_power_event(struct snd_soc_dapm_widget *w,
 					      struct snd_kcontrol *kcontrol, int event)
 {
-	struct acp3x_es83xx_private *priv = get_mach_priv(w->dapm->card);
+	struct snd_soc_card *card = snd_soc_dapm_to_card(w->dapm);
+	struct acp3x_es83xx_private *priv = get_mach_priv(card);
 
 	dev_dbg(priv->codec_dev, "headphone power event = %d\n", event);
 	if (SND_SOC_DAPM_EVENT_ON(event))
@@ -176,13 +181,17 @@ static int acp3x_es83xx_headphone_power_event(struct snd_soc_dapm_widget *w,
 static int acp3x_es83xx_speaker_power_event(struct snd_soc_dapm_widget *w,
 					    struct snd_kcontrol *kcontrol, int event)
 {
-	struct acp3x_es83xx_private *priv = get_mach_priv(w->dapm->card);
+	struct snd_soc_card *card = snd_soc_dapm_to_card(w->dapm);
+	struct acp3x_es83xx_private *priv = get_mach_priv(card);
 
 	dev_dbg(priv->codec_dev, "speaker power event: %d\n", event);
-	if (SND_SOC_DAPM_EVENT_ON(event))
+	if (SND_SOC_DAPM_EVENT_ON(event)) {
+		/* Let the codec output settle before enabling the amplifier */
+		msleep(ES83XX_AMP_ON_DELAY_MS);
 		priv->speaker_on = true;
-	else
+	} else {
 		priv->speaker_on = false;
+	}
 
 	gpiod_set_value_cansleep(priv->gpio_speakers, priv->speaker_on);
 	gpiod_set_value_cansleep(priv->gpio_headphone, priv->headphone_on);
@@ -314,7 +323,9 @@ static int acp3x_es83xx_init(struct snd_soc_pcm_runtime *runtime)
 
 	num_routes = acp3x_es83xx_configure_mics(priv);
 	if (num_routes > 0) {
-		ret = snd_soc_dapm_add_routes(&card->dapm, priv->mic_map, num_routes);
+		struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(card);
+
+		ret = snd_soc_dapm_add_routes(dapm, priv->mic_map, num_routes);
 		if (ret != 0)
 			device_remove_software_node(priv->codec_dev);
 	}
@@ -358,6 +369,14 @@ static const struct dmi_system_id acp3x_es83xx_dmi_table[] = {
 	{
 		.matches = {
 			DMI_EXACT_MATCH(DMI_BOARD_VENDOR, "HUAWEI"),
+			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "NBM-WXX9"),
+			DMI_EXACT_MATCH(DMI_PRODUCT_VERSION, "M1010"),
+		},
+		.driver_data = (void *)(ES83XX_ENABLE_DMIC|ES83XX_48_MHZ_MCLK),
+	},
+	{
+		.matches = {
+			DMI_EXACT_MATCH(DMI_BOARD_VENDOR, "HUAWEI"),
 			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "HVY-WXX9"),
 			DMI_EXACT_MATCH(DMI_PRODUCT_VERSION, "M1010"),
 		},
@@ -376,6 +395,14 @@ static const struct dmi_system_id acp3x_es83xx_dmi_table[] = {
 			DMI_EXACT_MATCH(DMI_BOARD_VENDOR, "HUAWEI"),
 			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "HVY-WXX9"),
 			DMI_EXACT_MATCH(DMI_PRODUCT_VERSION, "M1040"),
+		},
+		.driver_data = (void *)(ES83XX_ENABLE_DMIC),
+	},
+	{
+		.matches = {
+			DMI_EXACT_MATCH(DMI_BOARD_VENDOR, "HUAWEI"),
+			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "HVY-WXX9"),
+			DMI_EXACT_MATCH(DMI_PRODUCT_VERSION, "M1060"),
 		},
 		.driver_data = (void *)(ES83XX_ENABLE_DMIC),
 	},
@@ -417,18 +444,24 @@ static int acp3x_es83xx_probe(struct snd_soc_card *card)
 			return -ENXIO;
 		}
 
-		codec_dev = acpi_get_first_physical_node(adev);
+		codec_dev = acpi_bus_get_primary_device(adev);
 		acpi_dev_put(adev);
 		if (!codec_dev) {
 			dev_warn(dev, "Error cannot find codec device, will defer probe\n");
 			return -EPROBE_DEFER;
 		}
 
-		priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+		priv = devm_kzalloc_obj(dev, *priv);
 		if (!priv) {
 			put_device(codec_dev);
 			return -ENOMEM;
 		}
+
+		ret = devm_add_action_or_reset(dev,
+					       acp3x_es83xx_put_codec_device,
+					       codec_dev);
+		if (ret)
+			return ret;
 
 		priv->codec_dev = codec_dev;
 		priv->quirk = (unsigned long)dmi_id->driver_data;

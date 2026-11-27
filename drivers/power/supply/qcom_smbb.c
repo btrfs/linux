@@ -837,7 +837,7 @@ static int smbb_charger_probe(struct platform_device *pdev)
 	struct regulator_config config = { };
 	int rc, i;
 
-	chg = devm_kzalloc(&pdev->dev, sizeof(*chg), GFP_KERNEL);
+	chg = devm_kzalloc_obj(&pdev->dev, *chg);
 	if (!chg)
 		return -ENOMEM;
 
@@ -937,11 +937,8 @@ static int smbb_charger_probe(struct platform_device *pdev)
 		rc = devm_request_threaded_irq(&pdev->dev, irq, NULL,
 				smbb_charger_irqs[i].handler, IRQF_ONESHOT,
 				smbb_charger_irqs[i].name, chg);
-		if (rc) {
-			dev_err(&pdev->dev, "failed to request irq '%s'\n",
-				smbb_charger_irqs[i].name);
+		if (rc)
 			return rc;
-		}
 	}
 
 	/*

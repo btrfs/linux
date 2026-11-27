@@ -130,7 +130,7 @@ static int sy8827n_i2c_probe(struct i2c_client *client)
 	struct regmap *regmap;
 	int ret;
 
-	di = devm_kzalloc(dev, sizeof(struct sy8827n_device_info), GFP_KERNEL);
+	di = devm_kzalloc_obj(dev, struct sy8827n_device_info);
 	if (!di)
 		return -ENOMEM;
 
@@ -180,8 +180,8 @@ static const struct of_device_id sy8827n_dt_ids[] = {
 MODULE_DEVICE_TABLE(of, sy8827n_dt_ids);
 
 static const struct i2c_device_id sy8827n_id[] = {
-	{ "sy8827n", },
-	{ },
+	{ .name = "sy8827n" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, sy8827n_id);
 

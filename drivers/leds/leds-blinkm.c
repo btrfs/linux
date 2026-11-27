@@ -356,7 +356,8 @@ static int blinkm_transfer_hw(struct i2c_client *client, int cmd)
 	struct blinkm_data *data = i2c_get_clientdata(client);
 
 	/* We start hardware transfers which are not to be
-	 * mixed with other commands. Aquire a lock now. */
+	 * mixed with other commands. Acquire a lock now.
+	 */
 	if (mutex_lock_interruptible(&data->update_lock) < 0)
 		return -EAGAIN;
 
@@ -688,8 +689,7 @@ static int register_multicolor(struct i2c_client *client, struct blinkm_data *da
 	mc_led = &data->blinkm_leds[RED];
 	mc_led->i2c_client = client;
 
-	mc_led_info = devm_kcalloc(&client->dev, NUM_LEDS, sizeof(*mc_led_info),
-					GFP_KERNEL);
+	mc_led_info = devm_kzalloc_objs(&client->dev, *mc_led_info, NUM_LEDS);
 	if (!mc_led_info)
 		return -ENOMEM;
 
@@ -724,8 +724,7 @@ static int blinkm_probe(struct i2c_client *client)
 	struct blinkm_data *data;
 	int err;
 
-	data = devm_kzalloc(&client->dev,
-			sizeof(struct blinkm_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(&client->dev, struct blinkm_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -805,8 +804,8 @@ static void blinkm_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id blinkm_id[] = {
-	{ "blinkm" },
-	{}
+	{ .name = "blinkm" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, blinkm_id);

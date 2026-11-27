@@ -12,7 +12,6 @@
 #include <linux/cleanup.h>
 #include <linux/err.h>
 #include <linux/iio/iio.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/property.h>
 #include <linux/regulator/consumer.h>
@@ -196,11 +195,13 @@ static int adc128_probe(struct spi_device *spi)
 	adc = iio_priv(indio_dev);
 	adc->spi = spi;
 
-	indio_dev->name = spi_get_device_id(spi)->name;
+	config = spi_get_device_match_data(spi);
+	if (!config)
+		return -ENODATA;
+
+	indio_dev->name = spi->modalias;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->info = &adc128_info;
-
-	config = spi_get_device_match_data(spi);
 
 	indio_dev->channels = config->channels;
 	indio_dev->num_channels = config->num_channels;
@@ -248,18 +249,18 @@ static const struct of_device_id adc128_of_match[] = {
 MODULE_DEVICE_TABLE(of, adc128_of_match);
 
 static const struct spi_device_id adc128_id[] = {
-	{ "adc128s052", (kernel_ulong_t)&adc128s_config },
-	{ "adc122s021",	(kernel_ulong_t)&adc122s_config },
-	{ "adc122s051",	(kernel_ulong_t)&adc122s_config },
-	{ "adc122s101",	(kernel_ulong_t)&adc122s_config },
-	{ "adc124s021", (kernel_ulong_t)&adc124s_config },
-	{ "adc124s051", (kernel_ulong_t)&adc124s_config },
-	{ "adc124s101", (kernel_ulong_t)&adc124s_config },
-	{ "bd79100", (kernel_ulong_t)&bd79100_config },
-	{ "bd79101", (kernel_ulong_t)&bd79101_config },
-	{ "bd79102", (kernel_ulong_t)&bd79102_config },
-	{ "bd79103", (kernel_ulong_t)&bd79104_config },
-	{ "bd79104", (kernel_ulong_t)&bd79104_config },
+	{ .name = "adc128s052", .driver_data = (kernel_ulong_t)&adc128s_config },
+	{ .name = "adc122s021", .driver_data = (kernel_ulong_t)&adc122s_config },
+	{ .name = "adc122s051", .driver_data = (kernel_ulong_t)&adc122s_config },
+	{ .name = "adc122s101", .driver_data = (kernel_ulong_t)&adc122s_config },
+	{ .name = "adc124s021", .driver_data = (kernel_ulong_t)&adc124s_config },
+	{ .name = "adc124s051", .driver_data = (kernel_ulong_t)&adc124s_config },
+	{ .name = "adc124s101", .driver_data = (kernel_ulong_t)&adc124s_config },
+	{ .name = "bd79100", .driver_data = (kernel_ulong_t)&bd79100_config },
+	{ .name = "bd79101", .driver_data = (kernel_ulong_t)&bd79101_config },
+	{ .name = "bd79102", .driver_data = (kernel_ulong_t)&bd79102_config },
+	{ .name = "bd79103", .driver_data = (kernel_ulong_t)&bd79104_config },
+	{ .name = "bd79104", .driver_data = (kernel_ulong_t)&bd79104_config },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, adc128_id);
