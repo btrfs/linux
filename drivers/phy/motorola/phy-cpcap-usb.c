@@ -613,7 +613,7 @@ static int cpcap_usb_phy_probe(struct platform_device *pdev)
 	struct usb_otg *otg;
 	int error;
 
-	ddata = devm_kzalloc(&pdev->dev, sizeof(*ddata), GFP_KERNEL);
+	ddata = devm_kzalloc_obj(&pdev->dev, *ddata);
 	if (!ddata)
 		return -ENOMEM;
 
@@ -621,7 +621,7 @@ static int cpcap_usb_phy_probe(struct platform_device *pdev)
 	if (!ddata->reg)
 		return -ENODEV;
 
-	otg = devm_kzalloc(&pdev->dev, sizeof(*otg), GFP_KERNEL);
+	otg = devm_kzalloc_obj(&pdev->dev, *otg);
 	if (!otg)
 		return -ENOMEM;
 
@@ -717,3 +717,4 @@ MODULE_ALIAS("platform:cpcap_usb");
 MODULE_AUTHOR("Tony Lindgren <tony@atomide.com>");
 MODULE_DESCRIPTION("CPCAP usb phy driver");
 MODULE_LICENSE("GPL v2");
+MODULE_IMPORT_NS("IIO_CONSUMER");

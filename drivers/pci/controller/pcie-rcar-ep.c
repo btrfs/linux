@@ -141,8 +141,7 @@ static int rcar_pcie_ep_get_pdata(struct rcar_pcie_endpoint *ep,
 	if (IS_ERR(pcie->base))
 		return PTR_ERR(pcie->base);
 
-	ep->ob_window = devm_kcalloc(dev, RCAR_PCI_MAX_RESOURCES,
-				     sizeof(*window), GFP_KERNEL);
+	ep->ob_window = devm_kzalloc_objs(dev, *window, RCAR_PCI_MAX_RESOURCES);
 	if (!ep->ob_window)
 		return -ENOMEM;
 
@@ -440,13 +439,10 @@ static const struct pci_epc_features rcar_pcie_epc_features = {
 	/* use 64-bit BARs so mark BAR[1,3,5] as reserved */
 	.bar[BAR_0] = { .type = BAR_FIXED, .fixed_size = 128,
 			.only_64bit = true, },
-	.bar[BAR_1] = { .type = BAR_RESERVED, },
 	.bar[BAR_2] = { .type = BAR_FIXED, .fixed_size = 256,
 			.only_64bit = true, },
-	.bar[BAR_3] = { .type = BAR_RESERVED, },
 	.bar[BAR_4] = { .type = BAR_FIXED, .fixed_size = 256,
 			.only_64bit = true, },
-	.bar[BAR_5] = { .type = BAR_RESERVED, },
 };
 
 static const struct pci_epc_features*
@@ -483,7 +479,7 @@ static int rcar_pcie_ep_probe(struct platform_device *pdev)
 	struct pci_epc *epc;
 	int err;
 
-	ep = devm_kzalloc(dev, sizeof(*ep), GFP_KERNEL);
+	ep = devm_kzalloc_obj(dev, *ep);
 	if (!ep)
 		return -ENOMEM;
 
@@ -513,9 +509,8 @@ static int rcar_pcie_ep_probe(struct platform_device *pdev)
 		goto err_pm_put;
 	}
 
-	ep->ob_mapped_addr = devm_kcalloc(dev, ep->num_ob_windows,
-					  sizeof(*ep->ob_mapped_addr),
-					  GFP_KERNEL);
+	ep->ob_mapped_addr = devm_kzalloc_objs(dev, *ep->ob_mapped_addr,
+					       ep->num_ob_windows);
 	if (!ep->ob_mapped_addr) {
 		err = -ENOMEM;
 		dev_err(dev, "failed to allocate memory for outbound memory pointers\n");

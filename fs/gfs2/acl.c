@@ -59,7 +59,7 @@ static struct posix_acl *__gfs2_get_acl(struct inode *inode, int type)
 
 struct posix_acl *gfs2_get_acl(struct inode *inode, int type, bool rcu)
 {
-	struct gfs2_inode *ip = GFS2_I(inode);
+	struct gfs2_glock *gl = gfs2_inode_glock(inode);
 	struct gfs2_holder gh;
 	bool need_unlock = false;
 	struct posix_acl *acl;
@@ -67,8 +67,8 @@ struct posix_acl *gfs2_get_acl(struct inode *inode, int type, bool rcu)
 	if (rcu)
 		return ERR_PTR(-ECHILD);
 
-	if (!gfs2_glock_is_locked_by_me(ip->i_gl)) {
-		int ret = gfs2_glock_nq_init(ip->i_gl, LM_ST_SHARED,
+	if (!gfs2_glock_is_locked_by_me(gl)) {
+		int ret = gfs2_glock_nq_init(gl, LM_ST_SHARED,
 					     LM_FLAG_ANY, &gh);
 		if (ret)
 			return ERR_PTR(ret);
@@ -83,21 +83,14 @@ struct posix_acl *gfs2_get_acl(struct inode *inode, int type, bool rcu)
 int __gfs2_set_acl(struct inode *inode, struct posix_acl *acl, int type)
 {
 	int error;
-	size_t len;
-	char *data;
+	size_t len = 0;
+	char *data = NULL;
 	const char *name = gfs2_acl_name(type);
 
 	if (acl) {
-		len = posix_acl_xattr_size(acl->a_count);
-		data = kmalloc(len, GFP_NOFS);
+		data = posix_acl_to_xattr(&init_user_ns, acl, &len, GFP_NOFS);
 		if (data == NULL)
 			return -ENOMEM;
-		error = posix_acl_to_xattr(&init_user_ns, acl, data, len);
-		if (error < 0)
-			goto out;
-	} else {
-		data = NULL;
-		len = 0;
 	}
 
 	error = __gfs2_xattr_set(inode, name, data, len, 0, GFS2_EATYPE_SYS);
@@ -109,10 +102,11 @@ out:
 	return error;
 }
 
-int gfs2_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
+int gfs2_set_acl(const struct mnt_idmap *idmap, struct dentry *dentry,
 		 struct posix_acl *acl, int type)
 {
 	struct inode *inode = d_inode(dentry);
+	struct gfs2_glock *gl = gfs2_inode_glock(inode);
 	struct gfs2_inode *ip = GFS2_I(inode);
 	struct gfs2_holder gh;
 	bool need_unlock = false;
@@ -126,8 +120,8 @@ int gfs2_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 	if (ret)
 		return ret;
 
-	if (!gfs2_glock_is_locked_by_me(ip->i_gl)) {
-		ret = gfs2_glock_nq_init(ip->i_gl, LM_ST_EXCLUSIVE, 0, &gh);
+	if (!gfs2_glock_is_locked_by_me(gl)) {
+		ret = gfs2_glock_nq_init(gl, LM_ST_EXCLUSIVE, 0, &gh);
 		if (ret)
 			goto out;
 		need_unlock = true;

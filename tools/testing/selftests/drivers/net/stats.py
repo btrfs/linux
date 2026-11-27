@@ -220,6 +220,28 @@ def check_down(cfg) -> None:
     netfam.qstats_get({"ifindex": cfg.ifindex, "scope": "queue"}, dump=True)
 
 
+@ksft_disruptive
+def check_down_ts_stats(cfg) -> None:
+    """Test timestamping stats are not impacted by ifdown"""
+
+    req = {"header": {"dev-index": cfg.ifindex, "flags": {"stats"}}}
+    try:
+        stats = ethnl.tsinfo_get(req).get("stats")
+    except NlError as e:
+        if e.error == errno.EOPNOTSUPP:
+            raise KsftSkipEx("timestamping not supported by the device") from e
+        raise
+    if not stats:
+        raise KsftSkipEx("timestamping stats not supported by the device")
+
+    ip(f"link set dev {cfg.dev['ifname']} down")
+    defer(ip, f"link set dev {cfg.dev['ifname']} up")
+
+    stats2 = ethnl.tsinfo_get(req).get("stats", {})
+    for k in stats:
+        ksft_ge(stats2[k], stats[k], comment=f"{k} went backwards on device down")
+
+
 def __run_inf_loop(body):
     body = body.strip()
     if body[-1] != ';':
@@ -263,14 +285,15 @@ def procfs_downup_hammer(cfg) -> None:
     Reading stats via procfs only holds the RCU lock, drivers often try
     to sleep when reading the stats, or don't protect against races.
     """
-    # Max out the queues, we'll flip between max and 1
+    # Set a large number of queues,
+    # we'll flip between min(max_queues, 64) and 1
     channels = ethnl.channels_get({'header': {'dev-index': cfg.ifindex}})
     if channels['combined-count'] == 0:
         rx_type = 'rx'
     else:
         rx_type = 'combined'
     cur_queue_cnt = channels[f'{rx_type}-count']
-    max_queue_cnt = channels[f'{rx_type}-max']
+    max_queue_cnt = min(channels[f'{rx_type}-max'], 64)
 
     cmd(f"ethtool -L {cfg.ifname} {rx_type} {max_queue_cnt}")
     defer(cmd, f"ethtool -L {cfg.ifname} {rx_type} {cur_queue_cnt}")
@@ -310,7 +333,8 @@ def main() -> None:
 
     with NetDrvEnv(__file__, queue_count=100) as cfg:
         ksft_run([check_pause, check_fec, check_fec_hist, pkt_byte_sum,
-		  qstat_by_ifindex, check_down, procfs_hammer,
+		  qstat_by_ifindex, check_down, check_down_ts_stats,
+		  procfs_hammer,
 		  procfs_downup_hammer],
                  args=(cfg, ))
     ksft_exit()

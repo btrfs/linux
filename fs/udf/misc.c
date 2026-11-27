@@ -58,7 +58,7 @@ struct genericFormat *udf_add_extendedattr(struct inode *inode, uint32_t size,
 					cpu_to_le16(TAG_IDENT_EAHD) ||
 			    le32_to_cpu(eahd->descTag.tagLocation) !=
 					iinfo->i_location.logicalBlockNum)
-				return NULL;
+				return ERR_PTR(-EFSCORRUPTED);
 		} else {
 			struct udf_sb_info *sbi = UDF_SB(inode->i_sb);
 
@@ -122,7 +122,7 @@ struct genericFormat *udf_add_extendedattr(struct inode *inode, uint32_t size,
 		return (struct genericFormat *)&ea[offset];
 	}
 
-	return NULL;
+	return ERR_PTR(-ENOSPC);
 }
 
 struct genericFormat *udf_get_extendedattr(struct inode *inode, uint32_t type,
@@ -144,7 +144,7 @@ struct genericFormat *udf_get_extendedattr(struct inode *inode, uint32_t type,
 				cpu_to_le16(TAG_IDENT_EAHD) ||
 		    le32_to_cpu(eahd->descTag.tagLocation) !=
 				iinfo->i_location.logicalBlockNum)
-			return NULL;
+			return ERR_PTR(-EFSCORRUPTED);
 
 		if (type < 2048)
 			offset = sizeof(struct extendedAttrHeaderDesc);
@@ -153,16 +153,17 @@ struct genericFormat *udf_get_extendedattr(struct inode *inode, uint32_t type,
 		else
 			offset = le32_to_cpu(eahd->appAttrLocation);
 
-		while (offset + sizeof(*gaf) < iinfo->i_lenEAttr) {
+		while (offset <
+		       iinfo->i_lenEAttr - sizeof(struct genericFormat)) {
 			uint32_t attrLength;
 
 			gaf = (struct genericFormat *)&ea[offset];
 			attrLength = le32_to_cpu(gaf->attrLength);
 
 			/* Detect undersized elements and buffer overflows */
-			if ((attrLength < sizeof(*gaf)) ||
-			    (attrLength > (iinfo->i_lenEAttr - offset)))
-				break;
+			if (attrLength < sizeof(struct genericFormat) ||
+			    attrLength > iinfo->i_lenEAttr - offset)
+				return ERR_PTR(-EFSCORRUPTED);
 
 			if (le32_to_cpu(gaf->attrType) == type &&
 					gaf->attrSubtype == subtype)
@@ -230,8 +231,12 @@ struct buffer_head *udf_read_tagged(struct super_block *sb, uint32_t block,
 	}
 
 	/* Verify the descriptor CRC */
-	if (le16_to_cpu(tag_p->descCRCLength) + sizeof(struct tag) > sb->s_blocksize ||
-	    le16_to_cpu(tag_p->descCRC) == crc_itu_t(0,
+	if (le16_to_cpu(tag_p->descCRCLength) + sizeof(struct tag) > sb->s_blocksize) {
+		udf_err(sb, "block %u: CRC length %u exceeds block size\n",
+			block, le16_to_cpu(tag_p->descCRCLength));
+		goto error_out;
+	}
+	if (le16_to_cpu(tag_p->descCRC) == crc_itu_t(0,
 					bh->b_data + sizeof(struct tag),
 					le16_to_cpu(tag_p->descCRCLength)))
 		return bh;

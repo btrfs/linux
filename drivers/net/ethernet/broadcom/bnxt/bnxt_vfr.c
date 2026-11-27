@@ -496,13 +496,12 @@ int bnxt_vf_reps_create(struct bnxt *bp)
 	if (!(bp->flags & BNXT_FLAG_DSN_VALID))
 		return -ENODEV;
 
-	bp->vf_reps = kcalloc(num_vfs, sizeof(vf_rep), GFP_KERNEL);
+	bp->vf_reps = kzalloc_objs(vf_rep, num_vfs);
 	if (!bp->vf_reps)
 		return -ENOMEM;
 
 	/* storage for cfa_code to vf-idx mapping */
-	cfa_code_map = kmalloc_array(MAX_CFA_CODE, sizeof(*bp->cfa_code_map),
-				     GFP_KERNEL);
+	cfa_code_map = kmalloc_objs(*bp->cfa_code_map, MAX_CFA_CODE);
 	if (!cfa_code_map) {
 		rc = -ENOMEM;
 		goto err;

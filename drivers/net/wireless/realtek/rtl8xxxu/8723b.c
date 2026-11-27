@@ -483,16 +483,7 @@ static int rtl8723bu_parse_efuse(struct rtl8xxxu_priv *priv)
 
 static int rtl8723bu_load_firmware(struct rtl8xxxu_priv *priv)
 {
-	const char *fw_name;
-	int ret;
-
-	if (priv->enable_bluetooth)
-		fw_name = "rtlwifi/rtl8723bu_bt.bin";
-	else
-		fw_name = "rtlwifi/rtl8723bu_nic.bin";
-
-	ret = rtl8xxxu_load_firmware(priv, fw_name);
-	return ret;
+	return rtl8xxxu_load_firmware(priv, "rtlwifi/rtl8723bu_nic.bin");
 }
 
 static void rtl8723bu_init_phy_bb(struct rtl8xxxu_priv *priv)
@@ -1746,6 +1737,7 @@ struct rtl8xxxu_fileops rtl8723bu_fops = {
 	.gen2_thermal_meter = 1,
 	.needs_full_init = 1,
 	.init_reg_hmtfr = 1,
+	.hw_feature_report = 0,
 	.ampdu_max_time = 0x5e,
 	.ustime_tsf_edca = 0x50,
 	.max_aggr_num = 0x0c14,

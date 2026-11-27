@@ -12,11 +12,10 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/platform_data/pic32.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
 #include <linux/watchdog.h>
-
-#include <asm/mach-pic32/pic32.h>
 
 /* Deadman Timer Regs */
 #define DMTCON_REG	0x00
@@ -170,7 +169,7 @@ static int pic32_dmt_probe(struct platform_device *pdev)
 	struct pic32_dmt *dmt;
 	struct watchdog_device *wdd = &pic32_dmt_wdd;
 
-	dmt = devm_kzalloc(dev, sizeof(*dmt), GFP_KERNEL);
+	dmt = devm_kzalloc_obj(dev, *dmt);
 	if (!dmt)
 		return -ENOMEM;
 

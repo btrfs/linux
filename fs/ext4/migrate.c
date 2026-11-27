@@ -14,7 +14,7 @@
  * represented by a single extent
  */
 struct migrate_struct {
-	ext4_lblk_t first_block, last_block, curr_block;
+	u64 first_block, last_block, curr_block;
 	ext4_fsblk_t first_pblock, last_pblock;
 };
 
@@ -53,8 +53,7 @@ static int finish_range(handle_t *handle, struct inode *inode,
 	if (retval < 0)
 		goto err_out;
 	path = ext4_ext_insert_extent(handle, inode, path, &newext, 0);
-	if (IS_ERR(path))
-		retval = PTR_ERR(path);
+	retval = PTR_ERR_OR_ZERO(path);
 err_out:
 	up_write((&EXT4_I(inode)->i_data_sem));
 	ext4_free_ext_path(path);
@@ -66,12 +65,17 @@ static int update_extent_range(handle_t *handle, struct inode *inode,
 			       ext4_fsblk_t pblock, struct migrate_struct *lb)
 {
 	int retval;
+
+	if (lb->curr_block >= EXT_MAX_BLOCKS)
+		return -EOPNOTSUPP;
+
 	/*
 	 * See if we can add on to the existing range (if it exists)
 	 */
 	if (lb->first_pblock &&
 		(lb->last_pblock+1 == pblock) &&
-		(lb->last_block+1 == lb->curr_block)) {
+		(lb->last_block+1 == lb->curr_block) &&
+		(lb->last_block - lb->first_block + 1 < EXT_INIT_MAX_LEN)) {
 		lb->last_pblock = pblock;
 		lb->last_block = lb->curr_block;
 		lb->curr_block++;
@@ -322,6 +326,12 @@ static int ext4_ext_swap_inode_data(handle_t *handle, struct inode *inode,
 	 */
 	ext4_set_inode_flag(inode, EXT4_INODE_EXTENTS);
 	memcpy(ei->i_data, tmp_ei->i_data, sizeof(ei->i_data));
+	/*
+	 * The extent tree belongs to the inode now. Make tmp_inode's extent
+	 * tree empty, so that cleaning up tmp_inode can't free the tree
+	 * blocks, if we fail to finish the migration.
+	 */
+	ext4_ext_init_root(tmp_inode);
 
 	/*
 	 * Update i_blocks with the new blocks that got
@@ -331,10 +341,13 @@ static int ext4_ext_swap_inode_data(handle_t *handle, struct inode *inode,
 	 * While converting to extents we need not
 	 * update the original inode i_blocks for extent blocks
 	 * via quota APIs. The quota update happened via tmp_inode already.
+	 * Clear tmp_inode i_blocks to avoid truncating original data blocks
+	 * in case we fail to finish the migration.
 	 */
 	spin_lock(&inode->i_lock);
 	inode->i_blocks += tmp_inode->i_blocks;
 	spin_unlock(&inode->i_lock);
+	tmp_inode->i_blocks = 0;
 	up_write(&EXT4_I(inode)->i_data_sem);
 
 	/*
@@ -410,7 +423,7 @@ static int free_ext_block(handle_t *handle, struct inode *inode)
 int ext4_ext_migrate(struct inode *inode)
 {
 	handle_t *handle;
-	int retval = 0, i;
+	int retval = 0, err, i;
 	__le32 *i_data;
 	struct ext4_inode_info *ei;
 	struct inode *tmp_inode = NULL;
@@ -449,7 +462,13 @@ int ext4_ext_migrate(struct inode *inode)
 		retval = PTR_ERR(handle);
 		goto out_unlock;
 	}
-	goal = (((inode->i_ino - 1) / EXT4_INODES_PER_GROUP(inode->i_sb)) *
+	/*
+	 * This operation rewrites the inode's block mapping layout
+	 * (indirect to extents) and is not tracked in the fast commit
+	 * log, so disable fast commits for this transaction.
+	 */
+	ext4_fc_mark_ineligible(inode->i_sb, EXT4_FC_REASON_MIGRATE, handle);
+	goal = ((((u32)inode->i_ino - 1) / EXT4_INODES_PER_GROUP(inode->i_sb)) *
 		EXT4_INODES_PER_GROUP(inode->i_sb)) + 1;
 	owner[0] = i_uid_read(inode);
 	owner[1] = i_gid_read(inode);
@@ -458,6 +477,7 @@ int ext4_ext_migrate(struct inode *inode)
 	if (IS_ERR(tmp_inode)) {
 		retval = PTR_ERR(tmp_inode);
 		ext4_journal_stop(handle);
+		tmp_inode = NULL;
 		goto out_unlock;
 	}
 	/*
@@ -551,18 +571,16 @@ err_out:
 		free_ext_block(handle, tmp_inode);
 	else {
 		retval = ext4_ext_swap_inode_data(handle, inode, tmp_inode);
-		if (retval)
+		if (retval && !ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS))
 			/*
 			 * if we fail to swap inode data free the extent
-			 * details of the tmp inode
+			 * details of the tmp inode.  If the tree was already
+			 * moved to the original inode, the tmp_inode has an
+			 * empty tree and there is nothing to free.
 			 */
 			free_ext_block(handle, tmp_inode);
 	}
 
-	/* We mark the tmp_inode dirty via ext4_ext_tree_init. */
-	retval = ext4_journal_ensure_credits(handle, 1, 0);
-	if (retval < 0)
-		goto out_stop;
 	/*
 	 * Mark the tmp_inode as of size zero
 	 */
@@ -579,17 +597,25 @@ err_out:
 	tmp_inode->i_blocks = 0;
 	EXT4_I(tmp_inode)->i_csum_seed = tmp_csum_seed;
 
+	/* We mark the tmp_inode dirty via ext4_ext_tree_init. */
+	err = ext4_journal_ensure_credits(handle, 1, 0);
+	if (err < 0) {
+		if (!retval)
+			retval = err;
+		goto out_stop;
+	}
 	/* Reset the extent details */
 	ext4_ext_tree_init(handle, tmp_inode);
 out_stop:
 	ext4_journal_stop(handle);
 out_tmp_inode:
 	unlock_new_inode(tmp_inode);
-	iput(tmp_inode);
 out_unlock:
 	ext4_writepages_up_write(inode->i_sb, alloc_ctx);
+	iput(tmp_inode);
 	return retval;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_ext_migrate);
 
 /*
  * Migrate a simple extent-based inode to use the i_blocks[] array
@@ -614,6 +640,8 @@ int ext4_ind_migrate(struct inode *inode)
 
 	if (ext4_has_feature_bigalloc(inode->i_sb))
 		return -EOPNOTSUPP;
+	if (ext4_inode_buffered_iomap(inode))
+		return -EOPNOTSUPP;
 
 	/*
 	 * In order to get correct extent info, force all delayed allocation
@@ -630,6 +658,12 @@ int ext4_ind_migrate(struct inode *inode)
 		ret = PTR_ERR(handle);
 		goto out_unlock;
 	}
+	/*
+	 * This operation rewrites the inode's block mapping layout
+	 * (extents to indirect blocks) and is not tracked in the fast
+	 * commit log, so disable fast commits for this transaction.
+	 */
+	ext4_fc_mark_ineligible(inode->i_sb, EXT4_FC_REASON_MIGRATE, handle);
 
 	down_write(&EXT4_I(inode)->i_data_sem);
 	ret = ext4_ext_check_inode(inode);
@@ -670,3 +704,13 @@ out_unlock:
 	ext4_writepages_up_write(inode->i_sb, alloc_ctx);
 	return ret;
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_ind_migrate);
+
+#if IS_ENABLED(CONFIG_EXT4_KUNIT_TESTS)
+int ext4_ext_swap_inode_data_test(handle_t *handle, struct inode *inode,
+				  struct inode *tmp_inode)
+{
+	return ext4_ext_swap_inode_data(handle, inode, tmp_inode);
+}
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_ext_swap_inode_data_test);
+#endif

@@ -102,9 +102,9 @@ struct hwlat_sample {
 /* keep the global state somewhere. */
 static struct hwlat_data {
 
-	struct mutex lock;		/* protect changes */
+	struct mutex	lock;		/* protect changes */
 
-	u64	count;			/* total since reset */
+	atomic64_t	count;		/* total since reset */
 
 	u64	sample_window;		/* total sampling window (on+off) */
 	u64	sample_width;		/* active sampling portion of window */
@@ -193,8 +193,7 @@ void trace_hwlat_callback(bool enter)
  * get_sample - sample the CPU TSC and look for likely hardware latencies
  *
  * Used to repeatedly capture the CPU TSC (or similar), looking for potential
- * hardware-induced latency. Called with interrupts disabled and with
- * hwlat_data.lock held.
+ * hardware-induced latency. Called with interrupts disabled.
  */
 static int get_sample(void)
 {
@@ -204,12 +203,11 @@ static int get_sample(void)
 	time_type start, t1, t2, last_t2;
 	s64 diff, outer_diff, total, last_total = 0;
 	u64 sample = 0;
+	u64 sample_width = READ_ONCE(hwlat_data.sample_width) * NSEC_PER_USEC;
 	u64 thresh = tracing_thresh;
 	u64 outer_sample = 0;
-	int ret = -1;
+	int ret = 0;
 	unsigned int count = 0;
-
-	do_div(thresh, NSEC_PER_USEC); /* modifies interval value */
 
 	kdata->nmi_total_ts = 0;
 	kdata->nmi_count = 0;
@@ -229,28 +227,37 @@ static int get_sample(void)
 
 		if (time_u64(last_t2)) {
 			/* Check the delta from outer loop (t2 to next t1) */
-			outer_diff = time_to_us(time_sub(t1, last_t2));
+			outer_diff = time_sub(t1, last_t2);
 			/* This shouldn't happen */
 			if (outer_diff < 0) {
 				hwlat_err(BANNER "time running backwards\n");
-				goto out;
+				ret = -1;
+				break;
 			}
 			if (outer_diff > outer_sample)
 				outer_sample = outer_diff;
 		}
 		last_t2 = t2;
 
-		total = time_to_us(time_sub(t2, start)); /* sample width */
+		total = time_sub(t2, start); /* sample width */
 
 		/* Check for possible overflows */
 		if (total < last_total) {
 			hwlat_err("Time total overflowed\n");
+			/* Keep ret == 0 to preserve any latencies already detected */
 			break;
 		}
 		last_total = total;
 
 		/* This checks the inner loop (t1 to t2) */
-		diff = time_to_us(time_sub(t2, t1));     /* current diff */
+		diff = time_sub(t2, t1);     /* current diff */
+
+		/* This shouldn't happen: time went backwards between t1 and t2 */
+		if (diff < 0) {
+			hwlat_err(BANNER "time running backwards\n");
+			ret = -1;
+			break;
+		}
 
 		if (diff > thresh || outer_diff > thresh) {
 			if (!count)
@@ -258,25 +265,20 @@ static int get_sample(void)
 			count++;
 		}
 
-		/* This shouldn't happen */
-		if (diff < 0) {
-			hwlat_err(BANNER "time running backwards\n");
-			goto out;
-		}
-
 		if (diff > sample)
 			sample = diff; /* only want highest value */
 
-	} while (total <= hwlat_data.sample_width);
+	} while (total <= sample_width);
 
 	barrier(); /* finish the above in the view for NMIs */
 	trace_hwlat_callback_enabled = false;
 	barrier(); /* Make sure nmi_total_ts is no longer updated */
 
-	ret = 0;
+	if (ret)
+		return ret;
 
 	/* If we exceed the threshold value, we have found a hardware latency */
-	if (sample > thresh || outer_sample > thresh) {
+	if (count) {
 		u64 latency;
 
 		ret = 1;
@@ -285,10 +287,9 @@ static int get_sample(void)
 		if (kdata->nmi_total_ts)
 			do_div(kdata->nmi_total_ts, NSEC_PER_USEC);
 
-		hwlat_data.count++;
-		s.seqnum = hwlat_data.count;
-		s.duration = sample;
-		s.outer_duration = outer_sample;
+		s.seqnum = atomic64_inc_return(&hwlat_data.count);
+		s.duration = time_to_us(sample);
+		s.outer_duration = time_to_us(outer_sample);
 		s.nmi_total_ts = kdata->nmi_total_ts;
 		s.nmi_count = kdata->nmi_count;
 		s.count = count;
@@ -302,8 +303,6 @@ static int get_sample(void)
 			latency_fsnotify(tr);
 		}
 	}
-
-out:
 	return ret;
 }
 
@@ -832,11 +831,10 @@ static int hwlat_tracer_init(struct trace_array *tr)
 
 	hwlat_trace = tr;
 
-	hwlat_data.count = 0;
+	atomic64_set(&hwlat_data.count, 0);
 	tr->max_latency = 0;
 	save_tracing_thresh = tracing_thresh;
 
-	/* tracing_thresh is in nsecs, we speak in usecs */
 	if (!tracing_thresh)
 		tracing_thresh = last_tracing_thresh;
 

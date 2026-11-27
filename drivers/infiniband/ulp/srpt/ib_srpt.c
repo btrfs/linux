@@ -33,6 +33,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/hex.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/err.h>
@@ -76,8 +77,8 @@ module_param(srp_max_req_size, int, 0444);
 MODULE_PARM_DESC(srp_max_req_size,
 		 "Maximum size of SRP request messages in bytes.");
 
-static int srpt_srq_size = DEFAULT_SRPT_SRQ_SIZE;
-module_param(srpt_srq_size, int, 0444);
+static unsigned int srpt_srq_size = DEFAULT_SRPT_SRQ_SIZE;
+module_param(srpt_srq_size, uint, 0444);
 MODULE_PARM_DESC(srpt_srq_size,
 		 "Shared receive queue (SRQ) size.");
 
@@ -126,7 +127,7 @@ static struct kmem_cache *srpt_cache_get(unsigned int object_size)
 		return e->c;
 	}
 	snprintf(name, sizeof(name), "srpt-%u", object_size);
-	e = kmalloc(sizeof(*e), GFP_KERNEL);
+	e = kmalloc_obj(*e);
 	if (!e)
 		return NULL;
 	refcount_set(&e->ref, 1);
@@ -404,8 +405,7 @@ static void srpt_get_ioc(struct srpt_port *sport, u32 slot,
 	if (sdev->use_srq)
 		send_queue_depth = sdev->srq_size;
 	else
-		send_queue_depth = min(MAX_SRPT_RQ_SIZE,
-				       sdev->device->attrs.max_qp_wr);
+		send_queue_depth = min(sdev->device->attrs.max_qp_wr, MAX_SRPT_RQ_SIZE);
 
 	memset(iocp, 0, sizeof(*iocp));
 	strcpy(iocp->id_string, SRPT_ID_STRING);
@@ -789,7 +789,7 @@ static struct srpt_ioctx **srpt_alloc_ioctx_ring(struct srpt_device *sdev,
 	WARN_ON(ioctx_size != sizeof(struct srpt_recv_ioctx) &&
 		ioctx_size != sizeof(struct srpt_send_ioctx));
 
-	ring = kvmalloc_array(ring_size, sizeof(ring[0]), GFP_KERNEL);
+	ring = kvmalloc_objs(ring[0], ring_size);
 	if (!ring)
 		goto out;
 	for (i = 0; i < ring_size; ++i) {
@@ -959,22 +959,31 @@ static int srpt_alloc_rw_ctxs(struct srpt_send_ioctx *ioctx,
 	struct srpt_rdma_ch *ch = ioctx->ch;
 	struct scatterlist *prev = NULL;
 	unsigned prev_nents;
+	int n_rdma, n_rw_ctx;
 	int ret, i;
 
 	if (nbufs == 1) {
 		ioctx->rw_ctxs = &ioctx->s_rw_ctx;
 	} else {
-		ioctx->rw_ctxs = kmalloc_array(nbufs, sizeof(*ioctx->rw_ctxs),
-			GFP_KERNEL);
+		ioctx->rw_ctxs = kmalloc_objs(*ioctx->rw_ctxs, nbufs);
 		if (!ioctx->rw_ctxs)
 			return -ENOMEM;
 	}
+
+	n_rw_ctx = ioctx->n_rw_ctx;
+	n_rdma = ioctx->n_rdma;
 
 	for (i = ioctx->n_rw_ctx; i < nbufs; i++, db++) {
 		struct srpt_rw_ctx *ctx = &ioctx->rw_ctxs[i];
 		u64 remote_addr = be64_to_cpu(db->va);
 		u32 size = be32_to_cpu(db->len);
 		u32 rkey = be32_to_cpu(db->key);
+
+		if (size == 0) {
+			pr_err("received SRP_CMD buffer descriptor with zero length\n");
+			ret = -EINVAL;
+			goto unwind;
+		}
 
 		ret = target_alloc_sgl(&ctx->sg, &ctx->nents, size, false,
 				i < nbufs - 1);
@@ -1016,6 +1025,9 @@ unwind:
 	}
 	if (ioctx->rw_ctxs != &ioctx->s_rw_ctx)
 		kfree(ioctx->rw_ctxs);
+	ioctx->rw_ctxs = NULL;
+	ioctx->n_rw_ctx = n_rw_ctx;
+	ioctx->n_rdma = n_rdma;
 	return ret;
 }
 
@@ -1111,6 +1123,7 @@ static int srpt_get_desc_tbl(struct srpt_recv_ioctx *recv_ioctx,
 		struct srp_indirect_buf *idb = srpt_get_desc_buf(srp_cmd);
 		int nbufs = be32_to_cpu(idb->table_desc.len) /
 				sizeof(struct srp_direct_buf);
+		size_t desc_off = (uintptr_t)idb - (uintptr_t)srp_cmd;
 
 		if (nbufs >
 		    (srp_cmd->data_out_desc_cnt + srp_cmd->data_in_desc_cnt)) {
@@ -1122,6 +1135,18 @@ static int srpt_get_desc_tbl(struct srpt_recv_ioctx *recv_ioctx,
 			return -EINVAL;
 		}
 
+		if (nbufs == 0) {
+			pr_err("received SRP_CMD with an empty indirect descriptor table\n");
+			return -EINVAL;
+		}
+
+		if (desc_off + struct_size(idb, desc_list, nbufs) >
+		    recv_ioctx->byte_len) {
+			pr_err("received SRP_CMD indirect table (%d descriptors) that does not fit the %d-byte IU\n",
+			       nbufs, recv_ioctx->byte_len);
+			return -EINVAL;
+		}
+
 		*data_len = be32_to_cpu(idb->len);
 		return srpt_alloc_rw_ctxs(ioctx, idb->desc_list, nbufs,
 				sg, sg_cnt);
@@ -1129,9 +1154,10 @@ static int srpt_get_desc_tbl(struct srpt_recv_ioctx *recv_ioctx,
 		struct srp_imm_buf *imm_buf = srpt_get_desc_buf(srp_cmd);
 		void *data = (void *)srp_cmd + imm_data_offset;
 		uint32_t len = be32_to_cpu(imm_buf->len);
-		uint32_t req_size = imm_data_offset + len;
+		uint32_t req_size;
 
-		if (req_size > srp_max_req_size) {
+		if (check_add_overflow((uint32_t)imm_data_offset, len, &req_size) ||
+		    req_size > srp_max_req_size) {
 			pr_err("Immediate data (length %d + %d) exceeds request size %d\n",
 			       imm_data_offset, len, srp_max_req_size);
 			return -EINVAL;
@@ -1180,7 +1206,7 @@ static int srpt_init_ch_qp(struct srpt_rdma_ch *ch, struct ib_qp *qp)
 
 	WARN_ON_ONCE(ch->using_rdma_cm);
 
-	attr = kzalloc(sizeof(*attr), GFP_KERNEL);
+	attr = kzalloc_obj(*attr);
 	if (!attr)
 		return -ENOMEM;
 
@@ -1595,7 +1621,7 @@ static void srpt_handle_cmd(struct srpt_rdma_ch *ch,
 
 	rc = target_init_cmd(cmd, ch->sess, &send_ioctx->sense_data[0],
 			     scsilun_to_int(&srp_cmd->lun), data_len,
-			     TCM_SIMPLE_TAG, dir, TARGET_SCF_ACK_KREF);
+			     cmd->sam_task_attr, dir, TARGET_SCF_ACK_KREF);
 	if (rc != 0) {
 		pr_debug("target_submit_cmd() returned %d for tag %#llx\n", rc,
 			 srp_cmd->tag);
@@ -1850,13 +1876,13 @@ static int srpt_create_ch_ib(struct srpt_rdma_ch *ch)
 	struct srpt_port *sport = ch->sport;
 	struct srpt_device *sdev = sport->sdev;
 	const struct ib_device_attr *attrs = &sdev->device->attrs;
-	int sq_size = sport->port_attrib.srp_sq_size;
+	u32 sq_size = sport->port_attrib.srp_sq_size;
 	int i, ret;
 
 	WARN_ON(ch->rq_size < 1);
 
 	ret = -ENOMEM;
-	qp_init = kzalloc(sizeof(*qp_init), GFP_KERNEL);
+	qp_init = kzalloc_obj(*qp_init);
 	if (!qp_init)
 		goto out;
 
@@ -1881,7 +1907,7 @@ retry:
 	 * We divide up our send queue size into half SEND WRs to send the
 	 * completions, and half R/W contexts to actually do the RDMA
 	 * READ/WRITE transfers.  Note that we need to allocate CQ slots for
-	 * both both, as RDMA contexts will also post completions for the
+	 * both, as RDMA contexts will also post completions for the
 	 * RDMA READ case.
 	 */
 	qp_init->cap.max_send_wr = min(sq_size / 2, attrs->max_qp_wr);
@@ -1911,13 +1937,13 @@ retry:
 		bool retry = sq_size > MIN_SRPT_SQ_SIZE;
 
 		if (retry) {
-			pr_debug("failed to create queue pair with sq_size = %d (%d) - retrying\n",
+			pr_debug("failed to create queue pair with sq_size = %u (%d) - retrying\n",
 				 sq_size, ret);
 			ib_cq_pool_put(ch->cq, ch->cq_size);
 			sq_size = max(sq_size / 2, MIN_SRPT_SQ_SIZE);
 			goto retry;
 		} else {
-			pr_err("failed to create queue pair with sq_size = %d (%d)\n",
+			pr_err("failed to create queue pair with sq_size = %u (%d)\n",
 			       sq_size, ret);
 			goto err_destroy_cq;
 		}
@@ -1925,7 +1951,7 @@ retry:
 
 	atomic_set(&ch->sq_wr_avail, qp_init->cap.max_send_wr);
 
-	pr_debug("%s: max_cqe= %d max_sge= %d sq_size = %d ch= %p\n",
+	pr_debug("%s: max_cqe= %d max_sge= %d sq_size = %u ch= %p\n",
 		 __func__, ch->cq->cqe, qp_init->cap.max_send_sge,
 		 qp_init->cap.max_send_wr, ch);
 
@@ -2088,7 +2114,7 @@ static struct srpt_nexus *srpt_get_nexus(struct srpt_port *sport,
 
 		if (nexus)
 			break;
-		tmp_nexus = kzalloc(sizeof(*nexus), GFP_KERNEL);
+		tmp_nexus = kzalloc_obj(*nexus);
 		if (!tmp_nexus) {
 			nexus = ERR_PTR(-ENOMEM);
 			break;
@@ -2240,9 +2266,9 @@ static int srpt_cm_req_recv(struct srpt_device *const sdev,
 	}
 
 	ret = -ENOMEM;
-	rsp = kzalloc(sizeof(*rsp), GFP_KERNEL);
-	rej = kzalloc(sizeof(*rej), GFP_KERNEL);
-	rep_param = kzalloc(sizeof(*rep_param), GFP_KERNEL);
+	rsp = kzalloc_obj(*rsp);
+	rej = kzalloc_obj(*rej);
+	rep_param = kzalloc_obj(*rep_param);
 	if (!rsp || !rej || !rep_param)
 		goto out;
 
@@ -2272,7 +2298,7 @@ static int srpt_cm_req_recv(struct srpt_device *const sdev,
 	}
 
 	ret = -ENOMEM;
-	ch = kzalloc(sizeof(*ch), GFP_KERNEL);
+	ch = kzalloc_obj(*ch);
 	if (!ch) {
 		rej->reason = cpu_to_be32(SRP_LOGIN_REJ_INSUFFICIENT_RESOURCES);
 		pr_err("rejected SRP_LOGIN_REQ because out of memory.\n");
@@ -2298,7 +2324,7 @@ static int srpt_cm_req_recv(struct srpt_device *const sdev,
 	 * depth to avoid that the initiator driver has to report QUEUE_FULL
 	 * to the SCSI mid-layer.
 	 */
-	ch->rq_size = min(MAX_SRPT_RQ_SIZE, sdev->device->attrs.max_qp_wr);
+	ch->rq_size = min(sdev->device->attrs.max_qp_wr, MAX_SRPT_RQ_SIZE);
 	spin_lock_init(&ch->spinlock);
 	ch->state = CH_CONNECTING;
 	INIT_LIST_HEAD(&ch->cmd_wait_list);
@@ -3136,7 +3162,7 @@ static int srpt_alloc_srq(struct srpt_device *sdev)
 		return PTR_ERR(srq);
 	}
 
-	pr_debug("create SRQ #wr= %d max_allow=%d dev= %s\n", sdev->srq_size,
+	pr_debug("create SRQ #wr= %d max_allow=%u dev= %s\n", sdev->srq_size,
 		 sdev->device->attrs.max_srq_wr, dev_name(&device->dev));
 
 	sdev->req_buf_cache = srpt_cache_get(srp_max_req_size);
@@ -3209,8 +3235,7 @@ static int srpt_add_one(struct ib_device *device)
 
 	pr_debug("device = %p\n", device);
 
-	sdev = kzalloc(struct_size(sdev, port, device->phys_port_cnt),
-		       GFP_KERNEL);
+	sdev = kzalloc_flex(*sdev, port, device->phys_port_cnt);
 	if (!sdev)
 		return -ENOMEM;
 
@@ -3789,7 +3814,7 @@ static struct se_portal_group *srpt_make_tpg(struct se_wwn *wwn,
 	struct srpt_tpg *stpg;
 	int res = -ENOMEM;
 
-	stpg = kzalloc(sizeof(*stpg), GFP_KERNEL);
+	stpg = kzalloc_obj(*stpg);
 	if (!stpg)
 		return ERR_PTR(res);
 	stpg->sport_id = sport_id;
@@ -3846,7 +3871,7 @@ static struct se_wwn *srpt_make_tport(struct target_fabric_configfs *tf,
 		WARN_ON_ONCE(true);
 		return &(*papi.port_id)->wwn;
 	}
-	port_id = kzalloc(sizeof(*port_id), GFP_KERNEL);
+	port_id = kzalloc_obj(*port_id);
 	if (!port_id) {
 		srpt_sdev_put(sport->sdev);
 		return ERR_PTR(-ENOMEM);
@@ -3926,6 +3951,7 @@ static const struct target_core_fabric_ops srpt_template = {
 	.tfc_wwn_attrs			= srpt_wwn_attrs,
 	.tfc_tpg_attrib_attrs		= srpt_tpg_attrib_attrs,
 
+	.default_compl_type		= TARGET_QUEUE_COMPL,
 	.default_submit_type		= TARGET_DIRECT_SUBMIT,
 	.direct_submit_supp		= 1,
 };
@@ -3951,7 +3977,7 @@ static int __init srpt_init_module(void)
 
 	if (srpt_srq_size < MIN_SRPT_SRQ_SIZE
 	    || srpt_srq_size > MAX_SRPT_SRQ_SIZE) {
-		pr_err("invalid value %d for kernel module parameter srpt_srq_size -- must be in the range [%d..%d].\n",
+		pr_err("invalid value %u for kernel module parameter srpt_srq_size -- must be in the range [%d..%d].\n",
 		       srpt_srq_size, MIN_SRPT_SRQ_SIZE, MAX_SRPT_SRQ_SIZE);
 		goto out;
 	}

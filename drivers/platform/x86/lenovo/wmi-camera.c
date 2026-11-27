@@ -101,7 +101,7 @@ static int lenovo_wmi_probe(struct wmi_device *wdev, const void *context)
 {
 	struct lenovo_wmi_priv *priv;
 
-	priv = devm_kzalloc(&wdev->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&wdev->dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -134,6 +134,7 @@ static struct wmi_driver lenovo_wmi_driver = {
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 	.id_table = lenovo_wmi_id_table,
+	.min_event_size = sizeof(u8),
 	.no_singleton = true,
 	.probe = lenovo_wmi_probe,
 	.notify = lenovo_wmi_notify,

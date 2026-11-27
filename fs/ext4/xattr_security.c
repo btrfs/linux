@@ -4,6 +4,7 @@
  * Handler for storing security labels as extended attributes.
  */
 
+#include <kunit/static_stub.h>
 #include <linux/string.h>
 #include <linux/fs.h>
 #include <linux/security.h>
@@ -23,7 +24,7 @@ ext4_xattr_security_get(const struct xattr_handler *handler,
 
 static int
 ext4_xattr_security_set(const struct xattr_handler *handler,
-			struct mnt_idmap *idmap,
+			const struct mnt_idmap *idmap,
 			struct dentry *unused, struct inode *inode,
 			const char *name, const void *value,
 			size_t size, int flags)
@@ -55,9 +56,12 @@ int
 ext4_init_security(handle_t *handle, struct inode *inode, struct inode *dir,
 		   const struct qstr *qstr)
 {
+	KUNIT_STATIC_STUB_REDIRECT(ext4_init_security,
+				   handle, inode, dir, qstr);
 	return security_inode_init_security(inode, dir, qstr,
 					    &ext4_initxattrs, handle);
 }
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_init_security);
 
 const struct xattr_handler ext4_xattr_security_handler = {
 	.prefix	= XATTR_SECURITY_PREFIX,

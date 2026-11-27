@@ -31,7 +31,7 @@ ext4_xattr_user_get(const struct xattr_handler *handler,
 
 static int
 ext4_xattr_user_set(const struct xattr_handler *handler,
-		    struct mnt_idmap *idmap,
+		    const struct mnt_idmap *idmap,
 		    struct dentry *unused, struct inode *inode,
 		    const char *name, const void *value,
 		    size_t size, int flags)
@@ -48,3 +48,7 @@ const struct xattr_handler ext4_xattr_user_handler = {
 	.get	= ext4_xattr_user_get,
 	.set	= ext4_xattr_user_set,
 };
+
+#if IS_ENABLED(CONFIG_EXT4_KUNIT_TESTS)
+EXPORT_SYMBOL_FOR_EXT4_TEST(ext4_xattr_user_handler);
+#endif

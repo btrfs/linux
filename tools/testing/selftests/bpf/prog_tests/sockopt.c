@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+#include <linux/tcp.h>
 #include <test_progs.h>
 #include <io_uring/mini_liburing.h>
 #include "cgroup_helpers.h"
@@ -282,6 +283,27 @@ static struct sockopt_test {
 
 		.error = EFAULT_GETSOCKOPT,
 		.io_uring_support = true,
+	},
+	{
+		.descr = "getsockopt: deny negative ctx->optlen in TCP_ZEROCOPY_RECEIVE",
+		.insns = {
+			/* ctx->optlen = -1 */
+			BPF_MOV64_IMM(BPF_REG_0, -1),
+			BPF_STX_MEM(BPF_W, BPF_REG_1, BPF_REG_0,
+				    offsetof(struct bpf_sockopt, optlen)),
+
+			/* return 1 */
+			BPF_MOV64_IMM(BPF_REG_0, 1),
+			BPF_EXIT_INSN(),
+		},
+		.attach_type = BPF_CGROUP_GETSOCKOPT,
+		.expected_attach_type = BPF_CGROUP_GETSOCKOPT,
+
+		.get_level = IPPROTO_TCP,
+		.get_optname = TCP_ZEROCOPY_RECEIVE,
+		.get_optlen = sizeof(struct tcp_zerocopy_receive),
+
+		.error = EFAULT_GETSOCKOPT,
 	},
 	{
 		.descr = "getsockopt: ignore >PAGE_SIZE optlen",
@@ -933,7 +955,7 @@ static struct sockopt_test {
 	/* ==================== prog_type ====================  */
 
 	{
-		.descr = "can attach only BPF_CGROUP_SETSOCKOP",
+		.descr = "can attach only BPF_CGROUP_SETSOCKOPT",
 		.insns = {
 			/* return 1 */
 			BPF_MOV64_IMM(BPF_REG_0, 1),
@@ -947,7 +969,7 @@ static struct sockopt_test {
 	},
 
 	{
-		.descr = "can attach only BPF_CGROUP_GETSOCKOP",
+		.descr = "can attach only BPF_CGROUP_GETSOCKOPT",
 		.insns = {
 			/* return 1 */
 			BPF_MOV64_IMM(BPF_REG_0, 1),

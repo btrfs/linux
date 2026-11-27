@@ -233,7 +233,7 @@ static int seesaw_probe(struct i2c_client *client)
 	/* Wait for the registers to reset before proceeding */
 	usleep_range(10000, 15000);
 
-	seesaw = devm_kzalloc(&client->dev, sizeof(*seesaw), GFP_KERNEL);
+	seesaw = devm_kzalloc_obj(&client->dev, *seesaw);
 	if (!seesaw)
 		return -ENOMEM;
 
@@ -304,7 +304,7 @@ static int seesaw_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id seesaw_id_table[] = {
-	{ SEESAW_DEVICE_NAME },
+	{ .name = SEESAW_DEVICE_NAME },
 	{ /* Sentinel */ }
 };
 MODULE_DEVICE_TABLE(i2c, seesaw_id_table);

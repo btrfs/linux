@@ -10,7 +10,6 @@
 #include <linux/firmware/qcom/qcom_scm.h>
 #include <linux/iopoll.h>
 #include <linux/list.h>
-#include <linux/mod_devicetable.h>
 #include <linux/mutex.h>
 #include <linux/platform_device.h>
 #include <linux/ratelimit.h>
@@ -480,7 +479,7 @@ int qcom_tbu_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct qcom_tbu *tbu;
 
-	tbu = devm_kzalloc(dev, sizeof(*tbu), GFP_KERNEL);
+	tbu = devm_kzalloc_obj(dev, *tbu);
 	if (!tbu)
 		return -ENOMEM;
 

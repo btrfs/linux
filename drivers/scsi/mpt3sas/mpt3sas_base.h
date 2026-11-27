@@ -147,6 +147,7 @@
 #define INTERNAL_CMDS_COUNT		10	/* reserved cmds */
 /* reserved for issuing internally framed scsi io cmds */
 #define INTERNAL_SCSIIO_CMDS_COUNT	3
+#define INTERNAL_SCSIIO_FOR_DISCOVERY	2
 
 #define MPI3_HIM_MASK			0xFFFFFFFF /* mask every bit*/
 
@@ -480,6 +481,7 @@ struct MPT3SAS_DEVICE {
 	u32	flags;
 	u8	configured_lun;
 	u8	block;
+	u8	deleted;
 	u8	tlr_snoop_check;
 	u8	ignore_delay_remove;
 	/* Iopriority Command Handling */
@@ -577,7 +579,9 @@ struct _sas_device {
 	u8	chassis_slot;
 	u8	is_chassis_slot_valid;
 	u8	connector_name[5];
+	u8	ssd_device;
 	struct kref refcount;
+
 	u8	port_type;
 	struct hba_port *port;
 	struct sas_rphy *rphy;
@@ -1159,9 +1163,8 @@ typedef void (*MPT3SAS_FLUSH_RUNNING_CMDS)(struct MPT3SAS_ADAPTER *ioc);
  * @mask_interrupts: ignore interrupt
  * @pci_access_mutex: Mutex to synchronize ioctl, sysfs show path and
  *			pci resource handling
- * @fault_reset_work_q_name: fw fault work queue
- * @fault_reset_work_q: ""
- * @fault_reset_work: ""
+ * @fault_reset_work_q: fw fault workqueue
+ * @fault_reset_work: fw fault work
  * @firmware_event_thread: fw event work queue
  * @fw_event_lock:
  * @fw_event_list: list of fw events
@@ -1345,7 +1348,6 @@ struct MPT3SAS_ADAPTER {
 	u8		mask_interrupts;
 
 	/* fw fault handler */
-	char		fault_reset_work_q_name[20];
 	struct workqueue_struct *fault_reset_work_q;
 	struct delayed_work fault_reset_work;
 
@@ -1627,6 +1629,9 @@ struct MPT3SAS_ADAPTER {
 	u8		is_aero_ioc;
 	struct dentry	*debugfs_root;
 	struct dentry	*ioc_dump;
+#if IS_REACHABLE(CONFIG_HWMON)
+	struct mpt3sas_hwmon *hwmon;
+#endif
 	PUT_SMID_IO_FP_HIP put_smid_scsi_io;
 	PUT_SMID_IO_FP_HIP put_smid_fast_path;
 	PUT_SMID_IO_FP_HIP put_smid_hi_priority;
@@ -1902,6 +1907,9 @@ int mpt3sas_config_get_iounit_pg3(struct MPT3SAS_ADAPTER *ioc,
 	Mpi2ConfigReply_t *mpi_reply, Mpi2IOUnitPage3_t *config_page, u16 sz);
 int mpt3sas_config_set_iounit_pg1(struct MPT3SAS_ADAPTER *ioc, Mpi2ConfigReply_t
 	*mpi_reply, Mpi2IOUnitPage1_t *config_page);
+int mpt3sas_config_get_iounit_pg7(struct MPT3SAS_ADAPTER *ioc,
+				  Mpi2ConfigReply_t *mpi_reply,
+				  Mpi2IOUnitPage7_t *config_page);
 int mpt3sas_config_get_iounit_pg8(struct MPT3SAS_ADAPTER *ioc, Mpi2ConfigReply_t
 	*mpi_reply, Mpi2IOUnitPage8_t *config_page);
 int mpt3sas_config_get_sas_iounit_pg1(struct MPT3SAS_ADAPTER *ioc,
@@ -2044,6 +2052,20 @@ void mpt3sas_setup_debugfs(struct MPT3SAS_ADAPTER *ioc);
 void mpt3sas_destroy_debugfs(struct MPT3SAS_ADAPTER *ioc);
 void mpt3sas_init_debugfs(void);
 void mpt3sas_exit_debugfs(void);
+
+#if IS_REACHABLE(CONFIG_HWMON)
+int mpt3sas_hwmon_register(struct MPT3SAS_ADAPTER *ioc);
+void mpt3sas_hwmon_unregister(struct MPT3SAS_ADAPTER *ioc);
+#else
+static inline int mpt3sas_hwmon_register(struct MPT3SAS_ADAPTER *ioc)
+{
+	return 0;
+}
+
+static inline void mpt3sas_hwmon_unregister(struct MPT3SAS_ADAPTER *ioc)
+{
+}
+#endif
 
 /**
  * _scsih_is_pcie_scsi_device - determines if device is an pcie scsi device

@@ -11,7 +11,6 @@
 #include <linux/bitfield.h>
 #include <linux/device.h>
 #include <linux/io.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -423,6 +422,9 @@ static int eic7700_pin_config_set(struct pinctrl_dev *pctldev, unsigned int pin,
 			else
 				value &= ~EIC7700_ST;
 			break;
+		/* All pins are persistent over suspend */
+		case PIN_CONFIG_PERSIST_STATE:
+			return 0;
 		default:
 			return -EOPNOTSUPP;
 		}
@@ -577,7 +579,7 @@ static int eic7700_pinctrl_init_function_groups(struct device *dev, struct eic77
 		}
 	}
 
-	groups = devm_kcalloc(dev, ngroups, sizeof(*groups), GFP_KERNEL);
+	groups = devm_kzalloc_objs(dev, *groups, ngroups);
 	if (!groups)
 		return -ENOMEM;
 
@@ -625,7 +627,7 @@ static int eic7700_pinctrl_probe(struct platform_device *pdev)
 	u32 rgmii0_mode, rgmii1_mode;
 	int ret, voltage;
 
-	pc = devm_kzalloc(dev, struct_size(pc, functions, EIC7700_FUNCTIONS_COUNT), GFP_KERNEL);
+	pc = devm_kzalloc_flex(dev, *pc, functions, EIC7700_FUNCTIONS_COUNT);
 	if (!pc)
 		return -ENOMEM;
 

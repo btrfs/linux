@@ -14,6 +14,7 @@
 
 /dts-v1/;
 
+#include <dt-bindings/leds/common.h>
 #include "rk3399-nanopi4.dtsi"
 
 / {
@@ -25,19 +26,22 @@
 		/delete-node/ led-0;
 
 		lan_led: led-lan {
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_LAN;
 			gpios = <&gpio1 RK_PA1 GPIO_ACTIVE_HIGH>;
-			label = "green:lan";
 		};
 
 		sys_led: led-sys {
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_STATUS;
 			gpios = <&gpio0 RK_PB5 GPIO_ACTIVE_HIGH>;
-			label = "red:power";
 			default-state = "on";
 		};
 
 		wan_led: led-wan {
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_WAN;
 			gpios = <&gpio1 RK_PA0 GPIO_ACTIVE_HIGH>;
-			label = "green:wan";
 		};
 	};
 
@@ -66,17 +70,41 @@
 	status = "disabled";
 };
 
+/* No USB type-C PD power manager */
+/delete-node/ &fusb0;
+
+&i2c1 {
+	status = "disabled";
+};
+
 &i2c4 {
 	status = "disabled";
 };
 
+&i2c7 {
+	status = "disabled";
+};
+
+&i2s2 {
+	status = "disabled";
+};
+
+&hdmi {
+	status = "disabled";
+};
+
+&hdmi_sound {
+	status = "disabled";
+};
+
 &pcie0 {
-	max-link-speed = <1>;
 	num-lanes = <1>;
 	vpcie3v3-supply = <&vcc3v3_sys>;
 };
 
 &pinctrl {
+	/delete-node/ fusb30x;
+
 	gpio-leds {
 		/delete-node/ status-led-pin;
 
@@ -102,13 +130,20 @@
 	};
 };
 
+&pwm0 {
+	status = "disabled";
+};
+
 &sdhci {
 	status = "disabled";
 };
 
 &sdio0 {
+	/delete-property/ mmc-pwrseq;
 	status = "disabled";
 };
+
+/delete-node/ &sdio_pwrseq;
 
 &u2phy0_host {
 	phy-supply = <&vdd_5v>;
@@ -120,12 +155,48 @@
 
 &uart0 {
 	status = "disabled";
+
+	/delete-node/ bluetooth;
 };
 
+&u2phy1_host {
+	status = "disabled";
+};
+
+&usb_host1_ehci {
+	status = "disabled";
+};
+
+&usb_host1_ohci {
+	status = "disabled";
+};
 &usbdrd_dwc3_0 {
 	dr_mode = "host";
 };
 
+/delete-node/ &vbus_typec;
+
 &vcc3v3_sys {
 	vin-supply = <&vcc5v0_sys>;
 };
+
+&vopb {
+	status = "disabled";
+};
+
+&vopb_mmu {
+	status = "disabled";
+};
+
+&vopl {
+	status = "disabled";
+};
+
+&vopl_mmu {
+	status = "disabled";
+};
+
+/delete-node/ &bt_host_wake_l;
+/delete-node/ &bt_reg_on_h;
+/delete-node/ &bt_wake_l;
+/delete-node/ &wifi_reg_on_h;

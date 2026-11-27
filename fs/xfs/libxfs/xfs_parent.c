@@ -3,7 +3,7 @@
  * Copyright (c) 2022-2024 Oracle.
  * All rights reserved.
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_format.h"
 #include "xfs_da_format.h"
@@ -23,12 +23,12 @@
 #include "xfs_attr_sf.h"
 #include "xfs_bmap.h"
 #include "xfs_defer.h"
-#include "xfs_log.h"
 #include "xfs_xattr.h"
 #include "xfs_parent.h"
 #include "xfs_trans_space.h"
 #include "xfs_attr_item.h"
 #include "xfs_health.h"
+#include "xfs_attr_leaf.h"
 
 struct kmem_cache		*xfs_parent_args_cache;
 
@@ -193,7 +193,7 @@ xfs_parent_addname(
 	const struct xfs_name	*parent_name,
 	struct xfs_inode	*child)
 {
-	int			error;
+	int			error, local;
 
 	error = xfs_parent_iread_extents(tp, child);
 	if (error)
@@ -201,9 +201,13 @@ xfs_parent_addname(
 
 	xfs_inode_to_parent_rec(&ppargs->rec, dp);
 	xfs_parent_da_args_init(&ppargs->args, tp, &ppargs->rec, child,
-			child->i_ino, parent_name);
-	xfs_attr_defer_add(&ppargs->args, XFS_ATTR_DEFER_SET);
-	return 0;
+			I_INO(child), parent_name);
+
+	/* Growing the attr fork needs a real reservation in args->total. */
+	ppargs->args.total = xfs_attr_calc_size(&ppargs->args, &local);
+	ASSERT(local);
+
+	return xfs_attr_setname(&ppargs->args, 0);
 }
 
 /* Remove a parent pointer to reflect a dirent removal. */
@@ -223,9 +227,9 @@ xfs_parent_removename(
 
 	xfs_inode_to_parent_rec(&ppargs->rec, dp);
 	xfs_parent_da_args_init(&ppargs->args, tp, &ppargs->rec, child,
-			child->i_ino, parent_name);
-	xfs_attr_defer_add(&ppargs->args, XFS_ATTR_DEFER_REMOVE);
-	return 0;
+			I_INO(child), parent_name);
+
+	return xfs_attr_removename(&ppargs->args);
 }
 
 /* Replace one parent pointer with another to reflect a rename. */
@@ -239,7 +243,7 @@ xfs_parent_replacename(
 	const struct xfs_name	*new_name,
 	struct xfs_inode	*child)
 {
-	int			error;
+	int			error, local;
 
 	error = xfs_parent_iread_extents(tp, child);
 	if (error)
@@ -247,15 +251,20 @@ xfs_parent_replacename(
 
 	xfs_inode_to_parent_rec(&ppargs->rec, old_dp);
 	xfs_parent_da_args_init(&ppargs->args, tp, &ppargs->rec, child,
-			child->i_ino, old_name);
+			I_INO(child), old_name);
+
+	/* Growing the attr fork needs a real reservation in args->total. */
+	ppargs->args.total = xfs_attr_calc_size(&ppargs->args, &local);
+	ASSERT(local);
 
 	xfs_inode_to_parent_rec(&ppargs->new_rec, new_dp);
+
 	ppargs->args.new_name = new_name->name;
 	ppargs->args.new_namelen = new_name->len;
 	ppargs->args.new_value = &ppargs->new_rec;
 	ppargs->args.new_valuelen = sizeof(struct xfs_parent_rec);
-	xfs_attr_defer_add(&ppargs->args, XFS_ATTR_DEFER_REPLACE);
-	return 0;
+
+	return xfs_attr_replacename(&ppargs->args, 0);
 }
 
 /*
@@ -310,7 +319,7 @@ xfs_parent_lookup(
 	struct xfs_da_args		*scratch)
 {
 	memset(scratch, 0, sizeof(struct xfs_da_args));
-	xfs_parent_da_args_init(scratch, tp, pptr, ip, ip->i_ino, parent_name);
+	xfs_parent_da_args_init(scratch, tp, pptr, ip, I_INO(ip), parent_name);
 	return xfs_attr_get_ilocked(scratch);
 }
 

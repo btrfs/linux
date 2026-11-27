@@ -17,7 +17,7 @@
 #include <linux/irq.h>
 #include <linux/irq_sim.h>
 #include <linux/irqdomain.h>
-#include <linux/mod_devicetable.h>
+#include <linux/limits.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -381,7 +381,7 @@ static void gpio_mockup_debugfs_setup(struct device *dev,
 		if (!name)
 			return;
 
-		priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+		priv = devm_kzalloc_obj(dev, *priv);
 		if (!priv)
 			return;
 
@@ -436,7 +436,7 @@ static int gpio_mockup_probe(struct platform_device *pdev)
 	if (rv)
 		name = dev_name(dev);
 
-	chip = devm_kzalloc(dev, sizeof(*chip), GFP_KERNEL);
+	chip = devm_kzalloc_obj(dev, *chip);
 	if (!chip)
 		return -ENOMEM;
 
@@ -460,8 +460,7 @@ static int gpio_mockup_probe(struct platform_device *pdev)
 	gc->request = gpio_mockup_request;
 	gc->free = gpio_mockup_free;
 
-	chip->lines = devm_kcalloc(dev, gc->ngpio,
-				   sizeof(*chip->lines), GFP_KERNEL);
+	chip->lines = devm_kzalloc_objs(dev, *chip->lines, gc->ngpio);
 	if (!chip->lines)
 		return -ENOMEM;
 
@@ -578,7 +577,7 @@ static int __init gpio_mockup_register_chip(int idx)
 
 static int __init gpio_mockup_init(void)
 {
-	int i, num_chips, err;
+	int i, num_chips, err, base, ngpio;
 
 	if ((gpio_mockup_num_ranges % 2) ||
 	    (gpio_mockup_num_ranges > GPIO_MOCKUP_MAX_RANGES))
@@ -592,8 +591,19 @@ static int __init gpio_mockup_init(void)
 	 * always be greater than 0.
 	 */
 	for (i = 0; i < num_chips; i++) {
-		if (gpio_mockup_range_ngpio(i) < 0)
+		base = gpio_mockup_range_base(i);
+		ngpio = gpio_mockup_range_ngpio(i);
+
+		if (ngpio <= 0)
 			return -EINVAL;
+
+		if (base < 0) {
+			if (ngpio > U16_MAX)
+				return -EINVAL;
+		} else {
+			if (ngpio <= base || ngpio - base > U16_MAX)
+				return -EINVAL;
+		}
 	}
 
 	gpio_mockup_dbg_dir = debugfs_create_dir("gpio-mockup", NULL);

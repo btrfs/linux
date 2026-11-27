@@ -8,11 +8,25 @@ $schema: http://devicetree.org/meta-schemas/core.yaml#
 title: Imagination Technologies PowerVR and IMG Rogue GPUs
 
 maintainers:
-  - Frank Binns <frank.binns@imgtec.com>
+  - Alessio Belle <alessio.belle@imgtec.com>
+  - Luigi Santivetti <luigi.santivetti@imgtec.com>
 
 properties:
   compatible:
     oneOf:
+      - items:
+          - enum:
+              - mediatek,mt8173-gpu
+              - renesas,r8a7796-gpu
+              - renesas,r8a77961-gpu
+          - const: img,img-gx6250
+          - const: img,img-rogue
+      - items:
+          - enum:
+              - renesas,r8a77965-gpu
+              - renesas,r8a779a0-gpu
+          - const: img,img-ge7800
+          - const: img,img-rogue
       - items:
           - enum:
               - ti,am62-gpu
@@ -23,11 +37,18 @@ properties:
           - const: img,img-rogue
       - items:
           - enum:
+              - spacemit,k1-gpu
+          - const: img,img-bxe-2-32
+          - const: img,img-rogue
+      - items:
+          - enum:
+              - spacemit,k3-gpu
               - thead,th1520-gpu
           - const: img,img-bxm-4-64
           - const: img,img-rogue
       - items:
           - enum:
+              - ti,am62p-gpu
               - ti,j721s2-gpu
           - const: img,img-bxs-4-64
           - const: img,img-rogue
@@ -86,12 +107,41 @@ allOf:
       properties:
         compatible:
           contains:
+            enum:
+              - spacemit,k1-gpu
+              - spacemit,k3-gpu
+              - ti,am62-gpu
+              - ti,am62p-gpu
+              - ti,j721s2-gpu
+    then:
+      properties:
+        clocks:
+          maxItems: 1
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - img,img-ge7800
+              - img,img-gx6250
+              - thead,th1520-gpu
+    then:
+      properties:
+        clocks:
+          minItems: 3
+        clock-names:
+          minItems: 3
+
+  - if:
+      properties:
+        compatible:
+          contains:
             const: img,img-axe-1-16m
     then:
       properties:
         power-domains:
-          items:
-            - description: Power domain A
+          maxItems: 1
         power-domain-names:
           maxItems: 1
       required:
@@ -102,32 +152,14 @@ allOf:
       properties:
         compatible:
           contains:
-            const: thead,th1520-gpu
-    then:
-      properties:
-        clocks:
-          minItems: 3
-        clock-names:
-          minItems: 3
-        power-domains:
-          items:
-            - description: The single, unified power domain for the GPU on the
-                TH1520 SoC, integrating all internal IP power domains.
-        power-domain-names: false
-      required:
-        - power-domains
-
-  - if:
-      properties:
-        compatible:
-          contains:
-            const: img,img-bxs-4-64
+            enum:
+              - img,img-bxs-4-64
+              - img,img-ge7800
+              - img,img-gx6250
     then:
       properties:
         power-domains:
-          items:
-            - description: Power domain A
-            - description: Power domain B
+          minItems: 2
         power-domain-names:
           minItems: 2
       required:
@@ -139,12 +171,18 @@ allOf:
         compatible:
           contains:
             enum:
-              - ti,am62-gpu
-              - ti,j721s2-gpu
+              - spacemit,k1-gpu
+              - spacemit,k3-gpu
+              - thead,th1520-gpu
     then:
       properties:
-        clocks:
-          maxItems: 1
+        power-domains:
+          items:
+            - description: The single, unified power domain for the GPU,
+                integrating all internal IP power domains.
+        power-domain-names: false
+      required:
+        - power-domains
 
 examples:
   - |

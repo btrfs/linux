@@ -339,14 +339,14 @@ static int hisi_spi_nor_register(struct device_node *np,
 	struct mtd_info *mtd;
 	int ret;
 
-	nor = devm_kzalloc(dev, sizeof(*nor), GFP_KERNEL);
+	nor = devm_kzalloc_obj(dev, *nor);
 	if (!nor)
 		return -ENOMEM;
 
 	nor->dev = dev;
 	spi_nor_set_flash_node(nor, np);
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -394,19 +394,15 @@ static void hisi_spi_nor_unregister_all(struct hifmc_host *host)
 static int hisi_spi_nor_register_all(struct hifmc_host *host)
 {
 	struct device *dev = host->dev;
-	struct device_node *np;
 	int ret;
 
-	for_each_available_child_of_node(dev->of_node, np) {
+	for_each_available_child_of_node_scoped(dev->of_node, np) {
 		ret = hisi_spi_nor_register(np, host);
-		if (ret) {
-			of_node_put(np);
+		if (ret)
 			goto fail;
-		}
 
 		if (host->num_chip == HIFMC_MAX_CHIP_NUM) {
 			dev_warn(dev, "Flash device number exceeds the maximum chipselect number\n");
-			of_node_put(np);
 			break;
 		}
 	}
@@ -424,7 +420,7 @@ static int hisi_spi_nor_probe(struct platform_device *pdev)
 	struct hifmc_host *host;
 	int ret;
 
-	host = devm_kzalloc(dev, sizeof(*host), GFP_KERNEL);
+	host = devm_kzalloc_obj(dev, *host);
 	if (!host)
 		return -ENOMEM;
 

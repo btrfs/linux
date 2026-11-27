@@ -206,7 +206,7 @@ static void init_header(struct ctl_table_header *head,
 	head->node = node;
 	INIT_HLIST_HEAD(&head->inodes);
 	if (node) {
-		const struct ctl_table *entry;
+		const struct ctl_table *entry __maybe_unused;
 
 		list_for_each_table_entry(entry, head) {
 			node->header = head;
@@ -557,6 +557,8 @@ static ssize_t proc_sys_call_handler(struct kiocb *iocb, struct iov_iter *iter,
 	struct ctl_table_header *head = grab_header(inode);
 	const struct ctl_table *table = PROC_I(inode)->sysctl_entry;
 	size_t count = iov_iter_count(iter);
+	/* ->write_iter() must never report more than the iterator held */
+	size_t orig_count = count;
 	char *kbuf;
 	ssize_t error;
 
@@ -607,7 +609,8 @@ static ssize_t proc_sys_call_handler(struct kiocb *iocb, struct iov_iter *iter,
 			goto out_free_buf;
 	}
 
-	error = count;
+	/* the write path consumed at most the original iterator length */
+	error = write ? min(count, orig_count) : count;
 out_free_buf:
 	kvfree(kbuf);
 out:
@@ -692,8 +695,7 @@ static bool proc_sys_fill_cache(struct file *file,
 
 	child = d_lookup(dir, &qname);
 	if (!child) {
-		DECLARE_WAIT_QUEUE_HEAD_ONSTACK(wq);
-		child = d_alloc_parallel(dir, &qname, &wq);
+		child = d_alloc_parallel(dir, &qname);
 		if (IS_ERR(child))
 			return false;
 		if (d_in_lookup(child)) {
@@ -789,7 +791,7 @@ out:
 	return 0;
 }
 
-static int proc_sys_permission(struct mnt_idmap *idmap,
+static int proc_sys_permission(const struct mnt_idmap *idmap,
 			       struct inode *inode, int mask)
 {
 	/*
@@ -818,7 +820,7 @@ static int proc_sys_permission(struct mnt_idmap *idmap,
 	return error;
 }
 
-static int proc_sys_setattr(struct mnt_idmap *idmap,
+static int proc_sys_setattr(const struct mnt_idmap *idmap,
 			    struct dentry *dentry, struct iattr *attr)
 {
 	struct inode *inode = d_inode(dentry);
@@ -835,7 +837,7 @@ static int proc_sys_setattr(struct mnt_idmap *idmap,
 	return 0;
 }
 
-static int proc_sys_getattr(struct mnt_idmap *idmap,
+static int proc_sys_getattr(const struct mnt_idmap *idmap,
 			    const struct path *path, struct kstat *stat,
 			    u32 request_mask, unsigned int query_flags)
 {

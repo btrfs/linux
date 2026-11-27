@@ -15,11 +15,9 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define MAX_INLINE_NEST 1024
-
-/* If addr2line doesn't return data for 1 second then timeout. */
-int addr2line_timeout_ms = 1 * 1000;
 
 static int filename_split(char *filename, unsigned int *line_nr)
 {
@@ -90,16 +88,16 @@ static struct child_process *addr2line_subprocess_init(const char *addr2line_pat
 	return a2l;
 }
 
-enum a2l_style {
+enum cmd_a2l_style {
 	BROKEN,
 	GNU_BINUTILS,
 	LLVM,
 };
 
-static enum a2l_style addr2line_configure(struct child_process *a2l, const char *dso_name)
+static enum cmd_a2l_style cmd_addr2line_configure(struct child_process *a2l, const char *dso_name)
 {
 	static bool cached;
-	static enum a2l_style style;
+	static enum cmd_a2l_style style;
 
 	if (!cached) {
 		char buf[128];
@@ -123,7 +121,7 @@ static enum a2l_style addr2line_configure(struct child_process *a2l, const char 
 			lines = 3;
 			pr_debug3("Detected binutils addr2line style\n");
 		} else {
-			if (!symbol_conf.disable_add2line_warn) {
+			if (!symbol_conf.addr2line_disable_warn) {
 				char *output = NULL;
 				size_t output_len;
 
@@ -149,7 +147,7 @@ static enum a2l_style addr2line_configure(struct child_process *a2l, const char 
 }
 
 static int read_addr2line_record(struct io *io,
-				 enum a2l_style style,
+				 enum cmd_a2l_style style,
 				 const char *dso_name,
 				 u64 addr,
 				 bool first,
@@ -287,7 +285,7 @@ int cmd__addr2line(const char *dso_name, u64 addr,
 		   struct inline_node *node,
 		   struct symbol *sym __maybe_unused)
 {
-	struct child_process *a2l = dso__a2l(dso);
+	struct child_process *a2l;
 	char *record_function = NULL;
 	char *record_filename = NULL;
 	unsigned int record_line_nr = 0;
@@ -298,25 +296,43 @@ int cmd__addr2line(const char *dso_name, u64 addr,
 	char buf[128];
 	ssize_t written;
 	struct io io = { .eof = false };
-	enum a2l_style a2l_style;
+	enum cmd_a2l_style cmd_a2l_style;
+	const char *current_dso_name;
+	bool a2l_synced = false;
+
+	mutex_lock(dso__lock(dso));
+	current_dso_name = dso__symsrc_filename(dso) ?: dso_name;
+	a2l = dso__a2l(dso);
 
 	if (!a2l) {
-		if (!filename__has_section(dso_name, ".debug_line"))
-			goto out;
+		if (!filename__has_section(current_dso_name, ".debug_line"))
+			goto out_unlock;
 
 		dso__set_a2l(dso,
-			     addr2line_subprocess_init(symbol_conf.addr2line_path, dso_name));
+			     addr2line_subprocess_init(symbol_conf.addr2line_path,
+						       current_dso_name));
 		a2l = dso__a2l(dso);
 	}
 
 	if (a2l == NULL) {
-		if (!symbol_conf.disable_add2line_warn)
+		if (!symbol_conf.addr2line_disable_warn)
 			pr_warning("%s %s: addr2line_subprocess_init failed\n", __func__, dso_name);
-		goto out;
+		ret = -1;
+		goto out_unlock;
 	}
-	a2l_style = addr2line_configure(a2l, dso_name);
-	if (a2l_style == BROKEN)
-		goto out;
+	cmd_a2l_style = cmd_addr2line_configure(a2l, dso_name);
+	if (cmd_a2l_style == BROKEN) {
+		ret = -1;
+		goto out_unlock;
+	}
+
+	/*
+	 * Take ownership of the a2l subprocess so we can safely perform
+	 * blocking IPC without holding the dso lock. If another thread
+	 * resolves a symbol concurrently, it will spawn a new a2l process.
+	 */
+	dso__set_a2l(dso, NULL);
+	mutex_unlock(dso__lock(dso));
 
 	/*
 	 * Send our request and then *deliberately* send something that can't be
@@ -330,17 +346,19 @@ int cmd__addr2line(const char *dso_name, u64 addr,
 	len = snprintf(buf, sizeof(buf), "%016"PRIx64"\n,\n", addr);
 	written = len > 0 ? write(a2l->in, buf, len) : -1;
 	if (written != len) {
-		if (!symbol_conf.disable_add2line_warn)
+		if (!symbol_conf.addr2line_disable_warn)
 			pr_warning("%s %s: could not send request\n", __func__, dso_name);
+		ret = -1;
 		goto out;
 	}
 	io__init(&io, a2l->out, buf, sizeof(buf));
-	io.timeout_ms = addr2line_timeout_ms;
-	switch (read_addr2line_record(&io, a2l_style, dso_name, addr, /*first=*/true,
+	io.timeout_ms = symbol_conf.addr2line_timeout_ms;
+	switch (read_addr2line_record(&io, cmd_a2l_style, dso_name, addr, /*first=*/true,
 				      &record_function, &record_filename, &record_line_nr)) {
 	case -1:
-		if (!symbol_conf.disable_add2line_warn)
+		if (!symbol_conf.addr2line_disable_warn)
 			pr_warning("%s %s: could not read first record\n", __func__, dso_name);
+		ret = -1;
 		goto out;
 	case 0:
 		/*
@@ -351,19 +369,20 @@ int cmd__addr2line(const char *dso_name, u64 addr,
 		 * binutils, also force a non-zero address as we're no longer
 		 * reading that record.
 		 */
-		switch (read_addr2line_record(&io, a2l_style, dso_name,
+		switch (read_addr2line_record(&io, cmd_a2l_style, dso_name,
 					      /*addr=*/1, /*first=*/true,
 					      NULL, NULL, NULL)) {
 		case -1:
-			if (!symbol_conf.disable_add2line_warn)
+			if (!symbol_conf.addr2line_disable_warn)
 				pr_warning("%s %s: could not read sentinel record\n",
 					   __func__, dso_name);
 			break;
 		case 0:
 			/* The sentinel as expected. */
+			a2l_synced = true;
 			break;
 		default:
-			if (!symbol_conf.disable_add2line_warn)
+			if (!symbol_conf.addr2line_disable_warn)
 				pr_warning("%s %s: unexpected record instead of sentinel",
 					   __func__, dso_name);
 			break;
@@ -376,17 +395,23 @@ int cmd__addr2line(const char *dso_name, u64 addr,
 
 	if (file) {
 		*file = strdup(record_filename);
-		ret = 1;
+		if (!*file) {
+			ret = -ENOMEM;
+			goto out;
+		}
 	}
 	if (line_nr)
 		*line_nr = record_line_nr;
+	ret = 1;
 
 	if (unwind_inlines) {
 		if (node && inline_list__append_record(dso, node, sym,
 						       record_function,
 						       record_filename,
 						       record_line_nr)) {
-			ret = 0;
+			if (file && *file)
+				zfree(file);
+			ret = -ENOMEM;
 			goto out;
 		}
 	}
@@ -397,7 +422,7 @@ int cmd__addr2line(const char *dso_name, u64 addr,
 	 * as we're reading records beyond the first.
 	 */
 	while ((record_status = read_addr2line_record(&io,
-						      a2l_style,
+						      cmd_a2l_style,
 						      dso_name,
 						      /*addr=*/1,
 						      /*first=*/false,
@@ -409,20 +434,34 @@ int cmd__addr2line(const char *dso_name, u64 addr,
 						       record_function,
 						       record_filename,
 						       record_line_nr)) {
-				ret = 0;
+				if (file && *file)
+					zfree(file);
+				inline_node__clear_frames(node);
+				ret = -ENOMEM;
 				goto out;
 			}
 			ret = 1; /* found at least one inline frame */
 		}
 	}
+	if (record_status == 0)
+		a2l_synced = true;
 
 out:
+	mutex_lock(dso__lock(dso));
 	free(record_function);
 	free(record_filename);
-	if (io.eof) {
-		dso__set_a2l(dso, NULL);
+
+	current_dso_name = dso__symsrc_filename(dso) ?: dso__long_name(dso);
+	if (a2l_synced && !io.eof && dso__a2l(dso) == NULL && current_dso_name &&
+	    !strcmp(current_dso_name, dso_name))
+		dso__set_a2l(dso, a2l);
+	else
 		addr2line_subprocess_cleanup(a2l);
-	}
+	mutex_unlock(dso__lock(dso));
+	return ret;
+
+out_unlock:
+	mutex_unlock(dso__lock(dso));
 	return ret;
 }
 

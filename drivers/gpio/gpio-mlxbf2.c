@@ -14,7 +14,6 @@
 #include <linux/io.h>
 #include <linux/ioport.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
@@ -129,12 +128,20 @@ exit:
  * Acquire the YU arm_gpio_lock to be able to change the direction
  * mode. If the lock_active bit is already set, return an error.
  */
-static int mlxbf2_gpio_lock_acquire(struct mlxbf2_gpio_context *gs)
+static int mlxbf2_gpio_lock_acquire(struct mlxbf2_gpio_context *gs,
+				    unsigned long *flags)
 {
 	u32 arm_gpio_lock_val;
 
 	mutex_lock(yu_arm_gpio_lock_param.lock);
-	gpio_generic_chip_lock(&gs->chip);
+	/*
+	 * Disable interrupts before taking the chip lock. The GPIO irq
+	 * callbacks take this lock while holding the irq descriptor lock,
+	 * and the irq handler takes the descriptor lock in hardirq context.
+	 * A plain spin_lock() here lets lockdep report an inversion, and
+	 * can deadlock if a GPIO interrupt arrives on this CPU.
+	 */
+	gpio_generic_chip_lock_irqsave(&gs->chip, *flags);
 
 	arm_gpio_lock_val = readl(yu_arm_gpio_lock_param.io);
 
@@ -142,7 +149,7 @@ static int mlxbf2_gpio_lock_acquire(struct mlxbf2_gpio_context *gs)
 	 * When lock active bit[31] is set, ModeX is write enabled
 	 */
 	if (YU_LOCK_ACTIVE_BIT(arm_gpio_lock_val)) {
-		gpio_generic_chip_unlock(&gs->chip);
+		gpio_generic_chip_unlock_irqrestore(&gs->chip, *flags);
 		mutex_unlock(yu_arm_gpio_lock_param.lock);
 		return -EINVAL;
 	}
@@ -155,12 +162,13 @@ static int mlxbf2_gpio_lock_acquire(struct mlxbf2_gpio_context *gs)
 /*
  * Release the YU arm_gpio_lock after changing the direction mode.
  */
-static void mlxbf2_gpio_lock_release(struct mlxbf2_gpio_context *gs)
+static void mlxbf2_gpio_lock_release(struct mlxbf2_gpio_context *gs,
+				     unsigned long flags)
 	__releases(&gs->chip.lock)
 	__releases(yu_arm_gpio_lock_param.lock)
 {
 	writel(YU_ARM_GPIO_LOCK_RELEASE, yu_arm_gpio_lock_param.io);
-	gpio_generic_chip_unlock(&gs->chip);
+	gpio_generic_chip_unlock_irqrestore(&gs->chip, flags);
 	mutex_unlock(yu_arm_gpio_lock_param.lock);
 }
 
@@ -186,20 +194,21 @@ static int mlxbf2_gpio_direction_input(struct gpio_chip *chip,
 				       unsigned int offset)
 {
 	struct mlxbf2_gpio_context *gs = gpiochip_get_data(chip);
+	unsigned long flags;
 	int ret;
 
 	/*
 	 * Although the arm_gpio_lock was set in the probe function, check again
 	 * if it is still enabled to be able to write to the ModeX registers.
 	 */
-	ret = mlxbf2_gpio_lock_acquire(gs);
+	ret = mlxbf2_gpio_lock_acquire(gs, &flags);
 	if (ret < 0)
 		return ret;
 
 	writel(BIT(offset), gs->gpio_io + YU_GPIO_MODE0_CLEAR);
 	writel(BIT(offset), gs->gpio_io + YU_GPIO_MODE1_CLEAR);
 
-	mlxbf2_gpio_lock_release(gs);
+	mlxbf2_gpio_lock_release(gs, flags);
 
 	return ret;
 }
@@ -213,6 +222,7 @@ static int mlxbf2_gpio_direction_output(struct gpio_chip *chip,
 					int value)
 {
 	struct mlxbf2_gpio_context *gs = gpiochip_get_data(chip);
+	unsigned long flags;
 	int ret = 0;
 
 	/*
@@ -220,14 +230,14 @@ static int mlxbf2_gpio_direction_output(struct gpio_chip *chip,
 	 * check again it is still enabled to be able to write to the
 	 * ModeX registers.
 	 */
-	ret = mlxbf2_gpio_lock_acquire(gs);
+	ret = mlxbf2_gpio_lock_acquire(gs, &flags);
 	if (ret < 0)
 		return ret;
 
 	writel(BIT(offset), gs->gpio_io + YU_GPIO_MODE1_CLEAR);
 	writel(BIT(offset), gs->gpio_io + YU_GPIO_MODE0_SET);
 
-	mlxbf2_gpio_lock_release(gs);
+	mlxbf2_gpio_lock_release(gs, flags);
 
 	return ret;
 }
@@ -357,7 +367,7 @@ mlxbf2_gpio_probe(struct platform_device *pdev)
 
 	name = dev_name(dev);
 
-	gs = devm_kzalloc(dev, sizeof(*gs), GFP_KERNEL);
+	gs = devm_kzalloc_obj(dev, *gs);
 	if (!gs)
 		return -ENOMEM;
 
@@ -395,7 +405,9 @@ mlxbf2_gpio_probe(struct platform_device *pdev)
 	gc->owner = THIS_MODULE;
 
 	irq = platform_get_irq_optional(pdev, 0);
-	if (irq >= 0) {
+	if (irq < 0 && irq != -ENXIO)
+		return irq;
+	if (irq > 0) {
 		girq = &gs->chip.gc.irq;
 		gpio_irq_chip_set_chip(girq, &mlxbf2_gpio_irq_chip);
 		girq->handler = handle_simple_irq;
@@ -424,7 +436,7 @@ mlxbf2_gpio_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int __maybe_unused mlxbf2_gpio_suspend(struct device *dev)
+static int mlxbf2_gpio_suspend(struct device *dev)
 {
 	struct mlxbf2_gpio_context *gs = dev_get_drvdata(dev);
 
@@ -436,7 +448,7 @@ static int __maybe_unused mlxbf2_gpio_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused mlxbf2_gpio_resume(struct device *dev)
+static int mlxbf2_gpio_resume(struct device *dev)
 {
 	struct mlxbf2_gpio_context *gs = dev_get_drvdata(dev);
 
@@ -447,7 +459,7 @@ static int __maybe_unused mlxbf2_gpio_resume(struct device *dev)
 
 	return 0;
 }
-static SIMPLE_DEV_PM_OPS(mlxbf2_pm_ops, mlxbf2_gpio_suspend, mlxbf2_gpio_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(mlxbf2_pm_ops, mlxbf2_gpio_suspend, mlxbf2_gpio_resume);
 
 static const struct acpi_device_id __maybe_unused mlxbf2_gpio_acpi_match[] = {
 	{ "MLNXBF22", 0 },
@@ -459,7 +471,7 @@ static struct platform_driver mlxbf2_gpio_driver = {
 	.driver = {
 		.name = "mlxbf2_gpio",
 		.acpi_match_table = mlxbf2_gpio_acpi_match,
-		.pm = &mlxbf2_pm_ops,
+		.pm = pm_sleep_ptr(&mlxbf2_pm_ops),
 	},
 	.probe    = mlxbf2_gpio_probe,
 };

@@ -62,11 +62,6 @@ bool kvm_arch_vcpu_in_kernel(struct kvm_vcpu *vcpu)
 	return false;
 }
 
-int kvm_arch_vcpu_should_kick(struct kvm_vcpu *vcpu)
-{
-	return 1;
-}
-
 /*
  * Common checks before entering the guest world.  Call with interrupts
  * enabled.
@@ -84,18 +79,29 @@ int kvmppc_prepare_to_enter(struct kvm_vcpu *vcpu)
 	hard_irq_disable();
 
 	while (true) {
-		if (need_resched()) {
-			local_irq_enable();
-			cond_resched();
-			hard_irq_disable();
-			continue;
-		}
+		xfer_to_guest_mode_prepare();
 
-		if (signal_pending(current)) {
-			kvmppc_account_exit(vcpu, SIGNAL_EXITS);
-			vcpu->run->exit_reason = KVM_EXIT_INTR;
-			r = -EINTR;
-			break;
+		if (xfer_to_guest_mode_work_pending()) {
+			/*
+			 * The helper must run with IRQs enabled and may
+			 * schedule(). On a pending signal it returns -EINTR
+			 * with run->exit_reason and vcpu->stat.signal_exits
+			 * already set, so just return to userspace.
+			 */
+			local_irq_enable();
+			r = kvm_xfer_to_guest_mode_handle_work(vcpu);
+			hard_irq_disable();
+			if (r) {
+				/*
+				 * The generic helper does not set the exit
+				 * type; record it for the E500
+				 * CONFIG_KVM_EXIT_TIMING histogram (a no-op
+				 * otherwise).
+				 */
+				kvmppc_set_exit_type(vcpu, SIGNAL_EXITS);
+				break;
+			}
+			continue;
 		}
 
 		vcpu->mode = IN_GUEST_MODE;
@@ -257,6 +263,12 @@ int kvmppc_sanity_check(struct kvm_vcpu *vcpu)
 	/* We have to know what CPU to virtualize */
 	if (!vcpu->arch.pvr)
 		goto out;
+
+#if defined(CONFIG_KVM_BOOK3S_HV_POSSIBLE)
+	if (vcpu->arch.vcore &&
+	    vcpu->arch.vcore->arch_compat == PVR_ARCH_INVALID)
+		goto out;
+#endif
 
 	/* PAPR only works with book3s_64 */
 	if ((vcpu->arch.cpu_type != KVM_CPU_3S_64) && vcpu->arch.papr_enabled)
@@ -623,12 +635,6 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 		r = !!(hv_enabled && kvmppc_hv_ops->enable_nested &&
 		       !kvmppc_hv_ops->enable_nested(NULL));
 		break;
-#endif
-	case KVM_CAP_SYNC_MMU:
-		BUILD_BUG_ON(!IS_ENABLED(CONFIG_KVM_GENERIC_MMU_NOTIFIER));
-		r = 1;
-		break;
-#ifdef CONFIG_KVM_BOOK3S_HV_POSSIBLE
 	case KVM_CAP_PPC_HTAB_FD:
 		r = hv_enabled;
 		break;
@@ -641,15 +647,21 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 		 * implementations just count online CPUs.
 		 */
 		if (hv_enabled)
-			r = min_t(unsigned int, num_present_cpus(), KVM_MAX_VCPUS);
+			r = min(num_present_cpus(), KVM_MAX_VCPUS);
 		else
-			r = min_t(unsigned int, num_online_cpus(), KVM_MAX_VCPUS);
+			r = min(num_online_cpus(), KVM_MAX_VCPUS);
+		if (kvmhv_is_nestedv2())
+			r = min(r, KVM_MAX_VCPU_IDS_NESTEDv2);
 		break;
 	case KVM_CAP_MAX_VCPUS:
 		r = KVM_MAX_VCPUS;
+		if (kvmhv_is_nestedv2())
+			r = min(r, KVM_MAX_VCPU_IDS_NESTEDv2);
 		break;
 	case KVM_CAP_MAX_VCPU_ID:
 		r = KVM_MAX_VCPU_IDS;
+		if (kvmhv_is_nestedv2())
+			r = min(r, KVM_MAX_VCPU_IDS_NESTEDv2);
 		break;
 #ifdef CONFIG_PPC_BOOK3S_64
 	case KVM_CAP_PPC_GET_SMMU_INFO:
@@ -703,6 +715,13 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 			}
 		}
 		break;
+#if defined(CONFIG_KVM_BOOK3S_HV_POSSIBLE)
+	case KVM_CAP_PPC_COMPAT_CAPS:
+		r = 0;
+		if (hv_enabled && kvmhv_on_pseries())
+			r = 1;
+		break;
+#endif /* CONFIG_KVM_BOOK3S_HV_POSSIBLE */
 	default:
 		r = 0;
 		break;
@@ -738,6 +757,17 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
 	kvmppc_core_commit_memory_region(kvm, old, new, change);
 }
 
+void kvm_arch_flush_shadow_all(struct kvm *kvm)
+{
+	struct kvm_memory_slot *slot;
+	struct kvm_memslots *slots;
+	int bkt;
+
+	slots = kvm_memslots(kvm);
+	kvm_for_each_memslot(slot, bkt, slots)
+		kvmppc_core_flush_memslot(kvm, slot);
+}
+
 void kvm_arch_flush_shadow_memslot(struct kvm *kvm,
 				   struct kvm_memory_slot *slot)
 {
@@ -746,6 +776,9 @@ void kvm_arch_flush_shadow_memslot(struct kvm *kvm,
 
 int kvm_arch_vcpu_precreate(struct kvm *kvm, unsigned int id)
 {
+	if (kvmhv_is_nestedv2() && id >= KVM_MAX_VCPU_IDS_NESTEDv2)
+		return -EINVAL;
+
 	return 0;
 }
 
@@ -1130,23 +1163,29 @@ static inline u32 dp_to_sp(u64 fprd)
 #define dp_to_sp(x)	(x)
 #endif /* CONFIG_PPC_FPU */
 
-static void kvmppc_complete_mmio_load(struct kvm_vcpu *vcpu)
+static int kvmppc_complete_mmio_load(struct kvm_vcpu *vcpu)
 {
 	struct kvm_run *run = vcpu->run;
-	u64 gpr;
+	u64 gpr = 0;
+	u8 len = vcpu->arch.mmio_len; /* use kernel-private copy, not run->mmio.len */
 
-	if (run->mmio.len > sizeof(gpr))
-		return;
+	/* Reject lengths that have no corresponding switch case below. */
+	switch (len) {
+	case 1: case 2: case 4: case 8:
+		break;
+	default:
+		return EMULATE_FAIL;
+	}
 
 	if (!vcpu->arch.mmio_host_swabbed) {
-		switch (run->mmio.len) {
+		switch (len) {
 		case 8: gpr = *(u64 *)run->mmio.data; break;
 		case 4: gpr = *(u32 *)run->mmio.data; break;
 		case 2: gpr = *(u16 *)run->mmio.data; break;
 		case 1: gpr = *(u8 *)run->mmio.data; break;
 		}
 	} else {
-		switch (run->mmio.len) {
+		switch (len) {
 		case 8: gpr = swab64(*(u64 *)run->mmio.data); break;
 		case 4: gpr = swab32(*(u32 *)run->mmio.data); break;
 		case 2: gpr = swab16(*(u16 *)run->mmio.data); break;
@@ -1155,11 +1194,11 @@ static void kvmppc_complete_mmio_load(struct kvm_vcpu *vcpu)
 	}
 
 	/* conversion between single and double precision */
-	if ((vcpu->arch.mmio_sp64_extend) && (run->mmio.len == 4))
+	if ((vcpu->arch.mmio_sp64_extend) && (len == 4))
 		gpr = sp_to_dp(gpr);
 
 	if (vcpu->arch.mmio_sign_extend) {
-		switch (run->mmio.len) {
+		switch (len) {
 #ifdef CONFIG_PPC64
 		case 4:
 			gpr = (s64)(s32)gpr;
@@ -1238,6 +1277,7 @@ static void kvmppc_complete_mmio_load(struct kvm_vcpu *vcpu)
 	default:
 		BUG();
 	}
+	return EMULATE_DONE;
 }
 
 static int __kvmppc_handle_load(struct kvm_vcpu *vcpu,
@@ -1263,6 +1303,7 @@ static int __kvmppc_handle_load(struct kvm_vcpu *vcpu,
 	run->mmio.is_write = 0;
 
 	vcpu->arch.io_gpr = rt;
+	vcpu->arch.mmio_len = bytes; /* kernel-private, immune to TOCTOU */
 	vcpu->arch.mmio_host_swabbed = host_swabbed;
 	vcpu->mmio_needed = 1;
 	vcpu->mmio_is_write = 0;
@@ -1276,8 +1317,11 @@ static int __kvmppc_handle_load(struct kvm_vcpu *vcpu,
 	srcu_read_unlock(&vcpu->kvm->srcu, idx);
 
 	if (!ret) {
-		kvmppc_complete_mmio_load(vcpu);
 		vcpu->mmio_needed = 0;
+
+		if (kvmppc_complete_mmio_load(vcpu) != EMULATE_DONE)
+			return EMULATE_FAIL;
+
 		return EMULATE_DONE;
 	}
 
@@ -1318,7 +1362,7 @@ int kvmppc_handle_vsx_load(struct kvm_vcpu *vcpu,
 		if (emulated != EMULATE_DONE)
 			break;
 
-		vcpu->arch.paddr_accessed += vcpu->run->mmio.len;
+		vcpu->arch.paddr_accessed += vcpu->arch.mmio_len;
 
 		vcpu->arch.mmio_vsx_copy_nums--;
 		vcpu->arch.mmio_vsx_offset++;
@@ -1348,6 +1392,7 @@ int kvmppc_handle_store(struct kvm_vcpu *vcpu,
 	run->mmio.phys_addr = vcpu->arch.paddr_accessed;
 	run->mmio.len = bytes;
 	run->mmio.is_write = 1;
+	vcpu->arch.mmio_len = bytes; /* kernel-private, immune to TOCTOU */
 	vcpu->mmio_needed = 1;
 	vcpu->mmio_is_write = 1;
 
@@ -1464,7 +1509,7 @@ int kvmppc_handle_vsx_store(struct kvm_vcpu *vcpu,
 		if (emulated != EMULATE_DONE)
 			break;
 
-		vcpu->arch.paddr_accessed += vcpu->run->mmio.len;
+		vcpu->arch.paddr_accessed += vcpu->arch.mmio_len;
 
 		vcpu->arch.mmio_vsx_copy_nums--;
 		vcpu->arch.mmio_vsx_offset++;
@@ -1479,14 +1524,14 @@ static int kvmppc_emulate_mmio_vsx_loadstore(struct kvm_vcpu *vcpu)
 	enum emulation_result emulated = EMULATE_FAIL;
 	int r;
 
-	vcpu->arch.paddr_accessed += run->mmio.len;
+	vcpu->arch.paddr_accessed += vcpu->arch.mmio_len;
 
 	if (!vcpu->mmio_is_write) {
 		emulated = kvmppc_handle_vsx_load(vcpu, vcpu->arch.io_gpr,
-			 run->mmio.len, 1, vcpu->arch.mmio_sign_extend);
+			 vcpu->arch.mmio_len, 1, vcpu->arch.mmio_sign_extend);
 	} else {
 		emulated = kvmppc_handle_vsx_store(vcpu,
-			 vcpu->arch.io_gpr, run->mmio.len, 1);
+			 vcpu->arch.io_gpr, vcpu->arch.mmio_len, 1);
 	}
 
 	switch (emulated) {
@@ -1524,7 +1569,7 @@ int kvmppc_handle_vmx_load(struct kvm_vcpu *vcpu,
 		if (emulated != EMULATE_DONE)
 			break;
 
-		vcpu->arch.paddr_accessed += vcpu->run->mmio.len;
+		vcpu->arch.paddr_accessed += vcpu->arch.mmio_len;
 		vcpu->arch.mmio_vmx_copy_nums--;
 		vcpu->arch.mmio_vmx_offset++;
 	}
@@ -1644,7 +1689,7 @@ int kvmppc_handle_vmx_store(struct kvm_vcpu *vcpu,
 		if (emulated != EMULATE_DONE)
 			break;
 
-		vcpu->arch.paddr_accessed += vcpu->run->mmio.len;
+		vcpu->arch.paddr_accessed += vcpu->arch.mmio_len;
 		vcpu->arch.mmio_vmx_copy_nums--;
 		vcpu->arch.mmio_vmx_offset++;
 	}
@@ -1658,14 +1703,14 @@ static int kvmppc_emulate_mmio_vmx_loadstore(struct kvm_vcpu *vcpu)
 	enum emulation_result emulated = EMULATE_FAIL;
 	int r;
 
-	vcpu->arch.paddr_accessed += run->mmio.len;
+	vcpu->arch.paddr_accessed += vcpu->arch.mmio_len;
 
 	if (!vcpu->mmio_is_write) {
 		emulated = kvmppc_handle_vmx_load(vcpu,
-				vcpu->arch.io_gpr, run->mmio.len, 1);
+				vcpu->arch.io_gpr, vcpu->arch.mmio_len, 1);
 	} else {
 		emulated = kvmppc_handle_vmx_store(vcpu,
-				vcpu->arch.io_gpr, run->mmio.len, 1);
+				vcpu->arch.io_gpr, vcpu->arch.mmio_len, 1);
 	}
 
 	switch (emulated) {
@@ -1793,8 +1838,16 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
 
 	if (vcpu->mmio_needed) {
 		vcpu->mmio_needed = 0;
-		if (!vcpu->mmio_is_write)
-			kvmppc_complete_mmio_load(vcpu);
+		if (!vcpu->mmio_is_write) {
+			if (kvmppc_complete_mmio_load(vcpu) != EMULATE_DONE) {
+				run->exit_reason = KVM_EXIT_INTERNAL_ERROR;
+				run->internal.suberror =
+					KVM_INTERNAL_ERROR_EMULATION;
+				run->internal.ndata = 0;
+				r = 0;
+				goto out;
+			}
+		}
 #ifdef CONFIG_VSX
 		if (vcpu->arch.mmio_vsx_copy_nums > 0) {
 			vcpu->arch.mmio_vsx_copy_nums--;
@@ -1853,10 +1906,7 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
 
 	kvm_sigset_deactivate(vcpu);
 
-#ifdef CONFIG_ALTIVEC
 out:
-#endif
-
 	/*
 	 * We're already returning to userspace, don't pass the
 	 * RESUME_HOST flags along.
@@ -1877,7 +1927,7 @@ int kvm_vcpu_ioctl_interrupt(struct kvm_vcpu *vcpu, struct kvm_interrupt *irq)
 
 	kvmppc_core_queue_external(vcpu, irq);
 
-	kvm_vcpu_kick(vcpu);
+	kvmppc_vcpu_kick(vcpu);
 
 	return 0;
 }
@@ -2028,8 +2078,8 @@ int kvm_arch_vcpu_ioctl_set_mpstate(struct kvm_vcpu *vcpu,
 	return -EINVAL;
 }
 
-long kvm_arch_vcpu_async_ioctl(struct file *filp,
-			       unsigned int ioctl, unsigned long arg)
+long kvm_arch_vcpu_unlocked_ioctl(struct file *filp, unsigned int ioctl,
+				  unsigned long arg)
 {
 	struct kvm_vcpu *vcpu = filp->private_data;
 	void __user *argp = (void __user *)arg;
@@ -2467,6 +2517,77 @@ int kvm_arch_vm_ioctl(struct file *filp, unsigned int ioctl, unsigned long arg)
 			goto out;
 
 		r = kvm->arch.kvm_ops->svm_off(kvm);
+		break;
+	}
+	case KVM_PPC_GET_COMPAT_CAPS: {
+		struct kvm_ppc_compat_caps host_caps = {};
+		u64 usize;
+
+		/*
+		 * Read the size field first to drive copy_struct_from_user.
+		 * size must be the first field of the struct.
+		 */
+		r = -EFAULT;
+		if (get_user(usize, (__u64 __user *)argp))
+			goto out;
+
+		r = -E2BIG;
+		if (unlikely(usize > PAGE_SIZE))
+			goto out;
+
+		/*
+		 * Enforce a minimum: reject buffers smaller than the initial
+		 * struct version (VER0). This allows old userspace compiled
+		 * against the original struct to still work on a newer kernel
+		 * that has grown the struct with appended fields.
+		 */
+		r = -EINVAL;
+		if (usize < KVM_PPC_COMPAT_CAPS_SIZE_VER0)
+			goto out;
+
+		/*
+		 * copy_struct_from_user() handles forward/backward compat:
+		 *   usize == ksize: verbatim copy
+		 *   usize <  ksize: zero-pad trailing (old userspace, new kernel)
+		 *   usize >  ksize: succeed iff trailing bytes are zero, else -E2BIG
+		 */
+		r = copy_struct_from_user(&host_caps, sizeof(host_caps),
+					  argp, usize);
+		if (r) {
+			/*
+			 * New userspace with a larger struct called an older
+			 * kernel. Write back ksize in host_caps.size so
+			 * userspace knows which older struct to retry with,
+			 * then fail with -E2BIG.
+			 */
+			if (r == -E2BIG)
+				if (put_user((__u64)sizeof(host_caps),
+					     (__u64 __user *)argp))
+					r = -EFAULT;
+			goto out;
+		}
+
+		/* Reserved fields must be zero */
+		r = -EINVAL;
+		if (host_caps.flags)
+			goto out;
+
+		r = -ENOTTY;
+		if (!kvm->arch.kvm_ops->get_compat_caps)
+			goto out;
+
+		r = kvm->arch.kvm_ops->get_compat_caps(&host_caps);
+		if (r)
+			goto out;
+
+		/*
+		 * Report the number of bytes actually populated by the kernel,
+		 * not usize: if new userspace passed a larger struct with zero
+		 * trailing bytes, we only filled sizeof(host_caps) bytes.
+		 */
+		host_caps.size = min_t(u64, usize, sizeof(host_caps));
+		r = copy_struct_to_user(argp, usize, &host_caps,
+					sizeof(host_caps), NULL);
 		break;
 	}
 	default: {

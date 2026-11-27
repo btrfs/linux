@@ -38,6 +38,7 @@
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
+#include <linux/sched/task_stack.h>
 #include <linux/vmalloc.h>
 #include <linux/uaccess.h>
 #include <linux/io.h>
@@ -59,6 +60,7 @@
 #include <xen/swiotlb-xen.h>
 #include <xen/balloon.h>
 #ifdef CONFIG_X86
+#include <asm/cpuid/api.h>
 #include <asm/xen/cpuid.h>
 #endif
 #include <xen/mem-reservation.h>
@@ -556,7 +558,7 @@ static void gnttab_add_deferred(grant_ref_t ref, struct page *page)
 	gfp_t gfp = (in_atomic() || irqs_disabled()) ? GFP_ATOMIC : GFP_KERNEL;
 	uint64_t leaked, deferred;
 
-	entry = kmalloc(sizeof(*entry), gfp);
+	entry = kmalloc_obj(*entry, gfp);
 	if (!page) {
 		unsigned long gfn = gnttab_interface->read_frame(ref);
 
@@ -831,7 +833,7 @@ int gnttab_setup_auto_xlat_frames(phys_addr_t addr)
 			&addr);
 		return -ENOMEM;
 	}
-	pfn = kcalloc(max_nr_gframes, sizeof(pfn[0]), GFP_KERNEL);
+	pfn = kzalloc_objs(pfn[0], max_nr_gframes);
 	if (!pfn) {
 		memunmap(vaddr);
 		return -ENOMEM;
@@ -862,20 +864,20 @@ EXPORT_SYMBOL_GPL(gnttab_free_auto_xlat_frames);
 
 int gnttab_pages_set_private(int nr_pages, struct page **pages)
 {
+#if BITS_PER_LONG < 64
 	int i;
 
 	for (i = 0; i < nr_pages; i++) {
-#if BITS_PER_LONG < 64
 		struct xen_page_foreign *foreign;
 
-		foreign = kzalloc(sizeof(*foreign), GFP_KERNEL);
+		foreign = kzalloc_obj(*foreign);
 		if (!foreign)
 			return -ENOMEM;
 
 		set_page_private(pages[i], (unsigned long)foreign);
-#endif
-		SetPagePrivate(pages[i]);
 	}
+#endif
+	/* Data is stored in page->private on 64-bit */
 
 	return 0;
 }
@@ -1030,12 +1032,11 @@ void gnttab_pages_clear_private(int nr_pages, struct page **pages)
 	int i;
 
 	for (i = 0; i < nr_pages; i++) {
-		if (PagePrivate(pages[i])) {
 #if BITS_PER_LONG < 64
+		if (page_private(pages[i]))
 			kfree((void *)page_private(pages[i]));
 #endif
-			ClearPagePrivate(pages[i]);
-		}
+		set_page_private(pages[i], 0);
 	}
 }
 EXPORT_SYMBOL_GPL(gnttab_pages_clear_private);
@@ -1062,6 +1063,9 @@ int gnttab_dma_alloc_pages(struct gnttab_dma_alloc_args *args)
 	unsigned long pfn, start_pfn;
 	size_t size;
 	int i, ret;
+
+	if (WARN_ON(xen_pv_domain()))
+		return -EINVAL;
 
 	if (args->nr_pages < 0 || args->nr_pages > (INT_MAX >> PAGE_SHIFT))
 		return -ENOMEM;
@@ -1090,11 +1094,27 @@ int gnttab_dma_alloc_pages(struct gnttab_dma_alloc_args *args)
 		xenmem_reservation_scrub_page(page);
 	}
 
-	xenmem_reservation_va_mapping_reset(args->nr_pages, args->pages);
-
 	ret = xenmem_reservation_decrease(args->nr_pages, args->frames);
 	if (ret != args->nr_pages) {
 		pr_debug("Failed to decrease reservation for DMA buffer\n");
+		if (ret >= 0) {
+			/* Free the part where decrease didn't work. */
+			size_t done = ret << PAGE_SHIFT;
+
+			if (args->coherent)
+				dma_free_coherent(args->dev, size - done,
+						  args->vaddr + done,
+						  args->dev_bus_addr + done);
+			else
+				dma_free_wc(args->dev, size - done,
+					    args->vaddr + done,
+					    args->dev_bus_addr + done);
+
+			if (!ret) /* Nothing else to do? */
+				return -EFAULT;
+
+			args->nr_pages = ret;
+		}
 		ret = -EFAULT;
 		goto fail;
 	}
@@ -1120,6 +1140,9 @@ int gnttab_dma_free_pages(struct gnttab_dma_alloc_args *args)
 	size_t size;
 	int i, ret;
 
+	if (WARN_ON(xen_pv_domain()))
+		return -EINVAL;
+
 	gnttab_pages_clear_private(args->nr_pages, args->pages);
 
 	for (i = 0; i < args->nr_pages; i++)
@@ -1128,13 +1151,15 @@ int gnttab_dma_free_pages(struct gnttab_dma_alloc_args *args)
 	ret = xenmem_reservation_increase(args->nr_pages, args->frames);
 	if (ret != args->nr_pages) {
 		pr_debug("Failed to increase reservation for DMA buffer\n");
-		ret = -EFAULT;
+		/* Can only free what has been re-filled. */
+		if (!ret)
+			return -ENOMEM;
+		if (ret > 0)
+			args->nr_pages = ret;
+		ret = -ENOMEM;
 	} else {
 		ret = 0;
 	}
-
-	xenmem_reservation_va_mapping_update(args->nr_pages, args->pages,
-					     args->frames);
 
 	size = args->nr_pages << PAGE_SHIFT;
 	if (args->coherent)
@@ -1204,7 +1229,7 @@ void gnttab_foreach_grant_in_range(struct page *page,
 	unsigned int glen;
 	unsigned long xen_pfn;
 
-	len = min_t(unsigned int, PAGE_SIZE - offset, len);
+	len = min(PAGE_SIZE - offset, len);
 	goffset = xen_offset_in_page(offset);
 
 	xen_pfn = page_to_xen_pfn(page) + XEN_PFN_DOWN(offset);
@@ -1360,12 +1385,21 @@ static void unmap_refs_callback(int result,
 int gnttab_unmap_refs_sync(struct gntab_unmap_queue_data *item)
 {
 	struct unmap_refs_callback_data data;
+	bool on_stack = object_is_on_stack(item);
 
 	init_completion(&data.completion);
 	item->data = &data;
 	item->done = &unmap_refs_callback;
-	gnttab_unmap_refs_async(item);
+	/* blkback keeps @item, and so its retry work, on the stack. */
+	if (on_stack)
+		INIT_DELAYED_WORK_ONSTACK(&item->gnttab_work, gnttab_unmap_work);
+	else
+		INIT_DELAYED_WORK(&item->gnttab_work, gnttab_unmap_work);
+	item->age = 0;
+	__gnttab_unmap_refs_async(item);
 	wait_for_completion(&data.completion);
+	if (on_stack)
+		destroy_delayed_work_on_stack(&item->gnttab_work);
 
 	return data.result;
 }
@@ -1405,7 +1439,7 @@ static int gnttab_map_frames_v2(xen_pfn_t *frames, unsigned int nr_gframes)
 	/* No need for kzalloc as it is initialized in following hypercall
 	 * GNTTABOP_get_status_frames.
 	 */
-	sframes = kmalloc_array(nr_sframes, sizeof(uint64_t), GFP_ATOMIC);
+	sframes = kmalloc_objs(*sframes, nr_sframes, GFP_ATOMIC);
 	if (!sframes)
 		return -ENOMEM;
 
@@ -1477,7 +1511,7 @@ static int gnttab_map(unsigned int start_idx, unsigned int end_idx)
 	/* No need for kzalloc as it is initialized in following hypercall
 	 * GNTTABOP_setup_table.
 	 */
-	frames = kmalloc_array(nr_gframes, sizeof(unsigned long), GFP_ATOMIC);
+	frames = kmalloc_objs(*frames, nr_gframes, GFP_ATOMIC);
 	if (!frames)
 		return -ENOMEM;
 
@@ -1579,7 +1613,7 @@ static int gnttab_setup(void)
 	}
 	return gnttab_map(0, nr_grant_frames - 1);
 }
-
+#ifdef CONFIG_HIBERNATE_CALLBACKS
 int gnttab_resume(void)
 {
 	gnttab_request_version();
@@ -1592,6 +1626,7 @@ int gnttab_suspend(void)
 		gnttab_interface->unmap_frames();
 	return 0;
 }
+#endif
 
 static int gnttab_expand(unsigned int req_entries)
 {
@@ -1635,9 +1670,7 @@ int gnttab_init(void)
 	 */
 	max_nr_glist_frames = max_nr_grefs / RPP;
 
-	gnttab_list = kmalloc_array(max_nr_glist_frames,
-				    sizeof(grant_ref_t *),
-				    GFP_KERNEL);
+	gnttab_list = kmalloc_objs(grant_ref_t *, max_nr_glist_frames);
 	if (gnttab_list == NULL)
 		return -ENOMEM;
 

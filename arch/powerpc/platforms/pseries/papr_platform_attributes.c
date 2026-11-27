@@ -271,11 +271,9 @@ retry:
 		esi_buf_size = ESI_HDR_SIZE + (CURR_MAX_ESI_ATTRS * max_esi_attrs);
 
 		temp_esi_buf = krealloc(esi_buf, esi_buf_size, GFP_KERNEL);
-		if (temp_esi_buf)
-			esi_buf = temp_esi_buf;
-		else
-			return -ENOMEM;
-
+		if (!temp_esi_buf)
+			goto out_free_esi_buf;
+		esi_buf = temp_esi_buf;
 		goto retry;
 	}
 
@@ -295,7 +293,7 @@ retry:
 		goto out_free_esi_buf;
 	}
 
-	papr_groups = kcalloc(num_attrs, sizeof(*papr_groups), GFP_KERNEL);
+	papr_groups = kzalloc_objs(*papr_groups, num_attrs);
 	if (!papr_groups)
 		goto out_free_esi_buf;
 
@@ -313,9 +311,8 @@ retry:
 
 	/* Allocate the groups before registering */
 	for (idx = 0; idx < num_attrs; idx++) {
-		papr_groups[idx].pg.attrs = kcalloc(KOBJ_MAX_ATTRS + 1,
-					    sizeof(*papr_groups[idx].pg.attrs),
-					    GFP_KERNEL);
+		papr_groups[idx].pg.attrs = kzalloc_objs(*papr_groups[idx].pg.attrs,
+							 KOBJ_MAX_ATTRS + 1);
 		if (!papr_groups[idx].pg.attrs)
 			goto out_pgattrs;
 
@@ -326,12 +323,8 @@ retry:
 	}
 
 	for (idx = 0; idx < num_attrs; idx++) {
-		bool show_val_desc = true;
-
 		/* Do not add the value desc attr if it does not exist */
-		if (strnlen(esi_attrs[idx].value_desc,
-			    sizeof(esi_attrs[idx].value_desc)) == 0)
-			show_val_desc = false;
+		bool show_val_desc = *esi_attrs[idx].value_desc != '\0';
 
 		if (add_attr_group(be64_to_cpu(esi_attrs[idx].id),
 				   &papr_groups[idx],

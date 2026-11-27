@@ -11,7 +11,6 @@
  */
 
 #include <linux/interrupt.h>
-#include <linux/compat.h>
 #include <linux/export.h>
 #include <linux/major.h>
 #include <linux/fs.h>
@@ -304,7 +303,9 @@ static int dasd_ioctl_check_format(struct block_device *bdev, void __user *argp)
 		goto out_err;
 	}
 
-	if (copy_from_user(&cdata, argp, sizeof(cdata))) {
+	/* copy only input fields, clear the rest */
+	memset(&cdata, 0, sizeof(cdata));
+	if (copy_from_user(&cdata.expect, argp, sizeof(cdata.expect))) {
 		rc = -EFAULT;
 		goto out_err;
 	}
@@ -325,7 +326,7 @@ out_err:
 static int dasd_release_space(struct dasd_device *device,
 			      struct format_data_t *rdata)
 {
-	if (!device->discipline->is_ese && !device->discipline->is_ese(device))
+	if (!device->discipline->is_ese || !device->discipline->is_ese(device))
 		return -ENOTSUPP;
 	if (!device->discipline->release_space)
 		return -ENOTSUPP;
@@ -443,7 +444,7 @@ static int dasd_ioctl_read_profile(struct dasd_block *block, void __user *argp)
 	struct dasd_profile_info_t *data;
 	int rc = 0;
 
-	data = kmalloc(sizeof(*data), GFP_KERNEL);
+	data = kmalloc_obj(*data);
 	if (!data)
 		return -ENOMEM;
 
@@ -561,7 +562,7 @@ static int dasd_ioctl_information(struct dasd_block *block, void __user *argp,
 	struct dasd_information2_t *dasd_info;
 	int error;
 
-	dasd_info = kzalloc(sizeof(*dasd_info), GFP_KERNEL);
+	dasd_info = kzalloc_obj(*dasd_info);
 	if (!dasd_info)
 		return -ENOMEM;
 
@@ -616,10 +617,7 @@ int dasd_ioctl(struct block_device *bdev, blk_mode_t mode,
 	void __user *argp;
 	int rc;
 
-	if (is_compat_task())
-		argp = compat_ptr(arg);
-	else
-		argp = (void __user *)arg;
+	argp = (void __user *)arg;
 
 	if ((_IOC_DIR(cmd) != _IOC_NONE) && !arg)
 		return -EINVAL;

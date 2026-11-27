@@ -5,7 +5,6 @@
  * Copyright (C) 2014 Google, Inc.
  */
 
-#include <linux/gpio.h>
 #include <linux/i2c.h>
 #include <linux/init.h>
 #include <linux/input.h>
@@ -355,7 +354,7 @@ static int ts3a227e_i2c_probe(struct i2c_client *i2c)
 	int ret;
 	unsigned int acc_reg;
 
-	ts3a227e = devm_kzalloc(&i2c->dev, sizeof(*ts3a227e), GFP_KERNEL);
+	ts3a227e = devm_kzalloc_obj(&i2c->dev, *ts3a227e);
 	if (ts3a227e == NULL)
 		return -ENOMEM;
 
@@ -424,7 +423,7 @@ static const struct dev_pm_ops ts3a227e_pm = {
 };
 
 static const struct i2c_device_id ts3a227e_i2c_ids[] = {
-	{ "ts3a227e" },
+	{ .name = "ts3a227e" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ts3a227e_i2c_ids);

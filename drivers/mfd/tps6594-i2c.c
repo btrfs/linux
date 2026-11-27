@@ -13,7 +13,6 @@
 #include <linux/crc8.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/of_device.h>
 #include <linux/regmap.h>
 
@@ -213,7 +212,7 @@ static int tps6594_i2c_probe(struct i2c_client *client)
 	struct tps6594 *tps;
 	const struct of_device_id *match;
 
-	tps = devm_kzalloc(dev, sizeof(*tps), GFP_KERNEL);
+	tps = devm_kzalloc_obj(dev, *tps);
 	if (!tps)
 		return -ENOMEM;
 

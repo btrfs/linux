@@ -3,6 +3,11 @@
  * Copyright © 2013-2021 Intel Corporation
  */
 
+#include <linux/string_choices.h>
+
+#include <drm/drm_print.h>
+#include <drm/intel/display_parent_interface.h>
+
 #include "i915_drv.h"
 #include "i915_iosf_mbi.h"
 #include "i915_reg.h"
@@ -98,7 +103,7 @@ static int vlv_sideband_rw(struct drm_i915_private *i915,
 				    VLV_IOSF_DOORBELL_REQ, IOSF_SB_BUSY, 0,
 				    5)) {
 		drm_dbg(&i915->drm, "IOSF sideband idle wait (%s) timed out\n",
-			is_read ? "read" : "write");
+			str_read_write(is_read));
 		return -EAGAIN;
 	}
 
@@ -122,7 +127,7 @@ static int vlv_sideband_rw(struct drm_i915_private *i915,
 		err = 0;
 	} else {
 		drm_dbg(&i915->drm, "IOSF sideband finish wait (%s) timed out\n",
-			is_read ? "read" : "write");
+			str_read_write(is_read));
 		err = -ETIMEDOUT;
 	}
 
@@ -227,3 +232,10 @@ void vlv_iosf_sb_fini(struct drm_i915_private *i915)
 	if (IS_VALLEYVIEW(i915) || IS_CHERRYVIEW(i915))
 		mutex_destroy(&i915->vlv_iosf_sb.lock);
 }
+
+const struct intel_display_vlv_iosf_interface i915_display_vlv_iosf_interface = {
+	.get = vlv_iosf_sb_get,
+	.put = vlv_iosf_sb_put,
+	.read = vlv_iosf_sb_read,
+	.write = vlv_iosf_sb_write,
+};

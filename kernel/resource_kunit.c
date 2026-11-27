@@ -204,7 +204,7 @@ static void resource_test_insert_resource(struct kunit *test, struct resource *p
 {
 	struct resource *res;
 
-	res = kzalloc(sizeof(*res), GFP_KERNEL);
+	res = kzalloc_obj(*res);
 	KUNIT_ASSERT_NOT_NULL(test, res);
 
 	res->name = name;
@@ -224,6 +224,9 @@ static void resource_test_region_intersects(struct kunit *test)
 	unsigned long flags =  IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY;
 	struct resource *parent;
 	resource_size_t start;
+
+	if (!IS_ENABLED(CONFIG_GET_FREE_REGION))
+		kunit_skip(test, "CONFIG_GET_FREE_REGION is disabled");
 
 	/* Find an iomem_resource hole to hold test resources */
 	parent = alloc_free_mem_region(&iomem_resource, RES_TEST_TOTAL_SIZE, SZ_1M,

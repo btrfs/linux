@@ -212,7 +212,6 @@ be probed with.
 
 unregisters an rpmsg driver from the rpmsg bus. user should provide
 a pointer to a previously-registered rpmsg_driver struct.
-Returns 0 on success, and an appropriate error value on failure.
 
 
 Typical usage
@@ -224,9 +223,12 @@ content to the console.
 
 ::
 
-  #include <linux/kernel.h>
+  #include <linux/dev_printk.h>
+  #include <linux/mod_devicetable.h>
   #include <linux/module.h>
+  #include <linux/printk.h>
   #include <linux/rpmsg.h>
+  #include <linux/types.h>
 
   static void rpmsg_sample_cb(struct rpmsg_channel *rpdev, void *data, int len,
 						void *priv, u32 src)
@@ -244,7 +246,7 @@ content to the console.
 	/* send a message on our channel */
 	err = rpmsg_send(rpdev->ept, "hello!", 6);
 	if (err) {
-		pr_err("rpmsg_send failed: %d\n", err);
+		dev_err(&rpdev->dev, "rpmsg_send failed: %d\n", err);
 		return err;
 	}
 
@@ -297,3 +299,20 @@ by the bus, and can then start sending messages to the remote service.
 
 The plan is also to add static creation of rpmsg channels via the virtio
 config space, but it's not implemented yet.
+
+Configurable buffer sizes
+=========================
+
+By default each rpmsg buffer is 512 bytes, and the same size is used for both
+the receive and transmit directions. Remote processors that need a different
+size (for example a larger MTU, or different RX and TX queue sizes) can
+advertise it through the virtio device config space by setting the
+VIRTIO_RPMSG_F_BUFSZ feature bit.
+
+When this feature is negotiated, the driver reads struct virtio_rpmsg_config
+from the config space. This structure provides the size of a single buffer for
+each direction (TX and RX). The device should advertise TX/RX buffer sizes
+that already satisfy the alignment constraints of its buffers.
+
+If the feature is not negotiated, the default 512-byte buffers are used for
+both directions.

@@ -26,22 +26,19 @@ static int tegra_aconnect_probe(struct platform_device *pdev)
 	if (!pdev->dev.of_node)
 		return -EINVAL;
 
-	aconnect = devm_kzalloc(&pdev->dev, sizeof(struct tegra_aconnect),
-				GFP_KERNEL);
+	aconnect = devm_kzalloc_obj(&pdev->dev, struct tegra_aconnect);
 	if (!aconnect)
 		return -ENOMEM;
 
 	aconnect->ape_clk = devm_clk_get(&pdev->dev, "ape");
-	if (IS_ERR(aconnect->ape_clk)) {
-		dev_err(&pdev->dev, "Can't retrieve ape clock\n");
-		return PTR_ERR(aconnect->ape_clk);
-	}
+	if (IS_ERR(aconnect->ape_clk))
+		return dev_err_probe(&pdev->dev, PTR_ERR(aconnect->ape_clk),
+				     "can't retrieve ape clock\n");
 
 	aconnect->apb2ape_clk = devm_clk_get(&pdev->dev, "apb2ape");
-	if (IS_ERR(aconnect->apb2ape_clk)) {
-		dev_err(&pdev->dev, "Can't retrieve apb2ape clock\n");
-		return PTR_ERR(aconnect->apb2ape_clk);
-	}
+	if (IS_ERR(aconnect->apb2ape_clk))
+		return dev_err_probe(&pdev->dev, PTR_ERR(aconnect->apb2ape_clk),
+				     "can't retrieve apb2ape clock\n");
 
 	dev_set_drvdata(&pdev->dev, aconnect);
 	pm_runtime_enable(&pdev->dev);

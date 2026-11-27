@@ -633,7 +633,7 @@ static int lm78_i2c_probe(struct i2c_client *client)
 	struct device *hwmon_dev;
 	struct lm78_data *data;
 
-	data = devm_kzalloc(dev, sizeof(struct lm78_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct lm78_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -649,8 +649,8 @@ static int lm78_i2c_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id lm78_i2c_id[] = {
-	{ "lm78", lm78 },
-	{ "lm79", lm79 },
+	{ .name = "lm78", .driver_data = lm78 },
+	{ .name = "lm79", .driver_data = lm79 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, lm78_i2c_id);
@@ -794,7 +794,7 @@ static int lm78_isa_probe(struct platform_device *pdev)
 				 2, "lm78"))
 		return -EBUSY;
 
-	data = devm_kzalloc(dev, sizeof(struct lm78_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct lm78_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -843,17 +843,18 @@ static int __init lm78_isa_found(unsigned short address)
 		}
 	}
 
-#define REALLY_SLOW_IO
 	/*
 	 * We need the timeouts for at least some LM78-like
 	 * chips. But only if we read 'undefined' registers.
+	 * There used to be a "#define REALLY_SLOW_IO" to enforce that, but
+	 * this has been without any effect since more than a decade, so it
+	 * has been dropped.
 	 */
 	val = inb_p(address + 1);
 	if (inb_p(address + 2) != val
 	 || inb_p(address + 3) != val
 	 || inb_p(address + 7) != val)
 		goto release;
-#undef REALLY_SLOW_IO
 
 	/*
 	 * We should be able to change the 7 LSB of the address port. The

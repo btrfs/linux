@@ -284,7 +284,7 @@ static struct regmap *vexpress_syscfg_regmap_init(struct device *dev,
 		val = energy_quirk;
 	}
 
-	func = kzalloc(struct_size(func, template, num), GFP_KERNEL);
+	func = kzalloc_flex(*func, template, num);
 	if (!func)
 		return ERR_PTR(-ENOMEM);
 
@@ -355,7 +355,7 @@ static int vexpress_syscfg_probe(struct platform_device *pdev)
 	int master;
 	u32 dt_hbi;
 
-	syscfg = devm_kzalloc(&pdev->dev, sizeof(*syscfg), GFP_KERNEL);
+	syscfg = devm_kzalloc_obj(&pdev->dev, *syscfg);
 	if (!syscfg)
 		return -ENOMEM;
 	syscfg->dev = &pdev->dev;
@@ -365,7 +365,7 @@ static int vexpress_syscfg_probe(struct platform_device *pdev)
 	if (IS_ERR(syscfg->base))
 		return PTR_ERR(syscfg->base);
 
-	bridge = devm_kmalloc(&pdev->dev, sizeof(*bridge), GFP_KERNEL);
+	bridge = devm_kmalloc_obj(&pdev->dev, *bridge);
 	if (!bridge)
 		return -ENOMEM;
 

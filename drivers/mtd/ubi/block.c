@@ -312,7 +312,7 @@ static blk_status_t ubiblock_queue_rq(struct blk_mq_hw_ctx *hctx,
 
 static int ubiblock_init_request(struct blk_mq_tag_set *set,
 		struct request *req, unsigned int hctx_idx,
-		unsigned int numa_node)
+		int numa_node)
 {
 	struct ubiblock_pdu *pdu = blk_mq_rq_to_pdu(req);
 
@@ -368,7 +368,7 @@ int ubiblock_create(struct ubi_volume_info *vi)
 		goto out_unlock;
 	}
 
-	dev = kzalloc(sizeof(struct ubiblock), GFP_KERNEL);
+	dev = kzalloc_obj(struct ubiblock);
 	if (!dev) {
 		ret = -ENOMEM;
 		goto out_unlock;

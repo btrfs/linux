@@ -53,7 +53,7 @@ struct fm3130 {
 	int			data_valid;
 };
 static const struct i2c_device_id fm3130_id[] = {
-	{ "fm3130" },
+	{ .name = "fm3130" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, fm3130_id);
@@ -351,7 +351,7 @@ static int fm3130_probe(struct i2c_client *client)
 			I2C_FUNC_I2C | I2C_FUNC_SMBUS_WRITE_BYTE_DATA))
 		return -EIO;
 
-	fm3130 = devm_kzalloc(&client->dev, sizeof(struct fm3130), GFP_KERNEL);
+	fm3130 = devm_kzalloc_obj(&client->dev, struct fm3130);
 
 	if (!fm3130)
 		return -ENOMEM;

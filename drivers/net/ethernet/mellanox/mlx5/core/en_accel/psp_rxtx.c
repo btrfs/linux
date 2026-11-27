@@ -14,12 +14,6 @@
 #include "en_accel/psp_rxtx.h"
 #include "en_accel/psp.h"
 
-enum {
-	MLX5E_PSP_OFFLOAD_RX_SYNDROME_DECRYPTED,
-	MLX5E_PSP_OFFLOAD_RX_SYNDROME_AUTH_FAILED,
-	MLX5E_PSP_OFFLOAD_RX_SYNDROME_BAD_TRAILER,
-};
-
 static void mlx5e_psp_set_swp(struct sk_buff *skb,
 			      struct mlx5e_accel_tx_psp_state *psp_st,
 			      struct mlx5_wqe_eth_seg *eseg)
@@ -122,15 +116,10 @@ out:
 bool mlx5e_psp_offload_handle_rx_skb(struct net_device *netdev, struct sk_buff *skb,
 				     struct mlx5_cqe64 *cqe)
 {
-	u32 psp_meta_data = be32_to_cpu(cqe->ft_metadata);
 	struct mlx5e_priv *priv = netdev_priv(netdev);
-	u16 dev_id = priv->psp->psp->id;
+	u16 dev_id = priv->psp->psd->id;
 	bool strip_icv = true;
 	u8 generation = 0;
-
-	/* TBD: report errors as SW counters to ethtool, any further handling ? */
-	if (MLX5_PSP_METADATA_SYNDROME(psp_meta_data) != MLX5E_PSP_OFFLOAD_RX_SYNDROME_DECRYPTED)
-		goto drop;
 
 	if (psp_dev_rcv(skb, dev_id, generation, strip_icv))
 		goto drop;
@@ -177,8 +166,6 @@ bool mlx5e_psp_handle_tx_skb(struct net_device *netdev,
 {
 	struct mlx5e_priv *priv = netdev_priv(netdev);
 	struct net *net = sock_net(skb->sk);
-	const struct ipv6hdr *ip6;
-	struct tcphdr *th;
 
 	if (!mlx5e_psp_set_state(priv, skb, psp_st))
 		return true;
@@ -186,14 +173,22 @@ bool mlx5e_psp_handle_tx_skb(struct net_device *netdev,
 	/* psp_encap of the packet */
 	if (!psp_dev_encapsulate(net, skb, psp_st->spi, psp_st->ver, 0)) {
 		kfree_skb_reason(skb, SKB_DROP_REASON_PSP_OUTPUT);
+		atomic_inc(&priv->psp->tx_drop);
 		return false;
 	}
 	if (skb_is_gso(skb)) {
-		ip6 = ipv6_hdr(skb);
-		th = inner_tcp_hdr(skb);
+		int len = skb_shinfo(skb)->gso_size + inner_tcp_hdrlen(skb);
+		struct tcphdr *th = inner_tcp_hdr(skb);
 
-		th->check = ~tcp_v6_check(skb_shinfo(skb)->gso_size + inner_tcp_hdrlen(skb), &ip6->saddr,
-					  &ip6->daddr, 0);
+		if (skb->protocol == htons(ETH_P_IP)) {
+			const struct iphdr *ip = ip_hdr(skb);
+
+			th->check = ~tcp_v4_check(len, ip->saddr, ip->daddr, 0);
+		} else {
+			const struct ipv6hdr *ip6 = ipv6_hdr(skb);
+
+			th->check = ~tcp_v6_check(len, &ip6->saddr, &ip6->daddr, 0);
+		}
 	}
 
 	return true;

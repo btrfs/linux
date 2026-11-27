@@ -43,10 +43,10 @@
 #include <linux/io.h>
 #include <linux/io-64-nonatomic-lo-hi.h>
 #include <linux/interrupt.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/platform_device.h>
+#include <linux/stringify.h>
 #include <linux/uaccess.h>
 #include <linux/watchdog.h>
 #include <asm/arch_timer.h>
@@ -72,12 +72,16 @@
 #define SBSA_GWDT_WCS_WS0	BIT(1)
 #define SBSA_GWDT_WCS_WS1	BIT(2)
 
-#define SBSA_GWDT_VERSION_MASK  0xF
-#define SBSA_GWDT_VERSION_SHIFT 16
+#define SBSA_GWDT_VERSION_MASK		GENMASK(3, 0)
+#define SBSA_GWDT_VERSION_SHIFT		16
 
-#define SBSA_GWDT_IMPL_MASK	0x7FF
-#define SBSA_GWDT_IMPL_SHIFT	0
-#define SBSA_GWDT_IMPL_MEDIATEK	0x426
+#define SBSA_GWDT_REVISION_MASK		GENMASK(3, 0)
+#define SBSA_GWDT_REVISION_SHIFT	12
+#define SBSA_GWDT_REV_RACE_WA		0x0
+
+#define SBSA_GWDT_IMPL_MASK			GENMASK(11, 0)
+#define SBSA_GWDT_IMPL_SHIFT		0
+#define SBSA_GWDT_IMPL_MEDIATEK		0x426
 
 /**
  * struct sbsa_gwdt - Internal representation of the SBSA GWDT
@@ -104,7 +108,7 @@ static unsigned int timeout;
 module_param(timeout, uint, 0);
 MODULE_PARM_DESC(timeout,
 		 "Watchdog timeout in seconds. (>=0, default="
-		 __MODULE_STRING(DEFAULT_TIMEOUT) ")");
+		 __stringify(DEFAULT_TIMEOUT) ")");
 
 /*
  * action refers to action taken when watchdog gets WS0
@@ -121,7 +125,12 @@ static bool nowayout = WATCHDOG_NOWAYOUT;
 module_param(nowayout, bool, S_IRUGO);
 MODULE_PARM_DESC(nowayout,
 		 "Watchdog cannot be stopped once started (default="
-		 __MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
+		 __stringify(WATCHDOG_NOWAYOUT) ")");
+
+static bool early_enable;
+module_param(early_enable, bool, 0);
+MODULE_PARM_DESC(early_enable,
+		 "Watchdog is started on module insertion (default=0)");
 
 /*
  * Arm Base System Architecture 1.0 introduces watchdog v1 which
@@ -234,15 +243,17 @@ static int sbsa_gwdt_keepalive(struct watchdog_device *wdd)
 static void sbsa_gwdt_get_version(struct watchdog_device *wdd)
 {
 	struct sbsa_gwdt *gwdt = watchdog_get_drvdata(wdd);
-	int iidr, ver, impl;
+	int iidr, ver, rev, impl;
 
 	iidr = readl(gwdt->control_base + SBSA_GWDT_W_IIDR);
 	ver = (iidr >> SBSA_GWDT_VERSION_SHIFT) & SBSA_GWDT_VERSION_MASK;
+	rev = (iidr >> SBSA_GWDT_REVISION_SHIFT) & SBSA_GWDT_REVISION_MASK;
 	impl = (iidr >> SBSA_GWDT_IMPL_SHIFT) & SBSA_GWDT_IMPL_MASK;
 
 	gwdt->version = ver;
 	gwdt->need_ws0_race_workaround =
-		!action && (impl == SBSA_GWDT_IMPL_MEDIATEK);
+		!action && (impl == SBSA_GWDT_IMPL_MEDIATEK) &&
+		(rev == SBSA_GWDT_REV_RACE_WA);
 }
 
 static int sbsa_gwdt_start(struct watchdog_device *wdd)
@@ -297,8 +308,9 @@ static int sbsa_gwdt_probe(struct platform_device *pdev)
 	struct sbsa_gwdt *gwdt;
 	int ret, irq;
 	u32 status;
+	bool early_action;
 
-	gwdt = devm_kzalloc(dev, sizeof(*gwdt), GFP_KERNEL);
+	gwdt = devm_kzalloc_obj(dev, *gwdt);
 	if (!gwdt)
 		return -ENOMEM;
 	platform_set_drvdata(pdev, gwdt);
@@ -387,14 +399,23 @@ static int sbsa_gwdt_probe(struct platform_device *pdev)
 	 */
 	sbsa_gwdt_set_timeout(wdd, wdd->timeout);
 
+	early_action = early_enable && !(status & SBSA_GWDT_WCS_EN);
+	if (early_action) {
+		sbsa_gwdt_start(wdd);
+		set_bit(WDOG_HW_RUNNING, &wdd->status);
+	}
+
 	watchdog_stop_on_reboot(wdd);
 	ret = devm_watchdog_register_device(dev, wdd);
-	if (ret)
+	if (ret) {
+		if (early_action)
+			sbsa_gwdt_stop(wdd);
 		return ret;
+	}
 
 	dev_info(dev, "Initialized with %ds timeout @ %u Hz, action=%d.%s\n",
 		 wdd->timeout, gwdt->clk, action,
-		 status & SBSA_GWDT_WCS_EN ? " [enabled]" : "");
+		 watchdog_hw_running(wdd) ? " [enabled]" : "");
 
 	return 0;
 }

@@ -57,8 +57,9 @@ static int p1_rtc_read_time(struct device *dev, struct rtc_time *t)
 	u8 time[6];
 	int ret;
 
-	if (!regmap_test_bits(regmap, RTC_CTRL, RTC_EN))
-		return -EINVAL;		/* RTC is disabled */
+	ret = regmap_test_bits(regmap, RTC_CTRL, RTC_EN);
+	if (ret <= 0)
+		return ret ?: -EINVAL;	/* RTC is disabled or error */
 
 	ret = regmap_bulk_read(regmap, RTC_TIME, time, sizeof(time));
 	if (ret)
@@ -128,7 +129,7 @@ static int p1_rtc_probe(struct platform_device *pdev)
 	struct rtc_device *rtc;
 	struct p1_rtc *p1;
 
-	p1 = devm_kzalloc(dev, sizeof(*p1), GFP_KERNEL);
+	p1 = devm_kzalloc_obj(dev, *p1);
 	if (!p1)
 		return -ENOMEM;
 	dev_set_drvdata(dev, p1);

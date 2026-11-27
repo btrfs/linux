@@ -117,7 +117,7 @@ static int s2dos05_pmic_probe(struct platform_device *pdev)
 	struct regulator_config config = { };
 	unsigned int rdev_num = ARRAY_SIZE(regulators);
 
-	s2dos05 = devm_kzalloc(dev, sizeof(*s2dos05), GFP_KERNEL);
+	s2dos05 = devm_kzalloc_obj(dev, *s2dos05);
 	if (!s2dos05)
 		return -ENOMEM;
 
@@ -126,7 +126,7 @@ static int s2dos05_pmic_probe(struct platform_device *pdev)
 	s2dos05->regmap = iodev->regmap_pmic;
 	s2dos05->dev = dev;
 	if (!dev->of_node)
-		dev->of_node = dev->parent->of_node;
+		device_set_of_node_from_dev(dev, dev->parent);
 
 	config.dev = dev;
 	config.driver_data = s2dos05;
@@ -146,8 +146,8 @@ static int s2dos05_pmic_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id s2dos05_pmic_id[] = {
-	{ "s2dos05-regulator" },
-	{ },
+	{ .name = "s2dos05-regulator" },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, s2dos05_pmic_id);
 

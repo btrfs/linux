@@ -179,13 +179,13 @@ struct clk_hw *imx_clk_hw_divider_gate(const char *name, const char *parent_name
 				    const struct clk_div_table *table,
 				    spinlock_t *lock)
 {
-	struct clk_init_data init;
 	struct clk_divider_gate *div_gate;
+	struct clk_init_data init = {};
 	struct clk_hw *hw;
 	u32 val;
 	int ret;
 
-	div_gate  = kzalloc(sizeof(*div_gate), GFP_KERNEL);
+	div_gate = kzalloc_obj(*div_gate);
 	if (!div_gate)
 		return ERR_PTR(-ENOMEM);
 

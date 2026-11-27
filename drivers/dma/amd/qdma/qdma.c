@@ -9,7 +9,6 @@
 #include <linux/dmaengine.h>
 #include <linux/dma-mapping.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/platform_data/amd_qdma.h>
 #include <linux/regmap.h>
@@ -448,8 +447,7 @@ static int qdma_alloc_queues(struct qdma_device *qdev,
 		pidx_base = QDMA_REG_OFF(qdev, QDMA_REGO_C2H_PIDX);
 	}
 
-	*queues = devm_kcalloc(&qdev->pdev->dev, qdev->chan_num, sizeof(*q),
-			       GFP_KERNEL);
+	*queues = devm_kzalloc_objs(&qdev->pdev->dev, *q, qdev->chan_num);
 	if (!*queues)
 		return -ENOMEM;
 
@@ -769,7 +767,7 @@ qdma_prep_device_sg(struct dma_chan *chan, struct scatterlist *sgl,
 	struct dma_async_tx_descriptor *tx;
 	struct qdma_mm_vdesc *vdesc;
 
-	vdesc = kzalloc(sizeof(*vdesc), GFP_NOWAIT);
+	vdesc = kzalloc_obj(*vdesc, GFP_NOWAIT);
 	if (!vdesc)
 		return NULL;
 	vdesc->sgl = sgl;
@@ -955,9 +953,8 @@ static int qdmam_alloc_qintr_rings(struct qdma_device *qdev)
 	int ret, i;
 
 	qdev->qintr_ring_num = qdev->queue_irq_num;
-	qdev->qintr_rings = devm_kcalloc(dev, qdev->qintr_ring_num,
-					 sizeof(*qdev->qintr_rings),
-					 GFP_KERNEL);
+	qdev->qintr_rings = devm_kzalloc_objs(dev, *qdev->qintr_rings,
+					      qdev->qintr_ring_num);
 	if (!qdev->qintr_rings)
 		return -ENOMEM;
 
@@ -1044,7 +1041,7 @@ static int amd_qdma_probe(struct platform_device *pdev)
 	void __iomem *regs;
 	int ret;
 
-	qdev = devm_kzalloc(&pdev->dev, sizeof(*qdev), GFP_KERNEL);
+	qdev = devm_kzalloc_obj(&pdev->dev, *qdev);
 	if (!qdev)
 		return -ENOMEM;
 

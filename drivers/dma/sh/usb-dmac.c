@@ -266,7 +266,7 @@ static int usb_dmac_desc_alloc(struct usb_dmac_chan *chan, unsigned int sg_len,
 	struct usb_dmac_desc *desc;
 	unsigned long flags;
 
-	desc = kzalloc(struct_size(desc, sg, sg_len), gfp);
+	desc = kzalloc_flex(*desc, sg, sg_len, gfp);
 	if (!desc)
 		return -ENOMEM;
 
@@ -670,7 +670,6 @@ static struct dma_chan *usb_dmac_of_xlate(struct of_phandle_args *dma_spec,
  * Power management
  */
 
-#ifdef CONFIG_PM
 static int usb_dmac_runtime_suspend(struct device *dev)
 {
 	struct usb_dmac *dmac = dev_get_drvdata(dev);
@@ -691,13 +690,11 @@ static int usb_dmac_runtime_resume(struct device *dev)
 
 	return usb_dmac_init(dmac);
 }
-#endif /* CONFIG_PM */
 
 static const struct dev_pm_ops usb_dmac_pm = {
-	SET_NOIRQ_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
-				      pm_runtime_force_resume)
-	SET_RUNTIME_PM_OPS(usb_dmac_runtime_suspend, usb_dmac_runtime_resume,
-			   NULL)
+	NOIRQ_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
+				  pm_runtime_force_resume)
+	RUNTIME_PM_OPS(usb_dmac_runtime_suspend, usb_dmac_runtime_resume, NULL)
 };
 
 /* -----------------------------------------------------------------------------
@@ -771,7 +768,7 @@ static int usb_dmac_probe(struct platform_device *pdev)
 	int ret;
 	u8 i;
 
-	dmac = devm_kzalloc(&pdev->dev, sizeof(*dmac), GFP_KERNEL);
+	dmac = devm_kzalloc_obj(&pdev->dev, *dmac);
 	if (!dmac)
 		return -ENOMEM;
 
@@ -782,8 +779,8 @@ static int usb_dmac_probe(struct platform_device *pdev)
 	if (ret < 0)
 		return ret;
 
-	dmac->channels = devm_kcalloc(&pdev->dev, dmac->n_channels,
-				      sizeof(*dmac->channels), GFP_KERNEL);
+	dmac->channels = devm_kzalloc_objs(&pdev->dev, *dmac->channels,
+					   dmac->n_channels);
 	if (!dmac->channels)
 		return -ENOMEM;
 
@@ -894,7 +891,7 @@ MODULE_DEVICE_TABLE(of, usb_dmac_of_ids);
 
 static struct platform_driver usb_dmac_driver = {
 	.driver		= {
-		.pm	= &usb_dmac_pm,
+		.pm	= pm_ptr(&usb_dmac_pm),
 		.name	= "usb-dmac",
 		.of_match_table = usb_dmac_of_ids,
 	},

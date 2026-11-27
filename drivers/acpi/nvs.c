@@ -39,7 +39,7 @@ int acpi_nvs_register(__u64 start, __u64 size)
 {
 	struct nvs_region *region;
 
-	region = kmalloc(sizeof(*region), GFP_KERNEL);
+	region = kmalloc_obj(*region);
 	if (!region)
 		return -ENOMEM;
 	region->phys_start = start;
@@ -102,7 +102,7 @@ static int suspend_nvs_register(unsigned long start, unsigned long size)
 	while (size > 0) {
 		unsigned int nr_bytes;
 
-		entry = kzalloc(sizeof(struct nvs_page), GFP_KERNEL);
+		entry = kzalloc_obj(struct nvs_page);
 		if (!entry)
 			goto Error;
 
@@ -133,7 +133,7 @@ void suspend_nvs_free(void)
 
 	list_for_each_entry(entry, &nvs_list, node)
 		if (entry->data) {
-			free_page((unsigned long)entry->data);
+			kfree(entry->data);
 			entry->data = NULL;
 			if (entry->kaddr) {
 				if (entry->unmap) {
@@ -156,7 +156,7 @@ int suspend_nvs_alloc(void)
 	struct nvs_page *entry;
 
 	list_for_each_entry(entry, &nvs_list, node) {
-		entry->data = (void *)__get_free_page(GFP_KERNEL);
+		entry->data = kmalloc(PAGE_SIZE, GFP_KERNEL);
 		if (!entry->data) {
 			suspend_nvs_free();
 			return -ENOMEM;

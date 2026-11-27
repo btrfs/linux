@@ -6,21 +6,23 @@
  * Copyright (c) 2020  Changbin Du <changbin.du@gmail.com>, significant enhancement.
  */
 
-#include "builtin.h"
-
+#include <ctype.h>
 #include <errno.h>
-#include <unistd.h>
-#include <signal.h>
-#include <stdlib.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <math.h>
 #include <poll.h>
-#include <ctype.h>
+#include <semaphore.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <unistd.h>
 #include <linux/capability.h>
+#include <linux/err.h>
 #include <linux/string.h>
+#include <linux/zalloc.h>
 #include <sys/stat.h>
 
+#include "builtin.h"
 #include "debug.h"
 #include <subcmd/pager.h>
 #include <subcmd/parse-options.h>
@@ -43,6 +45,7 @@
 
 static volatile sig_atomic_t workload_exec_errno;
 static volatile sig_atomic_t done;
+static sem_t sig_sem;
 
 static struct stats latency_stats;  /* for tracepoints */
 
@@ -51,6 +54,7 @@ static char tracing_instance[PATH_MAX];	/* Trace instance directory */
 static void sig_handler(int sig __maybe_unused)
 {
 	done = true;
+	sem_post(&sig_sem);
 }
 
 /*
@@ -66,22 +70,16 @@ static void ftrace__workload_exec_failed_signal(int signo __maybe_unused,
 {
 	workload_exec_errno = info->si_value.sival_int;
 	done = true;
+	sem_post(&sig_sem);
 }
 
 static bool check_ftrace_capable(void)
 {
-	bool used_root;
-
-	if (perf_cap__capable(CAP_PERFMON, &used_root))
+	if (perf_cap__capable(CAP_PERFMON) ||
+	    perf_cap__capable(CAP_SYS_ADMIN))
 		return true;
 
-	if (!used_root && perf_cap__capable(CAP_SYS_ADMIN, &used_root))
-		return true;
-
-	pr_err("ftrace only works for %s!\n",
-		used_root ? "root"
-			  : "users with the CAP_PERFMON or CAP_SYS_ADMIN capability"
-		);
+	pr_err("ftrace only works for users with the CAP_PERFMON or CAP_SYS_ADMIN capability!\n");
 	return false;
 }
 
@@ -375,9 +373,9 @@ static int set_tracing_pid(struct perf_ftrace *ftrace)
 	if (target__has_cpu(&ftrace->target))
 		return 0;
 
-	for (i = 0; i < perf_thread_map__nr(ftrace->evlist->core.threads); i++) {
+	for (i = 0; i < perf_thread_map__nr(evlist__core(ftrace->evlist)->threads); i++) {
 		scnprintf(buf, sizeof(buf), "%d",
-			  perf_thread_map__pid(ftrace->evlist->core.threads, i));
+			  perf_thread_map__pid(evlist__core(ftrace->evlist)->threads, i));
 		if (append_tracing_file("set_ftrace_pid", buf) < 0)
 			return -1;
 	}
@@ -411,7 +409,7 @@ static int set_tracing_cpumask(struct perf_cpu_map *cpumap)
 
 static int set_tracing_cpu(struct perf_ftrace *ftrace)
 {
-	struct perf_cpu_map *cpumap = ftrace->evlist->core.user_requested_cpus;
+	struct perf_cpu_map *cpumap = evlist__core(ftrace->evlist)->user_requested_cpus;
 
 	if (!target__has_cpu(&ftrace->target))
 		return 0;
@@ -1151,6 +1149,11 @@ static int __cmd_latency(struct perf_ftrace *ftrace)
 
 	line[0] = '\0';
 	while (!done) {
+		if (ftrace->target.use_bpf) {
+			sem_wait(&sig_sem);
+			break;
+		}
+
 		if (poll(&pollfd, 1, -1) < 0)
 			break;
 
@@ -1209,8 +1212,12 @@ static int prepare_func_profile(struct perf_ftrace *ftrace)
 	ftrace->graph_verbose = 0;
 
 	ftrace->profile_hash = hashmap__new(profile_hash, profile_equal, NULL);
-	if (ftrace->profile_hash == NULL)
-		return -ENOMEM;
+	if (IS_ERR(ftrace->profile_hash)) {
+		int err = PTR_ERR(ftrace->profile_hash);
+
+		ftrace->profile_hash = NULL;
+		return err;
+	}
 
 	return 0;
 }
@@ -1608,14 +1615,15 @@ static int parse_filter_event(const struct option *opt, const char *str,
 {
 	struct list_head *head = opt->value;
 	struct filter_entry *entry;
-	char *s, *p;
+	char *s, *p, *tmp;
 	int ret = -ENOMEM;
 
 	s = strdup(str);
 	if (s == NULL)
 		return -ENOMEM;
 
-	while ((p = strsep(&s, ",")) != NULL) {
+	tmp = s;
+	while ((p = strsep(&tmp, ",")) != NULL) {
 		entry = malloc(sizeof(*entry) + strlen(p) + 1);
 		if (entry == NULL)
 			goto out;
@@ -1852,6 +1860,8 @@ int cmd_ftrace(int argc, const char **argv)
 	INIT_LIST_HEAD(&ftrace.nograph_funcs);
 	INIT_LIST_HEAD(&ftrace.event_pair);
 
+	sem_init(&sig_sem, 0, 0);
+
 	signal(SIGINT, sig_handler);
 	signal(SIGUSR1, sig_handler);
 	signal(SIGCHLD, sig_handler);
@@ -1993,20 +2003,20 @@ int cmd_ftrace(int argc, const char **argv)
 
 	ret = evlist__create_maps(ftrace.evlist, &ftrace.target);
 	if (ret < 0)
-		goto out_delete_evlist;
+		goto out_put_evlist;
 
 	if (argc) {
 		ret = evlist__prepare_workload(ftrace.evlist, &ftrace.target,
 					       argv, false,
 					       ftrace__workload_exec_failed_signal);
 		if (ret < 0)
-			goto out_delete_evlist;
+			goto out_put_evlist;
 	}
 
 	ret = cmd_func(&ftrace);
 
-out_delete_evlist:
-	evlist__delete(ftrace.evlist);
+out_put_evlist:
+	evlist__put(ftrace.evlist);
 
 out_delete_filters:
 	delete_filter_func(&ftrace.filters);
@@ -2015,5 +2025,11 @@ out_delete_filters:
 	delete_filter_func(&ftrace.nograph_funcs);
 	delete_filter_func(&ftrace.event_pair);
 
+	signal(SIGINT, SIG_DFL);
+	signal(SIGUSR1, SIG_DFL);
+	signal(SIGCHLD, SIG_DFL);
+	signal(SIGPIPE, SIG_DFL);
+
+	sem_destroy(&sig_sem);
 	return ret;
 }

@@ -35,8 +35,8 @@ static int poll_oip(struct bdc *bdc, u32 usec)
 	u32 status;
 	int ret;
 
-	ret = readl_poll_timeout(bdc->regs + BDC_BDCSC, status,
-				 (BDC_CSTS(status) != BDC_OIP), 10, usec);
+	ret = readl_poll_timeout_atomic(bdc->regs + BDC_BDCSC, status,
+					(BDC_CSTS(status) != BDC_OIP), 10, usec);
 	if (ret)
 		dev_err(bdc->dev, "operation timedout BDCSC: 0x%08x\n", status);
 	else
@@ -397,8 +397,7 @@ static int bdc_mem_alloc(struct bdc *bdc)
 		"ieps:%d eops:%d num_eps:%d\n",
 		num_ieps, num_oeps, bdc->num_eps);
 	/* allocate array of ep pointers */
-	bdc->bdc_ep_array = kcalloc(bdc->num_eps, sizeof(struct bdc_ep *),
-								GFP_KERNEL);
+	bdc->bdc_ep_array = kzalloc_objs(struct bdc_ep *, bdc->num_eps);
 	if (!bdc->bdc_ep_array)
 		goto fail;
 
@@ -492,7 +491,7 @@ static int bdc_probe(struct platform_device *pdev)
 
 	dev_dbg(dev, "%s()\n", __func__);
 
-	bdc = devm_kzalloc(dev, sizeof(*bdc), GFP_KERNEL);
+	bdc = devm_kzalloc_obj(dev, *bdc);
 	if (!bdc)
 		return -ENOMEM;
 
@@ -512,8 +511,7 @@ static int bdc_probe(struct platform_device *pdev)
 	bdc->num_phys = of_count_phandle_with_args(dev->of_node,
 						"phys", "#phy-cells");
 	if (bdc->num_phys > 0) {
-		bdc->phys = devm_kcalloc(dev, bdc->num_phys,
-					sizeof(struct phy *), GFP_KERNEL);
+		bdc->phys = devm_kzalloc_objs(dev, struct phy *, bdc->num_phys);
 		if (!bdc->phys)
 			return -ENOMEM;
 	} else {
@@ -586,9 +584,29 @@ disable_clk:
 static void bdc_remove(struct platform_device *pdev)
 {
 	struct bdc *bdc;
+	unsigned long flags;
+	u32 temp;
 
 	bdc  = platform_get_drvdata(pdev);
 	dev_dbg(bdc->dev, "%s ()\n", __func__);
+	/*
+	 * Disable the device interrupt source before freeing the IRQ:
+	 * clear BDC_GIE so the controller stops asserting interrupts,
+	 * then free_irq drains any in-flight handler.
+	 */
+	spin_lock_irqsave(&bdc->lock, flags);
+	temp = bdc_readl(bdc->regs, BDC_BDCSC);
+	temp &= ~BDC_GIE;
+	bdc_writel(bdc->regs, BDC_BDCSC, temp);
+	spin_unlock_irqrestore(&bdc->lock, flags);
+	free_irq(bdc->irq, bdc);
+	/*
+	 * Drain func_wake_notify after free_irq: the IRQ handler arms this
+	 * delayed_work via bdc_sr_uspc -> handle_link_state_change ->
+	 * schedule_delayed_work (self-rearmed in bdc_func_wake_timer), so
+	 * the IRQ must be released first to prevent re-arm after cancel.
+	 */
+	cancel_delayed_work_sync(&bdc->func_wake_notify);
 	bdc_udc_exit(bdc);
 	bdc_hw_exit(bdc);
 	bdc_phy_exit(bdc);

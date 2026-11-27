@@ -1,14 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright (C) 2020-2025 Intel Corporation
+ * Copyright (C) 2020-2026 Intel Corporation
  */
 
 #ifndef __IVPU_HW_BTRS_H__
 #define __IVPU_HW_BTRS_H__
 
 #include "ivpu_drv.h"
-#include "ivpu_hw_37xx_reg.h"
-#include "ivpu_hw_40xx_reg.h"
 #include "ivpu_hw_reg_io.h"
 
 #define PLL_PROFILING_FREQ_DEFAULT   38400000
@@ -19,7 +17,6 @@
 
 int ivpu_hw_btrs_info_init(struct ivpu_device *vdev);
 void ivpu_hw_btrs_freq_ratios_init(struct ivpu_device *vdev);
-int ivpu_hw_btrs_irqs_clear_with_0_mtl(struct ivpu_device *vdev);
 int ivpu_hw_btrs_wp_drive(struct ivpu_device *vdev, bool enable);
 int ivpu_hw_btrs_wait_for_clock_res_own_ack(struct ivpu_device *vdev);
 int ivpu_hw_btrs_d0i3_enable(struct ivpu_device *vdev);
@@ -31,12 +28,16 @@ int ivpu_hw_btrs_ip_reset(struct ivpu_device *vdev);
 void ivpu_hw_btrs_profiling_freq_reg_set_lnl(struct ivpu_device *vdev);
 void ivpu_hw_btrs_ats_print_lnl(struct ivpu_device *vdev);
 void ivpu_hw_btrs_clock_relinquish_disable_lnl(struct ivpu_device *vdev);
-u32 ivpu_hw_btrs_dpu_max_freq_get(struct ivpu_device *vdev);
-u32 ivpu_hw_btrs_dpu_freq_get(struct ivpu_device *vdev);
+u32 ivpu_hw_btrs_pll_ratio_to_mhz(struct ivpu_device *vdev, u8 pll_ratio);
+u32 ivpu_hw_btrs_pll_ratio_to_hz(struct ivpu_device *vdev, u8 pll_ratio);
+u32 ivpu_hw_btrs_current_freq_get(struct ivpu_device *vdev);
+int ivpu_hw_btrs_cfg_min_freq_set(struct ivpu_device *vdev, u32 freq_mhz);
+int ivpu_hw_btrs_cfg_max_freq_set(struct ivpu_device *vdev, u32 freq_mhz);
+int ivpu_hw_btrs_cfg_freq_init(struct ivpu_device *vdev);
 bool ivpu_hw_btrs_irq_handler_mtl(struct ivpu_device *vdev, int irq);
 bool ivpu_hw_btrs_irq_handler_lnl(struct ivpu_device *vdev, int irq);
 int ivpu_hw_btrs_dct_get_request(struct ivpu_device *vdev, bool *enable);
-void ivpu_hw_btrs_dct_set_status(struct ivpu_device *vdev, bool enable, u32 active_percent);
+void ivpu_hw_btrs_dct_set_status(struct ivpu_device *vdev, bool enable, u8 active_percent);
 u32 ivpu_hw_btrs_telemetry_offset_get(struct ivpu_device *vdev);
 u32 ivpu_hw_btrs_telemetry_size_get(struct ivpu_device *vdev);
 u32 ivpu_hw_btrs_telemetry_enable_get(struct ivpu_device *vdev);

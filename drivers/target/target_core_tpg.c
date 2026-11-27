@@ -267,6 +267,15 @@ struct se_node_acl *core_tpg_check_initiator_node_acl(
 	acl->dynamic_node_acl = 1;
 
 	/*
+	 * Publish the dynamic NodeACL on tpg->acl_node_list before creating
+	 * its demo-mode MappedLUN dev entries below, so that a concurrent LUN
+	 * teardown sweep (core_clear_lun_from_tpg(), which walks acl_node_list)
+	 * can observe and disable those dev entries.  Otherwise a dev entry can
+	 * be left on an se_lun->lun_deve_list that is about to be freed.
+	 */
+	target_add_node_acl(acl);
+
+	/*
 	 * Here we only create demo-mode MappedLUNs from the active
 	 * TPG LUNs if the fabric is not explicitly asking for
 	 * tpg_check_demo_mode_login_only() == 1.
@@ -275,7 +284,6 @@ struct se_node_acl *core_tpg_check_initiator_node_acl(
 	    (tpg->se_tpg_tfo->tpg_check_demo_mode_login_only(tpg) != 1))
 		core_tpg_add_node_to_devs(acl, tpg, NULL);
 
-	target_add_node_acl(acl);
 	return acl;
 }
 EXPORT_SYMBOL(core_tpg_check_initiator_node_acl);
@@ -548,7 +556,7 @@ int core_tpg_register(
 		ret = core_tpg_add_lun(se_tpg, se_tpg->tpg_virt_lun0,
 				true, g_lun0_dev);
 		if (ret < 0) {
-			kfree(se_tpg->tpg_virt_lun0);
+			target_tpg_free_lun(&se_tpg->tpg_virt_lun0->rcu_head);
 			return ret;
 		}
 	}
@@ -595,7 +603,7 @@ int core_tpg_deregister(struct se_portal_group *se_tpg)
 
 	if (se_tpg->proto_id >= 0) {
 		core_tpg_remove_lun(se_tpg, se_tpg->tpg_virt_lun0);
-		kfree_rcu(se_tpg->tpg_virt_lun0, rcu_head);
+		call_rcu(&se_tpg->tpg_virt_lun0->rcu_head, target_tpg_free_lun);
 	}
 
 	target_tpg_deregister_rtpi(se_tpg);
@@ -610,11 +618,18 @@ struct se_lun *core_tpg_alloc_lun(
 {
 	struct se_lun *lun;
 
-	lun = kzalloc(sizeof(*lun), GFP_KERNEL);
+	lun = kzalloc_obj(*lun);
 	if (!lun) {
 		pr_err("Unable to allocate se_lun memory\n");
 		return ERR_PTR(-ENOMEM);
 	}
+
+	lun->lun_stats = alloc_percpu(struct scsi_port_stats);
+	if (!lun->lun_stats) {
+		pr_err("Unable to allocate se_lun stats memory\n");
+		goto free_lun;
+	}
+
 	lun->unpacked_lun = unpacked_lun;
 	atomic_set(&lun->lun_acl_count, 0);
 	init_completion(&lun->lun_shutdown_comp);
@@ -628,6 +643,18 @@ struct se_lun *core_tpg_alloc_lun(
 	lun->lun_tpg = tpg;
 
 	return lun;
+
+free_lun:
+	kfree(lun);
+	return ERR_PTR(-ENOMEM);
+}
+
+void target_tpg_free_lun(struct rcu_head *head)
+{
+	struct se_lun *lun = container_of(head, struct se_lun, rcu_head);
+
+	free_percpu(lun->lun_stats);
+	kfree(lun);
 }
 
 int core_tpg_add_lun(

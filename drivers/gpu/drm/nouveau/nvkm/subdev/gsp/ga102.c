@@ -140,6 +140,7 @@ ga102_gsp_flcn = {
 	.select = ga102_flcn_select,
 	.addr2 = 0x1000,
 	.riscv_irqmask = 0x528,
+	.riscv_irqdest = 0x52c,
 	.reset_eng = gp102_flcn_reset_eng,
 	.reset_prep = ga102_flcn_reset_prep,
 	.reset_wait_mem_scrubbing = ga102_flcn_reset_wait_mem_scrubbing,
@@ -157,6 +158,9 @@ ga102_gsp_r535 = {
 	.sig_section = ".fwsignature_ga10x",
 
 	.booter.ctor = ga102_gsp_booter_ctor,
+
+	.fwsec_sb.ctor = tu102_gsp_fwsec_sb_ctor,
+	.fwsec_sb.dtor = tu102_gsp_fwsec_sb_dtor,
 
 	.dtor = r535_gsp_dtor,
 	.oneinit = tu102_gsp_oneinit,

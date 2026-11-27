@@ -651,7 +651,7 @@ static int ks0127_probe(struct i2c_client *client)
 		client->addr == (I2C_KS0127_ADDON >> 1) ? "addon" : "on-board",
 		client->addr << 1, client->adapter->name);
 
-	ks = devm_kzalloc(&client->dev, sizeof(*ks), GFP_KERNEL);
+	ks = devm_kzalloc_obj(&client->dev, *ks);
 	if (ks == NULL)
 		return -ENOMEM;
 	sd = &ks->sd;
@@ -677,9 +677,9 @@ static void ks0127_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ks0127_id[] = {
-	{ "ks0127" },
-	{ "ks0127b" },
-	{ "ks0122s" },
+	{ .name = "ks0127" },
+	{ .name = "ks0127b" },
+	{ .name = "ks0122s" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ks0127_id);

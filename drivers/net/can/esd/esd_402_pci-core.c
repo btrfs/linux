@@ -86,8 +86,8 @@ static const struct net_device_ops pci402_acc_netdev_ops = {
 	.ndo_open = acc_open,
 	.ndo_stop = acc_close,
 	.ndo_start_xmit = acc_start_xmit,
-	.ndo_change_mtu = can_change_mtu,
-	.ndo_eth_ioctl = can_eth_ioctl_hwts,
+	.ndo_hwtstamp_get = can_hwtstamp_get,
+	.ndo_hwtstamp_set = can_hwtstamp_set,
 };
 
 static const struct ethtool_ops pci402_acc_ethtool_ops = {
@@ -192,8 +192,8 @@ static int pci402_init_card(struct pci_dev *pdev)
 			card->ov.active_cores);
 		return -EINVAL;
 	}
-	card->cores = devm_kcalloc(&pdev->dev, card->ov.active_cores,
-				   sizeof(struct acc_core), GFP_KERNEL);
+	card->cores = devm_kzalloc_objs(&pdev->dev, struct acc_core,
+					card->ov.active_cores);
 	if (!card->cores)
 		return -ENOMEM;
 
@@ -424,7 +424,7 @@ static int pci402_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (err)
 		return err;
 
-	card = devm_kzalloc(&pdev->dev, sizeof(*card), GFP_KERNEL);
+	card = devm_kzalloc_obj(&pdev->dev, *card);
 	if (!card) {
 		err = -ENOMEM;
 		goto failure_disable_pci;

@@ -12,7 +12,6 @@
 #include <linux/module.h>
 #include <linux/i2c.h>
 #include <linux/err.h>
-#include <linux/mod_devicetable.h>
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
 
@@ -227,7 +226,7 @@ err:
 	return ret;
 }
 
-static u32 isl29501_register_write(struct isl29501_private *isl29501,
+static int isl29501_register_write(struct isl29501_private *isl29501,
 				   enum isl29501_register_name name,
 				   u32 value)
 {
@@ -995,7 +994,7 @@ static int isl29501_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id isl29501_id[] = {
-	{ "isl29501" },
+	{ .name = "isl29501" },
 	{ }
 };
 

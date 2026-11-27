@@ -443,7 +443,7 @@ ath_node_to_tid(struct ath_node *an, u8 tidno)
 
 #define case_rtn_string(val) case val: return #val
 
-#define ath_for_each_chanctx(_sc, _ctx)                             \
+#define ath_for_each_chanctx(sc, ctx)                               \
 	for (ctx = &sc->chanctx[0];                                 \
 	     ctx <= &sc->chanctx[ARRAY_SIZE(sc->chanctx) - 1];      \
 	     ctx++)
@@ -690,9 +690,6 @@ void ath9k_set_txpower(struct ath_softc *sc, struct ieee80211_vif *vif);
 #define	ATH_BCBUF               	8
 #define ATH_DEFAULT_BINTVAL     	100 /* TU */
 #define ATH_DEFAULT_BMISS_LIMIT 	10
-
-#define TSF_TO_TU(_h,_l) \
-	((((u32)(_h)) << 22) | (((u32)(_l)) >> 10))
 
 struct ath_beacon {
 	enum {

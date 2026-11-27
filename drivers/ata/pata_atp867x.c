@@ -340,7 +340,7 @@ static int atp867x_set_priv(struct ata_port *ap)
 	int port = ap->port_no;
 
 	dp = ap->private_data =
-		devm_kzalloc(&pdev->dev, sizeof(*dp), GFP_KERNEL);
+		devm_kzalloc_obj(&pdev->dev, *dp);
 	if (dp == NULL)
 		return -ENOMEM;
 
@@ -526,9 +526,9 @@ static int atp867x_reinit_one(struct pci_dev *pdev)
 #endif
 
 static const struct pci_device_id atp867x_pci_tbl[] = {
-	{ PCI_VDEVICE(ARTOP, PCI_DEVICE_ID_ARTOP_ATP867A),	0 },
-	{ PCI_VDEVICE(ARTOP, PCI_DEVICE_ID_ARTOP_ATP867B),	0 },
-	{ },
+	{ PCI_VDEVICE(ARTOP, PCI_DEVICE_ID_ARTOP_ATP867A) },
+	{ PCI_VDEVICE(ARTOP, PCI_DEVICE_ID_ARTOP_ATP867B) },
+	{ }
 };
 
 static struct pci_driver atp867x_driver = {

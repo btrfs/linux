@@ -37,6 +37,30 @@
 
 /* Registers from ACP_DSP_0 block */
 #define ACP_DSP0_RUNSTALL			0x414
+/*
+ * ATU group registers for groups 9 to 16.
+ * ACPAXI2AXI_ATU_CTRL (0xC40) sits between GRP_8 and GRP_9,
+ * so groups 9 to 16 are offset by 4 bytes relative to a simple stride.
+ */
+#define ACPAXI2AXI_ATU_PAGE_SIZE_GRP_9		0xC44
+#define ACPAXI2AXI_ATU_BASE_ADDR_GRP_9		0xC48
+#define ACPAXI2AXI_ATU_PAGE_SIZE_GRP_10	0xC4C
+#define ACPAXI2AXI_ATU_BASE_ADDR_GRP_10	0xC50
+#define ACPAXI2AXI_ATU_PAGE_SIZE_GRP_11	0xC54
+#define ACPAXI2AXI_ATU_BASE_ADDR_GRP_11	0xC58
+#define ACPAXI2AXI_ATU_PAGE_SIZE_GRP_12	0xC5C
+#define ACPAXI2AXI_ATU_BASE_ADDR_GRP_12	0xC60
+#define ACPAXI2AXI_ATU_PAGE_SIZE_GRP_13	0xC64
+#define ACPAXI2AXI_ATU_BASE_ADDR_GRP_13	0xC68
+#define ACPAXI2AXI_ATU_PAGE_SIZE_GRP_14	0xC6C
+#define ACPAXI2AXI_ATU_BASE_ADDR_GRP_14	0xC70
+#define ACPAXI2AXI_ATU_PAGE_SIZE_GRP_15	0xC74
+#define ACPAXI2AXI_ATU_BASE_ADDR_GRP_15	0xC78
+#define ACPAXI2AXI_ATU_PAGE_SIZE_GRP_16	0xC7C
+#define ACPAXI2AXI_ATU_BASE_ADDR_GRP_16	0xC80
+
+/* ATU page size value for 2 MB pages - used for carveout groups */
+#define PAGE_SIZE_2M_ENABLE			0x0
 
 /* Registers from ACP_AXI2AXIATU block */
 #define ACPAXI2AXI_ATU_PAGE_SIZE_GRP_1		0xC00
@@ -68,12 +92,14 @@
 #define ACP5X_PGFSM_BASE			0x1424
 #define ACP6X_PGFSM_BASE                        0x1024
 #define ACP70_PGFSM_BASE                        ACP6X_PGFSM_BASE
+#define ACP7X_PGFSM_BASE                        ACP6X_PGFSM_BASE
 #define PGFSM_CONTROL_OFFSET			0x0
 #define PGFSM_STATUS_OFFSET			0x4
 #define ACP3X_CLKMUX_SEL			0x1424
 #define ACP5X_CLKMUX_SEL			0x142C
 #define ACP6X_CLKMUX_SEL			0x102C
 #define ACP70_CLKMUX_SEL			ACP6X_CLKMUX_SEL
+#define ACP7X_CLKMUX_SEL			ACP6X_CLKMUX_SEL
 
 /* Registers from ACP_INTR block */
 #define ACP3X_EXT_INTR_STAT			0x1808
@@ -86,21 +112,31 @@
 #define ACP70_EXTERNAL_INTR_CNTL		ACP6X_EXTERNAL_INTR_CNTL
 #define ACP70_EXT_INTR_STAT			ACP6X_EXT_INTR_STAT
 #define ACP70_EXT_INTR_STAT1			ACP6X_EXT_INTR_STAT1
+#define ACP7X_EXTERNAL_INTR_ENB			ACP6X_EXTERNAL_INTR_ENB
+#define ACP7X_EXTERNAL_INTR_CNTL		0x1A04
+#define ACP7X_EXT_INTR_STAT			0x1A1C
+#define ACP7X_EXTERNAL_INTR_CNTL1		0x1A08
+#define ACP7X_EXT_INTR_STAT1			0x1A20
 
 #define ACP3X_DSP_SW_INTR_BASE			0x1814
 #define ACP5X_DSP_SW_INTR_BASE			0x1814
 #define ACP6X_DSP_SW_INTR_BASE                  0x1808
 #define ACP70_DSP_SW_INTR_BASE			ACP6X_DSP_SW_INTR_BASE
+#define ACP7X_DSP_SW_INTR_BASE			0x1860
 #define DSP_SW_INTR_CNTL_OFFSET			0x0
 #define DSP_SW_INTR_STAT_OFFSET			0x4
+#define ACP7X_DSP_SW_INTR_STAT			(ACP7X_DSP_SW_INTR_BASE + DSP_SW_INTR_STAT_OFFSET)
 #define DSP_SW_INTR_TRIG_OFFSET			0x8
+#define ACP7X_DSP_SW_INTR_TRIG_OFFSET		0x30
 #define ACP3X_ERROR_STATUS			0x18C4
 #define ACP6X_ERROR_STATUS			0x1A4C
 #define ACP70_ERROR_STATUS			ACP6X_ERROR_STATUS
+#define ACP7X_ERROR_STATUS			0x1A88
 #define ACP3X_AXI2DAGB_SEM_0			0x1880
 #define ACP5X_AXI2DAGB_SEM_0			0x1884
 #define ACP6X_AXI2DAGB_SEM_0			0x1874
 #define ACP70_AXI2DAGB_SEM_0			ACP6X_AXI2DAGB_SEM_0
+#define ACP7X_AXI2DAGB_SEM_0			0x18F4
 
 /* ACP common registers to report errors related to I2S & SoundWire interfaces */
 #define ACP3X_SW_I2S_ERROR_REASON		0x18C8
@@ -120,9 +156,44 @@
 #define ACP_SHA_DMA_INCLUDE_HDR         0x1CCC
 #define ACP_SHA_PSP_ACK                         0x1C74
 
+/* ACP7.B/7.F MALL/Carveout configuration registers (ACP MMIO offsets) */
+#define ACP7X_MALL_ADDR_VALID			0x114C
+#define ACP7X_MALL_BASE_ADDR_LOW		0x1150
+#define ACP7X_MALL_BASE_ADDR_HIGH		0x1154
+#define ACP7X_MALL_SIZE				0x1158
+#define ACP7X_MALL_VALID			0x115C
+
+/* ASP MPASP mailbox SMN addresses for ACP7.B/7.F carveout firmware load */
+#define MPASP_C2PMSG_173_REG			0x03810BB4
+#define MPASP_C2PMSG_174_REG			0x03810BB8
+#define MPASP_C2PMSG_175_REG			0x03810BBC
+#define MPASP_C2PMSG_73_REG			0x03810A24
+
+/* ASP mailbox command IDs */
+#define ASP_MBOX_CMD_VALIDATE_IMAGE		0x0001
+#define ASP_MBOX_CMD_CALC_HMAC			0x0002
+#define ASP_MBOX_CMD_VALIDATE_HMAC		0x0003
+#define ASP_MBOX_CMD_GET_CARVEOUT_ADDR		0x0004
+
+/* MPASP_C2PMSG_173 control register bit definitions */
+#define ASP_MBOX_READY_BIT			BIT(31)
+#define ASP_MBOX_CMD_ID_MASK			0xFFFF
+
+/* ASP mailbox timeout: 5 seconds per ASP firmware load specification */
+#define ASP_MBOX_TIMEOUT_US			5000000
+/* Short timeout for the initial GET_CARVEOUT_ADDR probe: fail fast when
+ * ASP does not support carveout rather than blocking probe for 5 seconds.
+ */
+#define ASP_MBOX_PROBE_TIMEOUT_US		50000
+#define ASP_MBOX_POLL_INTERVAL_US		1000
+
+/* ASP mailbox payload cookie "ACPB" */
+#define ASP_MBOX_COOKIE				0x41435042
+
 #define ACP_SCRATCH_REG_0			0x10000
 #define ACP6X_DSP_FUSION_RUNSTALL		0x0644
 #define ACP70_DSP_FUSION_RUNSTALL		ACP6X_DSP_FUSION_RUNSTALL
+#define ACP7X_DSP_FUSION_RUNSTALL		ACP6X_DSP_FUSION_RUNSTALL
 
 /* Cache window registers */
 #define ACP_DSP0_CACHE_OFFSET0			0x0420
@@ -139,5 +210,26 @@
 #define ACP70_SDW1_HOST_WAKE_STAT		BIT(25)
 #define ACP70_SDW0_PME_STAT			BIT(26)
 #define ACP70_SDW1_PME_STAT			BIT(27)
+#define ACP7X_DSP0_IDMA_ERROR_MASK		0x4B0
+#define ACP7X_IDMA_ERROR_MASK			0x1FF9FF
+#define ACP7X_ZSC_DSP_CTRL			0x001014
+#define ACP7X_PME_EN				ACP70_PME_EN
+/* SW enable base for SDW0; manager N uses ACP7X_SW_EN + (N * 0x2000) */
+#define ACP7X_SW_EN				0x5200
+
+/* ACP7X SoundWire IO registers (non-gsync, up to 4 managers SW0-SW3) */
+#define ACP7X_EXTERNAL_SW_INTR_STAT		0x001A24
+#define ACP7X_SW_WAKE_EN			0x001458
+#define ACP7X_SW_PME_STS			0x001474
+#define ACP7X_SDW_STAT				BIT(23)
+#define ACP7X_ERROR_IRQ				BIT(29)
+#define ACP7X_SW_WAKE_EN_MASK			BIT(0)
+#define ACP7X_SW_HOST_WAKE_MASK			BIT(22)
+#define ACP7X_SDW_HOST_WAKE_STAT		BIT(24)
+#define ACP7X_SW_FIFO_ERROR_REASON		0x50C4
+#define ACP7X_SW_ERROR_REASON1			0x50CC
+#define ACP7X_SW_ERROR_REASON2			0x50D4
+#define ACP7X_EXTERNAL_SDW_STAT			BIT(16)
+#define ACP7X_SW_ERR_STAT_MASK			BIT(11)
 
 #endif

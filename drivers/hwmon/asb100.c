@@ -213,7 +213,7 @@ static struct asb100_data *asb100_update_device(struct device *dev);
 static void asb100_init_client(struct i2c_client *client);
 
 static const struct i2c_device_id asb100_id[] = {
-	{ "asb100" },
+	{ .name = "asb100" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, asb100_id);
@@ -779,8 +779,7 @@ static int asb100_probe(struct i2c_client *client)
 	int err;
 	struct asb100_data *data;
 
-	data = devm_kzalloc(&client->dev, sizeof(struct asb100_data),
-			    GFP_KERNEL);
+	data = devm_kzalloc_obj(&client->dev, struct asb100_data);
 	if (!data)
 		return -ENOMEM;
 

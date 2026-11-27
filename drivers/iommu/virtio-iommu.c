@@ -231,7 +231,7 @@ static int __viommu_add_req(struct viommu_dev *viommu, void *buf, size_t len,
 	if (write_offset <= 0)
 		return -EINVAL;
 
-	req = kzalloc(struct_size(req, buf, len), GFP_ATOMIC);
+	req = kzalloc_flex(*req, buf, len, GFP_ATOMIC);
 	if (!req)
 		return -ENOMEM;
 
@@ -333,7 +333,7 @@ static int viommu_add_mapping(struct viommu_domain *vdomain, u64 iova, u64 end,
 	unsigned long irqflags;
 	struct viommu_mapping *mapping;
 
-	mapping = kzalloc(sizeof(*mapping), GFP_ATOMIC);
+	mapping = kzalloc_obj(*mapping, GFP_ATOMIC);
 	if (!mapping)
 		return -ENOMEM;
 
@@ -670,7 +670,7 @@ static struct iommu_domain *viommu_domain_alloc_paging(struct device *dev)
 		return ERR_PTR(-ENODEV);
 	}
 
-	vdomain = kzalloc(sizeof(*vdomain), GFP_KERNEL);
+	vdomain = kzalloc_obj(*vdomain);
 	if (!vdomain)
 		return ERR_PTR(-ENOMEM);
 
@@ -730,7 +730,8 @@ static struct iommu_domain *viommu_domain_alloc_identity(struct device *dev)
 	return domain;
 }
 
-static int viommu_attach_dev(struct iommu_domain *domain, struct device *dev)
+static int viommu_attach_dev(struct iommu_domain *domain, struct device *dev,
+			     struct iommu_domain *old)
 {
 	int ret = 0;
 	struct virtio_iommu_req_attach req;
@@ -781,7 +782,8 @@ static int viommu_attach_dev(struct iommu_domain *domain, struct device *dev)
 }
 
 static int viommu_attach_identity_domain(struct iommu_domain *domain,
-					 struct device *dev)
+					 struct device *dev,
+					 struct iommu_domain *old)
 {
 	int ret = 0;
 	struct virtio_iommu_req_attach req;
@@ -1026,7 +1028,7 @@ static struct iommu_device *viommu_probe_device(struct device *dev)
 	if (!viommu)
 		return ERR_PTR(-ENODEV);
 
-	vdev = kzalloc(sizeof(*vdev), GFP_KERNEL);
+	vdev = kzalloc_obj(*vdev);
 	if (!vdev)
 		return ERR_PTR(-ENOMEM);
 
@@ -1128,8 +1130,7 @@ static int viommu_fill_evtq(struct viommu_dev *viommu)
 	struct virtqueue *vq = viommu->vqs[VIOMMU_EVENT_VQ];
 	size_t nr_evts = vq->num_free;
 
-	viommu->evts = evts = devm_kmalloc_array(viommu->dev, nr_evts,
-						 sizeof(*evts), GFP_KERNEL);
+	viommu->evts = evts = devm_kmalloc_objs(viommu->dev, *evts, nr_evts);
 	if (!evts)
 		return -ENOMEM;
 
@@ -1156,7 +1157,7 @@ static int viommu_probe(struct virtio_device *vdev)
 	    !virtio_has_feature(vdev, VIRTIO_IOMMU_F_MAP_UNMAP))
 		return -ENODEV;
 
-	viommu = devm_kzalloc(dev, sizeof(*viommu), GFP_KERNEL);
+	viommu = devm_kzalloc_obj(dev, *viommu);
 	if (!viommu)
 		return -ENOMEM;
 
@@ -1225,12 +1226,12 @@ static int viommu_probe(struct virtio_device *vdev)
 	/* Populate the event queue with buffers */
 	ret = viommu_fill_evtq(viommu);
 	if (ret)
-		goto err_free_vqs;
+		goto err_reset_vdev;
 
 	ret = iommu_device_sysfs_add(&viommu->iommu, dev, NULL, "%s",
 				     virtio_bus_name(vdev));
 	if (ret)
-		goto err_free_vqs;
+		goto err_reset_vdev;
 
 	vdev->priv = viommu;
 
@@ -1242,6 +1243,8 @@ static int viommu_probe(struct virtio_device *vdev)
 
 	return 0;
 
+err_reset_vdev:
+	virtio_reset_device(vdev);
 err_free_vqs:
 	vdev->config->del_vqs(vdev);
 

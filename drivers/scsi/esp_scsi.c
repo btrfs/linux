@@ -881,7 +881,7 @@ static struct esp_cmd_entry *esp_get_ent(struct esp *esp)
 	struct esp_cmd_entry *ret;
 
 	if (list_empty(head)) {
-		ret = kzalloc(sizeof(struct esp_cmd_entry), GFP_ATOMIC);
+		ret = kzalloc_obj(struct esp_cmd_entry, GFP_ATOMIC);
 	} else {
 		ret = list_entry(head->next, struct esp_cmd_entry, list);
 		list_del(&ret->list);
@@ -952,7 +952,7 @@ static void esp_event_queue_full(struct esp *esp, struct esp_cmd_entry *ent)
 	scsi_track_queue_full(dev, lp->num_tagged - 1);
 }
 
-static int esp_queuecommand_lck(struct scsi_cmnd *cmd)
+static enum scsi_qc_status esp_queuecommand_lck(struct scsi_cmnd *cmd)
 {
 	struct scsi_device *dev = cmd->device;
 	struct esp *esp = shost_priv(dev->host);
@@ -2174,7 +2174,7 @@ irqreturn_t scsi_esp_intr(int irq, void *dev_id)
 	unsigned long flags;
 	irqreturn_t ret;
 
-	spin_lock_irqsave(esp->host->host_lock, flags);
+	spin_lock_irqsave(&esp->host->host_lock, flags);
 	ret = IRQ_NONE;
 	if (esp->ops->irq_pending(esp)) {
 		ret = IRQ_HANDLED;
@@ -2194,7 +2194,7 @@ irqreturn_t scsi_esp_intr(int irq, void *dev_id)
 				break;
 		}
 	}
-	spin_unlock_irqrestore(esp->host->host_lock, flags);
+	spin_unlock_irqrestore(&esp->host->host_lock, flags);
 
 	return ret;
 }
@@ -2447,7 +2447,7 @@ static int esp_sdev_init(struct scsi_device *dev)
 	struct esp_target_data *tp = &esp->target[dev->id];
 	struct esp_lun_data *lp;
 
-	lp = kzalloc(sizeof(*lp), GFP_KERNEL);
+	lp = kzalloc_obj(*lp);
 	if (!lp)
 		return -ENOMEM;
 	dev->hostdata = lp;
@@ -2497,7 +2497,7 @@ static int esp_eh_abort_handler(struct scsi_cmnd *cmd)
 	/* XXX This helps a lot with debugging but might be a bit
 	 * XXX much for the final driver.
 	 */
-	spin_lock_irqsave(esp->host->host_lock, flags);
+	spin_lock_irqsave(&esp->host->host_lock, flags);
 	shost_printk(KERN_ERR, esp->host, "Aborting command [%p:%02x]\n",
 		     cmd, cmd->cmnd[0]);
 	ent = esp->active_cmd;
@@ -2514,9 +2514,9 @@ static int esp_eh_abort_handler(struct scsi_cmnd *cmd)
 			     ent->cmd, ent->cmd->cmnd[0]);
 	}
 	esp_dump_cmd_log(esp);
-	spin_unlock_irqrestore(esp->host->host_lock, flags);
+	spin_unlock_irqrestore(&esp->host->host_lock, flags);
 
-	spin_lock_irqsave(esp->host->host_lock, flags);
+	spin_lock_irqsave(&esp->host->host_lock, flags);
 
 	ent = NULL;
 	list_for_each_entry(tmp, &esp->queued_cmds, list) {
@@ -2579,12 +2579,12 @@ static int esp_eh_abort_handler(struct scsi_cmnd *cmd)
 		goto out_failure;
 	}
 
-	spin_unlock_irqrestore(esp->host->host_lock, flags);
+	spin_unlock_irqrestore(&esp->host->host_lock, flags);
 
 	if (!wait_for_completion_timeout(&eh_done, 5 * HZ)) {
-		spin_lock_irqsave(esp->host->host_lock, flags);
+		spin_lock_irqsave(&esp->host->host_lock, flags);
 		ent->eh_done = NULL;
-		spin_unlock_irqrestore(esp->host->host_lock, flags);
+		spin_unlock_irqrestore(&esp->host->host_lock, flags);
 
 		return FAILED;
 	}
@@ -2592,7 +2592,7 @@ static int esp_eh_abort_handler(struct scsi_cmnd *cmd)
 	return SUCCESS;
 
 out_success:
-	spin_unlock_irqrestore(esp->host->host_lock, flags);
+	spin_unlock_irqrestore(&esp->host->host_lock, flags);
 	return SUCCESS;
 
 out_failure:
@@ -2600,7 +2600,7 @@ out_failure:
 	 * XXX since we know which target/lun in particular is
 	 * XXX causing trouble.
 	 */
-	spin_unlock_irqrestore(esp->host->host_lock, flags);
+	spin_unlock_irqrestore(&esp->host->host_lock, flags);
 	return FAILED;
 }
 
@@ -2612,7 +2612,7 @@ static int esp_eh_bus_reset_handler(struct scsi_cmnd *cmd)
 
 	init_completion(&eh_reset);
 
-	spin_lock_irqsave(esp->host->host_lock, flags);
+	spin_lock_irqsave(&esp->host->host_lock, flags);
 
 	esp->eh_reset = &eh_reset;
 
@@ -2624,14 +2624,14 @@ static int esp_eh_bus_reset_handler(struct scsi_cmnd *cmd)
 	esp->flags |= ESP_FLAG_RESETTING;
 	scsi_esp_cmd(esp, ESP_CMD_RS);
 
-	spin_unlock_irqrestore(esp->host->host_lock, flags);
+	spin_unlock_irqrestore(&esp->host->host_lock, flags);
 
 	ssleep(esp_bus_reset_settle);
 
 	if (!wait_for_completion_timeout(&eh_reset, 5 * HZ)) {
-		spin_lock_irqsave(esp->host->host_lock, flags);
+		spin_lock_irqsave(&esp->host->host_lock, flags);
 		esp->eh_reset = NULL;
-		spin_unlock_irqrestore(esp->host->host_lock, flags);
+		spin_unlock_irqrestore(&esp->host->host_lock, flags);
 
 		return FAILED;
 	}
@@ -2645,10 +2645,10 @@ static int esp_eh_host_reset_handler(struct scsi_cmnd *cmd)
 	struct esp *esp = shost_priv(cmd->device->host);
 	unsigned long flags;
 
-	spin_lock_irqsave(esp->host->host_lock, flags);
+	spin_lock_irqsave(&esp->host->host_lock, flags);
 	esp_bootup_reset(esp);
 	esp_reset_cleanup(esp);
-	spin_unlock_irqrestore(esp->host->host_lock, flags);
+	spin_unlock_irqrestore(&esp->host->host_lock, flags);
 
 	ssleep(esp_bus_reset_settle);
 

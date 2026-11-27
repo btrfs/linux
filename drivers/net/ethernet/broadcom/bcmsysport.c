@@ -391,8 +391,10 @@ static void bcm_sysport_update_mib_counters(struct bcm_sysport_priv *priv)
 			if (priv->is_lite)
 				continue;
 
-			if (s->type != BCM_SYSPORT_STAT_MIB_RX)
+			if (s->type == BCM_SYSPORT_STAT_MIB_TX)
 				offset = UMAC_MIB_STAT_OFFSET;
+			else if (s->type == BCM_SYSPORT_STAT_RUNT)
+				offset = 2 * UMAC_MIB_STAT_OFFSET;
 			val = umac_readl(priv, UMAC_MIB_START + j + offset);
 			break;
 		case BCM_SYSPORT_STAT_RXCHK:
@@ -482,10 +484,10 @@ static void bcm_sysport_get_stats(struct net_device *dev,
 		    s->type == BCM_SYSPORT_STAT_NETDEV64) {
 			do {
 				start = u64_stats_fetch_begin(syncp);
-				data[i] = *(u64 *)p;
+				data[j] = *(u64 *)p;
 			} while (u64_stats_fetch_retry(syncp, start));
 		} else
-			data[i] = *(u32 *)p;
+			data[j] = *(u32 *)p;
 		j++;
 	}
 
@@ -842,8 +844,8 @@ next:
 			priv->rx_read_ptr = 0;
 	}
 
-	priv->dim.packets = processed;
-	priv->dim.bytes = processed_bytes;
+	priv->dim.packets += processed;
+	priv->dim.bytes += processed_bytes;
 
 	return processed;
 }
@@ -1010,16 +1012,17 @@ static int bcm_sysport_poll(struct napi_struct *napi, int budget)
 	else
 		rdma_writel(priv, priv->rx_c_index << 16, RDMA_CONS_INDEX);
 
-	if (work_done < budget) {
-		napi_complete_done(napi, work_done);
-		/* re-enable RX interrupts */
-		intrl2_0_mask_clear(priv, INTRL2_0_RDMA_MBDONE);
-	}
-
+	/* net_dim() can queue work, so run it while NAPI is still owned */
 	if (priv->dim.use_dim) {
 		dim_update_sample(priv->dim.event_ctr, priv->dim.packets,
 				  priv->dim.bytes, &dim_sample);
 		net_dim(&priv->dim.dim, &dim_sample);
+	}
+
+	if (work_done < budget) {
+		napi_complete_done(napi, work_done);
+		/* re-enable RX interrupts */
+		intrl2_0_mask_clear(priv, INTRL2_0_RDMA_MBDONE);
 	}
 
 	return work_done;
@@ -1450,8 +1453,11 @@ static void bcm_sysport_init_dim(struct bcm_sysport_priv *priv,
 {
 	struct bcm_sysport_net_dim *dim = &priv->dim;
 
+	memset(&dim->dim, 0, sizeof(dim->dim));
 	INIT_WORK(&dim->dim.work, cb);
 	dim->dim.mode = DIM_CQ_PERIOD_MODE_START_FROM_EQE;
+	/* Match the profile bcm_sysport_init_rx_coalesce() programs */
+	dim->dim.profile_ix = NET_DIM_DEF_PROFILE_EQE;
 	dim->event_ctr = 0;
 	dim->packets = 0;
 	dim->bytes = 0;
@@ -1486,7 +1492,7 @@ static int bcm_sysport_init_tx_ring(struct bcm_sysport_priv *priv,
 	/* Simple descriptors partitioning for now */
 	size = 256;
 
-	ring->cbs = kcalloc(size, sizeof(struct bcm_sysport_cb), GFP_KERNEL);
+	ring->cbs = kzalloc_objs(struct bcm_sysport_cb, size);
 	if (!ring->cbs) {
 		netif_err(priv, hw, priv->netdev, "CB allocation failed\n");
 		return -ENOMEM;
@@ -1665,8 +1671,7 @@ static int bcm_sysport_init_rx_ring(struct bcm_sysport_priv *priv)
 	priv->rx_bds = priv->base + SYS_PORT_RDMA_OFFSET;
 	priv->rx_c_index = 0;
 	priv->rx_read_ptr = 0;
-	priv->rx_cbs = kcalloc(priv->num_rx_bds, sizeof(struct bcm_sysport_cb),
-				GFP_KERNEL);
+	priv->rx_cbs = kzalloc_objs(struct bcm_sysport_cb, priv->num_rx_bds);
 	if (!priv->rx_cbs) {
 		netif_err(priv, hw, priv->netdev, "CB allocation failed\n");
 		return -ENOMEM;
@@ -1717,6 +1722,9 @@ static void bcm_sysport_fini_rx_ring(struct bcm_sysport_priv *priv)
 	reg = rdma_readl(priv, RDMA_STATUS);
 	if (!(reg & RDMA_DISABLED))
 		netdev_warn(priv->netdev, "RDMA not stopped!\n");
+
+	if (!priv->rx_cbs)
+		return;
 
 	for (i = 0; i < priv->num_rx_bds; i++) {
 		cb = &priv->rx_cbs[i];
@@ -2084,7 +2092,7 @@ static int bcm_sysport_stop(struct net_device *dev)
 
 	ret = tdma_enable_set(priv, 0);
 	if (ret) {
-		netdev_err(dev, "timeout disabling RDMA\n");
+		netdev_err(dev, "timeout disabling TDMA\n");
 		return ret;
 	}
 
@@ -2093,7 +2101,7 @@ static int bcm_sysport_stop(struct net_device *dev)
 
 	ret = rdma_enable_set(priv, 0);
 	if (ret) {
-		netdev_err(dev, "timeout disabling TDMA\n");
+		netdev_err(dev, "timeout disabling RDMA\n");
 		return ret;
 	}
 
@@ -2454,8 +2462,6 @@ static int bcm_sysport_probe(struct platform_device *pdev)
 		return -EINVAL;
 
 	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(40));
-	if (ret)
-		ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 	if (ret) {
 		dev_err(&pdev->dev, "unable to set DMA mask: %d\n", ret);
 		return ret;
@@ -2488,9 +2494,8 @@ static int bcm_sysport_probe(struct platform_device *pdev)
 	}
 
 	/* Allocate number of TX rings */
-	priv->tx_rings = devm_kcalloc(&pdev->dev, txq,
-				      sizeof(struct bcm_sysport_tx_ring),
-				      GFP_KERNEL);
+	priv->tx_rings = devm_kzalloc_objs(&pdev->dev,
+					   struct bcm_sysport_tx_ring, txq);
 	if (!priv->tx_rings) {
 		ret = -ENOMEM;
 		goto err_free_netdev;
@@ -2525,17 +2530,19 @@ static int bcm_sysport_probe(struct platform_device *pdev)
 	if (ret)
 		priv->phy_interface = PHY_INTERFACE_MODE_GMII;
 
+	priv->phy_dn = of_parse_phandle(dn, "phy-handle", 0);
+
 	/* In the case of a fixed PHY, the DT node associated
 	 * to the PHY is the Ethernet MAC DT node.
 	 */
-	if (of_phy_is_fixed_link(dn)) {
+	if (!priv->phy_dn && of_phy_is_fixed_link(dn)) {
 		ret = of_phy_register_fixed_link(dn);
 		if (ret) {
 			dev_err(&pdev->dev, "failed to register fixed PHY\n");
 			goto err_free_netdev;
 		}
 
-		priv->phy_dn = dn;
+		priv->phy_dn = of_node_get(dn);
 	}
 
 	/* Initialize netdevice members */
@@ -2620,6 +2627,7 @@ err_deregister_notifier:
 err_deregister_fixed_link:
 	if (of_phy_is_fixed_link(dn))
 		of_phy_deregister_fixed_link(dn);
+	of_node_put(priv->phy_dn);
 err_free_netdev:
 	free_netdev(dev);
 	return ret;
@@ -2638,6 +2646,7 @@ static void bcm_sysport_remove(struct platform_device *pdev)
 	unregister_netdev(dev);
 	if (of_phy_is_fixed_link(dn))
 		of_phy_deregister_fixed_link(dn);
+	of_node_put(priv->phy_dn);
 	free_netdev(dev);
 	dev_set_drvdata(&pdev->dev, NULL);
 }
@@ -2646,7 +2655,7 @@ static int bcm_sysport_suspend_to_wol(struct bcm_sysport_priv *priv)
 {
 	struct net_device *ndev = priv->netdev;
 	unsigned int timeout = 1000;
-	unsigned int index, i = 0;
+	unsigned int index;
 	u32 reg;
 
 	reg = umac_readl(priv, UMAC_MPD_CTRL);
@@ -2676,10 +2685,8 @@ static int bcm_sysport_suspend_to_wol(struct bcm_sysport_priv *priv)
 		reg = rxchk_readl(priv, RXCHK_CONTROL);
 		reg &= ~(RXCHK_BRCM_TAG_MATCH_MASK <<
 			 RXCHK_BRCM_TAG_MATCH_SHIFT);
-		for_each_set_bit(index, priv->filters, RXCHK_BRCM_TAG_MAX) {
-			reg |= BIT(RXCHK_BRCM_TAG_MATCH_SHIFT + i);
-			i++;
-		}
+		for_each_set_bit(index, priv->filters, RXCHK_BRCM_TAG_MAX)
+			reg |= BIT(RXCHK_BRCM_TAG_MATCH_SHIFT + index);
 		reg |= RXCHK_EN | RXCHK_BRCM_TAG_EN;
 		rxchk_writel(priv, reg, RXCHK_CONTROL);
 	}

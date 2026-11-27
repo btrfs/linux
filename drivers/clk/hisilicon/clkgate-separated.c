@@ -87,10 +87,10 @@ struct clk *hisi_register_clkgate_sep(struct device *dev, const char *name,
 				      u8 clk_gate_flags, spinlock_t *lock)
 {
 	struct clkgate_separated *sclk;
+	struct clk_init_data init = {};
 	struct clk *clk;
-	struct clk_init_data init;
 
-	sclk = kzalloc(sizeof(*sclk), GFP_KERNEL);
+	sclk = kzalloc_obj(*sclk);
 	if (!sclk)
 		return ERR_PTR(-ENOMEM);
 

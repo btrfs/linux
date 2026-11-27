@@ -29,6 +29,7 @@
  *		_N,_P	- other mobile parts
  *		_H	- premium mobile parts
  *		_S	- other client parts
+ *		_R	- ruggedized for harsh environment
  *
  *		Historical OPTDIFFs:
  *
@@ -128,6 +129,8 @@
 
 #define INTEL_DIAMONDRAPIDS_X		IFM(19, 0x01) /* Panther Cove */
 
+#define INTEL_CORALRAPIDS_X		IFM(19, 0x08)
+
 #define INTEL_BARTLETTLAKE		IFM(6, 0xD7) /* Raptor Cove */
 
 /* "Hybrid" Processors (P-Core/E-Core) */
@@ -151,11 +154,17 @@
 #define INTEL_LUNARLAKE_M		IFM(6, 0xBD) /* Lion Cove / Skymont */
 
 #define INTEL_PANTHERLAKE_L		IFM(6, 0xCC) /* Cougar Cove / Darkmont */
+#define INTEL_PANTHERLAKE_R		IFM(6, 0xE5) /* Cougar Cove / Darkmont */
 
 #define INTEL_WILDCATLAKE_L		IFM(6, 0xD5)
 
 #define INTEL_NOVALAKE			IFM(18, 0x01) /* Coyote Cove / Arctic Wolf */
 #define INTEL_NOVALAKE_L		IFM(18, 0x03) /* Coyote Cove / Arctic Wolf */
+
+#define INTEL_RAZORLAKE			IFM(18, 0x06)
+#define INTEL_RAZORLAKE_L		IFM(18, 0x07)
+#define INTEL_RAZORLAKE_U		IFM(18, 0x09)
+#define INTEL_RAZORLAKE_S		IFM(18, 0x0A)
 
 /* "Small Core" Processors (Atom/E-Core) */
 

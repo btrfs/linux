@@ -916,7 +916,7 @@ static void __init mtmips_clk_init(struct device_node *node)
 	struct clk_hw_onecell_data *clk_data;
 	int ret, i, count;
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return;
 
@@ -936,7 +936,7 @@ static void __init mtmips_clk_init(struct device_node *node)
 	priv->data = data;
 	count = priv->data->num_clk_base + priv->data->num_clk_fixed +
 		priv->data->num_clk_factor + priv->data->num_clk_periph;
-	clk_data = kzalloc(struct_size(clk_data, hws, count), GFP_KERNEL);
+	clk_data = kzalloc_flex(*clk_data, hws, count);
 	if (!clk_data)
 		goto free_clk_priv;
 
@@ -1079,7 +1079,7 @@ static int mtmips_reset_init(struct device *dev, struct regmap *sysc)
 {
 	struct mtmips_rst *rst_data;
 
-	rst_data = devm_kzalloc(dev, sizeof(*rst_data), GFP_KERNEL);
+	rst_data = devm_kzalloc_obj(dev, *rst_data);
 	if (!rst_data)
 		return -ENOMEM;
 
@@ -1101,7 +1101,7 @@ static int mtmips_clk_probe(struct platform_device *pdev)
 	struct mtmips_clk_priv *priv;
 	int ret;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

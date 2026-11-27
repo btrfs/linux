@@ -9,7 +9,6 @@
 #include <linux/err.h>
 #include <linux/gpio/consumer.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -121,7 +120,7 @@ static int rt9123p_platform_probe(struct platform_device *pdev)
 	struct rt9123p_priv *rt9123p;
 	int ret;
 
-	rt9123p = devm_kzalloc(dev, sizeof(*rt9123p), GFP_KERNEL);
+	rt9123p = devm_kzalloc_obj(dev, *rt9123p);
 	if (!rt9123p)
 		return -ENOMEM;
 

@@ -303,7 +303,7 @@ static int saa7185_probe(struct i2c_client *client)
 	v4l_info(client, "chip found @ 0x%x (%s)\n",
 			client->addr << 1, client->adapter->name);
 
-	encoder = devm_kzalloc(&client->dev, sizeof(*encoder), GFP_KERNEL);
+	encoder = devm_kzalloc_obj(&client->dev, *encoder);
 	if (encoder == NULL)
 		return -ENOMEM;
 	encoder->norm = V4L2_STD_NTSC;
@@ -334,7 +334,7 @@ static void saa7185_remove(struct i2c_client *client)
 /* ----------------------------------------------------------------------- */
 
 static const struct i2c_device_id saa7185_id[] = {
-	{ "saa7185" },
+	{ .name = "saa7185" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, saa7185_id);

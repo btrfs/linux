@@ -64,7 +64,7 @@
 #define BNO055_GRAVITY_DATA_X_LSB_REG	0x2E
 #define BNO055_GRAVITY_DATA_Y_LSB_REG	0x30
 #define BNO055_GRAVITY_DATA_Z_LSB_REG	0x32
-#define BNO055_SCAN_CH_COUNT ((BNO055_GRAVITY_DATA_Z_LSB_REG - BNO055_ACC_DATA_X_LSB_REG) / 2)
+#define BNO055_SCAN_CH_COUNT ((BNO055_GRAVITY_DATA_Z_LSB_REG - BNO055_ACC_DATA_X_LSB_REG) / 2 + 1)
 #define BNO055_TEMP_REG			0x34
 #define BNO055_CALIB_STAT_REG		0x35
 #define BNO055_CALIB_STAT_MAGN_SHIFT 0
@@ -210,9 +210,30 @@ struct bno055_priv {
 	u8 uid[BNO055_UID_LEN];
 	struct gpio_desc *reset_gpio;
 	bool sw_reset;
-	struct {
-		__le16 chans[BNO055_SCAN_CH_COUNT];
-		aligned_s64 timestamp;
+	union {
+		IIO_DECLARE_BUFFER_WITH_TS(__le16, chans, BNO055_SCAN_CH_COUNT);
+		/*
+		 * This struct is not used, but it is here to ensure proper size
+		 * and alignment of the scan buffer above (because of the extra
+		 * requirements of the quaternion field). Technically it is not
+		 * needed in this case, because other fields just happen to make
+		 * things correctly aligned already. But it is better to be
+		 * explicit about the requirements anyway. The actual contents
+		 * of the scan buffer will vary depending on which channels are
+		 * enabled.
+		 */
+		struct {
+			__le16 acc[3];
+			__le16 magn[3];
+			__le16 gyr[3];
+			__le16 yaw;
+			__le16 pitch;
+			__le16 roll;
+			IIO_DECLARE_QUATERNION(__le16, quaternion);
+			__le16 lia[3];
+			__le16 gravity[3];
+			aligned_s64 timestamp;
+		};
 	} buf;
 	struct dentry *debugfs;
 };

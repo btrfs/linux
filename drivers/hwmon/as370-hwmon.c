@@ -11,7 +11,6 @@
 #include <linux/init.h>
 #include <linux/io.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 
 #define CTRL		0x0
@@ -98,7 +97,7 @@ static int as370_hwmon_probe(struct platform_device *pdev)
 	struct as370_hwmon *hwmon;
 	struct device *dev = &pdev->dev;
 
-	hwmon = devm_kzalloc(dev, sizeof(*hwmon), GFP_KERNEL);
+	hwmon = devm_kzalloc_obj(dev, *hwmon);
 	if (!hwmon)
 		return -ENOMEM;
 

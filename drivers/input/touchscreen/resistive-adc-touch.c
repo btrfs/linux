@@ -13,7 +13,6 @@
 #include <linux/input/touchscreen.h>
 #include <linux/iio/consumer.h>
 #include <linux/iio/iio.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -204,7 +203,7 @@ static int grts_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	int error;
 
-	st = devm_kzalloc(dev, sizeof(struct grts_state), GFP_KERNEL);
+	st = devm_kzalloc_obj(dev, struct grts_state);
 	if (!st)
 		return -ENOMEM;
 
@@ -301,3 +300,4 @@ module_platform_driver(grts_driver);
 MODULE_AUTHOR("Eugen Hristev <eugen.hristev@microchip.com>");
 MODULE_DESCRIPTION("Generic ADC Resistive Touch Driver");
 MODULE_LICENSE("GPL v2");
+MODULE_IMPORT_NS("IIO_CONSUMER");

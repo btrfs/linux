@@ -20,9 +20,14 @@ struct bpf_map *bpf_map_meta_alloc(int inner_map_ufd)
 	/* Does not support >1 level map-in-map */
 	if (inner_map->inner_map_meta)
 		return ERR_PTR(-EINVAL);
-
+	if (inner_map->excl_prog_sha)
+		return ERR_PTR(-ENOTSUPP);
 	if (!inner_map->ops->map_meta_equal)
 		return ERR_PTR(-ENOTSUPP);
+
+	/* An inner map has no used_maps reference to hold it under a queued callback. */
+	if (btf_record_has_field(inner_map->record, BPF_RCU_HEAD))
+		return ERR_PTR(-EOPNOTSUPP);
 
 	inner_map_meta_size = sizeof(*inner_map_meta);
 	/* In some cases verifier needs to access beyond just base map. */
@@ -101,12 +106,17 @@ void *bpf_map_fd_get_ptr(struct bpf_map *map,
 	inner_map = __bpf_map_get(f);
 	if (IS_ERR(inner_map))
 		return inner_map;
+	if (inner_map->excl_prog_sha)
+		return ERR_PTR(-ENOTSUPP);
 
 	inner_map_meta = map->inner_map_meta;
-	if (inner_map_meta->ops->map_meta_equal(inner_map_meta, inner_map))
+	if (inner_map_meta->ops->map_meta_equal(inner_map_meta, inner_map)) {
 		bpf_map_inc(inner_map);
-	else
+		/* Its users are those of the outer maps from now on */
+		WRITE_ONCE(inner_map->was_inner_map, true);
+	} else {
 		inner_map = ERR_PTR(-EINVAL);
+	}
 
 	return inner_map;
 }

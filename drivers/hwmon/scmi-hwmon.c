@@ -196,7 +196,7 @@ static int scmi_thermal_sensor_register(struct device *dev,
 	struct scmi_thermal_sensor *th_sensor;
 	struct thermal_zone_device *tzd;
 
-	th_sensor = devm_kzalloc(dev, sizeof(*th_sensor), GFP_KERNEL);
+	th_sensor = devm_kzalloc_obj(dev, *th_sensor);
 	if (!th_sensor)
 		return -ENOMEM;
 
@@ -228,8 +228,8 @@ static int scmi_thermal_sensor_register(struct device *dev,
 
 static int scmi_hwmon_probe(struct scmi_device *sdev)
 {
-	int i, idx;
 	u16 nr_sensors;
+	int i, idx, ret;
 	enum hwmon_sensor_types type;
 	struct scmi_sensors *scmi_sensors;
 	const struct scmi_sensor_info *sensor;
@@ -240,6 +240,8 @@ static int scmi_hwmon_probe(struct scmi_device *sdev)
 	const struct hwmon_channel_info **ptr_scmi_ci;
 	const struct scmi_handle *handle = sdev->handle;
 	struct scmi_protocol_handle *ph;
+	u32 sensor_config = FIELD_PREP(SCMI_SENS_CFG_SENSOR_ENABLED_MASK,
+				       SCMI_SENS_CFG_SENSOR_ENABLE);
 
 	if (!handle)
 		return -ENODEV;
@@ -252,7 +254,7 @@ static int scmi_hwmon_probe(struct scmi_device *sdev)
 	if (!nr_sensors)
 		return -EIO;
 
-	scmi_sensors = devm_kzalloc(dev, sizeof(*scmi_sensors), GFP_KERNEL);
+	scmi_sensors = devm_kzalloc_obj(dev, *scmi_sensors);
 	if (!scmi_sensors)
 		return -ENOMEM;
 
@@ -280,13 +282,11 @@ static int scmi_hwmon_probe(struct scmi_device *sdev)
 	if (nr_count[hwmon_temp])
 		nr_count_temp = nr_count[hwmon_temp];
 
-	scmi_hwmon_chan = devm_kcalloc(dev, nr_types, sizeof(*scmi_hwmon_chan),
-				       GFP_KERNEL);
+	scmi_hwmon_chan = devm_kzalloc_objs(dev, *scmi_hwmon_chan, nr_types);
 	if (!scmi_hwmon_chan)
 		return -ENOMEM;
 
-	ptr_scmi_ci = devm_kcalloc(dev, nr_types + 1, sizeof(*ptr_scmi_ci),
-				   GFP_KERNEL);
+	ptr_scmi_ci = devm_kzalloc_objs(dev, *ptr_scmi_ci, nr_types + 1);
 	if (!ptr_scmi_ci)
 		return -ENOMEM;
 
@@ -297,13 +297,17 @@ static int scmi_hwmon_probe(struct scmi_device *sdev)
 		if (!nr_count[type])
 			continue;
 
-		scmi_hwmon_add_chan_info(scmi_hwmon_chan, dev, nr_count[type],
-					 type, hwmon_attributes[type]);
+		ret = scmi_hwmon_add_chan_info(scmi_hwmon_chan, dev,
+					       nr_count[type], type,
+					       hwmon_attributes[type]);
+		if (ret)
+			return ret;
+
 		*ptr_scmi_ci++ = scmi_hwmon_chan++;
 
 		scmi_sensors->info[type] =
-			devm_kcalloc(dev, nr_count[type],
-				     sizeof(*scmi_sensors->info), GFP_KERNEL);
+			devm_kzalloc_objs(dev, *scmi_sensors->info[type],
+					  nr_count[type]);
 		if (!scmi_sensors->info[type])
 			return -ENOMEM;
 	}
@@ -321,6 +325,12 @@ static int scmi_hwmon_probe(struct scmi_device *sdev)
 		case ENERGY:
 			type = scmi_types[sensor->type];
 			idx = --nr_count[type];
+			ret = sensor_ops->config_set(ph, sensor->id, sensor_config);
+			if (ret) {
+				dev_err(dev, "Error enabling sensor %s. err=%d\n",
+					sensor->name, ret);
+				continue;
+			}
 			*(scmi_sensors->info[type] + idx) = sensor;
 			break;
 		}
@@ -333,8 +343,6 @@ static int scmi_hwmon_probe(struct scmi_device *sdev)
 		return PTR_ERR(hwdev);
 
 	for (i = 0; i < nr_count_temp; i++) {
-		int ret;
-
 		sensor = *(scmi_sensors->info[hwmon_temp] + i);
 		if (!sensor)
 			continue;

@@ -137,7 +137,7 @@ int radeon_fence_emit(struct radeon_device *rdev,
 	u64 seq;
 
 	/* we are protected by the ring emission mutex */
-	*fence = kmalloc(sizeof(struct radeon_fence), GFP_KERNEL);
+	*fence = kmalloc_obj(struct radeon_fence);
 	if ((*fence) == NULL)
 		return -ENOMEM;
 
@@ -191,7 +191,7 @@ static int radeon_fence_check_signaled(wait_queue_entry_t *wait,
  * @ring: ring index the fence is associated with
  *
  * Checks the current fence value and calculates the last
- * signalled fence value. Returns true if activity occured
+ * signalled fence value. Returns true if activity occurred
  * on the ring, and the fence_queue should be waken up.
  */
 static bool radeon_fence_activity(struct radeon_device *rdev, int ring)
@@ -262,7 +262,7 @@ static bool radeon_fence_activity(struct radeon_device *rdev, int ring)
  * @work: delayed work item
  *
  * Checks for fence activity and if there is none probe
- * the hardware if a lockup occured.
+ * the hardware if a lockup occurred.
  */
 static void radeon_fence_check_lockup(struct work_struct *work)
 {
@@ -360,6 +360,13 @@ static bool radeon_fence_is_signaled(struct dma_fence *f)
 	if (atomic64_read(&rdev->fence_drv[ring].last_seq) >= seq)
 		return true;
 
+	if (down_read_trylock(&rdev->exclusive_lock)) {
+		radeon_fence_activity(rdev, ring);
+		up_read(&rdev->exclusive_lock);
+
+		if (atomic64_read(&rdev->fence_drv[ring].last_seq) >= seq)
+			return true;
+	}
 	return false;
 }
 
