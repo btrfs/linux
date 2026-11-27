@@ -5,6 +5,10 @@
  * between CONFIG_MMU and non-CONFIG_MMU kernel configurations.
  */
 
+/*
+ * To allow for userland testing we place internal dependencies in
+ * vma_internal.h and external VMA API declarations in vma.h.
+ */
 #include "vma_internal.h"
 #include "vma.h"
 
@@ -46,7 +50,8 @@ static void vm_area_init_from(const struct vm_area_struct *src,
 	dest->vm_start = src->vm_start;
 	dest->vm_end = src->vm_end;
 	dest->anon_vma = src->anon_vma;
-	dest->vm_pgoff = src->vm_pgoff;
+	dest->vm_pgoff = vma_start_pgoff(src);
+	__vma_set_anon_pgoff(dest, vma_start_anon_pgoff(src));
 	dest->vm_file = src->vm_file;
 	dest->vm_private_data = src->vm_private_data;
 	vm_flags_init(dest, src->vm_flags);
@@ -121,6 +126,9 @@ static inline void vma_pfnmap_track_ctx_release(struct vm_area_struct *vma)
 struct vm_area_struct *vm_area_dup(struct vm_area_struct *orig)
 {
 	struct vm_area_struct *new = kmem_cache_alloc(vm_area_cachep, GFP_KERNEL);
+
+	/* Must hold a write lock to stabilise atomic VMA flags. */
+	vma_assert_write_locked(orig);
 
 	if (!new)
 		return NULL;

@@ -99,13 +99,13 @@ static int dump_tcp_sock(struct seq_file *seq, struct tcp_sock *tp,
 	    icsk->icsk_pending == ICSK_TIME_REO_TIMEOUT ||
 	    icsk->icsk_pending == ICSK_TIME_LOSS_PROBE) {
 		timer_active = 1;
-		timer_expires = icsk->icsk_retransmit_timer.expires;
+		timer_expires = sp->tcp_retransmit_timer.expires;
 	} else if (icsk->icsk_pending == ICSK_TIME_PROBE0) {
 		timer_active = 4;
-		timer_expires = icsk->icsk_retransmit_timer.expires;
-	} else if (timer_pending(&sp->sk_timer)) {
+		timer_expires = sp->tcp_retransmit_timer.expires;
+	} else if (timer_pending(&icsk->icsk_keepalive_timer)) {
 		timer_active = 2;
-		timer_expires = sp->sk_timer.expires;
+		timer_expires = icsk->icsk_keepalive_timer.expires;
 	} else {
 		timer_active = 0;
 		timer_expires = bpf_jiffies64();
@@ -131,8 +131,7 @@ static int dump_tcp_sock(struct seq_file *seq, struct tcp_sock *tp,
 		       icsk->icsk_probes_out,
 		       sock_i_ino(sp),
 		       sp->sk_refcnt.refs.counter);
-	BPF_SEQ_PRINTF(seq, "%pK %lu %lu %u %u %d\n",
-		       tp,
+	BPF_SEQ_PRINTF(seq, "0 %lu %lu %u %u %d\n",
 		       jiffies_to_clock_t(icsk->icsk_rto),
 		       jiffies_to_clock_t(icsk->icsk_ack.ato),
 		       (icsk->icsk_ack.quick << 1) | inet_csk_in_pingpong_mode(icsk),
@@ -161,10 +160,10 @@ static int dump_tw_sock(struct seq_file *seq, struct tcp_timewait_sock *ttw,
 	BPF_SEQ_PRINTF(seq, "%4d: %08X:%04X %08X:%04X ",
 		       seq_num, src, srcp, dest, destp);
 
-	BPF_SEQ_PRINTF(seq, "%02X %08X:%08X %02X:%08lX %08X %5d %8d %d %d %pK\n",
+	BPF_SEQ_PRINTF(seq, "%02X %08X:%08X %02X:%08lX %08X %5d %8d %d %d 0\n",
 		       tw->tw_substate, 0, 0,
 		       3, jiffies_delta_to_clock_t(delta), 0, 0, 0, 0,
-		       tw->tw_refcnt.refs.counter, tw);
+		       tw->tw_refcnt.refs.counter);
 
 	return 0;
 }
@@ -185,9 +184,9 @@ static int dump_req_sock(struct seq_file *seq, struct tcp_request_sock *treq,
 		       seq_num, irsk->ir_loc_addr,
 		       irsk->ir_num, irsk->ir_rmt_addr,
 		       bpf_ntohs(irsk->ir_rmt_port));
-	BPF_SEQ_PRINTF(seq, "%02X %08X:%08X %02X:%08lX %08X %5d %8d %d %d %pK\n",
+	BPF_SEQ_PRINTF(seq, "%02X %08X:%08X %02X:%08lX %08X %5d %8d %d %d 0\n",
 		       TCP_SYN_RECV, 0, 0, 1, jiffies_to_clock_t(ttd),
-		       req->num_timeout, uid, 0, 0, 0, req);
+		       req->num_timeout, uid, 0, 0, 0);
 
 	return 0;
 }

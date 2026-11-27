@@ -97,7 +97,7 @@ static u32 map_old_perms(u32 old)
 	return new;
 }
 
-static void compute_fperms_allow(struct aa_perms *perms, struct aa_dfa *dfa,
+static void compute_fperms_allow(struct aa_perms *perms, const struct aa_dfa *dfa,
 				 aa_state_t state)
 {
 	perms->allow |= AA_MAY_GETATTR;
@@ -109,7 +109,7 @@ static void compute_fperms_allow(struct aa_perms *perms, struct aa_dfa *dfa,
 		perms->allow |= AA_MAY_ONEXEC;
 }
 
-static struct aa_perms compute_fperms_user(struct aa_dfa *dfa,
+static struct aa_perms compute_fperms_user(const struct aa_dfa *dfa,
 					   aa_state_t state)
 {
 	struct aa_perms perms = { };
@@ -124,7 +124,7 @@ static struct aa_perms compute_fperms_user(struct aa_dfa *dfa,
 	return perms;
 }
 
-static struct aa_perms compute_fperms_other(struct aa_dfa *dfa,
+static struct aa_perms compute_fperms_other(const struct aa_dfa *dfa,
 					    aa_state_t state)
 {
 	struct aa_perms perms = { };
@@ -147,7 +147,7 @@ static struct aa_perms compute_fperms_other(struct aa_dfa *dfa,
  *
  * Returns: remapped perm table
  */
-static struct aa_perms *compute_fperms(struct aa_dfa *dfa,
+static struct aa_perms *compute_fperms(const struct aa_dfa *dfa,
 				       u32 *size)
 {
 	aa_state_t state;
@@ -158,7 +158,7 @@ static struct aa_perms *compute_fperms(struct aa_dfa *dfa,
 
 	state_count = dfa->tables[YYTD_ID_BASE]->td_lolen;
 	/* DFAs are restricted from having a state_count of less than 2 */
-	table = kvcalloc(state_count * 2, sizeof(struct aa_perms), GFP_KERNEL);
+	table = kvzalloc_objs(struct aa_perms, state_count * 2);
 	if (!table)
 		return NULL;
 	*size = state_count * 2;
@@ -171,7 +171,7 @@ static struct aa_perms *compute_fperms(struct aa_dfa *dfa,
 	return table;
 }
 
-static struct aa_perms *compute_xmatch_perms(struct aa_dfa *xmatch,
+static struct aa_perms *compute_xmatch_perms(const struct aa_dfa *xmatch,
 				      u32 *size)
 {
 	struct aa_perms *perms;
@@ -182,7 +182,7 @@ static struct aa_perms *compute_xmatch_perms(struct aa_dfa *xmatch,
 
 	state_count = xmatch->tables[YYTD_ID_BASE]->td_lolen;
 	/* DFAs are restricted from having a state_count of less than 2 */
-	perms = kvcalloc(state_count, sizeof(struct aa_perms), GFP_KERNEL);
+	perms = kvzalloc_objs(struct aa_perms, state_count);
 	if (!perms)
 		return NULL;
 	*size = state_count;
@@ -207,7 +207,7 @@ static u32 map_xbits(u32 x)
 		((x & 0x7e) << 9);
 }
 
-static struct aa_perms compute_perms_entry(struct aa_dfa *dfa,
+static struct aa_perms compute_perms_entry(const struct aa_dfa *dfa,
 					   aa_state_t state,
 					   u32 version)
 {
@@ -246,7 +246,7 @@ static struct aa_perms compute_perms_entry(struct aa_dfa *dfa,
 	return perms;
 }
 
-static struct aa_perms *compute_perms(struct aa_dfa *dfa, u32 version,
+static struct aa_perms *compute_perms(const struct aa_dfa *dfa, u32 version,
 				      u32 *size)
 {
 	unsigned int state;
@@ -257,15 +257,21 @@ static struct aa_perms *compute_perms(struct aa_dfa *dfa, u32 version,
 
 	state_count = dfa->tables[YYTD_ID_BASE]->td_lolen;
 	/* DFAs are restricted from having a state_count of less than 2 */
-	table = kvcalloc(state_count, sizeof(struct aa_perms), GFP_KERNEL);
+	table = kvzalloc_objs(struct aa_perms, state_count);
 	if (!table)
 		return NULL;
 	*size = state_count;
 
 	/* zero init so skip the trap state (state == 0) */
-	for (state = 1; state < state_count; state++)
+	for (state = 1; state < state_count; state++) {
 		table[state] = compute_perms_entry(dfa, state, version);
-
+		AA_DEBUG(DEBUG_UNPACK,
+			 "[%d]: (0x%x/0x%x/0x%x//0x%x/0x%x//0x%x), converted from accept1: 0x%x, accept2: 0x%x",
+			 state, table[state].allow, table[state].deny,
+			 table[state].prompt, table[state].audit,
+			 table[state].quiet, table[state].xindex,
+			 ACCEPT_TABLE(dfa)[state], ACCEPT_TABLE2(dfa)[state]);
+	}
 	return table;
 }
 

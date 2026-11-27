@@ -39,8 +39,6 @@
 #define ATH_RESTART_CALINTERVAL   1200000 /* 20 minutes */
 
 #define ATH_DEFAULT_BMISS_LIMIT 10
-#define TSF_TO_TU(_h, _l) \
-	((((u32)(_h)) << 22) | (((u32)(_l)) >> 10))
 
 extern struct ieee80211_ops ath9k_htc_ops;
 extern int htc_modparam_nohwcrypt;
@@ -281,7 +279,6 @@ struct ath9k_htc_rxbuf {
 struct ath9k_htc_rx {
 	struct list_head rxbuf;
 	spinlock_t rxbuflock;
-	bool initialized;
 };
 
 #define ATH9K_HTC_TX_CLEANUP_INTERVAL 50 /* ms */

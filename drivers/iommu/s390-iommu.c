@@ -531,7 +531,7 @@ static struct iommu_domain *s390_domain_alloc_paging(struct device *dev)
 	struct s390_domain *s390_domain;
 	u64 aperture_size;
 
-	s390_domain = kzalloc(sizeof(*s390_domain), GFP_KERNEL);
+	s390_domain = kzalloc_obj(*s390_domain);
 	if (!s390_domain)
 		return NULL;
 
@@ -670,7 +670,8 @@ int zpci_iommu_register_ioat(struct zpci_dev *zdev, u8 *status)
 }
 
 static int blocking_domain_attach_device(struct iommu_domain *domain,
-					 struct device *dev)
+					 struct device *dev,
+					 struct iommu_domain *old)
 {
 	struct zpci_dev *zdev = to_zpci_dev(dev);
 	struct s390_domain *s390_domain;
@@ -694,7 +695,8 @@ static int blocking_domain_attach_device(struct iommu_domain *domain,
 }
 
 static int s390_iommu_attach_device(struct iommu_domain *domain,
-				    struct device *dev)
+				    struct device *dev,
+				    struct iommu_domain *old)
 {
 	struct s390_domain *s390_domain = to_s390_domain(domain);
 	struct zpci_dev *zdev = to_zpci_dev(dev);
@@ -709,7 +711,7 @@ static int s390_iommu_attach_device(struct iommu_domain *domain,
 		domain->geometry.aperture_end < zdev->start_dma))
 		return -EINVAL;
 
-	blocking_domain_attach_device(&blocking_domain, dev);
+	blocking_domain_attach_device(&blocking_domain, dev, old);
 
 	/* If we fail now DMA remains blocked via blocking domain */
 	cc = s390_iommu_domain_reg_ioat(zdev, domain, &status);
@@ -786,7 +788,7 @@ static struct iommu_device *s390_iommu_probe_device(struct device *dev)
 
 static int zpci_refresh_all(struct zpci_dev *zdev)
 {
-	return zpci_refresh_trans((u64)zdev->fh << 32, zdev->start_dma,
+	return zpci_refresh_trans(zdev->fh, zdev->start_dma,
 				  zdev->end_dma - zdev->start_dma + 1);
 }
 
@@ -817,8 +819,7 @@ static void s390_iommu_iotlb_sync(struct iommu_domain *domain,
 	rcu_read_lock();
 	list_for_each_entry_rcu(zdev, &s390_domain->devices, iommu_list) {
 		atomic64_inc(&s390_domain->ctrs.sync_rpcits);
-		zpci_refresh_trans((u64)zdev->fh << 32, gather->start,
-				   size);
+		zpci_refresh_trans(zdev->fh, gather->start, size);
 	}
 	rcu_read_unlock();
 }
@@ -835,8 +836,7 @@ static int s390_iommu_iotlb_sync_map(struct iommu_domain *domain,
 		if (!zdev->tlb_refresh)
 			continue;
 		atomic64_inc(&s390_domain->ctrs.sync_map_rpcits);
-		ret = zpci_refresh_trans((u64)zdev->fh << 32,
-					 iova, size);
+		ret = zpci_refresh_trans(zdev->fh, iova, size);
 		/*
 		 * let the hypervisor discover invalidated entries
 		 * allowing it to free IOVAs and unpin pages
@@ -972,6 +972,8 @@ static unsigned long *get_rto_from_iova(struct s390_domain *domain,
 	case ZPCI_TABLE_TYPE_RFX:
 	case ZPCI_TABLE_TYPE_RSX:
 		rso = get_rso_from_iova(domain, iova);
+		if (!rso)
+			return NULL;
 		rsx = calc_rsx(iova);
 		rse = READ_ONCE(rso[rsx]);
 		if (!reg_entry_isvalid(rse))
@@ -1131,13 +1133,14 @@ static int __init s390_iommu_init(void)
 subsys_initcall(s390_iommu_init);
 
 static int s390_attach_dev_identity(struct iommu_domain *domain,
-				    struct device *dev)
+				    struct device *dev,
+				    struct iommu_domain *old)
 {
 	struct zpci_dev *zdev = to_zpci_dev(dev);
 	u8 status;
 	int cc;
 
-	blocking_domain_attach_device(&blocking_domain, dev);
+	blocking_domain_attach_device(&blocking_domain, dev, old);
 
 	/* If we fail now DMA remains blocked via blocking domain */
 	cc = s390_iommu_domain_reg_ioat(zdev, domain, &status);

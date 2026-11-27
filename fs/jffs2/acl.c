@@ -133,8 +133,7 @@ static void *jffs2_acl_to_medium(const struct posix_acl *acl, size_t *size)
 	size_t i;
 
 	*size = jffs2_acl_size(acl->a_count);
-	header = kmalloc(struct_size(header, a_entries, acl->a_count),
-			GFP_KERNEL);
+	header = kmalloc_flex(*header, a_entries, acl->a_count);
 	if (!header)
 		return ERR_PTR(-ENOMEM);
 	header->a_version = cpu_to_je32(JFFS2_ACL_VERSION);
@@ -229,7 +228,7 @@ static int __jffs2_set_acl(struct inode *inode, int xprefix, struct posix_acl *a
 	return rc;
 }
 
-int jffs2_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
+int jffs2_set_acl(const struct mnt_idmap *idmap, struct dentry *dentry,
 		  struct posix_acl *acl, int type)
 {
 	int rc, xprefix;

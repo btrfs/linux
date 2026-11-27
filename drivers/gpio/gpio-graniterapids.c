@@ -18,7 +18,6 @@
 #include <linux/io.h>
 #include <linux/irq.h>
 #include <linux/math.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/overflow.h>
 #include <linux/platform_device.h>
@@ -321,7 +320,7 @@ static int gnr_gpio_probe(struct platform_device *pdev)
 	int irq, ret;
 	u32 offset;
 
-	priv = devm_kzalloc(dev, struct_size(priv, pad_backup, num_backup_pins), GFP_KERNEL);
+	priv = devm_kzalloc_flex(dev, *priv, pad_backup, num_backup_pins);
 	if (!priv)
 		return -ENOMEM;
 

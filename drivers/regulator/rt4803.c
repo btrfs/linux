@@ -7,7 +7,6 @@
 
 #include <linux/i2c.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
@@ -159,7 +158,7 @@ static int rt4803_probe(struct i2c_client *i2c)
 	bool vsel_act_high;
 	int ret;
 
-	desc = devm_kzalloc(dev, sizeof(*desc), GFP_KERNEL);
+	desc = devm_kzalloc_obj(dev, *desc);
 	if (!desc)
 		return -ENOMEM;
 

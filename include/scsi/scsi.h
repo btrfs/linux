@@ -106,12 +106,15 @@ enum scsi_disposition {
 };
 
 /*
- * Midlevel queue return values.
+ * Status values returned by the .queuecommand() callback if a command has not
+ * been queued.
  */
-#define SCSI_MLQUEUE_HOST_BUSY   0x1055
-#define SCSI_MLQUEUE_DEVICE_BUSY 0x1056
-#define SCSI_MLQUEUE_EH_RETRY    0x1057
-#define SCSI_MLQUEUE_TARGET_BUSY 0x1058
+enum scsi_qc_status {
+	SCSI_MLQUEUE_HOST_BUSY   = 0x1055,
+	SCSI_MLQUEUE_DEVICE_BUSY = 0x1056,
+	SCSI_MLQUEUE_EH_RETRY    = 0x1057,
+	SCSI_MLQUEUE_TARGET_BUSY = 0x1058,
+};
 
 /*
  *  Use these to separate status msg and our bytes
@@ -173,7 +176,7 @@ enum scsi_disposition {
 /*
  * Here are some scsi specific ioctl commands which are sometimes useful.
  *
- * Note that include/linux/cdrom.h also defines IOCTL 0x5300 - 0x5395
+ * Note that include/uapi/linux/cdrom.h also defines IOCTL 0x5301 - 0x5396.
  */
 
 /* Used to obtain PUN and LUN info.  Conflicts with CDROMAUDIOBUFSIZ */

@@ -69,17 +69,15 @@ nouveau_job_init(struct nouveau_job *job,
 			goto err_free_in_sync;
 		}
 
-		job->out_sync.objs = kcalloc(job->out_sync.count,
-					     sizeof(*job->out_sync.objs),
-					     GFP_KERNEL);
+		job->out_sync.objs = kzalloc_objs(*job->out_sync.objs,
+						  job->out_sync.count);
 		if (!job->out_sync.objs) {
 			ret = -ENOMEM;
 			goto err_free_out_sync;
 		}
 
-		job->out_sync.chains = kcalloc(job->out_sync.count,
-					       sizeof(*job->out_sync.chains),
-					       GFP_KERNEL);
+		job->out_sync.chains = kzalloc_objs(*job->out_sync.chains,
+						    job->out_sync.count);
 		if (!job->out_sync.chains) {
 			ret = -ENOMEM;
 			goto err_free_objs;
@@ -330,7 +328,11 @@ nouveau_job_submit(struct nouveau_job *job)
 	mutex_unlock(&sched->mutex);
 
 	if (done_fence) {
-		dma_fence_wait(done_fence, true);
+		/* The job is queued and its VA space changes are applied. It
+		 * can neither be restarted nor reported as failed, so wait
+		 * until it has run.
+		 */
+		dma_fence_wait(done_fence, false);
 		dma_fence_put(done_fence);
 	}
 
@@ -416,7 +418,8 @@ nouveau_sched_init(struct nouveau_sched *sched, struct nouveau_drm *drm,
 	int ret;
 
 	if (!wq) {
-		wq = alloc_workqueue("nouveau_sched_wq_%d", 0, WQ_MAX_ACTIVE,
+		wq = alloc_workqueue("nouveau_sched_wq_%d", WQ_PERCPU,
+				     WQ_MAX_ACTIVE,
 				     current->pid);
 		if (!wq)
 			return -ENOMEM;
@@ -467,7 +470,7 @@ nouveau_sched_create(struct nouveau_sched **psched, struct nouveau_drm *drm,
 	struct nouveau_sched *sched;
 	int ret;
 
-	sched = kzalloc(sizeof(*sched), GFP_KERNEL);
+	sched = kzalloc_obj(*sched);
 	if (!sched)
 		return -ENOMEM;
 
@@ -518,7 +521,7 @@ nouveau_sched_destroy(struct nouveau_sched **psched)
 	struct nouveau_sched *sched = *psched;
 
 	nouveau_sched_fini(sched);
-	kfree(sched);
+	kfree_rcu(sched, rcu);
 
 	*psched = NULL;
 }

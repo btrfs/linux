@@ -2591,20 +2591,26 @@ static int gbe_rxtstamp(struct gbe_intf *gbe_intf, struct netcp_packet *p_info)
 	return 0;
 }
 
-static int gbe_hwtstamp_get(struct gbe_intf *gbe_intf, struct ifreq *ifr)
+static int gbe_hwtstamp_get(void *intf_priv, struct kernel_hwtstamp_config *cfg)
 {
-	struct gbe_priv *gbe_dev = gbe_intf->gbe_dev;
-	struct cpts *cpts = gbe_dev->cpts;
-	struct hwtstamp_config cfg;
+	struct gbe_intf *gbe_intf = intf_priv;
+	struct gbe_priv *gbe_dev;
+	struct phy_device *phy;
 
-	if (!cpts)
+	gbe_dev = gbe_intf->gbe_dev;
+
+	if (!gbe_dev->cpts)
 		return -EOPNOTSUPP;
 
-	cfg.flags = 0;
-	cfg.tx_type = gbe_dev->tx_ts_enabled ? HWTSTAMP_TX_ON : HWTSTAMP_TX_OFF;
-	cfg.rx_filter = gbe_dev->rx_ts_enabled;
+	phy = gbe_intf->slave->phy;
+	if (phy_has_hwtstamp(phy))
+		return -EOPNOTSUPP;
 
-	return copy_to_user(ifr->ifr_data, &cfg, sizeof(cfg)) ? -EFAULT : 0;
+	cfg->flags = 0;
+	cfg->tx_type = gbe_dev->tx_ts_enabled ? HWTSTAMP_TX_ON : HWTSTAMP_TX_OFF;
+	cfg->rx_filter = gbe_dev->rx_ts_enabled;
+
+	return 0;
 }
 
 static void gbe_hwtstamp(struct gbe_intf *gbe_intf)
@@ -2637,19 +2643,23 @@ static void gbe_hwtstamp(struct gbe_intf *gbe_intf)
 	writel(ctl,    GBE_REG_ADDR(slave, port_regs, ts_ctl_ltype2));
 }
 
-static int gbe_hwtstamp_set(struct gbe_intf *gbe_intf, struct ifreq *ifr)
+static int gbe_hwtstamp_set(void *intf_priv, struct kernel_hwtstamp_config *cfg,
+			    struct netlink_ext_ack *extack)
 {
-	struct gbe_priv *gbe_dev = gbe_intf->gbe_dev;
-	struct cpts *cpts = gbe_dev->cpts;
-	struct hwtstamp_config cfg;
+	struct gbe_intf *gbe_intf = intf_priv;
+	struct gbe_priv *gbe_dev;
+	struct phy_device *phy;
 
-	if (!cpts)
+	gbe_dev = gbe_intf->gbe_dev;
+
+	if (!gbe_dev->cpts)
 		return -EOPNOTSUPP;
 
-	if (copy_from_user(&cfg, ifr->ifr_data, sizeof(cfg)))
-		return -EFAULT;
+	phy = gbe_intf->slave->phy;
+	if (phy_has_hwtstamp(phy))
+		return phy->mii_ts->hwtstamp_set(phy->mii_ts, cfg, extack);
 
-	switch (cfg.tx_type) {
+	switch (cfg->tx_type) {
 	case HWTSTAMP_TX_OFF:
 		gbe_dev->tx_ts_enabled = 0;
 		break;
@@ -2660,7 +2670,7 @@ static int gbe_hwtstamp_set(struct gbe_intf *gbe_intf, struct ifreq *ifr)
 		return -ERANGE;
 	}
 
-	switch (cfg.rx_filter) {
+	switch (cfg->rx_filter) {
 	case HWTSTAMP_FILTER_NONE:
 		gbe_dev->rx_ts_enabled = HWTSTAMP_FILTER_NONE;
 		break;
@@ -2668,7 +2678,7 @@ static int gbe_hwtstamp_set(struct gbe_intf *gbe_intf, struct ifreq *ifr)
 	case HWTSTAMP_FILTER_PTP_V1_L4_SYNC:
 	case HWTSTAMP_FILTER_PTP_V1_L4_DELAY_REQ:
 		gbe_dev->rx_ts_enabled = HWTSTAMP_FILTER_PTP_V1_L4_EVENT;
-		cfg.rx_filter = HWTSTAMP_FILTER_PTP_V1_L4_EVENT;
+		cfg->rx_filter = HWTSTAMP_FILTER_PTP_V1_L4_EVENT;
 		break;
 	case HWTSTAMP_FILTER_PTP_V2_L4_EVENT:
 	case HWTSTAMP_FILTER_PTP_V2_L4_SYNC:
@@ -2680,7 +2690,7 @@ static int gbe_hwtstamp_set(struct gbe_intf *gbe_intf, struct ifreq *ifr)
 	case HWTSTAMP_FILTER_PTP_V2_SYNC:
 	case HWTSTAMP_FILTER_PTP_V2_DELAY_REQ:
 		gbe_dev->rx_ts_enabled = HWTSTAMP_FILTER_PTP_V2_EVENT;
-		cfg.rx_filter = HWTSTAMP_FILTER_PTP_V2_EVENT;
+		cfg->rx_filter = HWTSTAMP_FILTER_PTP_V2_EVENT;
 		break;
 	default:
 		return -ERANGE;
@@ -2688,7 +2698,7 @@ static int gbe_hwtstamp_set(struct gbe_intf *gbe_intf, struct ifreq *ifr)
 
 	gbe_hwtstamp(gbe_intf);
 
-	return copy_to_user(ifr->ifr_data, &cfg, sizeof(cfg)) ? -EFAULT : 0;
+	return 0;
 }
 
 static void gbe_register_cpts(struct gbe_priv *gbe_dev)
@@ -2745,12 +2755,15 @@ static inline void gbe_unregister_cpts(struct gbe_priv *gbe_dev)
 {
 }
 
-static inline int gbe_hwtstamp_get(struct gbe_intf *gbe_intf, struct ifreq *req)
+static inline int gbe_hwtstamp_get(void *intf_priv,
+				   struct kernel_hwtstamp_config *cfg)
 {
 	return -EOPNOTSUPP;
 }
 
-static inline int gbe_hwtstamp_set(struct gbe_intf *gbe_intf, struct ifreq *req)
+static inline int gbe_hwtstamp_set(void *intf_priv,
+				   struct kernel_hwtstamp_config *cfg,
+				   struct netlink_ext_ack *extack)
 {
 	return -EOPNOTSUPP;
 }
@@ -2815,15 +2828,6 @@ static int gbe_ioctl(void *intf_priv, struct ifreq *req, int cmd)
 {
 	struct gbe_intf *gbe_intf = intf_priv;
 	struct phy_device *phy = gbe_intf->slave->phy;
-
-	if (!phy_has_hwtstamp(phy)) {
-		switch (cmd) {
-		case SIOCGHWTSTAMP:
-			return gbe_hwtstamp_get(gbe_intf, req);
-		case SIOCSHWTSTAMP:
-			return gbe_hwtstamp_set(gbe_intf, req);
-		}
-	}
 
 	if (phy)
 		return phy_mii_ioctl(phy, req, cmd);
@@ -3116,7 +3120,7 @@ static void init_secondary_ports(struct gbe_priv *gbe_dev,
 	bool mac_phy_link = false;
 
 	for_each_child_of_node(node, port) {
-		slave = devm_kzalloc(dev, sizeof(*slave), GFP_KERNEL);
+		slave = devm_kzalloc_obj(dev, *slave);
 		if (!slave) {
 			dev_err(dev, "memory alloc failed for secondary port(%pOFn), skipping...\n",
 				port);
@@ -3266,18 +3270,15 @@ static int set_xgbe_ethss10_priv(struct gbe_priv *gbe_dev,
 	gbe_dev->et_stats = xgbe10_et_stats;
 	gbe_dev->num_et_stats = ARRAY_SIZE(xgbe10_et_stats);
 
-	gbe_dev->hw_stats = devm_kcalloc(gbe_dev->dev,
-					 gbe_dev->num_et_stats, sizeof(u64),
-					 GFP_KERNEL);
+	gbe_dev->hw_stats = devm_kzalloc_objs(gbe_dev->dev, u64,
+					      gbe_dev->num_et_stats);
 	if (!gbe_dev->hw_stats) {
 		dev_err(gbe_dev->dev, "hw_stats memory allocation failed\n");
 		return -ENOMEM;
 	}
 
 	gbe_dev->hw_stats_prev =
-		devm_kcalloc(gbe_dev->dev,
-			     gbe_dev->num_et_stats, sizeof(u32),
-			     GFP_KERNEL);
+		devm_kzalloc_objs(gbe_dev->dev, u32, gbe_dev->num_et_stats);
 	if (!gbe_dev->hw_stats_prev) {
 		dev_err(gbe_dev->dev,
 			"hw_stats_prev memory allocation failed\n");
@@ -3385,18 +3386,15 @@ static int set_gbe_ethss14_priv(struct gbe_priv *gbe_dev,
 	gbe_dev->et_stats = gbe13_et_stats;
 	gbe_dev->num_et_stats = ARRAY_SIZE(gbe13_et_stats);
 
-	gbe_dev->hw_stats = devm_kcalloc(gbe_dev->dev,
-					 gbe_dev->num_et_stats, sizeof(u64),
-					 GFP_KERNEL);
+	gbe_dev->hw_stats = devm_kzalloc_objs(gbe_dev->dev, u64,
+					      gbe_dev->num_et_stats);
 	if (!gbe_dev->hw_stats) {
 		dev_err(gbe_dev->dev, "hw_stats memory allocation failed\n");
 		return -ENOMEM;
 	}
 
 	gbe_dev->hw_stats_prev =
-		devm_kcalloc(gbe_dev->dev,
-			     gbe_dev->num_et_stats, sizeof(u32),
-			     GFP_KERNEL);
+		devm_kzalloc_objs(gbe_dev->dev, u32, gbe_dev->num_et_stats);
 	if (!gbe_dev->hw_stats_prev) {
 		dev_err(gbe_dev->dev,
 			"hw_stats_prev memory allocation failed\n");
@@ -3456,18 +3454,15 @@ static int set_gbenu_ethss_priv(struct gbe_priv *gbe_dev,
 		gbe_dev->num_et_stats = GBENU_ET_STATS_HOST_SIZE +
 					GBENU_ET_STATS_PORT_SIZE;
 
-	gbe_dev->hw_stats = devm_kcalloc(gbe_dev->dev,
-					 gbe_dev->num_et_stats, sizeof(u64),
-					 GFP_KERNEL);
+	gbe_dev->hw_stats = devm_kzalloc_objs(gbe_dev->dev, u64,
+					      gbe_dev->num_et_stats);
 	if (!gbe_dev->hw_stats) {
 		dev_err(gbe_dev->dev, "hw_stats memory allocation failed\n");
 		return -ENOMEM;
 	}
 
 	gbe_dev->hw_stats_prev =
-		devm_kcalloc(gbe_dev->dev,
-			     gbe_dev->num_et_stats, sizeof(u32),
-			     GFP_KERNEL);
+		devm_kzalloc_objs(gbe_dev->dev, u32, gbe_dev->num_et_stats);
 	if (!gbe_dev->hw_stats_prev) {
 		dev_err(gbe_dev->dev,
 			"hw_stats_prev memory allocation failed\n");
@@ -3551,7 +3546,7 @@ static int gbe_probe(struct netcp_device *netcp_device, struct device *dev,
 		return -ENODEV;
 	}
 
-	gbe_dev = devm_kzalloc(dev, sizeof(struct gbe_priv), GFP_KERNEL);
+	gbe_dev = devm_kzalloc_obj(dev, struct gbe_priv);
 	if (!gbe_dev)
 		return -ENOMEM;
 
@@ -3746,7 +3741,7 @@ static int gbe_attach(void *inst_priv, struct net_device *ndev,
 		return -ENODEV;
 	}
 
-	gbe_intf = devm_kzalloc(gbe_dev->dev, sizeof(*gbe_intf), GFP_KERNEL);
+	gbe_intf = devm_kzalloc_obj(gbe_dev->dev, *gbe_intf);
 	if (!gbe_intf)
 		return -ENOMEM;
 
@@ -3754,9 +3749,7 @@ static int gbe_attach(void *inst_priv, struct net_device *ndev,
 	gbe_intf->dev = gbe_dev->dev;
 	gbe_intf->gbe_dev = gbe_dev;
 
-	gbe_intf->slave = devm_kzalloc(gbe_dev->dev,
-					sizeof(*gbe_intf->slave),
-					GFP_KERNEL);
+	gbe_intf->slave = devm_kzalloc_obj(gbe_dev->dev, *gbe_intf->slave);
 	if (!gbe_intf->slave) {
 		ret = -ENOMEM;
 		goto fail;
@@ -3824,6 +3817,8 @@ static struct netcp_module gbe_module = {
 	.add_vid	= gbe_add_vid,
 	.del_vid	= gbe_del_vid,
 	.ioctl		= gbe_ioctl,
+	.hwtstamp_get	= gbe_hwtstamp_get,
+	.hwtstamp_set	= gbe_hwtstamp_set,
 };
 
 static struct netcp_module xgbe_module = {
@@ -3841,6 +3836,8 @@ static struct netcp_module xgbe_module = {
 	.add_vid	= gbe_add_vid,
 	.del_vid	= gbe_del_vid,
 	.ioctl		= gbe_ioctl,
+	.hwtstamp_get	= gbe_hwtstamp_get,
+	.hwtstamp_set	= gbe_hwtstamp_set,
 };
 
 static int __init keystone_gbe_init(void)

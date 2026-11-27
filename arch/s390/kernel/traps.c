@@ -9,7 +9,9 @@
  *    Copyright (C) 1991, 1992 Linus Torvalds
  */
 
+#include <linux/capability.h>
 #include <linux/cpufeature.h>
+#include <linux/debugfs.h>
 #include <linux/kprobes.h>
 #include <linux/kdebug.h>
 #include <linux/randomize_kstack.h>
@@ -23,24 +25,40 @@
 #include <linux/cpu.h>
 #include <linux/entry-common.h>
 #include <linux/kmsan.h>
+#include <linux/bug.h>
+#include <linux/panic.h>
+#include <asm/pgmcheck-defs.h>
+#include <asm/entry-percpu.h>
 #include <asm/asm-extable.h>
 #include <asm/irqflags.h>
 #include <asm/ptrace.h>
 #include <asm/vtime.h>
 #include <asm/fpu.h>
 #include <asm/fault.h>
+#include <asm/processor.h>
 #include "entry.h"
 
-static inline void __user *get_trap_ip(struct pt_regs *regs)
-{
-	unsigned long address;
+struct pgm_stat {
+	unsigned int count[128];
+};
 
+static DEFINE_PER_CPU_SHARED_ALIGNED(struct pgm_stat, pgm_stat);
+
+unsigned long get_trap_ip(struct pt_regs *regs)
+{
+	static const unsigned long nullified[2] = { PGM_CHECKS_NULLIFIED };
+	psw_t psw = regs->psw;
+
+	if (test_pt_regs_flag(regs, PIF_PSW_ADDR_ADJUSTED))
+		return psw.addr;
 	if (regs->int_code & 0x200)
-		address = current->thread.trap_tdb.data[3];
-	else
-		address = regs->psw.addr;
-	return (void __user *)(address - (regs->int_code >> 16));
+		psw.addr = current->thread.trap_tdb.data[3];
+	if (test_bit(regs->int_code & PGM_INT_CODE_MASK, nullified))
+		return psw.addr;
+	psw.addr = __rewind_psw(psw, regs->int_code >> 16);
+	return psw.addr;
 }
+NOKPROBE_SYMBOL(get_trap_ip);
 
 #ifdef CONFIG_GENERIC_BUG
 int is_valid_bugaddr(unsigned long addr)
@@ -52,7 +70,7 @@ int is_valid_bugaddr(unsigned long addr)
 void do_report_trap(struct pt_regs *regs, int si_signo, int si_code, char *str)
 {
 	if (user_mode(regs)) {
-		force_sig_fault(si_signo, si_code, get_trap_ip(regs));
+		force_sig_fault(si_signo, si_code, (void __user *)get_trap_ip(regs));
 		report_user_fault(regs, si_signo, 0);
 	} else {
 		if (!fixup_exception(regs))
@@ -138,12 +156,12 @@ static void translation_specification_exception(struct pt_regs *regs)
 static void illegal_op(struct pt_regs *regs)
 {
 	int is_uprobe_insn = 0;
-	u16 __user *location;
 	int signal = 0;
 	u16 opcode;
 
-	location = get_trap_ip(regs);
 	if (user_mode(regs)) {
+		u16 __user *location = (void __user *)get_trap_ip(regs);
+
 		if (get_user(opcode, location))
 			return;
 		if (opcode == S390_BREAKPOINT_U16) {
@@ -220,11 +238,49 @@ static void space_switch_exception(struct pt_regs *regs)
 	do_trap(regs, SIGILL, ILL_PRVOPC, "space switch event");
 }
 
+#if defined(CONFIG_BUG) && defined(CONFIG_CC_HAS_ASM_IMMEDIATE_STRINGS)
+
+void *__warn_args(struct arch_va_list *args, struct pt_regs *regs)
+{
+	struct stack_frame *stack_frame;
+
+	/*
+	 * Generate va_list from pt_regs. See ELF Application Binary Interface
+	 * s390x Supplement documentation for details.
+	 *
+	 * - __overflow_arg_area needs to point to the parameter area, which
+	 *   is right above the standard stack frame (160 bytes)
+	 *
+	 * - __reg_save_area needs to point to a register save area where
+	 *   general registers (%r2 - %r6) can be found at offset 16. Which
+	 *   means that the gprs save area of pt_regs can be used
+	 *
+	 * - __gpr must be set to one, since the first parameter has been
+	 *   processed (pointer to bug_entry)
+	 */
+	stack_frame = (struct stack_frame *)regs->gprs[15];
+	args->__overflow_arg_area = stack_frame + 1;
+	args->__reg_save_area = regs->gprs;
+	args->__gpr = 1;
+	return args;
+}
+
+#endif /* CONFIG_BUG && CONFIG_CC_HAS_ASM_IMMEDIATE_STRINGS */
+
 static void monitor_event_exception(struct pt_regs *regs)
 {
+	enum bug_trap_type btt;
+
 	if (user_mode(regs))
 		return;
-	switch (report_bug(regs->psw.addr - (regs->int_code >> 16), regs)) {
+	if (regs->monitor_code == MONCODE_BUG_ARG) {
+		regs->psw.addr = regs->gprs[14];
+		set_pt_regs_flag(regs, PIF_WARN_TRAP_SKIPPED);
+		btt = report_bug_entry((struct bug_entry *)regs->gprs[2], regs);
+	} else {
+		btt = report_bug(regs->psw.addr - (regs->int_code >> 16), regs);
+	}
+	switch (btt) {
 	case BUG_TRAP_TYPE_NONE:
 		fixup_exception(regs);
 		break;
@@ -235,6 +291,17 @@ static void monitor_event_exception(struct pt_regs *regs)
 		break;
 	}
 }
+
+void arch_do_panic(void)
+{
+	disabled_wait();
+}
+
+/*
+ * Content of the faulting CPU's lowcore, copied by stack_invalid().
+ */
+struct lowcore stack_invalid_lowcore;
+int stack_invalid_lowcore_used;
 
 void kernel_stack_invalid(struct pt_regs *regs)
 {
@@ -258,11 +325,12 @@ static void __init test_monitor_call(void)
 	if (!IS_ENABLED(CONFIG_BUG))
 		return;
 	asm_inline volatile(
-		"	mc	0,0\n"
-		"0:	lhi	%[val],0\n"
+		"0:	mc	%[monc](%%r0),0\n"
+		"	lhi	%[val],0\n"
 		"1:\n"
-		EX_TABLE(0b, 1b)
-		: [val] "+d" (val));
+		EX_TABLE_INSN(0b, 1b)
+		: [val] "+d" (val)
+		: [monc] "i" (MONCODE_BUG));
 	if (!val)
 		panic("Monitor call doesn't work!\n");
 }
@@ -287,16 +355,23 @@ void __init trap_init(void)
 
 static void (*pgm_check_table[128])(struct pt_regs *regs);
 
-void noinstr __do_pgm_check(struct pt_regs *regs)
+void noinstr __do_pgm_check(struct pt_regs *regs, unsigned long flags)
 {
 	struct lowcore *lc = get_lowcore();
 	irqentry_state_t state;
+	struct pgm_stat *stat;
 	unsigned int trapnr;
 	union teid teid;
 
 	teid.val = lc->trans_exc_code;
 	regs->int_code = lc->pgm_int_code;
 	regs->int_parm_long = teid.val;
+	regs->monitor_code = lc->monitor_code;
+	set_pt_regs_flag(regs, PIF_PGM_CHECK);
+
+	trapnr = regs->int_code & PGM_INT_CODE_MASK;
+	stat = this_cpu_ptr(&pgm_stat);
+	stat->count[trapnr]++;
 	/*
 	 * In case of a guest fault, short-circuit the fault handler and return.
 	 * This way the sie64a() function will return 0; fault address and
@@ -304,11 +379,12 @@ void noinstr __do_pgm_check(struct pt_regs *regs)
 	 * the fault number in current->thread.gmap_int_code. KVM will be
 	 * able to use this information to handle the fault.
 	 */
-	if (test_pt_regs_flag(regs, PIF_GUEST_FAULT)) {
+	if (flags & PGM_FLAG_GUEST_FAULT) {
 		current->thread.gmap_teid.val = regs->int_parm_long;
 		current->thread.gmap_int_code = regs->int_code & 0xffff;
 		return;
 	}
+	percpu_entry(regs);
 	state = irqentry_enter(regs);
 	if (user_mode(regs)) {
 		update_timer_sys();
@@ -340,13 +416,40 @@ void noinstr __do_pgm_check(struct pt_regs *regs)
 	if (!irqs_disabled_flags(regs->psw.mask))
 		trace_hardirqs_on();
 	__arch_local_irq_ssm(regs->psw.mask & ~PSW_MASK_PER);
-	trapnr = regs->int_code & PGM_INT_CODE_MASK;
 	if (trapnr)
 		pgm_check_table[trapnr](regs);
 out:
 	local_irq_disable();
 	irqentry_exit(regs, state);
+	percpu_exit(regs);
 }
+
+static int pgm_check_stat_show(struct seq_file *p, void *v)
+{
+	int i, cpu;
+
+	cpus_read_lock();
+	seq_puts(p, "          ");
+	for_each_online_cpu(cpu)
+		seq_printf(p, "CPU%-8d", cpu);
+	seq_putc(p, '\n');
+	for (i = 0; i < 128; i++) {
+		seq_printf(p, "%02x: ", i);
+		for_each_online_cpu(cpu)
+			seq_printf(p, "%10u ", per_cpu(pgm_stat, cpu).count[i]);
+		seq_putc(p, '\n');
+	}
+	cpus_read_unlock();
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(pgm_check_stat);
+
+static int __init debugfs_pgm_check_init(void)
+{
+	debugfs_create_file("exceptions", 0400, arch_debugfs_dir, NULL, &pgm_check_stat_fops);
+	return 0;
+}
+late_initcall(debugfs_pgm_check_init);
 
 /*
  * The program check table contains exactly 128 (0x00-0x7f) entries. Each

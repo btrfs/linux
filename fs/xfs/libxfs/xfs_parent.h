@@ -34,7 +34,7 @@ xfs_inode_to_parent_rec(
 	struct xfs_parent_rec	*rec,
 	const struct xfs_inode	*dp)
 {
-	xfs_parent_rec_init(rec, dp->i_ino, VFS_IC(dp)->i_generation);
+	xfs_parent_rec_init(rec, I_INO(dp), VFS_IC(dp)->i_generation);
 }
 
 extern struct kmem_cache	*xfs_parent_args_cache;
@@ -72,7 +72,6 @@ xfs_parent_start(
 /* Finish a parent pointer update by freeing the context object. */
 static inline void
 xfs_parent_finish(
-	struct xfs_mount	*mp,
 	struct xfs_parent_args	*ppargs)
 {
 	if (ppargs)

@@ -103,7 +103,7 @@ static int tps65912_gpio_probe(struct platform_device *pdev)
 	struct tps65912 *tps = dev_get_drvdata(pdev->dev.parent);
 	struct tps65912_gpio *gpio;
 
-	gpio = devm_kzalloc(&pdev->dev, sizeof(*gpio), GFP_KERNEL);
+	gpio = devm_kzalloc_obj(&pdev->dev, *gpio);
 	if (!gpio)
 		return -ENOMEM;
 
@@ -115,7 +115,7 @@ static int tps65912_gpio_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id tps65912_gpio_id_table[] = {
-	{ "tps65912-gpio", },
+	{ .name = "tps65912-gpio" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(platform, tps65912_gpio_id_table);

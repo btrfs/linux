@@ -1,0 +1,98 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause)
+/*
+ * Copyright (C) 2025-2026 Marek Vasut <marex@nabladev.com>
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+#include "stm32mp25-pinctrl.dtsi"
+#include "stm32mp25xxak-pinctrl.dtsi"
+#include "stm32mp2xxx-dhcos-som.dtsi"
+
+/ {
+	model = "DH electronics STM32MP25xx DHCOS SoM";
+	compatible = "dh,stm32mp251a-dhcos-som", "st,stm32mp251";
+
+	aliases {
+		serial1 = &uart8;
+		serial2 = &uart9;
+	};
+};
+
+&gpioa {
+	gpio-line-names = "", "DHCOS-M", "DHCOS-K", "DHCOS-L",
+			  "DHCOS-E", "DHCOS-J", "", "",
+			  "DHCOS-D", "", "", "",
+			  "", "", "", "";
+};
+
+&gpiof {
+	gpio-line-names = "", "", "", "",
+			  "", "", "", "",
+			  "", "", "", "",
+			  "", "", "", "DHCOS_RAM-CODE_2";
+};
+
+&gpiog {
+	gpio-line-names = "", "", "", "",
+			  "", "", "", "",
+			  "", "DHCOS_RAM-CODE_0", "DHCOS_RAM-CODE_1", "",
+			  "", "", "DHCOS-F", "DHCOS_HW-CODE_0";
+};
+
+&gpioh {
+	gpio-line-names = "", "", "DHCOS-I", "DHCOS-N",
+			  "", "", "DHCOS-O", "DHCOS-H",
+			  "DHCOS-G", "", "", "",
+			  "", "", "", "";
+};
+
+&gpioi {
+	gpio-line-names = "DHCOS_HW-CODE_1", "DHCOS_HW-CODE_2", "", "",
+			  "", "", "", "",
+			  "", "DHCOS-C", "", "",
+			  "", "", "", "";
+};
+
+&ioexp {
+	gpio-line-names =
+		"#ETH1_RST_P0_0", "#ETH0_RST_P0_1",
+		"BT_REG_ON_P0_2", "WL_REG_ON_P0_3",
+		"USB1_PWR_EN_P0_4", "USB1_PWR_STAT_P0_5",
+		"USB0_PWR_EN_P0_6", "USB0_PWR_STAT_P0_7",
+		"SDIO0_CD_P1_0", "USB0_SS_SEL_P1_1",
+		"#PCIe_RST_1_2", "#PCIe_Wake_P1_3",
+		"#QSPI_RST_P1_4", "#CSI0_PWDN_P1_5",
+		"#CSI0_RST_P1_6", "#ETH3_RST_P1_7";
+};
+
+&rv3032 {
+	interrupts-extended = <&gpioi 10 IRQ_TYPE_EDGE_FALLING>;
+};
+
+/* Bluetooth */
+&uart8 {
+	pinctrl-names = "default", "sleep", "idle";
+	pinctrl-0 = <&uart8_pins_a>;
+	pinctrl-1 = <&uart8_sleep_pins_a>;
+	pinctrl-2 = <&uart8_idle_pins_a>;
+	uart-has-rtscts;
+	status = "okay";
+
+	bluetooth {
+		compatible = "infineon,cyw55572-bt";
+		brcm,requires-autobaud-mode;
+		max-speed = <3000000>;
+		shutdown-gpios = <&ioexp 2 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+&uart9 {
+	pinctrl-names = "default", "sleep", "idle";
+	pinctrl-0 = <&uart9_pins_a>;
+	pinctrl-1 = <&uart9_sleep_pins_a>;
+	pinctrl-2 = <&uart9_idle_pins_a>;
+	uart-has-rtscts;
+	status = "okay";
+};

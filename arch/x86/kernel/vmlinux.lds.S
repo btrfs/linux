@@ -65,9 +65,26 @@ const_cpu_current_top_of_stack = cpu_current_top_of_stack;
 		__end_rodata_hpage_align = .;			\
 		__end_rodata_aligned = .;
 
+#if defined(CONFIG_MITIGATION_PAGE_TABLE_ISOLATION) || defined(CONFIG_MITIGATION_SRSO)
 #define ALIGN_ENTRY_TEXT_BEGIN	. = ALIGN(PMD_SIZE);
 #define ALIGN_ENTRY_TEXT_END	. = ALIGN(PMD_SIZE);
+#else
+#define ALIGN_ENTRY_TEXT_BEGIN
+#define ALIGN_ENTRY_TEXT_END
+#endif
 
+#else
+
+#define X86_ALIGN_RODATA_BEGIN
+#define X86_ALIGN_RODATA_END					\
+		. = ALIGN(PAGE_SIZE);				\
+		__end_rodata_aligned = .;
+
+#define ALIGN_ENTRY_TEXT_BEGIN
+#define ALIGN_ENTRY_TEXT_END
+#endif
+
+#ifdef CONFIG_AMD_MEM_ENCRYPT
 /*
  * This section contains data which will be mapped as decrypted. Memory
  * encryption operates on a page basis. Make this section PMD-aligned
@@ -88,17 +105,9 @@ const_cpu_current_top_of_stack = cpu_current_top_of_stack;
 	__pi___end_bss_decrypted = .;				\
 
 #else
-
-#define X86_ALIGN_RODATA_BEGIN
-#define X86_ALIGN_RODATA_END					\
-		. = ALIGN(PAGE_SIZE);				\
-		__end_rodata_aligned = .;
-
-#define ALIGN_ENTRY_TEXT_BEGIN
-#define ALIGN_ENTRY_TEXT_END
 #define BSS_DECRYPTED
-
 #endif
+
 #if defined(CONFIG_X86_64) && defined(CONFIG_KEXEC_CORE)
 #define KEXEC_RELOCATE_KERNEL					\
 	. = ALIGN(0x100);					\
@@ -218,7 +227,7 @@ SECTIONS
 	 * references to such code must be patched out by alternatives, normally
 	 * by using X86_FEATURE_ALWAYS CPU feature bit.
 	 *
-	 * See static_cpu_has() for an example.
+	 * See cpu_feature_enabled() for an example.
 	 */
 	.altinstr_aux : AT(ADDR(.altinstr_aux) - LOAD_OFFSET) {
 		*(.altinstr_aux)
@@ -343,18 +352,6 @@ SECTIONS
 		__init_end = .;
 	}
 
-	/*
-	 * smp_locks might be freed after init
-	 * start/end must be page aligned
-	 */
-	. = ALIGN(PAGE_SIZE);
-	.smp_locks : AT(ADDR(.smp_locks) - LOAD_OFFSET) {
-		__smp_locks = .;
-		*(.smp_locks)
-		. = ALIGN(PAGE_SIZE);
-		__smp_locks_end = .;
-	}
-
 #ifdef CONFIG_X86_64
 	.data_nosave : AT(ADDR(.data_nosave) - LOAD_OFFSET) {
 		NOSAVE_DATA
@@ -420,10 +417,8 @@ SECTIONS
 
 	STABS_DEBUG
 	DWARF_DEBUG
-#ifdef CONFIG_PROPELLER_CLANG
-	.llvm_bb_addr_map : { *(.llvm_bb_addr_map) }
-#endif
-
+	PROPELLER_DATA
+	MODINFO
 	ELF_DETAILS
 
 	DISCARDS

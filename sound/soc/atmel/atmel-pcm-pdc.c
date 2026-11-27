@@ -288,12 +288,19 @@ static int atmel_pcm_open(struct snd_soc_component *component,
 	if (ret < 0)
 		goto out;
 
-	prtd = kzalloc(sizeof(struct atmel_runtime_data), GFP_KERNEL);
+	prtd = kzalloc_obj(struct atmel_runtime_data);
 	if (prtd == NULL) {
 		ret = -ENOMEM;
 		goto out;
 	}
 	runtime->private_data = prtd;
+
+	/*
+	 * ASoC only marks the component as opened when .open() returns 0.
+	 * Since snd_pcm_hw_constraint_integer() may return 1, explicitly
+	 * return 0 to ensure .close() is not skipped on rollback.
+	 */
+	return 0;
 
  out:
 	return ret;
@@ -316,7 +323,7 @@ static const struct snd_soc_component_driver atmel_soc_platform = {
 	.prepare	= atmel_pcm_prepare,
 	.trigger	= atmel_pcm_trigger,
 	.pointer	= atmel_pcm_pointer,
-	.pcm_construct	= atmel_pcm_new,
+	.pcm_new	= atmel_pcm_new,
 };
 
 int atmel_pcm_pdc_platform_register(struct device *dev)

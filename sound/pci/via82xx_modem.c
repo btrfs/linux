@@ -246,8 +246,8 @@ struct via82xx_modem {
 };
 
 static const struct pci_device_id snd_via82xx_modem_ids[] = {
-	{ PCI_VDEVICE(VIA, 0x3068), TYPE_CARD_VIA82XX_MODEM, },
-	{ 0, }
+	{ PCI_VDEVICE(VIA, 0x3068), .driver_data = TYPE_CARD_VIA82XX_MODEM },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, snd_via82xx_modem_ids);
@@ -278,9 +278,7 @@ static int build_via_table(struct viadev *dev, struct snd_pcm_substream *substre
 			return -ENOMEM;
 	}
 	if (! dev->idx_table) {
-		dev->idx_table = kmalloc_array(VIA_TABLE_SIZE,
-					       sizeof(*dev->idx_table),
-					       GFP_KERNEL);
+		dev->idx_table = kmalloc_objs(*dev->idx_table, VIA_TABLE_SIZE);
 		if (! dev->idx_table)
 			return -ENOMEM;
 	}
@@ -575,24 +573,18 @@ static inline unsigned int calc_linear_pos(struct via82xx_modem *chip,
 		       viadev->bufsize2, viadev->idx_table[idx].offset,
 		       viadev->idx_table[idx].size, count);
 #endif
-		if (count && size < count) {
+		if (! count)
+			/* bogus count 0 on the DMA boundary? */
+			res = viadev->idx_table[idx].offset;
+		else
+			/* count register returns full size
+			 * when end of buffer is reached
+			 */
+			res = viadev->idx_table[idx].offset + size;
+		if (check_invalid_pos(viadev, res)) {
 			dev_dbg(chip->card->dev,
-				"invalid via82xx_cur_ptr, using last valid pointer\n");
+				"invalid via82xx_cur_ptr (2), using last valid pointer\n");
 			res = viadev->lastpos;
-		} else {
-			if (! count)
-				/* bogus count 0 on the DMA boundary? */
-				res = viadev->idx_table[idx].offset;
-			else
-				/* count register returns full size
-				 * when end of buffer is reached
-				 */
-				res = viadev->idx_table[idx].offset + size;
-			if (check_invalid_pos(viadev, res)) {
-				dev_dbg(chip->card->dev,
-					"invalid via82xx_cur_ptr (2), using last valid pointer\n");
-				res = viadev->lastpos;
-			}
 		}
 	}
 	viadev->lastpos = res; /* remember the last position */
@@ -1096,10 +1088,10 @@ static int snd_via82xx_create(struct snd_card *card,
 }
 
 
-static int __snd_via82xx_probe(struct pci_dev *pci,
-			       const struct pci_device_id *pci_id)
+static int snd_via82xx_probe(struct pci_dev *pci,
+			     const struct pci_device_id *pci_id)
 {
-	struct snd_card *card;
+	struct snd_card *card __free(snd_card_free) = NULL;
 	struct via82xx_modem *chip;
 	int chip_type = 0, card_type;
 	unsigned int i;
@@ -1147,13 +1139,8 @@ static int __snd_via82xx_probe(struct pci_dev *pci,
 	if (err < 0)
 		return err;
 	pci_set_drvdata(pci, card);
+	card = NULL; /* probe succeeded, don't release as error */
 	return 0;
-}
-
-static int snd_via82xx_probe(struct pci_dev *pci,
-			     const struct pci_device_id *pci_id)
-{
-	return snd_card_free_on_error(&pci->dev, __snd_via82xx_probe(pci, pci_id));
 }
 
 static struct pci_driver via82xx_modem_driver = {

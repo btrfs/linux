@@ -141,6 +141,8 @@
 #include <linux/mroute.h>
 #include <linux/netlink.h>
 #include <net/dst_metadata.h>
+#include <net/udp.h>
+#include <net/tcp.h>
 
 /*
  *	Process Router Attention IP option (RFC 2113)
@@ -205,6 +207,12 @@ resubmit:
 		ret = INDIRECT_CALL_2(ipprot->handler, tcp_v4_rcv, udp_rcv,
 				      skb);
 		if (ret < 0) {
+			if (unlikely(skb_headroom(skb) > SKB_MAX_RX_HEADROOM)) {
+				__IP_INC_STATS(net, IPSTATS_MIB_INDISCARDS);
+				kfree_skb_reason(skb,
+						 SKB_DROP_REASON_SKB_RX_HEADROOM);
+				return;
+			}
 			protocol = -ret;
 			goto resubmit;
 		}
@@ -317,8 +325,45 @@ static bool ip_can_use_hint(const struct sk_buff *skb, const struct iphdr *iph,
 	       ip_hdr(hint)->tos == iph->tos;
 }
 
-int tcp_v4_early_demux(struct sk_buff *skb);
-enum skb_drop_reason udp_v4_early_demux(struct sk_buff *skb);
+static int tcp_v4_early_demux(struct sk_buff *skb)
+{
+	struct net *net = dev_net_rcu(skb->dev);
+	const struct iphdr *iph;
+	const struct tcphdr *th;
+	struct sock *sk;
+
+	if (skb->pkt_type != PACKET_HOST)
+		return 0;
+
+	if (!pskb_may_pull(skb, skb_transport_offset(skb) +
+				sizeof(struct tcphdr)))
+		return 0;
+
+	iph = ip_hdr(skb);
+	th = tcp_hdr(skb);
+
+	if (th->doff < sizeof(struct tcphdr) / 4)
+		return 0;
+
+	sk = __inet_lookup_established(net, iph->saddr, th->source,
+				       iph->daddr, ntohs(th->dest),
+				       skb->skb_iif, inet_sdif(skb));
+	if (sk) {
+		skb->sk = sk;
+		skb->destructor = sock_edemux;
+		if (sk_fullsock(sk)) {
+			struct dst_entry *dst = rcu_dereference(sk->sk_rx_dst);
+
+			if (dst)
+				dst = dst_check(dst, 0);
+			if (dst &&
+			    sk->sk_rx_dst_ifindex == skb->skb_iif)
+				skb_dst_set_noref(skb, dst);
+		}
+	}
+	return 0;
+}
+
 static int ip_rcv_finish_core(struct net *net,
 			      struct sk_buff *skb, struct net_device *dev,
 			      const struct sk_buff *hint)

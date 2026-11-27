@@ -32,6 +32,7 @@
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/ctype.h>
+#include <linux/hex.h>
 #include <linux/jiffies.h>
 #include <linux/slab.h>
 #include <linux/timer.h>
@@ -778,12 +779,12 @@ static int jr3_pci_pci_probe(struct pci_dev *dev,
 }
 
 static const struct pci_device_id jr3_pci_pci_table[] = {
-	{ PCI_VDEVICE(JR3, 0x1111), BOARD_JR3_1 },
-	{ PCI_VDEVICE(JR3, 0x3111), BOARD_JR3_1 },
-	{ PCI_VDEVICE(JR3, 0x3112), BOARD_JR3_2 },
-	{ PCI_VDEVICE(JR3, 0x3113), BOARD_JR3_3 },
-	{ PCI_VDEVICE(JR3, 0x3114), BOARD_JR3_4 },
-	{ 0 }
+	{ PCI_VDEVICE(JR3, 0x1111), .driver_data = BOARD_JR3_1 },
+	{ PCI_VDEVICE(JR3, 0x3111), .driver_data = BOARD_JR3_1 },
+	{ PCI_VDEVICE(JR3, 0x3112), .driver_data = BOARD_JR3_2 },
+	{ PCI_VDEVICE(JR3, 0x3113), .driver_data = BOARD_JR3_3 },
+	{ PCI_VDEVICE(JR3, 0x3114), .driver_data = BOARD_JR3_4 },
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, jr3_pci_pci_table);
 

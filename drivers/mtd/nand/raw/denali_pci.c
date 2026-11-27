@@ -19,8 +19,8 @@
 
 /* List of platforms this NAND controller has be integrated into */
 static const struct pci_device_id denali_pci_ids[] = {
-	{ PCI_VDEVICE(INTEL, 0x0701), INTEL_CE4100 },
-	{ PCI_VDEVICE(INTEL, 0x0809), INTEL_MRST },
+	{ PCI_VDEVICE(INTEL, 0x0701), .driver_data = INTEL_CE4100 },
+	{ PCI_VDEVICE(INTEL, 0x0809), .driver_data = INTEL_MRST },
 	{ /* end: all zeroes */ }
 };
 MODULE_DEVICE_TABLE(pci, denali_pci_ids);
@@ -35,7 +35,7 @@ static int denali_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	struct denali_chip *dchip;
 	int nsels, ret, i;
 
-	denali = devm_kzalloc(&dev->dev, sizeof(*denali), GFP_KERNEL);
+	denali = devm_kzalloc_obj(&dev->dev, *denali);
 	if (!denali)
 		return -ENOMEM;
 
@@ -92,8 +92,7 @@ static int denali_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
 	nsels = denali->nbanks;
 
-	dchip = devm_kzalloc(denali->dev, struct_size(dchip, sels, nsels),
-			     GFP_KERNEL);
+	dchip = devm_kzalloc_flex(denali->dev, *dchip, sels, nsels);
 	if (!dchip) {
 		ret = -ENOMEM;
 		goto out_remove_denali;

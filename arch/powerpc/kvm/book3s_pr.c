@@ -639,27 +639,24 @@ static void kvmppc_set_pvr_pr(struct kvm_vcpu *vcpu, u32 pvr)
  */
 static void kvmppc_patch_dcbz(struct kvm_vcpu *vcpu, struct kvmppc_pte *pte)
 {
-	struct kvm_host_map map;
 	u64 hpage_offset;
 	u32 *page;
-	int i, r;
+	int i;
 
-	r = kvm_vcpu_map(vcpu, pte->raddr >> PAGE_SHIFT, &map);
-	if (r)
+	CLASS(kvm_vcpu_map_local, m)(vcpu, pte->raddr >> PAGE_SHIFT);
+	if (m.ret)
 		return;
 
 	hpage_offset = pte->raddr & ~PAGE_MASK;
 	hpage_offset &= ~0xFFFULL;
 	hpage_offset /= 4;
 
-	page = map.hva;
+	page = m.map.hva;
 
 	/* patch dcbz into reserved instruction, so we trap */
 	for (i=hpage_offset; i < hpage_offset + (HW_PAGE_SIZE / 4); i++)
 		if ((be32_to_cpu(page[i]) & 0xff0007ff) == INS_DCBZ)
 			page[i] &= cpu_to_be32(0xfffffff7);
-
-	kvm_vcpu_unmap(vcpu, &map);
 }
 
 static bool kvmppc_visible_gpa(struct kvm_vcpu *vcpu, gpa_t gpa)
@@ -1738,8 +1735,7 @@ static int kvmppc_core_vcpu_create_pr(struct kvm_vcpu *vcpu)
 	vcpu->arch.book3s = vcpu_book3s;
 
 #ifdef CONFIG_KVM_BOOK3S_32_HANDLER
-	vcpu->arch.shadow_vcpu =
-		kzalloc(sizeof(*vcpu->arch.shadow_vcpu), GFP_KERNEL);
+	vcpu->arch.shadow_vcpu = kzalloc_obj(*vcpu->arch.shadow_vcpu);
 	if (!vcpu->arch.shadow_vcpu)
 		goto free_vcpu3s;
 #endif
@@ -1897,7 +1893,13 @@ out:
 static void kvmppc_core_flush_memslot_pr(struct kvm *kvm,
 					 struct kvm_memory_slot *memslot)
 {
-	return;
+	struct kvm_gfn_range range = {
+		.slot = memslot,
+		.start = memslot->base_gfn,
+		.end = memslot->base_gfn + memslot->npages,
+	};
+
+	kvm_unmap_gfn_range_pr(kvm, &range);
 }
 
 static int kvmppc_core_prepare_memory_region_pr(struct kvm *kvm,
@@ -2070,7 +2072,7 @@ static struct kvmppc_ops kvm_ops_pr = {
 	.emulate_op = kvmppc_core_emulate_op_pr,
 	.emulate_mtspr = kvmppc_core_emulate_mtspr_pr,
 	.emulate_mfspr = kvmppc_core_emulate_mfspr_pr,
-	.fast_vcpu_kick = kvm_vcpu_kick,
+	.fast_vcpu_kick = kvmppc_vcpu_kick,
 	.arch_vm_ioctl  = kvm_arch_vm_ioctl_pr,
 #ifdef CONFIG_PPC_BOOK3S_64
 	.hcall_implemented = kvmppc_hcall_impl_pr,

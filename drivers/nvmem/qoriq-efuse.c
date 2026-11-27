@@ -6,7 +6,6 @@
 #include <linux/device.h>
 #include <linux/io.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/nvmem-provider.h>
 #include <linux/platform_device.h>
 
@@ -43,7 +42,7 @@ static int qoriq_efuse_probe(struct platform_device *pdev)
 	struct nvmem_device *nvmem;
 	struct resource *res;
 
-	priv = devm_kzalloc(config.dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(config.dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 

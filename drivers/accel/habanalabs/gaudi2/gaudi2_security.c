@@ -2620,7 +2620,7 @@ static int gaudi2_init_pb_tpc(struct hl_device *hdev)
 
 	block_array_size = ARRAY_SIZE(gaudi2_pb_dcr0_tpc0);
 
-	glbl_sec = kcalloc(block_array_size, sizeof(struct hl_block_glbl_sec), GFP_KERNEL);
+	glbl_sec = kzalloc_objs(struct hl_block_glbl_sec, block_array_size);
 	if (!glbl_sec)
 		return -ENOMEM;
 
@@ -2717,7 +2717,7 @@ static int gaudi2_init_pb_sm_objs(struct hl_device *hdev)
 	array_base = gaudi2_pb_dcr0_sm_objs.mm_block_base_addr +
 				gaudi2_pb_dcr0_sm_objs.glbl_sec_offset;
 
-	sec_array = kcalloc(glbl_sec_array_len, sizeof(u32), GFP_KERNEL);
+	sec_array = kzalloc_objs(u32, glbl_sec_array_len);
 	if (!sec_array)
 		return -ENOMEM;
 

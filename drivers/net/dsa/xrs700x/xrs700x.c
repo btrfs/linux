@@ -566,6 +566,7 @@ static int xrs700x_hsr_join(struct dsa_switch *ds, int port,
 	struct xrs700x *priv = ds->priv;
 	struct net_device *user;
 	int ret, i, hsr_pair[2];
+	enum hsr_port_type type;
 	enum hsr_version ver;
 	bool fwd = false;
 
@@ -586,6 +587,16 @@ static int xrs700x_hsr_join(struct dsa_switch *ds, int port,
 	} else {
 		NL_SET_ERR_MSG_MOD(extack,
 				   "Only HSR v1 and PRP v1 can be offloaded");
+		return -EOPNOTSUPP;
+	}
+
+	ret = hsr_get_port_type(hsr, dsa_to_port(ds, port)->user, &type);
+	if (ret)
+		return ret;
+
+	if (type != HSR_PT_SLAVE_A && type != HSR_PT_SLAVE_B) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "Only HSR slave ports can be offloaded");
 		return -EOPNOTSUPP;
 	}
 
@@ -765,13 +776,13 @@ struct xrs700x *xrs700x_switch_alloc(struct device *base, void *devpriv)
 	struct dsa_switch *ds;
 	struct xrs700x *priv;
 
-	ds = devm_kzalloc(base, sizeof(*ds), GFP_KERNEL);
+	ds = devm_kzalloc_obj(base, *ds);
 	if (!ds)
 		return NULL;
 
 	ds->dev = base;
 
-	priv = devm_kzalloc(base, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(base, *priv);
 	if (!priv)
 		return NULL;
 
@@ -793,8 +804,8 @@ static int xrs700x_alloc_port_mib(struct xrs700x *priv, int port)
 {
 	struct xrs700x_port *p = &priv->ports[port];
 
-	p->mib_data = devm_kcalloc(priv->dev, ARRAY_SIZE(xrs700x_mibs),
-				   sizeof(*p->mib_data), GFP_KERNEL);
+	p->mib_data = devm_kzalloc_objs(priv->dev, *p->mib_data,
+					ARRAY_SIZE(xrs700x_mibs));
 	if (!p->mib_data)
 		return -ENOMEM;
 
@@ -817,8 +828,8 @@ int xrs700x_switch_register(struct xrs700x *priv)
 	if (ret)
 		return ret;
 
-	priv->ports = devm_kcalloc(priv->dev, priv->ds->num_ports,
-				   sizeof(*priv->ports), GFP_KERNEL);
+	priv->ports = devm_kzalloc_objs(priv->dev, *priv->ports,
+					priv->ds->num_ports);
 	if (!priv->ports)
 		return -ENOMEM;
 

@@ -22,8 +22,7 @@
 #include <linux/tty_flip.h>
 #include <linux/serial_core.h>
 #include <linux/delay.h>
-
-#include <asm/mach-pic32/pic32.h>
+#include <linux/platform_data/pic32.h>
 
 /* UART name and device definitions */
 #define PIC32_DEV_NAME		"pic32-uart"
@@ -878,7 +877,7 @@ static int pic32_uart_probe(struct platform_device *pdev)
 	if (!res_mem)
 		return -EINVAL;
 
-	sport = devm_kzalloc(&pdev->dev, sizeof(*sport), GFP_KERNEL);
+	sport = devm_kzalloc_obj(&pdev->dev, *sport);
 	if (!sport)
 		return -ENOMEM;
 

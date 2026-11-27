@@ -96,7 +96,7 @@ For short bitmaps of (reasonably) fixed length, standard ``NLA_BITFIELD32``
 type is used. For arbitrary length bitmaps, ethtool netlink uses a nested
 attribute with contents of one of two forms: compact (two binary bitmaps
 representing bit values and mask of affected bits) and bit-by-bit (list of
-bits identified by either index or name).
+bits identified by index or name).
 
 Verbose (bit-by-bit) bitsets allow sending symbolic names for bits together
 with their values which saves a round trip (when the bitset is passed in a
@@ -131,7 +131,7 @@ For compact form, ``ETHTOOL_A_BITSET_SIZE`` and ``ETHTOOL_A_BITSET_VALUE`` are
 mandatory. ``ETHTOOL_A_BITSET_MASK`` attribute is mandatory if
 ``ETHTOOL_A_BITSET_NOMASK`` is not set (bitset represents a value/mask pair);
 if ``ETHTOOL_A_BITSET_NOMASK`` is not set, ``ETHTOOL_A_BITSET_MASK`` is not
-allowed (bitset represents a single bitmap.
+allowed (bitset represents a single bitmap).
 
 Kernel bit set length may differ from userspace length if older application is
 used on newer kernel or vice versa. If userspace bitmap is longer, an error is
@@ -156,12 +156,16 @@ Bit-by-bit form: nested (bitset) attribute contents:
  | | | ``ETHTOOL_A_BITSET_BIT_VALUE`` | flag   | present if bit is set       |
  +-+-+--------------------------------+--------+-----------------------------+
 
-Bit size is optional for bit-by-bit form. ``ETHTOOL_A_BITSET_BITS`` nest can
+For bit-by-bit form, ``ETHTOOL_A_BITSET_SIZE`` is optional, and
+``ETHTOOL_A_BITSET_BITS`` is mandatory. ``ETHTOOL_A_BITSET_BITS`` nest can
 only contain ``ETHTOOL_A_BITSET_BITS_BIT`` attributes but there can be an
 arbitrary number of them.  A bit may be identified by its index or by its
 name. When used in requests, listed bits are set to 0 or 1 according to
-``ETHTOOL_A_BITSET_BIT_VALUE``, the rest is preserved. A request fails if
-index exceeds kernel bit length or if name is not recognized.
+``ETHTOOL_A_BITSET_BIT_VALUE``, the rest is preserved.
+
+A request fails if index exceeds kernel bit length or if name is not
+recognized. If both name and index are set, the request will fail if they
+point to different bits.
 
 When ``ETHTOOL_A_BITSET_NOMASK`` flag is present, bitset is interpreted as
 a simple bitmap. ``ETHTOOL_A_BITSET_BIT_VALUE`` attributes are not used in
@@ -242,6 +246,8 @@ Userspace to kernel:
   ``ETHTOOL_MSG_RSS_SET``               set RSS settings
   ``ETHTOOL_MSG_RSS_CREATE_ACT``        create an additional RSS context
   ``ETHTOOL_MSG_RSS_DELETE_ACT``        delete an additional RSS context
+  ``ETHTOOL_MSG_MSE_GET``               get MSE diagnostic data
+  ``ETHTOOL_MSG_PORT_GET``              get port information
   ===================================== =================================
 
 Kernel to userspace:
@@ -299,6 +305,8 @@ Kernel to userspace:
   ``ETHTOOL_MSG_RSS_CREATE_ACT_REPLY``     create an additional RSS context
   ``ETHTOOL_MSG_RSS_CREATE_NTF``           additional RSS context created
   ``ETHTOOL_MSG_RSS_DELETE_NTF``           additional RSS context deleted
+  ``ETHTOOL_MSG_MSE_GET_REPLY``            MSE diagnostic data
+  ``ETHTOOL_MSG_PORT_GET_REPLY``           port information
   ======================================== =================================
 
 ``GET`` requests are sent by userspace applications to retrieve device
@@ -1070,6 +1078,8 @@ Kernel response contents:
   ``ETHTOOL_A_COALESCE_TX_AGGR_TIME_USECS``    u32     time (us), aggr, Tx
   ``ETHTOOL_A_COALESCE_RX_PROFILE``            nested  profile of DIM, Rx
   ``ETHTOOL_A_COALESCE_TX_PROFILE``            nested  profile of DIM, Tx
+  ``ETHTOOL_A_COALESCE_RX_CQE_FRAMES``         u32     max packets, Rx CQE
+  ``ETHTOOL_A_COALESCE_RX_CQE_NSECS``          u32     delay (ns), Rx CQE
   ===========================================  ======  =======================
 
 Attributes are only included in reply if their value is not zero or the
@@ -1102,6 +1112,13 @@ well with frequent small-sized URBs transmissions.
 ``ETHTOOL_A_COALESCE_RX_PROFILE`` and ``ETHTOOL_A_COALESCE_TX_PROFILE`` refer
 to DIM parameters, see `Generic Network Dynamic Interrupt Moderation (Net DIM)
 <https://www.kernel.org/doc/Documentation/networking/net_dim.rst>`_.
+
+Rx CQE coalescing allows multiple received packets to be coalesced into a
+single Completion Queue Entry (CQE) or descriptor writeback.
+``ETHTOOL_A_COALESCE_RX_CQE_FRAMES`` describes the maximum number of
+frames that can be coalesced into a CQE or writeback.
+``ETHTOOL_A_COALESCE_RX_CQE_NSECS`` describes max time in nanoseconds after
+the first packet arrival in a coalesced CQE or writeback to be sent.
 
 COALESCE_SET
 ============
@@ -1141,6 +1158,8 @@ Request contents:
   ``ETHTOOL_A_COALESCE_TX_AGGR_TIME_USECS``    u32     time (us), aggr, Tx
   ``ETHTOOL_A_COALESCE_RX_PROFILE``            nested  profile of DIM, Rx
   ``ETHTOOL_A_COALESCE_TX_PROFILE``            nested  profile of DIM, Tx
+  ``ETHTOOL_A_COALESCE_RX_CQE_FRAMES``         u32     max packets, Rx CQE
+  ``ETHTOOL_A_COALESCE_RX_CQE_NSECS``          u32     delay (ns), Rx CQE
   ===========================================  ======  =======================
 
 Request is rejected if it attributes declared as unsupported by driver (i.e.
@@ -2458,6 +2477,101 @@ Kernel response contents:
 
 For a description of each attribute, see ``TSCONFIG_GET``.
 
+MSE_GET
+=======
+
+Retrieves detailed Mean Square Error (MSE) diagnostic information from the PHY.
+
+Request Contents:
+
+  ====================================  ======  ============================
+  ``ETHTOOL_A_MSE_HEADER``              nested  request header
+  ====================================  ======  ============================
+
+Kernel Response Contents:
+
+  ====================================  ======  ================================
+  ``ETHTOOL_A_MSE_HEADER``              nested  reply header
+  ``ETHTOOL_A_MSE_CAPABILITIES``        nested  capability/scale info for MSE
+                                                measurements
+  ``ETHTOOL_A_MSE_CHANNEL_A``           nested  snapshot for Channel A
+  ``ETHTOOL_A_MSE_CHANNEL_B``           nested  snapshot for Channel B
+  ``ETHTOOL_A_MSE_CHANNEL_C``           nested  snapshot for Channel C
+  ``ETHTOOL_A_MSE_CHANNEL_D``           nested  snapshot for Channel D
+  ``ETHTOOL_A_MSE_WORST_CHANNEL``       nested  snapshot for worst channel
+  ``ETHTOOL_A_MSE_LINK``                nested  snapshot for link-wide aggregate
+  ====================================  ======  ================================
+
+MSE Capabilities
+----------------
+
+This nested attribute reports the capability / scaling properties used to
+interpret snapshot values.
+
+  ============================================== ======  =========================
+  ``ETHTOOL_A_MSE_CAPABILITIES_MAX_AVERAGE_MSE`` uint    max avg_mse scale
+  ``ETHTOOL_A_MSE_CAPABILITIES_MAX_PEAK_MSE``    uint    max peak_mse scale
+  ``ETHTOOL_A_MSE_CAPABILITIES_REFRESH_RATE_PS`` uint    sample rate (picoseconds)
+  ``ETHTOOL_A_MSE_CAPABILITIES_NUM_SYMBOLS``     uint    symbols per HW sample
+  ============================================== ======  =========================
+
+The max-average/peak fields are included only if the corresponding metric
+is supported by the PHY. Their absence indicates that the metric is not
+available.
+
+See ``struct phy_mse_capability`` kernel documentation in
+``include/linux/phy.h``.
+
+MSE Snapshot
+------------
+
+Each per-channel nest contains an atomic snapshot of MSE values for that
+selector (channel A/B/C/D, worst channel, or link).
+
+  ==========================================  ======  ===================
+  ``ETHTOOL_A_MSE_SNAPSHOT_AVERAGE_MSE``      uint    average MSE value
+  ``ETHTOOL_A_MSE_SNAPSHOT_PEAK_MSE``         uint    current peak MSE
+  ``ETHTOOL_A_MSE_SNAPSHOT_WORST_PEAK_MSE``   uint    worst-case peak MSE
+  ==========================================  ======  ===================
+
+Within each channel nest, only the metrics supported by the PHY will be present.
+
+See ``struct phy_mse_snapshot`` kernel documentation in
+``include/linux/phy.h``.
+
+PORT_GET
+========
+
+Retrieve information about the physical connection points of a network device,
+referred to as "ports". User needs to specify a PORT_ID for the DO operation,
+in which case the DO request returns information about that specific port.
+
+As there can be more than one port, the DUMP operation can be used to list the
+ports present on a given interface, by passing an interface index or name in
+the dump request.
+
+Request contents:
+
+  ===================================== ======  ===============================
+  ``ETHTOOL_A_PORT_HEADER``             nested  request header
+  ``ETHTOOL_A_PORT_ID``                 u32     port id
+  ===================================== ======  ===============================
+
+Kernel response contents:
+
+  ======================================= ======  =============================
+  ``ETHTOOL_A_PORT_HEADER``               nested  request header
+  ``ETHTOOL_A_PORT_ID``                   u32     the port's unique identifier,
+                                                  per netdevice.
+  ``ETHTOOL_A_PORT_SUPPORTED_MODES``      bitset  bitset of supported linkmodes
+  ``ETHTOOL_A_PORT_SUPPORTED_INTERFACES`` bitset  bitset of supported MII
+                                                  interfaces
+  ``ETHTOOL_A_PORT_TYPE``                 u32     the port type
+  ``ETHTOOL_A_PORT_UPSTREAM_PORT``        u32     If any, the index of the MII
+                                                  port that feeds into this
+                                                  port.
+  ======================================= ======  =============================
+
 Request translation
 ===================
 
@@ -2568,4 +2682,5 @@ are netlink only.
   n/a                                 ``ETHTOOL_MSG_PHY_GET``
   ``SIOCGHWTSTAMP``                   ``ETHTOOL_MSG_TSCONFIG_GET``
   ``SIOCSHWTSTAMP``                   ``ETHTOOL_MSG_TSCONFIG_SET``
+  n/a                                 ``ETHTOOL_MSG_PORT_GET``
   =================================== =====================================

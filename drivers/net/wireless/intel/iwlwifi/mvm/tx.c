@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright (C) 2012-2014, 2018-2025 Intel Corporation
+ * Copyright (C) 2012-2014, 2018-2026 Intel Corporation
  * Copyright (C) 2013-2015 Intel Mobile Communications GmbH
  * Copyright (C) 2016-2017 Intel Deutschland GmbH
  */
@@ -268,7 +268,6 @@ static u32 iwl_mvm_convert_rate_idx(struct iwl_mvm *mvm,
 				    int rate_idx)
 {
 	u32 rate_flags = 0;
-	u8 rate_plcp;
 	bool is_cck;
 
 	/* if the rate isn't a well known legacy rate, take the lowest one */
@@ -277,8 +276,9 @@ static u32 iwl_mvm_convert_rate_idx(struct iwl_mvm *mvm,
 							    info,
 							    info->control.vif);
 
-	/* Get PLCP rate for tx_cmd->rate_n_flags */
-	rate_plcp = iwl_mvm_mac80211_idx_to_hwrate(mvm->fw, rate_idx);
+	/* Get FW rate for tx_cmd->rate_n_flags */
+	rate_flags |= iwl_mvm_rate_idx_to_fw_idx(mvm->fw, rate_idx);
+
 	is_cck = (rate_idx >= IWL_FIRST_CCK_RATE) &&
 		 (rate_idx <= IWL_LAST_CCK_RATE);
 
@@ -288,7 +288,7 @@ static u32 iwl_mvm_convert_rate_idx(struct iwl_mvm *mvm,
 	else
 		rate_flags |= RATE_MCS_MOD_TYPE_CCK;
 
-	return (u32)rate_plcp | rate_flags;
+	return rate_flags;
 }
 
 static u32 iwl_mvm_get_inject_tx_rate(struct iwl_mvm *mvm,
@@ -817,28 +817,15 @@ int iwl_mvm_tx_skb_non_sta(struct iwl_mvm *mvm, struct sk_buff *skb)
 			   NL80211_IFTYPE_P2P_DEVICE ||
 			   info.control.vif->type == NL80211_IFTYPE_AP ||
 			   info.control.vif->type == NL80211_IFTYPE_ADHOC) {
-			u32 link_id = u32_get_bits(info.control.flags,
-						   IEEE80211_TX_CTRL_MLO_LINK);
-			struct iwl_mvm_vif_link_info *link;
-
-			if (link_id == IEEE80211_LINK_UNSPECIFIED) {
-				if (info.control.vif->active_links)
-					link_id = ffs(info.control.vif->active_links) - 1;
-				else
-					link_id = 0;
-			}
-
-			link = mvmvif->link[link_id];
-			if (WARN_ON(!link))
-				return -1;
 
 			if (!ieee80211_is_data(hdr->frame_control))
-				sta_id = link->bcast_sta.sta_id;
+				sta_id = mvmvif->deflink.bcast_sta.sta_id;
 			else
-				sta_id = link->mcast_sta.sta_id;
+				sta_id = mvmvif->deflink.mcast_sta.sta_id;
 
-			queue = iwl_mvm_get_ctrl_vif_queue(mvm, link, &info,
-							   skb);
+			queue = iwl_mvm_get_ctrl_vif_queue(mvm,
+							   &mvmvif->deflink,
+							   &info, skb);
 		} else if (info.control.vif->type == NL80211_IFTYPE_MONITOR) {
 			queue = mvm->snif_queue;
 			sta_id = mvm->snif_sta.sta_id;
@@ -895,33 +882,9 @@ unsigned int iwl_mvm_max_amsdu_size(struct iwl_mvm *mvm,
 	 */
 	val = mvmsta->max_amsdu_len;
 
-	if (hweight16(sta->valid_links) <= 1) {
-		if (sta->valid_links) {
-			struct ieee80211_bss_conf *link_conf;
-			unsigned int link = ffs(sta->valid_links) - 1;
+	band = mvmsta->vif->bss_conf.chanreq.oper.chan->band;
 
-			rcu_read_lock();
-			link_conf = rcu_dereference(mvmsta->vif->link_conf[link]);
-			if (WARN_ON(!link_conf))
-				band = NL80211_BAND_2GHZ;
-			else
-				band = link_conf->chanreq.oper.chan->band;
-			rcu_read_unlock();
-		} else {
-			band = mvmsta->vif->bss_conf.chanreq.oper.chan->band;
-		}
-
-		lmac = iwl_mvm_get_lmac_id(mvm, band);
-	} else if (fw_has_capa(&mvm->fw->ucode_capa,
-			       IWL_UCODE_TLV_CAPA_CDB_SUPPORT)) {
-		/* for real MLO restrict to both LMACs if they exist */
-		lmac = IWL_LMAC_5G_INDEX;
-		val = min_t(unsigned int, val,
-			    mvm->fwrt.smem_cfg.lmac[lmac].txfifo_size[txf] - 256);
-		lmac = IWL_LMAC_24G_INDEX;
-	} else {
-		lmac = IWL_LMAC_24G_INDEX;
-	}
+	lmac = iwl_mvm_get_lmac_id(mvm, band);
 
 	return min_t(unsigned int, val,
 		     mvm->fwrt.smem_cfg.lmac[lmac].txfifo_size[txf] - 256);
@@ -1581,6 +1544,17 @@ static inline u32 iwl_mvm_get_scd_ssn(struct iwl_mvm *mvm,
 	return val & 0xFFF;
 }
 
+static inline size_t iwl_mvm_tx_resp_min_len(struct iwl_mvm *mvm,
+					     struct iwl_tx_resp *tx_resp)
+{
+	struct agg_tx_status *agg_status =
+		iwl_mvm_get_agg_status(mvm, tx_resp);
+
+	/* The aggregate response ends with a trailing SCD SSN __le32 word. */
+	return (u8 *)(agg_status + tx_resp->frame_count) - (u8 *)tx_resp +
+		sizeof(__le32);
+}
+
 static void iwl_mvm_rx_tx_cmd_single(struct iwl_mvm *mvm,
 				     struct iwl_rx_packet *pkt)
 {
@@ -1884,6 +1858,9 @@ static void iwl_mvm_rx_tx_cmd_agg(struct iwl_mvm *mvm,
 	int queue = SEQ_TO_QUEUE(sequence);
 	struct ieee80211_sta *sta;
 
+	if (WARN_ON_ONCE(iwl_mvm_has_new_tx_api(mvm)))
+		return;
+
 	if (WARN_ON_ONCE(queue < IWL_MVM_DQA_MIN_DATA_QUEUE &&
 			 (queue != IWL_MVM_DQA_BSS_CLIENT_QUEUE)))
 		return;
@@ -1918,6 +1895,26 @@ void iwl_mvm_rx_tx_cmd(struct iwl_mvm *mvm, struct iwl_rx_cmd_buffer *rxb)
 {
 	struct iwl_rx_packet *pkt = rxb_addr(rxb);
 	struct iwl_tx_resp *tx_resp = (void *)pkt->data;
+	size_t min_len;
+
+	if (IWL_FW_CHECK(mvm, !tx_resp->frame_count,
+			 "invalid TX_CMD frame_count %u\n",
+			 tx_resp->frame_count))
+		return;
+
+	if (IWL_FW_CHECK(mvm,
+			 iwl_mvm_has_new_tx_api(mvm) &&
+			 tx_resp->frame_count != 1,
+			 "invalid TX_CMD frame_count %u for new TX API\n",
+			 tx_resp->frame_count))
+		return;
+
+	min_len = iwl_mvm_tx_resp_min_len(mvm, tx_resp);
+	if (IWL_FW_CHECK(mvm, iwl_rx_packet_payload_len(pkt) < min_len,
+			 "invalid TX_CMD len %u (frame_count %u, min %zu)\n",
+			 iwl_rx_packet_payload_len(pkt), tx_resp->frame_count,
+			 min_len))
+		return;
 
 	if (tx_resp->frame_count == 1)
 		iwl_mvm_rx_tx_cmd_single(mvm, pkt);
@@ -2137,8 +2134,14 @@ void iwl_mvm_rx_ba_notif(struct iwl_mvm *mvm, struct iwl_rx_cmd_buffer *rxb)
 			if (tid == IWL_MGMT_TID)
 				tid = IWL_MAX_TID_COUNT;
 
+			if (IWL_FW_CHECK(mvm, tid >=
+					 ARRAY_SIZE(mvmsta->tid_data),
+					 "invalid TID %d in compressed BA\n",
+					 tid))
+				continue;
+
 			if (mvmsta)
-				mvmsta->tid_data[i].lq_color = lq_color;
+				mvmsta->tid_data[tid].lq_color = lq_color;
 
 			iwl_mvm_tx_reclaim(mvm, sta_id, tid,
 					   (int)(le16_to_cpu(ba_tfd->q_num)),
@@ -2158,6 +2161,9 @@ void iwl_mvm_rx_ba_notif(struct iwl_mvm *mvm, struct iwl_rx_cmd_buffer *rxb)
 	ba_notif = (void *)pkt->data;
 	sta_id = ba_notif->sta_id;
 	tid = ba_notif->tid;
+	if (IWL_FW_CHECK(mvm, tid >= ARRAY_SIZE(mvmsta->tid_data),
+			 "invalid TID %d in BA notif\n", tid))
+		return;
 	/* "flow" corresponds to Tx queue */
 	txq = le16_to_cpu(ba_notif->scd_flow);
 	/* "ssn" is start of block-ack Tx window, corresponds to index

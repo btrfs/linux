@@ -97,34 +97,7 @@ fi
 
 log_test()
 {
-	local rc=$1
-	local expected=$2
-	local msg="$3"
-	local ans
-
-	[ "${VERBOSE}" = "1" ] && echo
-
-	if [ ${rc} -eq ${expected} ]; then
-		nsuccess=$((nsuccess+1))
-		printf "TEST: %-70s  [ OK ]\n" "${msg}"
-	else
-		nfail=$((nfail+1))
-		printf "TEST: %-70s  [FAIL]\n" "${msg}"
-		echo "    expected rc $expected; actual rc $rc"
-		if [ "${PAUSE_ON_FAIL}" = "yes" ]; then
-			echo
-			echo "hit enter to continue, 'q' to quit"
-			read ans
-			[ "$ans" = "q" ] && exit 1
-		fi
-	fi
-
-	if [ "${PAUSE}" = "yes" ]; then
-		echo
-		echo "hit enter to continue, 'q' to quit"
-		read ans
-		[ "$ans" = "q" ] && exit 1
-	fi
+	log_test_expected "$1" "$2" "$3"
 
 	kill_procs
 }
@@ -2325,6 +2298,13 @@ ipv6_ping_novrf()
 		show_hint "Fails since address on loopback is out of device scope"
 		run_cmd ${ping6} -c1 -w1 -I ${NSA_DEV} ${a}
 		log_test_addr ${a} $? 2 "ping local, device bind"
+	done
+
+	for a in ${NSA_LO_IP6} ${NSA_LINKIP6}%${NSA_DEV} ${NSA_IP6}
+	do
+		log_start
+		run_cmd ${ping6} -c1 -w1 -I ::1 ${a}
+		log_test_addr ${a} $? 0 "ping local, from localhost"
 	done
 
 	#

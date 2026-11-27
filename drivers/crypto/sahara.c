@@ -1285,7 +1285,7 @@ static int sahara_probe(struct platform_device *pdev)
 	int err;
 	int i;
 
-	dev = devm_kzalloc(&pdev->dev, sizeof(*dev), GFP_KERNEL);
+	dev = devm_kzalloc_obj(&pdev->dev, *dev);
 	if (!dev)
 		return -ENOMEM;
 
@@ -1305,8 +1305,7 @@ static int sahara_probe(struct platform_device *pdev)
 	err = devm_request_irq(&pdev->dev, irq, sahara_irq_handler,
 			       0, dev_name(&pdev->dev), dev);
 	if (err)
-		return dev_err_probe(&pdev->dev, err,
-				     "failed to request irq\n");
+		return err;
 
 	/* clocks */
 	dev->clk_ipg = devm_clk_get_enabled(&pdev->dev, "ipg");

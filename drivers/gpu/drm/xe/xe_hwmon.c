@@ -15,6 +15,7 @@
 #include "regs/xe_pcode_regs.h"
 #include "xe_device.h"
 #include "xe_hwmon.h"
+#include "xe_log.h"
 #include "xe_mmio.h"
 #include "xe_pcode.h"
 #include "xe_pcode_api.h"
@@ -39,10 +40,16 @@ enum xe_hwmon_reg_operation {
 	REG_READ64,
 };
 
+#define MAX_VRAM_CHANNELS      (16)
+
 enum xe_hwmon_channel {
 	CHANNEL_CARD,
 	CHANNEL_PKG,
 	CHANNEL_VRAM,
+	CHANNEL_MCTRL,
+	CHANNEL_PCIE,
+	CHANNEL_VRAM_N,
+	CHANNEL_VRAM_N_MAX = CHANNEL_VRAM_N + MAX_VRAM_CHANNELS - 1,
 	CHANNEL_MAX,
 };
 
@@ -51,6 +58,15 @@ enum xe_fan_channel {
 	FAN_2,
 	FAN_3,
 	FAN_MAX,
+};
+
+enum xe_temp_limit {
+	TEMP_LIMIT_PKG_SHUTDOWN,
+	TEMP_LIMIT_PKG_CRIT,
+	TEMP_LIMIT_MEM_SHUTDOWN,
+	TEMP_LIMIT_PKG_MAX,
+	TEMP_LIMIT_MEM_CRIT,
+	TEMP_LIMIT_MAX
 };
 
 /* Attribute index for powerX_xxx_interval sysfs entries */
@@ -86,10 +102,18 @@ enum sensor_attr_power {
 
 #define PWR_ATTR_TO_STR(attr)	(((attr) == hwmon_power_max) ? "PL1" : "PL2")
 
-/*
- * Timeout for power limit write mailbox command.
- */
-#define PL_WRITE_MBX_TIMEOUT_MS	(1)
+/* Index of memory controller in READ_THERMAL_DATA output */
+#define TEMP_INDEX_MCTRL	2
+
+/* Mailbox sentinel reported for an unavailable temperature sensor */
+#define TEMP_MBX_INVALID	0xFF
+
+/* Mailbox temperature is sign-magnitude: bit 7 sign, bits 6:0 magnitude. */
+#define TEMP_MBX_SIGN		BIT(7)
+#define TEMP_MBX_MAG		GENMASK(6, 0)
+
+/* Maximum characters in hwmon label name */
+#define MAX_LABEL_SIZE		16
 
 /**
  * struct xe_hwmon_energy_info - to accumulate energy
@@ -112,6 +136,28 @@ struct xe_hwmon_fan_info {
 };
 
 /**
+ * struct xe_hwmon_thermal_info - to store temperature data
+ */
+struct xe_hwmon_thermal_info {
+	union {
+		/** @limit: temperatures limits */
+		u8 limit[TEMP_LIMIT_MAX];
+		/** @data: temperature limits as little-endian dwords */
+		__le32 data[DIV_ROUND_UP(TEMP_LIMIT_MAX, sizeof(u32))];
+	};
+	/** @count: no of temperature sensors available for the platform */
+	u8 count;
+	union {
+		/** @value: per-sensor raw mailbox temperature; bit7=sign, bits6:0=magnitude */
+		u8 value[U8_MAX + 1];
+		/** @dword: sensor values as little-endian dwords, u32-aligned for pcode reads */
+		__le32 dword[DIV_ROUND_UP(U8_MAX + 1, sizeof(u32))];
+	};
+	/** @vram_label: vram label names */
+	char vram_label[MAX_VRAM_CHANNELS][MAX_LABEL_SIZE];
+};
+
+/**
  * struct xe_hwmon - xe hwmon data structure
  */
 struct xe_hwmon {
@@ -131,14 +177,27 @@ struct xe_hwmon {
 	struct xe_hwmon_energy_info ei[CHANNEL_MAX];
 	/** @fi: Fan info for fanN_input */
 	struct xe_hwmon_fan_info fi[FAN_MAX];
-	/** @boot_power_limit_read: is boot power limits read */
-	bool boot_power_limit_read;
+	/** @read_power_limit_from_pcode: pcode accepted power limits write for the channel */
+	bool read_power_limit_from_pcode[CHANNEL_MAX];
 	/** @pl1_on_boot: power limit PL1 on boot */
 	u32 pl1_on_boot[CHANNEL_MAX];
 	/** @pl2_on_boot: power limit PL2 on boot */
 	u32 pl2_on_boot[CHANNEL_MAX];
-
+	/** @temp: Temperature info */
+	struct xe_hwmon_thermal_info temp;
 };
+
+static inline int prepare_power_limit_param2(const struct xe_hwmon *hwmon, int channel)
+{
+	if (hwmon->read_power_limit_from_pcode[channel]) {
+		if (hwmon->xe->info.platform >= XE_CRESCENTISLAND)
+			return READ_PL_ACCEPTED;
+		else
+			return READ_PL_FROM_PCODE;
+	} else {
+		return READ_PL_FROM_FW;
+	}
+}
 
 static int xe_hwmon_pcode_read_power_limit(const struct xe_hwmon *hwmon, u32 attr, int channel,
 					   u32 *uval)
@@ -151,9 +210,8 @@ static int xe_hwmon_pcode_read_power_limit(const struct xe_hwmon *hwmon, u32 att
 						  (channel == CHANNEL_CARD) ?
 						  READ_PSYSGPU_POWER_LIMIT :
 						  READ_PACKAGE_POWER_LIMIT,
-						  hwmon->boot_power_limit_read ?
-						  READ_PL_FROM_PCODE : READ_PL_FROM_FW),
-						  &val0, &val1);
+						  prepare_power_limit_param2(hwmon, channel)),
+			    &val0, &val1);
 
 	if (ret) {
 		drm_dbg(&hwmon->xe->drm, "read failed ch %d val0 0x%08x, val1 0x%08x, ret %d\n",
@@ -168,14 +226,14 @@ static int xe_hwmon_pcode_read_power_limit(const struct xe_hwmon *hwmon, u32 att
 	else if (attr == PL2_HWMON_ATTR)
 		*uval = (val1 & PWR_LIM_EN) ? val1 : 0;
 	else if (attr == hwmon_power_label)
-		*uval = (val0 & PWR_LIM_EN) ? 1 : (val1 & PWR_LIM_EN) ? 1 : 0;
+		*uval = (val0 | val1) & PWR_LIM_EN;
 	else
 		*uval = 0;
 
 	return ret;
 }
 
-static int xe_hwmon_pcode_rmw_power_limit(const struct xe_hwmon *hwmon, u32 attr, u8 channel,
+static int xe_hwmon_pcode_rmw_power_limit(struct xe_hwmon *hwmon, u32 attr, u8 channel,
 					  u32 clr, u32 set)
 {
 	struct xe_tile *root_tile = xe_device_get_root_tile(hwmon->xe);
@@ -186,13 +244,13 @@ static int xe_hwmon_pcode_rmw_power_limit(const struct xe_hwmon *hwmon, u32 attr
 						  (channel == CHANNEL_CARD) ?
 						  READ_PSYSGPU_POWER_LIMIT :
 						  READ_PACKAGE_POWER_LIMIT,
-						  hwmon->boot_power_limit_read ?
-						  READ_PL_FROM_PCODE : READ_PL_FROM_FW),
-						  &val0, &val1);
-
-	if (ret)
-		drm_dbg(&hwmon->xe->drm, "read failed ch %d val0 0x%08x, val1 0x%08x, ret %d\n",
+						  prepare_power_limit_param2(hwmon, channel)),
+			    &val0, &val1);
+	if (ret) {
+		drm_err(&hwmon->xe->drm, "read failed ch %d val0 0x%08x, val1 0x%08x, ret %d\n",
 			channel, val0, val1, ret);
+		return ret;
+	}
 
 	if (attr == PL1_HWMON_ATTR)
 		val0 = (val0 & ~clr) | set;
@@ -205,10 +263,37 @@ static int xe_hwmon_pcode_rmw_power_limit(const struct xe_hwmon *hwmon, u32 attr
 							     (channel == CHANNEL_CARD) ?
 							     WRITE_PSYSGPU_POWER_LIMIT :
 							     WRITE_PACKAGE_POWER_LIMIT, 0),
-							     val0, val1, PL_WRITE_MBX_TIMEOUT_MS);
-	if (ret)
+							     val0, val1, PCODE_DEFAULT_TIMEOUT_MS);
+	if (ret) {
 		drm_dbg(&hwmon->xe->drm, "write failed ch %d val0 0x%08x, val1 0x%08x, ret %d\n",
 			channel, val0, val1, ret);
+		return ret;
+	}
+
+	/* Read from pcode once it holds a driver-written limit */
+	if (!hwmon->read_power_limit_from_pcode[channel])
+		hwmon->read_power_limit_from_pcode[channel] = true;
+
+	return 0;
+}
+
+static int xe_hwmon_pcode_set_default_power_limits(struct xe_hwmon *hwmon)
+{
+	int ret = 0;
+
+	ret |= xe_hwmon_pcode_rmw_power_limit(hwmon, PL1_HWMON_ATTR, CHANNEL_CARD,
+						       PWR_LIM | PWR_LIM_TIME,
+						       hwmon->pl1_on_boot[CHANNEL_CARD]);
+	ret |= xe_hwmon_pcode_rmw_power_limit(hwmon, PL1_HWMON_ATTR, CHANNEL_PKG,
+						       PWR_LIM | PWR_LIM_TIME,
+						       hwmon->pl1_on_boot[CHANNEL_PKG]);
+	ret |= xe_hwmon_pcode_rmw_power_limit(hwmon, PL2_HWMON_ATTR, CHANNEL_CARD,
+						       PWR_LIM | PWR_LIM_TIME,
+						       hwmon->pl2_on_boot[CHANNEL_CARD]);
+	ret |= xe_hwmon_pcode_rmw_power_limit(hwmon, PL2_HWMON_ATTR, CHANNEL_PKG,
+						       PWR_LIM | PWR_LIM_TIME,
+						       hwmon->pl2_on_boot[CHANNEL_PKG]);
+
 	return ret;
 }
 
@@ -219,11 +304,13 @@ static struct xe_reg xe_hwmon_get_reg(struct xe_hwmon *hwmon, enum xe_hwmon_reg 
 
 	switch (hwmon_reg) {
 	case REG_TEMP:
-		if (xe->info.platform == XE_BATTLEMAGE) {
+		if (xe->info.platform == XE_BATTLEMAGE || xe->info.platform == XE_CRESCENTISLAND) {
 			if (channel == CHANNEL_PKG)
 				return BMG_PACKAGE_TEMPERATURE;
 			else if (channel == CHANNEL_VRAM)
 				return BMG_VRAM_TEMPERATURE;
+			else if (in_range(channel, CHANNEL_VRAM_N, MAX_VRAM_CHANNELS))
+				return BMG_VRAM_TEMPERATURE_N(channel - CHANNEL_VRAM_N);
 		} else if (xe->info.platform == XE_DG2) {
 			if (channel == CHANNEL_PKG)
 				return PCU_CR_PACKAGE_TEMPERATURE;
@@ -254,7 +341,12 @@ static struct xe_reg xe_hwmon_get_reg(struct xe_hwmon *hwmon, enum xe_hwmon_reg 
 			return GT_PERF_STATUS;
 		break;
 	case REG_PKG_ENERGY_STATUS:
-		if (xe->info.platform == XE_PVC && channel == CHANNEL_PKG) {
+		if (xe->info.platform == XE_CRESCENTISLAND) {
+			if (channel == CHANNEL_CARD)
+				return CRI_PLATFORM_ENERGY_STATUS;
+			else if (channel == CHANNEL_PKG)
+				return CRI_PACKAGE_ENERGY_STATUS;
+		} else if (xe->info.platform == XE_PVC && channel == CHANNEL_PKG) {
 			return PVC_GT0_PLATFORM_ENERGY_STATUS;
 		} else if ((xe->info.platform == XE_DG2) && (channel == CHANNEL_PKG)) {
 			return PCU_CR_PACKAGE_ENERGY_STATUS;
@@ -284,17 +376,20 @@ static struct xe_reg xe_hwmon_get_reg(struct xe_hwmon *hwmon, enum xe_hwmon_reg 
  * same pattern for sysfs, allow arbitrary PL1 limits to be set but display
  * clamped values when read.
  */
-static void xe_hwmon_power_max_read(struct xe_hwmon *hwmon, u32 attr, int channel, long *value)
+static int xe_hwmon_power_max_read(struct xe_hwmon *hwmon, u32 attr, int channel, long *value)
 {
 	u32 reg_val = 0;
 	struct xe_device *xe = hwmon->xe;
 	struct xe_reg rapl_limit, pkg_power_sku;
 	struct xe_mmio *mmio = xe_root_tile_mmio(xe);
+	int ret = 0;
 
 	mutex_lock(&hwmon->hwmon_lock);
 
 	if (hwmon->xe->info.has_mbx_power_limits) {
-		xe_hwmon_pcode_read_power_limit(hwmon, attr, channel, &reg_val);
+		ret = xe_hwmon_pcode_read_power_limit(hwmon, attr, channel, &reg_val);
+		if (ret)
+			goto unlock;
 	} else {
 		rapl_limit = xe_hwmon_get_reg(hwmon, REG_PKG_RAPL_LIMIT, channel);
 		pkg_power_sku = xe_hwmon_get_reg(hwmon, REG_PKG_POWER_SKU, channel);
@@ -326,6 +421,7 @@ static void xe_hwmon_power_max_read(struct xe_hwmon *hwmon, u32 attr, int channe
 	}
 unlock:
 	mutex_unlock(&hwmon->hwmon_lock);
+	return ret;
 }
 
 static int xe_hwmon_power_max_write(struct xe_hwmon *hwmon, u32 attr, int channel, long value)
@@ -345,8 +441,12 @@ static int xe_hwmon_power_max_write(struct xe_hwmon *hwmon, u32 attr, int channe
 		if (hwmon->xe->info.has_mbx_power_limits) {
 			drm_dbg(&hwmon->xe->drm, "disabling %s on channel %d\n",
 				PWR_ATTR_TO_STR(attr), channel);
-			xe_hwmon_pcode_rmw_power_limit(hwmon, attr, channel, PWR_LIM_EN, 0);
-			xe_hwmon_pcode_read_power_limit(hwmon, attr, channel, &reg_val);
+			ret = xe_hwmon_pcode_rmw_power_limit(hwmon, attr, channel, PWR_LIM_EN, 0);
+			if (ret)
+				goto unlock;
+			ret = xe_hwmon_pcode_read_power_limit(hwmon, attr, channel, &reg_val);
+			if (ret)
+				goto unlock;
 		} else {
 			reg_val = xe_mmio_rmw32(mmio, rapl_limit, PWR_LIM_EN, 0);
 			reg_val = xe_mmio_read32(mmio, rapl_limit);
@@ -403,15 +503,18 @@ unlock:
 	return ret;
 }
 
-static void xe_hwmon_power_rated_max_read(struct xe_hwmon *hwmon, u32 attr, int channel,
-					  long *value)
+static int xe_hwmon_power_rated_max_read(struct xe_hwmon *hwmon, u32 attr, int channel,
+					 long *value)
 {
 	struct xe_mmio *mmio = xe_root_tile_mmio(hwmon->xe);
 	u32 reg_val;
+	int ret = 0;
 
 	if (hwmon->xe->info.has_mbx_power_limits) {
 		/* PL1 is rated max if supported. */
-		xe_hwmon_pcode_read_power_limit(hwmon, PL1_HWMON_ATTR, channel, &reg_val);
+		ret = xe_hwmon_pcode_read_power_limit(hwmon, PL1_HWMON_ATTR, channel, &reg_val);
+		if (ret)
+			return ret;
 	} else {
 		/*
 		 * This sysfs file won't be visible if REG_PKG_POWER_SKU is invalid, so valid check
@@ -425,6 +528,7 @@ static void xe_hwmon_power_rated_max_read(struct xe_hwmon *hwmon, u32 attr, int 
 
 	reg_val = REG_FIELD_GET(PKG_TDP, reg_val);
 	*value = mul_u64_u32_shr(reg_val, SF_POWER, hwmon->scl_shift_power);
+	return ret;
 }
 
 /*
@@ -447,7 +551,7 @@ static void xe_hwmon_power_rated_max_read(struct xe_hwmon *hwmon, u32 attr, int 
  * hwmon->scl_shift_energy of 14 bits we have 57 (63 - 20 + 14) bits before
  * energyN_input overflows. This at 1000 W is an overflow duration of 278 years.
  */
-static void
+static int
 xe_hwmon_energy_get(struct xe_hwmon *hwmon, int channel, long *energy)
 {
 	struct xe_mmio *mmio = xe_root_tile_mmio(hwmon->xe);
@@ -458,19 +562,19 @@ xe_hwmon_energy_get(struct xe_hwmon *hwmon, int channel, long *energy)
 	/* Energy is supported only for card and pkg */
 	if (channel > CHANNEL_PKG) {
 		*energy = 0;
-		return;
+		return 0;
 	}
 
 	if (hwmon->xe->info.platform == XE_BATTLEMAGE) {
 		u64 pmt_val;
 
-		ret = xe_pmt_telem_read(to_pci_dev(hwmon->xe->drm.dev),
+		ret = xe_pmt_telem_read(hwmon->xe->drm.dev,
 					xe_mmio_read32(mmio, PUNIT_TELEMETRY_GUID),
 					&pmt_val, BMG_ENERGY_STATUS_PMT_OFFSET,	sizeof(pmt_val));
 		if (ret != sizeof(pmt_val)) {
 			drm_warn(&hwmon->xe->drm, "energy read from pmt failed, ret %d\n", ret);
 			*energy = 0;
-			return;
+			return ret < 0 ? ret : -EIO;
 		}
 
 		if (channel == CHANNEL_PKG)
@@ -487,6 +591,7 @@ xe_hwmon_energy_get(struct xe_hwmon *hwmon, int channel, long *energy)
 
 	*energy = mul_u64_u32_shr(ei->accum_energy, SF_ENERGY,
 				  hwmon->scl_shift_energy);
+	return 0;
 }
 
 static ssize_t
@@ -502,17 +607,18 @@ xe_hwmon_power_max_interval_show(struct device *dev, struct device_attribute *at
 
 	int ret = 0;
 
-	xe_pm_runtime_get(hwmon->xe);
+	guard(xe_pm_runtime)(hwmon->xe);
 
 	mutex_lock(&hwmon->hwmon_lock);
 
 	if (hwmon->xe->info.has_mbx_power_limits) {
 		ret = xe_hwmon_pcode_read_power_limit(hwmon, power_attr, channel, &reg_val);
 		if (ret) {
-			drm_err(&hwmon->xe->drm,
-				"power interval read fail, ch %d, attr %d, val 0x%08x, ret %d\n",
-				channel, power_attr, reg_val, ret);
-			reg_val = 0;
+			xe_log_err(hwmon->xe, HWMON, ret,
+				   "Power interval read fail, ch %d, attr %d, val 0x%08x\n",
+				   channel, power_attr, reg_val);
+			mutex_unlock(&hwmon->hwmon_lock);
+			return ret;
 		}
 	} else {
 		reg_val = xe_mmio_read32(mmio, xe_hwmon_get_reg(hwmon, REG_PKG_RAPL_LIMIT,
@@ -521,25 +627,36 @@ xe_hwmon_power_max_interval_show(struct device *dev, struct device_attribute *at
 
 	mutex_unlock(&hwmon->hwmon_lock);
 
-	xe_pm_runtime_put(hwmon->xe);
+	if (hwmon->xe->info.platform >= XE_CRESCENTISLAND) {
+		/**
+		 * On CRI and newer platforms, the interval encoding changed.
+		 * The value is now stored directly in milliseconds as U5.2,
+		 * replacing the older 1.x * 2^y representation.
+		 * Bits [6:2] hold the integer part and bits [1:0] the fraction,
+		 * so convert to milliseconds by extracting integer/fractional parts.
+		 * Round fraction value to 1 when it is >= 0.5.
+		 */
+		reg_val = REG_FIELD_GET(PWR_LIM_TIME, reg_val);
+		out = (u64)((reg_val >> 2) + ((reg_val & 0x3) >= 2));
+	} else {
+		x = REG_FIELD_GET(PWR_LIM_TIME_X, reg_val);
+		y = REG_FIELD_GET(PWR_LIM_TIME_Y, reg_val);
 
-	x = REG_FIELD_GET(PWR_LIM_TIME_X, reg_val);
-	y = REG_FIELD_GET(PWR_LIM_TIME_Y, reg_val);
+		/*
+		 * tau = (1 + (x / 4)) * power(2,y), x = bits(23:22), y = bits(21:17)
+		 *     = (4 | x) << (y - 2)
+		 *
+		 * Here (y - 2) ensures a 1.x fixed point representation of 1.x
+		 * As x is 2 bits so 1.x can be 1.0, 1.25, 1.50, 1.75
+		 *
+		 * As y can be < 2, we compute tau4 = (4 | x) << y
+		 * and then add 2 when doing the final right shift to account for units
+		 */
+		tau4 = (u64)((1 << x_w) | x) << y;
 
-	/*
-	 * tau = (1 + (x / 4)) * power(2,y), x = bits(23:22), y = bits(21:17)
-	 *     = (4 | x) << (y - 2)
-	 *
-	 * Here (y - 2) ensures a 1.x fixed point representation of 1.x
-	 * As x is 2 bits so 1.x can be 1.0, 1.25, 1.50, 1.75
-	 *
-	 * As y can be < 2, we compute tau4 = (4 | x) << y
-	 * and then add 2 when doing the final right shift to account for units
-	 */
-	tau4 = (u64)((1 << x_w) | x) << y;
-
-	/* val in hwmon interface units (millisec) */
-	out = mul_u64_u32_shr(tau4, SF_TIME, hwmon->scl_shift_time + x_w);
+		/* val in hwmon interface units (millisec) */
+		out = mul_u64_u32_shr(tau4, SF_TIME, hwmon->scl_shift_time + x_w);
+	}
 
 	return sysfs_emit(buf, "%llu\n", out);
 }
@@ -585,40 +702,53 @@ xe_hwmon_power_max_interval_store(struct device *dev, struct device_attribute *a
 	if (val > max_win)
 		return -EINVAL;
 
-	/* val in hw units */
-	val = DIV_ROUND_CLOSEST_ULL((u64)val << hwmon->scl_shift_time, SF_TIME) + 1;
-
-	/*
-	 * Convert val to 1.x * power(2,y)
-	 * y = ilog2(val)
-	 * x = (val - (1 << y)) >> (y - 2)
-	 */
-	if (!val) {
-		y = 0;
-		x = 0;
+	if (hwmon->xe->info.platform >= XE_CRESCENTISLAND) {
+		/**
+		 * On CRI and newer platforms, the interval encoding changed.
+		 * The value is now stored directly in milliseconds as U5.2,
+		 * replacing the older 1.x * 2^y representation.
+		 * Bits [6:2] hold the integer part and bits [1:0] the fraction,so
+		 * convert from milliseconds by shifting the value left by 2 to fit into the field.
+		 */
+		rxy = REG_FIELD_PREP(PWR_LIM_TIME, (val << 2));
 	} else {
-		y = ilog2(val);
-		x = (val - (1ul << y)) << x_w >> y;
+		/* val in hw units */
+		val = DIV_ROUND_CLOSEST_ULL((u64)val << hwmon->scl_shift_time, SF_TIME) + 1;
+
+		/*
+		 * Convert val to 1.x * power(2,y)
+		 * y = ilog2(val)
+		 * x = (val - (1 << y)) >> (y - 2)
+		 */
+		if (!val) {
+			y = 0;
+			x = 0;
+		} else {
+			y = ilog2(val);
+			x = (val - (1ul << y)) << x_w >> y;
+		}
+
+		rxy = REG_FIELD_PREP(PWR_LIM_TIME_X, x) |
+				       REG_FIELD_PREP(PWR_LIM_TIME_Y, y);
 	}
 
-	rxy = REG_FIELD_PREP(PWR_LIM_TIME_X, x) |
-			       REG_FIELD_PREP(PWR_LIM_TIME_Y, y);
-
-	xe_pm_runtime_get(hwmon->xe);
+	guard(xe_pm_runtime)(hwmon->xe);
 
 	mutex_lock(&hwmon->hwmon_lock);
 
-	if (hwmon->xe->info.has_mbx_power_limits)
-		xe_hwmon_pcode_rmw_power_limit(hwmon, power_attr, channel, PWR_LIM_TIME, rxy);
-	else
+	ret = count;
+	if (hwmon->xe->info.has_mbx_power_limits) {
+		ret = xe_hwmon_pcode_rmw_power_limit(hwmon, power_attr, channel, PWR_LIM_TIME, rxy);
+		if (!ret)
+			ret = count;
+	} else {
 		r = xe_mmio_rmw32(mmio, xe_hwmon_get_reg(hwmon, REG_PKG_RAPL_LIMIT, channel),
 				  PWR_LIM_TIME, rxy);
+	}
 
 	mutex_unlock(&hwmon->hwmon_lock);
 
-	xe_pm_runtime_put(hwmon->xe);
-
-	return count;
+	return ret;
 }
 
 /* PSYS PL1 */
@@ -658,8 +788,6 @@ static umode_t xe_hwmon_attributes_visible(struct kobject *kobj,
 	struct xe_reg rapl_limit;
 	struct xe_mmio *mmio = xe_root_tile_mmio(hwmon->xe);
 
-	xe_pm_runtime_get(hwmon->xe);
-
 	if (hwmon->xe->info.has_mbx_power_limits) {
 		xe_hwmon_pcode_read_power_limit(hwmon, power_attr, channel, &uval);
 	} else if (power_attr != PL2_HWMON_ATTR) {
@@ -668,8 +796,6 @@ static umode_t xe_hwmon_attributes_visible(struct kobject *kobj,
 			uval = xe_mmio_read32(mmio, rapl_limit);
 	}
 	ret = (uval & PWR_LIM_EN) ? attr->mode : 0;
-
-	xe_pm_runtime_put(hwmon->xe);
 
 	return ret;
 }
@@ -685,8 +811,29 @@ static const struct attribute_group *hwmon_groups[] = {
 };
 
 static const struct hwmon_channel_info * const hwmon_info[] = {
-	HWMON_CHANNEL_INFO(temp, HWMON_T_LABEL, HWMON_T_INPUT | HWMON_T_LABEL,
-			   HWMON_T_INPUT | HWMON_T_LABEL),
+	HWMON_CHANNEL_INFO(temp,
+			   HWMON_T_LABEL,
+			   HWMON_T_CRIT | HWMON_T_EMERGENCY | HWMON_T_INPUT | HWMON_T_LABEL |
+			   HWMON_T_MAX,
+			   HWMON_T_CRIT | HWMON_T_EMERGENCY | HWMON_T_INPUT | HWMON_T_LABEL,
+			   HWMON_T_CRIT | HWMON_T_EMERGENCY | HWMON_T_INPUT | HWMON_T_LABEL,
+			   HWMON_T_CRIT | HWMON_T_EMERGENCY | HWMON_T_INPUT | HWMON_T_LABEL,
+			   HWMON_T_CRIT | HWMON_T_EMERGENCY | HWMON_T_INPUT | HWMON_T_LABEL,
+			   HWMON_T_CRIT | HWMON_T_EMERGENCY | HWMON_T_INPUT | HWMON_T_LABEL,
+			   HWMON_T_CRIT | HWMON_T_EMERGENCY | HWMON_T_INPUT | HWMON_T_LABEL,
+			   HWMON_T_CRIT | HWMON_T_EMERGENCY | HWMON_T_INPUT | HWMON_T_LABEL,
+			   HWMON_T_CRIT | HWMON_T_EMERGENCY | HWMON_T_INPUT | HWMON_T_LABEL,
+			   HWMON_T_CRIT | HWMON_T_EMERGENCY | HWMON_T_INPUT | HWMON_T_LABEL,
+			   HWMON_T_CRIT | HWMON_T_EMERGENCY | HWMON_T_INPUT | HWMON_T_LABEL,
+			   HWMON_T_CRIT | HWMON_T_EMERGENCY | HWMON_T_INPUT | HWMON_T_LABEL,
+			   HWMON_T_CRIT | HWMON_T_EMERGENCY | HWMON_T_INPUT | HWMON_T_LABEL,
+			   HWMON_T_CRIT | HWMON_T_EMERGENCY | HWMON_T_INPUT | HWMON_T_LABEL,
+			   HWMON_T_CRIT | HWMON_T_EMERGENCY | HWMON_T_INPUT | HWMON_T_LABEL,
+			   HWMON_T_CRIT | HWMON_T_EMERGENCY | HWMON_T_INPUT | HWMON_T_LABEL,
+			   HWMON_T_CRIT | HWMON_T_EMERGENCY | HWMON_T_INPUT | HWMON_T_LABEL,
+			   HWMON_T_CRIT | HWMON_T_EMERGENCY | HWMON_T_INPUT | HWMON_T_LABEL,
+			   HWMON_T_CRIT | HWMON_T_EMERGENCY | HWMON_T_INPUT | HWMON_T_LABEL,
+			   HWMON_T_CRIT | HWMON_T_EMERGENCY | HWMON_T_INPUT | HWMON_T_LABEL),
 	HWMON_CHANNEL_INFO(power, HWMON_P_MAX | HWMON_P_RATED_MAX | HWMON_P_LABEL | HWMON_P_CRIT |
 			   HWMON_P_CAP,
 			   HWMON_P_MAX | HWMON_P_RATED_MAX | HWMON_P_LABEL | HWMON_P_CAP),
@@ -696,6 +843,124 @@ static const struct hwmon_channel_info * const hwmon_info[] = {
 	HWMON_CHANNEL_INFO(fan, HWMON_F_INPUT, HWMON_F_INPUT, HWMON_F_INPUT),
 	NULL
 };
+
+static int xe_hwmon_pcode_read_thermal_info(struct xe_hwmon *hwmon)
+{
+	struct xe_tile *root_tile = xe_device_get_root_tile(hwmon->xe);
+	u32 config = 0, data0 = 0, data1 = 0;
+	int ret;
+
+	ret = xe_pcode_read(root_tile, PCODE_MBOX(PCODE_THERMAL_INFO, READ_THERMAL_LIMITS, 0),
+			    &data0, &data1);
+	if (ret)
+		return ret;
+
+	drm_dbg(&hwmon->xe->drm, "thermal info read val 0x%x val1 0x%x\n", data0, data1);
+	hwmon->temp.data[0] = cpu_to_le32(data0);
+	hwmon->temp.data[1] = cpu_to_le32(data1);
+
+	ret = xe_pcode_read(root_tile, PCODE_MBOX(PCODE_THERMAL_INFO, READ_THERMAL_CONFIG, 0),
+			    &config, NULL);
+	if (ret)
+		return ret;
+
+	drm_dbg(&hwmon->xe->drm, "thermal config count 0x%x\n", config);
+	hwmon->temp.count = REG_FIELD_GET(TEMP_MASK, config);
+
+	return ret;
+}
+
+static inline bool mmio_temp_valid(const struct xe_hwmon *hwmon, u32 value)
+{
+	/*
+	 * On platforms lacking temperature sentinel support, a value of 0 is treated
+	 * as invalid. While 0°C is theoretically possible, it is highly unlikely for
+	 * a discrete GPU in normal environments, making it a reasonable fallback
+	 * indicator for invalid or uninitialized temperature readings.
+	 * All-ones is returned when the device is off the bus, so reject it too.
+	 */
+	if (value == U32_MAX)
+		return false;
+
+	return hwmon->xe->info.has_temp_sentinel || value != 0;
+}
+
+/* Mailbox temperature is sign-magnitude (bit 7 sign, bits 6:0 magnitude). */
+static inline bool mbx_temp_valid(const struct xe_hwmon *hwmon, u8 value)
+{
+	if (value == TEMP_MBX_INVALID)
+		return false;
+
+	return hwmon->xe->info.has_temp_sentinel || value != 0;
+}
+
+/* Decode an 8-bit sign-magnitude mailbox temperature to degrees Celsius. */
+static int mbx_temp_decode(u8 value)
+{
+	int temp = value & TEMP_MBX_MAG;
+
+	return (value & TEMP_MBX_SIGN) ? -temp : temp;
+}
+
+static int get_mc_temp(struct xe_hwmon *hwmon, long *val)
+{
+	struct xe_tile *root_tile = xe_device_get_root_tile(hwmon->xe);
+	int ret, i, count = 0;
+	s32 average = 0;
+
+	guard(mutex)(&hwmon->hwmon_lock);
+
+	for (i = 0; i < DIV_ROUND_UP(hwmon->temp.count, sizeof(u32)); i++) {
+		u32 data = 0;
+
+		ret = xe_pcode_read(root_tile, PCODE_MBOX(PCODE_THERMAL_INFO, READ_THERMAL_DATA, i),
+				    &data, NULL);
+		if (ret)
+			return ret;
+		drm_dbg(&hwmon->xe->drm, "thermal data for group %d val 0x%x\n", i, data);
+		hwmon->temp.dword[i] = cpu_to_le32(data);
+	}
+
+	for (i = TEMP_INDEX_MCTRL; i < hwmon->temp.count - 1; i++) {
+		if (!mbx_temp_valid(hwmon, hwmon->temp.value[i]))
+			continue;
+		average += mbx_temp_decode(hwmon->temp.value[i]);
+		count++;
+	}
+
+	if (!count) {
+		drm_dbg(&hwmon->xe->drm, "Memory controller temperature unavailable!\n");
+		return -ENXIO;
+	}
+
+	average /= count;
+
+	if (val)
+		*val = average * MILLIDEGREE_PER_DEGREE;
+
+	return 0;
+}
+
+static int get_pcie_temp(struct xe_hwmon *hwmon, long *val)
+{
+	struct xe_tile *root_tile = xe_device_get_root_tile(hwmon->xe);
+	u32 data = 0;
+	int ret;
+
+	ret = xe_pcode_read(root_tile, PCODE_MBOX(PCODE_THERMAL_INFO, READ_THERMAL_DATA,
+						  PCIE_SENSOR_GROUP_ID), &data, NULL);
+	if (ret)
+		return ret;
+
+	/* Sensor offset is different for G21 */
+	if (hwmon->xe->info.subplatform != XE_SUBPLATFORM_BATTLEMAGE_G21)
+		data = REG_FIELD_GET(PCIE_SENSOR_MASK, data);
+
+	data = REG_FIELD_GET(TEMP_MASK, data);
+	*val = mbx_temp_decode(data) * MILLIDEGREE_PER_DEGREE;
+
+	return 0;
+}
 
 /* I1 is exposed as power_crit or as curr_crit depending on bit 31 */
 static int xe_hwmon_pcode_read_i1(const struct xe_hwmon *hwmon, u32 *uval)
@@ -791,13 +1056,77 @@ static void xe_hwmon_get_voltage(struct xe_hwmon *hwmon, int channel, long *valu
 	*value = DIV_ROUND_CLOSEST(REG_FIELD_GET(VOLTAGE_MASK, reg_val) * 2500, SF_VOLTAGE);
 }
 
+static inline bool is_vram_ch_available(struct xe_hwmon *hwmon, int channel)
+{
+	struct xe_mmio *mmio = xe_root_tile_mmio(hwmon->xe);
+	int vram_id = channel - CHANNEL_VRAM_N;
+	struct xe_reg vram_reg;
+
+	vram_reg = xe_hwmon_get_reg(hwmon, REG_TEMP, channel);
+	if (!xe_reg_is_valid(vram_reg) || !xe_mmio_read32(mmio, vram_reg))
+		return false;
+
+	/* Create label only for available vram channel */
+	sprintf(hwmon->temp.vram_label[vram_id], "vram_ch_%d", vram_id);
+	return true;
+}
+
 static umode_t
 xe_hwmon_temp_is_visible(struct xe_hwmon *hwmon, u32 attr, int channel)
 {
 	switch (attr) {
+	case hwmon_temp_emergency:
+		switch (channel) {
+		case CHANNEL_PKG:
+			return hwmon->temp.limit[TEMP_LIMIT_PKG_SHUTDOWN] ? 0444 : 0;
+		case CHANNEL_VRAM:
+			return hwmon->temp.limit[TEMP_LIMIT_MEM_SHUTDOWN] ? 0444 : 0;
+		case CHANNEL_MCTRL:
+		case CHANNEL_PCIE:
+			return hwmon->temp.count ? 0444 : 0;
+		case CHANNEL_VRAM_N...CHANNEL_VRAM_N_MAX:
+			return (is_vram_ch_available(hwmon, channel) &&
+				hwmon->temp.limit[TEMP_LIMIT_MEM_SHUTDOWN]) ? 0444 : 0;
+		default:
+			return 0;
+		}
+	case hwmon_temp_crit:
+		switch (channel) {
+		case CHANNEL_PKG:
+			return hwmon->temp.limit[TEMP_LIMIT_PKG_CRIT] ? 0444 : 0;
+		case CHANNEL_VRAM:
+			return hwmon->temp.limit[TEMP_LIMIT_MEM_CRIT] ? 0444 : 0;
+		case CHANNEL_MCTRL:
+		case CHANNEL_PCIE:
+			return hwmon->temp.count ? 0444 : 0;
+		case CHANNEL_VRAM_N...CHANNEL_VRAM_N_MAX:
+			return (is_vram_ch_available(hwmon, channel) &&
+				hwmon->temp.limit[TEMP_LIMIT_MEM_CRIT]) ? 0444 : 0;
+		default:
+			return 0;
+		}
+	case hwmon_temp_max:
+		switch (channel) {
+		case CHANNEL_PKG:
+			return hwmon->temp.limit[TEMP_LIMIT_PKG_MAX] ? 0444 : 0;
+		default:
+			return 0;
+		}
 	case hwmon_temp_input:
 	case hwmon_temp_label:
-		return xe_reg_is_valid(xe_hwmon_get_reg(hwmon, REG_TEMP, channel)) ? 0444 : 0;
+		switch (channel) {
+		case CHANNEL_PKG:
+		case CHANNEL_VRAM:
+			return xe_reg_is_valid(xe_hwmon_get_reg(hwmon, REG_TEMP,
+								channel)) ? 0444 : 0;
+		case CHANNEL_MCTRL:
+		case CHANNEL_PCIE:
+			return hwmon->temp.count ? 0444 : 0;
+		case CHANNEL_VRAM_N...CHANNEL_VRAM_N_MAX:
+			return is_vram_ch_available(hwmon, channel) ? 0444 : 0;
+		default:
+			return 0;
+		}
 	default:
 		return 0;
 	}
@@ -811,11 +1140,67 @@ xe_hwmon_temp_read(struct xe_hwmon *hwmon, u32 attr, int channel, long *val)
 
 	switch (attr) {
 	case hwmon_temp_input:
-		reg_val = xe_mmio_read32(mmio, xe_hwmon_get_reg(hwmon, REG_TEMP, channel));
+		switch (channel) {
+		case CHANNEL_PKG:
+		case CHANNEL_VRAM:
+			reg_val = xe_mmio_read32(mmio, xe_hwmon_get_reg(hwmon, REG_TEMP, channel));
 
-		/* HW register value is in degrees Celsius, convert to millidegrees. */
-		*val = REG_FIELD_GET(TEMP_MASK, reg_val) * MILLIDEGREE_PER_DEGREE;
-		return 0;
+			/* HW register value is in degrees Celsius, convert to millidegrees. */
+			*val = REG_FIELD_GET(TEMP_MASK, reg_val) * MILLIDEGREE_PER_DEGREE;
+			return 0;
+		case CHANNEL_MCTRL:
+			return get_mc_temp(hwmon, val);
+		case CHANNEL_PCIE:
+			return get_pcie_temp(hwmon, val);
+		case CHANNEL_VRAM_N...CHANNEL_VRAM_N_MAX:
+			reg_val = xe_mmio_read32(mmio, xe_hwmon_get_reg(hwmon, REG_TEMP, channel));
+			/*
+			 * This temperature format is 24 bit [31:8] signed integer and 8 bit
+			 * [7:0] fraction.
+			 */
+			*val = (s32)(REG_FIELD_GET(TEMP_MASK_VRAM_N, reg_val)) *
+				(REG_FIELD_GET(TEMP_SIGN_MASK, reg_val) ? -1 : 1) *
+				 MILLIDEGREE_PER_DEGREE;
+			return 0;
+		default:
+			return -EOPNOTSUPP;
+		}
+	case hwmon_temp_emergency:
+		switch (channel) {
+		case CHANNEL_PKG:
+		case CHANNEL_MCTRL:
+		case CHANNEL_PCIE:
+			*val = hwmon->temp.limit[TEMP_LIMIT_PKG_SHUTDOWN] * MILLIDEGREE_PER_DEGREE;
+			return 0;
+		case CHANNEL_VRAM:
+		case CHANNEL_VRAM_N...CHANNEL_VRAM_N_MAX:
+			*val = hwmon->temp.limit[TEMP_LIMIT_MEM_SHUTDOWN] * MILLIDEGREE_PER_DEGREE;
+			return 0;
+		default:
+			return -EOPNOTSUPP;
+		}
+	case hwmon_temp_crit:
+		switch (channel) {
+		case CHANNEL_PKG:
+		case CHANNEL_MCTRL:
+		case CHANNEL_PCIE:
+			*val = hwmon->temp.limit[TEMP_LIMIT_PKG_CRIT] * MILLIDEGREE_PER_DEGREE;
+			return 0;
+		case CHANNEL_VRAM:
+		case CHANNEL_VRAM_N...CHANNEL_VRAM_N_MAX:
+			*val = hwmon->temp.limit[TEMP_LIMIT_MEM_CRIT] * MILLIDEGREE_PER_DEGREE;
+			return 0;
+		default:
+			return -EOPNOTSUPP;
+		}
+	case hwmon_temp_max:
+		switch (channel) {
+		case CHANNEL_PKG:
+			*val = hwmon->temp.limit[TEMP_LIMIT_PKG_MAX] * MILLIDEGREE_PER_DEGREE;
+			return 0;
+		default:
+			return -EOPNOTSUPP;
+		}
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -857,7 +1242,8 @@ xe_hwmon_power_is_visible(struct xe_hwmon *hwmon, u32 attr, int channel)
 		}
 	case hwmon_power_crit:
 		if (channel == CHANNEL_CARD) {
-			xe_hwmon_pcode_read_i1(hwmon, &uval);
+			if (xe_hwmon_pcode_read_i1(hwmon, &uval))
+				return 0;
 			return (uval & POWER_SETUP_I1_WATTS) ? 0644 : 0;
 		}
 		break;
@@ -876,7 +1262,8 @@ xe_hwmon_power_is_visible(struct xe_hwmon *hwmon, u32 attr, int channel)
 			}
 		}
 		if ((!(uval & PWR_LIM_EN)) && channel == CHANNEL_CARD) {
-			xe_hwmon_pcode_read_i1(hwmon, &uval);
+			if (xe_hwmon_pcode_read_i1(hwmon, &uval))
+				return 0;
 			return (uval & POWER_SETUP_I1_WATTS) ? 0444 : 0;
 		}
 		return (uval) ? 0444 : 0;
@@ -892,11 +1279,9 @@ xe_hwmon_power_read(struct xe_hwmon *hwmon, u32 attr, int channel, long *val)
 	switch (attr) {
 	case hwmon_power_max:
 	case hwmon_power_cap:
-		xe_hwmon_power_max_read(hwmon, attr, channel, val);
-		return 0;
+		return xe_hwmon_power_max_read(hwmon, attr, channel, val);
 	case hwmon_power_rated_max:
-		xe_hwmon_power_rated_max_read(hwmon, attr, channel, val);
-		return 0;
+		return xe_hwmon_power_rated_max_read(hwmon, attr, channel, val);
 	case hwmon_power_crit:
 		return xe_hwmon_power_curr_crit_read(hwmon, channel, val, SF_POWER);
 	default:
@@ -1013,8 +1398,7 @@ xe_hwmon_energy_read(struct xe_hwmon *hwmon, u32 attr, int channel, long *val)
 {
 	switch (attr) {
 	case hwmon_energy_input:
-		xe_hwmon_energy_get(hwmon, channel, val);
-		return 0;
+		return xe_hwmon_energy_get(hwmon, channel, val);
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -1096,8 +1480,6 @@ xe_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types type,
 	struct xe_hwmon *hwmon = (struct xe_hwmon *)drvdata;
 	int ret;
 
-	xe_pm_runtime_get(hwmon->xe);
-
 	switch (type) {
 	case hwmon_temp:
 		ret = xe_hwmon_temp_is_visible(hwmon, attr, channel);
@@ -1122,8 +1504,6 @@ xe_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types type,
 		break;
 	}
 
-	xe_pm_runtime_put(hwmon->xe);
-
 	return ret;
 }
 
@@ -1132,37 +1512,25 @@ xe_hwmon_read(struct device *dev, enum hwmon_sensor_types type, u32 attr,
 	      int channel, long *val)
 {
 	struct xe_hwmon *hwmon = dev_get_drvdata(dev);
-	int ret;
 
-	xe_pm_runtime_get(hwmon->xe);
+	guard(xe_pm_runtime)(hwmon->xe);
 
 	switch (type) {
 	case hwmon_temp:
-		ret = xe_hwmon_temp_read(hwmon, attr, channel, val);
-		break;
+		return xe_hwmon_temp_read(hwmon, attr, channel, val);
 	case hwmon_power:
-		ret = xe_hwmon_power_read(hwmon, attr, channel, val);
-		break;
+		return xe_hwmon_power_read(hwmon, attr, channel, val);
 	case hwmon_curr:
-		ret = xe_hwmon_curr_read(hwmon, attr, channel, val);
-		break;
+		return xe_hwmon_curr_read(hwmon, attr, channel, val);
 	case hwmon_in:
-		ret = xe_hwmon_in_read(hwmon, attr, channel, val);
-		break;
+		return xe_hwmon_in_read(hwmon, attr, channel, val);
 	case hwmon_energy:
-		ret = xe_hwmon_energy_read(hwmon, attr, channel, val);
-		break;
+		return xe_hwmon_energy_read(hwmon, attr, channel, val);
 	case hwmon_fan:
-		ret = xe_hwmon_fan_read(hwmon, attr, channel, val);
-		break;
+		return xe_hwmon_fan_read(hwmon, attr, channel, val);
 	default:
-		ret = -EOPNOTSUPP;
-		break;
+		return -EOPNOTSUPP;
 	}
-
-	xe_pm_runtime_put(hwmon->xe);
-
-	return ret;
 }
 
 static int
@@ -1170,37 +1538,37 @@ xe_hwmon_write(struct device *dev, enum hwmon_sensor_types type, u32 attr,
 	       int channel, long val)
 {
 	struct xe_hwmon *hwmon = dev_get_drvdata(dev);
-	int ret;
 
-	xe_pm_runtime_get(hwmon->xe);
+	guard(xe_pm_runtime)(hwmon->xe);
 
 	switch (type) {
 	case hwmon_power:
-		ret = xe_hwmon_power_write(hwmon, attr, channel, val);
-		break;
+		return xe_hwmon_power_write(hwmon, attr, channel, val);
 	case hwmon_curr:
-		ret = xe_hwmon_curr_write(hwmon, attr, channel, val);
-		break;
+		return xe_hwmon_curr_write(hwmon, attr, channel, val);
 	default:
-		ret = -EOPNOTSUPP;
-		break;
+		return -EOPNOTSUPP;
 	}
-
-	xe_pm_runtime_put(hwmon->xe);
-
-	return ret;
 }
 
 static int xe_hwmon_read_label(struct device *dev,
 			       enum hwmon_sensor_types type,
 			       u32 attr, int channel, const char **str)
 {
+	struct xe_hwmon *hwmon = dev_get_drvdata(dev);
+
 	switch (type) {
 	case hwmon_temp:
 		if (channel == CHANNEL_PKG)
 			*str = "pkg";
 		else if (channel == CHANNEL_VRAM)
 			*str = "vram";
+		else if (channel == CHANNEL_MCTRL)
+			*str = "mctrl";
+		else if (channel == CHANNEL_PCIE)
+			*str = "pcie";
+		else if (in_range(channel, CHANNEL_VRAM_N, MAX_VRAM_CHANNELS))
+			*str = hwmon->temp.vram_label[channel - CHANNEL_VRAM_N];
 		return 0;
 	case hwmon_power:
 	case hwmon_energy:
@@ -1252,22 +1620,11 @@ xe_hwmon_get_preregistration_info(struct xe_hwmon *hwmon)
 		} else {
 			drm_info(&hwmon->xe->drm, "Using mailbox commands for power limits\n");
 			/* Write default limits to read from pcode from now on. */
-			xe_hwmon_pcode_rmw_power_limit(hwmon, PL1_HWMON_ATTR,
-						       CHANNEL_CARD, PWR_LIM | PWR_LIM_TIME,
-						       hwmon->pl1_on_boot[CHANNEL_CARD]);
-			xe_hwmon_pcode_rmw_power_limit(hwmon, PL1_HWMON_ATTR,
-						       CHANNEL_PKG, PWR_LIM | PWR_LIM_TIME,
-						       hwmon->pl1_on_boot[CHANNEL_PKG]);
-			xe_hwmon_pcode_rmw_power_limit(hwmon, PL2_HWMON_ATTR,
-						       CHANNEL_CARD, PWR_LIM | PWR_LIM_TIME,
-						       hwmon->pl2_on_boot[CHANNEL_CARD]);
-			xe_hwmon_pcode_rmw_power_limit(hwmon, PL2_HWMON_ATTR,
-						       CHANNEL_PKG, PWR_LIM | PWR_LIM_TIME,
-						       hwmon->pl2_on_boot[CHANNEL_PKG]);
+			if (xe_hwmon_pcode_set_default_power_limits(hwmon))
+				drm_warn(&hwmon->xe->drm, "Failed to set default power limits\n");
 			hwmon->scl_shift_power = PWR_UNIT;
 			hwmon->scl_shift_energy = ENERGY_UNIT;
 			hwmon->scl_shift_time = TIME_UNIT;
-			hwmon->boot_power_limit_read = true;
 		}
 	} else {
 		drm_info(&hwmon->xe->drm, "Using register for power limits\n");
@@ -1295,13 +1652,16 @@ xe_hwmon_get_preregistration_info(struct xe_hwmon *hwmon)
 	for (channel = 0; channel < FAN_MAX; channel++)
 		if (xe_hwmon_is_visible(hwmon, hwmon_fan, hwmon_fan_input, channel))
 			xe_hwmon_fan_input_read(hwmon, channel, &fan_speed);
+
+	if (hwmon->xe->info.has_mbx_thermal_info && xe_hwmon_pcode_read_thermal_info(hwmon))
+		drm_warn(&hwmon->xe->drm, "Thermal mailbox not supported by card firmware\n");
 }
 
 int xe_hwmon_register(struct xe_device *xe)
 {
 	struct device *dev = xe->drm.dev;
 	struct xe_hwmon *hwmon;
-	int ret;
+	int ret, err;
 
 	/* hwmon is available only for dGfx */
 	if (!IS_DGFX(xe))
@@ -1311,7 +1671,7 @@ int xe_hwmon_register(struct xe_device *xe)
 	if (IS_SRIOV_VF(xe))
 		return 0;
 
-	hwmon = devm_kzalloc(dev, sizeof(*hwmon), GFP_KERNEL);
+	hwmon = devm_kzalloc_obj(dev, *hwmon);
 	if (!hwmon)
 		return -ENOMEM;
 
@@ -1332,9 +1692,11 @@ int xe_hwmon_register(struct xe_device *xe)
 								&hwmon_chip_info,
 								hwmon_groups);
 	if (IS_ERR(hwmon->hwmon_dev)) {
-		drm_err(&xe->drm, "Failed to register xe hwmon (%pe)\n", hwmon->hwmon_dev);
+		err = PTR_ERR(hwmon->hwmon_dev);
+		xe_log_err(xe, HWMON, err,
+			   "Failed to register xe hwmon\n");
 		xe->hwmon = NULL;
-		return PTR_ERR(hwmon->hwmon_dev);
+		return err;
 	}
 
 	return 0;

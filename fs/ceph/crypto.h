@@ -8,6 +8,7 @@
 
 #include <crypto/sha2.h>
 #include <linux/fscrypt.h>
+#include <linux/base64.h>
 
 #define CEPH_FSCRYPT_BLOCK_SHIFT   12
 #define CEPH_FSCRYPT_BLOCK_SIZE    (_AC(1, UL) << CEPH_FSCRYPT_BLOCK_SHIFT)
@@ -89,11 +90,6 @@ static inline u32 ceph_fscrypt_auth_len(struct ceph_fscrypt_auth *fa)
  */
 #define CEPH_NOHASH_NAME_MAX (180 - SHA256_DIGEST_SIZE)
 
-#define CEPH_BASE64_CHARS(nbytes) DIV_ROUND_UP((nbytes) * 4, 3)
-
-int ceph_base64_encode(const u8 *src, int srclen, char *dst);
-int ceph_base64_decode(const char *src, int srclen, u8 *dst);
-
 void ceph_fscrypt_set_ops(struct super_block *sb);
 
 void ceph_fscrypt_free_dummy_policy(struct ceph_fs_client *fsc);
@@ -119,7 +115,7 @@ static inline void ceph_fname_free_buffer(struct inode *parent,
 		fscrypt_fname_free_buffer(fname);
 }
 
-int ceph_fname_to_usr(const struct ceph_fname *fname, struct fscrypt_str *tname,
+int ceph_fname_to_usr(const struct ceph_fname *fname, unsigned char *tname,
 		      struct fscrypt_str *oname, bool *is_nokey);
 int ceph_fscrypt_prepare_readdir(struct inode *dir);
 
@@ -161,9 +157,9 @@ int ceph_fscrypt_decrypt_extents(struct inode *inode, struct page **page,
 int ceph_fscrypt_encrypt_pages(struct inode *inode, struct page **page, u64 off,
 			       int len);
 
-static inline struct page *ceph_fscrypt_pagecache_page(struct page *page)
+static inline struct folio *ceph_fscrypt_pagecache_folio(struct folio *folio)
 {
-	return fscrypt_is_bounce_page(page) ? fscrypt_pagecache_page(page) : page;
+	return fscrypt_is_bounce_folio(folio) ? fscrypt_pagecache_folio(folio) : folio;
 }
 
 #else /* CONFIG_FS_ENCRYPTION */
@@ -208,7 +204,7 @@ static inline void ceph_fname_free_buffer(struct inode *parent,
 }
 
 static inline int ceph_fname_to_usr(const struct ceph_fname *fname,
-				    struct fscrypt_str *tname,
+				    unsigned char *tname,
 				    struct fscrypt_str *oname, bool *is_nokey)
 {
 	oname->name = fname->name;
@@ -262,15 +258,15 @@ static inline int ceph_fscrypt_encrypt_pages(struct inode *inode,
 	return 0;
 }
 
-static inline struct page *ceph_fscrypt_pagecache_page(struct page *page)
+static inline struct folio *ceph_fscrypt_pagecache_folio(struct folio *folio)
 {
-	return page;
+	return folio;
 }
 #endif /* CONFIG_FS_ENCRYPTION */
 
-static inline loff_t ceph_fscrypt_page_offset(struct page *page)
+static inline loff_t ceph_fscrypt_folio_offset(struct folio *folio)
 {
-	return page_offset(ceph_fscrypt_pagecache_page(page));
+	return folio_pos(ceph_fscrypt_pagecache_folio(folio));
 }
 
 #endif /* _CEPH_CRYPTO_H */

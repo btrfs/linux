@@ -15,7 +15,7 @@
  * 09/2002 Helge Deller    <deller@gmx.de>
  *	(enable driver on big-endian machines (hppa), ioctl fixes)
  * 12/2002 Helge Deller    <deller@gmx.de>
- *	(port driver to new frambuffer infrastructure)
+ *	(port driver to new framebuffer infrastructure)
  * 01/2003 Helge Deller    <deller@gmx.de>
  *	(initial work on fb hardware acceleration for voodoo2)
  * 08/2006 Alan Cox 	   <alan@redhat.com>
@@ -358,6 +358,9 @@ static int sstfb_check_var(struct fb_var_screeninfo *var,
 	int vSyncOn    = var->vsync_len;
 	int tiles_in_X, real_length;
 	unsigned int freq;
+
+	if (!var->pixclock)
+		return -EINVAL;
 
 	if (sst_calc_pll(PICOS2KHZ(var->pixclock), &freq, &par->pll)) {
 		printk(KERN_ERR "sstfb: Pixclock at %ld KHZ out of range\n",
@@ -1332,7 +1335,8 @@ static int sstfb_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		return err;
 
 	/* Enable device in PCI config. */
-	if ((err=pci_enable_device(pdev))) {
+	err = pcim_enable_device(pdev);
+	if (err) {
 		printk(KERN_ERR "cannot enable device\n");
 		return err;
 	}
@@ -1492,6 +1496,7 @@ static const struct pci_device_id sstfb_id_tbl[] = {
 		.driver_data = ID_VOODOO2, },
 	{ 0 },
 };
+MODULE_DEVICE_TABLE(pci, sstfb_id_tbl);
 
 static struct pci_driver sstfb_driver = {
 	.name		= "sstfb",

@@ -280,10 +280,10 @@ static int lp8727_setup_irq(struct lp8727_chg *pchg)
 
 static void lp8727_release_irq(struct lp8727_chg *pchg)
 {
-	cancel_delayed_work_sync(&pchg->work);
-
 	if (pchg->irq)
 		free_irq(pchg->irq, pchg);
+
+	cancel_delayed_work_sync(&pchg->work);
 }
 
 static enum power_supply_property lp8727_charger_prop[] = {
@@ -444,7 +444,7 @@ static int lp8727_register_psy(struct lp8727_chg *pchg)
 	struct power_supply_config psy_cfg = {}; /* Only for ac and usb */
 	struct lp8727_psy *psy;
 
-	psy = devm_kzalloc(pchg->dev, sizeof(*psy), GFP_KERNEL);
+	psy = devm_kzalloc_obj(pchg->dev, *psy);
 	if (!psy)
 		return -ENOMEM;
 
@@ -475,7 +475,7 @@ static struct lp8727_chg_param
 {
 	struct lp8727_chg_param *param;
 
-	param = devm_kzalloc(dev, sizeof(*param), GFP_KERNEL);
+	param = devm_kzalloc_obj(dev, *param);
 	if (!param)
 		goto out;
 
@@ -492,7 +492,7 @@ static struct lp8727_platform_data *lp8727_parse_dt(struct device *dev)
 	struct lp8727_platform_data *pdata;
 	const char *type;
 
-	pdata = devm_kzalloc(dev, sizeof(*pdata), GFP_KERNEL);
+	pdata = devm_kzalloc_obj(dev, *pdata);
 	if (!pdata)
 		return ERR_PTR(-ENOMEM);
 
@@ -538,7 +538,7 @@ static int lp8727_probe(struct i2c_client *cl)
 		pdata = dev_get_platdata(&cl->dev);
 	}
 
-	pchg = devm_kzalloc(&cl->dev, sizeof(*pchg), GFP_KERNEL);
+	pchg = devm_kzalloc_obj(&cl->dev, *pchg);
 	if (!pchg)
 		return -ENOMEM;
 
@@ -584,7 +584,7 @@ static const struct of_device_id lp8727_dt_ids[] __maybe_unused = {
 MODULE_DEVICE_TABLE(of, lp8727_dt_ids);
 
 static const struct i2c_device_id lp8727_ids[] = {
-	{ "lp8727" },
+	{ .name = "lp8727" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, lp8727_ids);

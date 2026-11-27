@@ -43,7 +43,8 @@
  * to use) happens.
  */
 
-#include "uapi/drm/vc4_drm.h"
+#include <drm/drm_print.h>
+
 #include "vc4_drv.h"
 #include "vc4_packet.h"
 
@@ -384,7 +385,24 @@ validate_tile_binning_config(VALIDATE_ARGS)
 		return -EINVAL;
 	}
 
-	bin_slot = vc4_v3d_get_bin_slot(vc4);
+	/* The tile state data array is 48 bytes per tile, and we put it at
+	 * the start of a BO containing both it and the tile alloc.
+	 */
+	tile_state_size = 48 * tile_count;
+
+	/* Since the tile alloc array will follow us, align. */
+	tile_state_size = roundup(tile_state_size, 4096);
+
+	/* Reject configurations whose tile state would leave no room for
+	 * the tile alloc pool that follows it in the slot.
+	 */
+	if (tile_state_size >= vc4->bin_alloc_size) {
+		DRM_DEBUG("Tile binning config of %dx%d too large\n",
+			  exec->bin_tiles_x, exec->bin_tiles_y);
+		return -EINVAL;
+	}
+
+	bin_slot = vc4_v3d_get_bin_slot(vc4, MAX_SCHEDULE_TIMEOUT);
 	if (bin_slot < 0) {
 		if (bin_slot != -EINTR && bin_slot != -ERESTARTSYS) {
 			drm_err(dev, "Failed to allocate binner memory: %d\n",
@@ -399,13 +417,13 @@ validate_tile_binning_config(VALIDATE_ARGS)
 	exec->bin_slots |= BIT(bin_slot);
 	bin_addr = vc4->bin_bo->base.dma_addr + bin_slot * vc4->bin_alloc_size;
 
-	/* The tile state data array is 48 bytes per tile, and we put it at
-	 * the start of a BO containing both it and the tile alloc.
-	 */
-	tile_state_size = 48 * tile_count;
+	exec->tile_alloc_offset = bin_addr + tile_state_size;
 
-	/* Since the tile alloc array will follow us, align. */
-	exec->tile_alloc_offset = bin_addr + roundup(tile_state_size, 4096);
+	/* The TSDA area must be zeroed out before use, otherwise the PTB might
+	 * consume a stale tile state.
+	 */
+	memset(vc4->bin_bo->base.vaddr + bin_slot * vc4->bin_alloc_size, 0,
+	       tile_state_size);
 
 	*(uint8_t *)(validated + 14) =
 		((flags & ~(VC4_BIN_CONFIG_ALLOC_INIT_BLOCK_SIZE_MASK |
@@ -797,13 +815,16 @@ validate_gl_shader_rec(struct drm_device *dev,
 	exec->shader_rec_size -= packet_size;
 
 	for (i = 0; i < shader_reloc_count; i++) {
-		if (src_handles[i] > exec->bo_count) {
+		if (src_handles[i] >= exec->bo_count) {
 			DRM_DEBUG("Shader handle %d too big\n", src_handles[i]);
 			return -EINVAL;
 		}
 
 		bo[i] = to_drm_gem_dma_obj(exec->bo[src_handles[i]]);
 		if (!bo[i])
+			return -EINVAL;
+
+		if (!to_vc4_bo(&bo[i]->base)->validated_shader)
 			return -EINVAL;
 	}
 	for (i = shader_reloc_count; i < nr_relocs; i++) {
@@ -825,24 +846,22 @@ validate_gl_shader_rec(struct drm_device *dev,
 	}
 
 	for (i = 0; i < shader_reloc_count; i++) {
-		struct vc4_validated_shader_info *validated_shader;
+		struct vc4_validated_shader_info *validated_shader =
+			to_vc4_bo(&bo[i]->base)->validated_shader;
 		uint32_t o = shader_reloc_offsets[i];
 		uint32_t src_offset = *(uint32_t *)(pkt_u + o);
 		uint32_t *texture_handles_u;
 		void *uniform_data_u;
 		uint32_t tex, uni;
 
-		*(uint32_t *)(pkt_v + o) = bo[i]->dma_addr + src_offset;
+		*(uint32_t *)(pkt_v + o) = bo[i]->dma_addr + src_offset +
+					   to_vc4_bo(&bo[i]->base)->shader_offset;
 
 		if (src_offset != 0) {
 			DRM_DEBUG("Shaders must be at offset 0 of "
 				  "the BO.\n");
 			return -EINVAL;
 		}
-
-		validated_shader = to_vc4_bo(&bo[i]->base)->validated_shader;
-		if (!validated_shader)
-			return -EINVAL;
 
 		if (validated_shader->uniforms_src_size >
 		    exec->uniforms_size) {

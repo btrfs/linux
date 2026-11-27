@@ -36,6 +36,7 @@
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_of.h>
 #include <drm/drm_panel.h>
+#include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_simple_kms_helper.h>
 
@@ -798,7 +799,7 @@ dsi_esc_timing(u32 ns)
 }
 
 static void vc4_dsi_bridge_disable(struct drm_bridge *bridge,
-				   struct drm_atomic_state *state)
+				   struct drm_atomic_commit *state)
 {
 	struct vc4_dsi *dsi = bridge_to_vc4_dsi(bridge);
 	u32 disp0_ctrl;
@@ -809,7 +810,7 @@ static void vc4_dsi_bridge_disable(struct drm_bridge *bridge,
 }
 
 static void vc4_dsi_bridge_post_disable(struct drm_bridge *bridge,
-					struct drm_atomic_state *state)
+					struct drm_atomic_commit *state)
 {
 	struct vc4_dsi *dsi = bridge_to_vc4_dsi(bridge);
 	struct device *dev = &dsi->pdev->dev;
@@ -871,7 +872,7 @@ static bool vc4_dsi_bridge_mode_fixup(struct drm_bridge *bridge,
 }
 
 static void vc4_dsi_bridge_pre_enable(struct drm_bridge *bridge,
-				      struct drm_atomic_state *state)
+				      struct drm_atomic_commit *state)
 {
 	struct vc4_dsi *dsi = bridge_to_vc4_dsi(bridge);
 	const struct drm_crtc_state *crtc_state;
@@ -1140,7 +1141,7 @@ static void vc4_dsi_bridge_pre_enable(struct drm_bridge *bridge,
 }
 
 static void vc4_dsi_bridge_enable(struct drm_bridge *bridge,
-				  struct drm_atomic_state *state)
+				  struct drm_atomic_commit *state)
 {
 	struct vc4_dsi *dsi = bridge_to_vc4_dsi(bridge);
 	bool debug_dump_regs = false;
@@ -1410,7 +1411,7 @@ static const struct mipi_dsi_host_ops vc4_dsi_host_ops = {
 static const struct drm_bridge_funcs vc4_dsi_bridge_funcs = {
 	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
-	.atomic_reset = drm_atomic_helper_bridge_reset,
+	.atomic_create_state = drm_atomic_helper_bridge_create_state,
 	.atomic_pre_enable = vc4_dsi_bridge_pre_enable,
 	.atomic_enable = vc4_dsi_bridge_enable,
 	.atomic_disable = vc4_dsi_bridge_disable,
@@ -1526,8 +1527,8 @@ static irqreturn_t vc4_dsi_irq_handler(int irq, void *data)
 		complete(&dsi->xfer_completion);
 		ret = IRQ_HANDLED;
 	} else if (stat & DSI_PORT_BIT(INT_HSTX_TO)) {
-		complete(&dsi->xfer_completion);
 		dsi->xfer_result = -ETIMEDOUT;
+		complete(&dsi->xfer_completion);
 		ret = IRQ_HANDLED;
 	}
 
@@ -1598,9 +1599,8 @@ vc4_dsi_init_phy_clocks(struct vc4_dsi *dsi)
 		dsi->clk_onecell->hws[i] = &fix->hw;
 	}
 
-	return of_clk_add_hw_provider(dev->of_node,
-				      of_clk_hw_onecell_get,
-				      dsi->clk_onecell);
+	return devm_of_clk_add_hw_provider(dev, of_clk_hw_onecell_get,
+					   dsi->clk_onecell);
 }
 
 static void vc4_dsi_dma_mem_release(void *ptr)

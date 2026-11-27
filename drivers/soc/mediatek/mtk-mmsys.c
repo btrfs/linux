@@ -167,9 +167,11 @@ static void mtk_mmsys_update_bits(struct mtk_mmsys *mmsys, u32 offset, u32 mask,
 	u32 tmp;
 
 	if (mmsys->cmdq_base.size && cmdq_pkt) {
-		ret = cmdq_pkt_write_mask(cmdq_pkt, mmsys->cmdq_base.subsys,
-					  mmsys->cmdq_base.offset + offset, val,
-					  mask);
+		ret = mmsys->cmdq_base.pkt_write_mask(cmdq_pkt,
+						      mmsys->cmdq_base.subsys,
+						      mmsys->cmdq_base.pa_base,
+						      mmsys->cmdq_base.offset + offset,
+						      val, mask);
 		if (ret)
 			pr_debug("CMDQ unavailable: using CPU write\n");
 		else
@@ -392,7 +394,7 @@ static int mtk_mmsys_probe(struct platform_device *pdev)
 	struct mtk_mmsys *mmsys;
 	int ret;
 
-	mmsys = devm_kzalloc(dev, sizeof(*mmsys), GFP_KERNEL);
+	mmsys = devm_kzalloc_obj(dev, *mmsys);
 	if (!mmsys)
 		return -ENOMEM;
 

@@ -295,7 +295,7 @@ static int ad5820_probe(struct i2c_client *client)
 	struct ad5820_device *coil;
 	int ret;
 
-	coil = devm_kzalloc(&client->dev, sizeof(*coil), GFP_KERNEL);
+	coil = devm_kzalloc_obj(&client->dev, *coil);
 	if (!coil)
 		return -ENOMEM;
 
@@ -347,8 +347,8 @@ static void ad5820_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ad5820_id_table[] = {
-	{ "ad5820" },
-	{ "ad5821" },
+	{ .name = "ad5820" },
+	{ .name = "ad5821" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ad5820_id_table);

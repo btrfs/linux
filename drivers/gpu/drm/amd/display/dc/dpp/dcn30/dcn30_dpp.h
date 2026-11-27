@@ -587,12 +587,36 @@ bool dpp3_construct(struct dcn3_dpp *dpp3,
 bool dpp3_program_gamcor_lut(
 	struct dpp *dpp_base, const struct pwl_params *params);
 
+struct dcn3_xfer_func_reg;
+
+void dpp3_enable_cm_block(
+	struct dpp *dpp_base);
+
+enum dc_lut_mode dpp30_get_gamcor_current(
+	struct dpp *dpp_base);
+
+void dpp3_program_gammcor_lut(
+	struct dpp *dpp_base,
+	const struct pwl_result_data *rgb,
+	uint32_t num,
+	bool is_ram_a);
+
+void dpp3_gamcor_reg_field(
+	struct dcn3_dpp *dpp,
+	struct dcn3_xfer_func_reg *reg);
+
+void dpp3_configure_gamcor_lut(
+	struct dpp *dpp_base,
+	bool is_ram_a);
+
 void dpp3_program_CM_dealpha(
 		struct dpp *dpp_base,
 		uint32_t enable, uint32_t additive_blending);
 
 void dpp30_read_state(struct dpp *dpp_base,
 		struct dcn_dpp_state *s);
+
+void dpp30_read_reg_state(struct dpp *dpp_base, struct dcn_dpp_reg_state *dpp_reg_state);
 
 bool dpp3_get_optimal_number_of_taps(
 		struct dpp *dpp,
@@ -642,4 +666,8 @@ void dpp3_program_cm_dealpha(
 
 void dpp3_cm_get_gamut_remap(struct dpp *dpp_base,
 			     struct dpp_grph_csc_adjustment *adjust);
+
+bool dpp3_should_bypass_post_csc_for_colorspace(
+		enum dc_color_space dc_color_space);
+
 #endif /* __DC_HWSS_DCN30_H__ */

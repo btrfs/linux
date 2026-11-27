@@ -47,6 +47,7 @@ struct vboxsf_sbi {
 	u32 next_generation;
 	u32 root;
 	int bdi_id;
+	bool case_insensitive;
 };
 
 /* per-inode information */
@@ -97,10 +98,10 @@ int vboxsf_stat(struct vboxsf_sbi *sbi, struct shfl_string *path,
 		struct shfl_fsobjinfo *info);
 int vboxsf_stat_dentry(struct dentry *dentry, struct shfl_fsobjinfo *info);
 int vboxsf_inode_revalidate(struct dentry *dentry);
-int vboxsf_getattr(struct mnt_idmap *idmap, const struct path *path,
+int vboxsf_getattr(const struct mnt_idmap *idmap, const struct path *path,
 		   struct kstat *kstat, u32 request_mask,
 		   unsigned int query_flags);
-int vboxsf_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+int vboxsf_setattr(const struct mnt_idmap *idmap, struct dentry *dentry,
 		   struct iattr *iattr);
 struct shfl_string *vboxsf_path_from_dentry(struct vboxsf_sbi *sbi,
 					    struct dentry *dentry);
@@ -110,6 +111,11 @@ struct vboxsf_dir_info *vboxsf_dir_info_alloc(void);
 void vboxsf_dir_info_free(struct vboxsf_dir_info *p);
 int vboxsf_dir_read_all(struct vboxsf_sbi *sbi, struct vboxsf_dir_info *sf_d,
 			u64 handle);
+
+int vboxsf_query_case_sensitive(struct vboxsf_sbi *sbi);
+
+struct file_kattr;
+int vboxsf_fileattr_get(struct dentry *dentry, struct file_kattr *fa);
 
 /* from vboxsf_wrappers.c */
 int vboxsf_connect(void);

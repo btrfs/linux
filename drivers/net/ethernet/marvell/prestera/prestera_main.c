@@ -307,13 +307,14 @@ static int prestera_pcs_config(struct phylink_pcs *pcs, unsigned int neg_mode,
 			       bool permit_pause_to_mac)
 {
 	struct prestera_port *port = prestera_pcs_to_port(pcs);
-	struct prestera_port_mac_config cfg_mac;
+	struct prestera_port_mac_config cfg_mac, old;
 	int err;
 
 	err = prestera_port_cfg_mac_read(port, &cfg_mac);
 	if (err)
 		return err;
 
+	old = cfg_mac;
 	cfg_mac.admin = true;
 	cfg_mac.fec = PRESTERA_PORT_FEC_OFF;
 	cfg_mac.inband = neg_mode == PHYLINK_PCS_NEG_INBAND_ENABLED;
@@ -329,6 +330,7 @@ static int prestera_pcs_config(struct phylink_pcs *pcs, unsigned int neg_mode,
 		cfg_mac.mode = PRESTERA_MAC_MODE_SGMII;
 		break;
 	case PHY_INTERFACE_MODE_SGMII:
+		cfg_mac.speed = SPEED_1000;
 		cfg_mac.mode = PRESTERA_MAC_MODE_SGMII;
 		break;
 	case PHY_INTERFACE_MODE_1000BASEX:
@@ -337,6 +339,19 @@ static int prestera_pcs_config(struct phylink_pcs *pcs, unsigned int neg_mode,
 		cfg_mac.duplex = DUPLEX_FULL;
 		cfg_mac.mode = PRESTERA_MAC_MODE_1000BASE_X;
 		break;
+	}
+
+	/* Firmware may not report link up after the mode, speed or inband
+	 * setting of an enabled port changes until the port is disabled and
+	 * re-enabled.
+	 */
+	if (old.admin && (old.mode != cfg_mac.mode ||
+			  old.speed != cfg_mac.speed ||
+			  old.inband != cfg_mac.inband)) {
+		old.admin = false;
+		err = prestera_port_cfg_mac_write(port, &old);
+		if (err)
+			return err;
 	}
 
 	err = prestera_port_cfg_mac_write(port, &cfg_mac);
@@ -373,7 +388,7 @@ static int prestera_port_sfp_bind(struct prestera_port *port)
 	struct device_node *ports, *node;
 	struct fwnode_handle *fwnode;
 	struct phylink *phy_link;
-	int err;
+	int err = 0;
 
 	if (!sw->np)
 		return 0;
@@ -1014,7 +1029,7 @@ static int prestera_lag_init(struct prestera_switch *sw)
 {
 	u16 id;
 
-	sw->lags = kcalloc(sw->lag_max, sizeof(*sw->lags), GFP_KERNEL);
+	sw->lags = kzalloc_objs(*sw->lags, sw->lag_max);
 	if (!sw->lags)
 		return -ENOMEM;
 
@@ -1209,7 +1224,7 @@ prestera_mdb_entry_create(struct prestera_switch *sw,
 	struct prestera_flood_domain *flood_domain;
 	struct prestera_mdb_entry *mdb_entry;
 
-	mdb_entry = kzalloc(sizeof(*mdb_entry), GFP_KERNEL);
+	mdb_entry = kzalloc_obj(*mdb_entry);
 	if (!mdb_entry)
 		goto err_mdb_alloc;
 
@@ -1247,7 +1262,7 @@ prestera_flood_domain_create(struct prestera_switch *sw)
 {
 	struct prestera_flood_domain *domain;
 
-	domain = kzalloc(sizeof(*domain), GFP_KERNEL);
+	domain = kzalloc_obj(*domain);
 	if (!domain)
 		return NULL;
 
@@ -1279,7 +1294,7 @@ prestera_flood_domain_port_create(struct prestera_flood_domain *flood_domain,
 	bool is_first_port_in_list = false;
 	int err;
 
-	flood_domain_port = kzalloc(sizeof(*flood_domain_port), GFP_KERNEL);
+	flood_domain_port = kzalloc_obj(*flood_domain_port);
 	if (!flood_domain_port) {
 		err = -ENOMEM;
 		goto err_port_alloc;

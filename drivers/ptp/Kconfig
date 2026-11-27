@@ -78,6 +78,7 @@ config DP83640_PHY
 	depends on PHYLIB
 	depends on PTP_1588_CLOCK
 	select CRC32
+	select PHY_PACKAGE
 	help
 	  Supports the DP83640 PHYTER with IEEE 1588 features.
 
@@ -134,7 +135,7 @@ config PTP_1588_CLOCK_KVM
 config PTP_1588_CLOCK_VMCLOCK
 	tristate "Virtual machine PTP clock"
 	depends on X86_TSC || ARM_ARCH_TIMER
-	depends on PTP_1588_CLOCK && ACPI && ARCH_SUPPORTS_INT128
+	depends on PTP_1588_CLOCK && ARCH_SUPPORTS_INT128
 	default PTP_1588_CLOCK_KVM
 	help
 	  This driver adds support for using a virtual precision clock

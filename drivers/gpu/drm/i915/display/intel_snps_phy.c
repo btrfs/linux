@@ -7,12 +7,12 @@
 
 #include <drm/drm_print.h>
 
-#include "i915_utils.h"
 #include "intel_ddi.h"
 #include "intel_ddi_buf_trans.h"
 #include "intel_de.h"
 #include "intel_display_regs.h"
 #include "intel_display_types.h"
+#include "intel_display_utils.h"
 #include "intel_snps_hdmi_pll.h"
 #include "intel_snps_phy.h"
 #include "intel_snps_phy_regs.h"
@@ -42,8 +42,8 @@ void intel_snps_phy_wait_for_calibration(struct intel_display *display)
 		 * which phy was affected and skip setup of the corresponding
 		 * output later.
 		 */
-		if (intel_de_wait_for_clear(display, DG2_PHY_MISC(phy),
-					    DG2_PHY_DP_TX_ACK_MASK, 25))
+		if (intel_de_wait_for_clear_ms(display, DG2_PHY_MISC(phy),
+					       DG2_PHY_DP_TX_ACK_MASK, 25))
 			display->snps.phy_failed_calibration |= BIT(phy);
 	}
 }
@@ -72,7 +72,7 @@ void intel_snps_phy_set_signal_levels(struct intel_encoder *encoder,
 	enum phy phy = intel_encoder_to_phy(encoder);
 	int n_entries, ln;
 
-	trans = encoder->get_buf_trans(encoder, crtc_state, &n_entries);
+	trans = intel_ddi_buf_trans_get(encoder, crtc_state, &n_entries);
 	if (drm_WARN_ON_ONCE(display->drm, !trans))
 		return;
 
@@ -1816,13 +1816,12 @@ int intel_mpllb_calc_state(struct intel_crtc_state *crtc_state,
 	return -EINVAL;
 }
 
-void intel_mpllb_enable(struct intel_encoder *encoder,
-			const struct intel_crtc_state *crtc_state)
+void intel_mpllb_enable_phy(struct intel_encoder *encoder,
+			    const struct intel_mpllb_state *pll_state)
 {
 	struct intel_display *display = to_intel_display(encoder);
-	const struct intel_mpllb_state *pll_state = &crtc_state->dpll_hw_state.mpllb;
 	enum phy phy = intel_encoder_to_phy(encoder);
-	i915_reg_t enable_reg = (phy <= PHY_D ?
+	intel_reg_t enable_reg = (phy <= PHY_D ?
 				 DG2_PLL_ENABLE(phy) : MG_PLL_ENABLE(0));
 
 	/*
@@ -1863,7 +1862,7 @@ void intel_mpllb_enable(struct intel_encoder *encoder,
 	 * is locked at new settings. This register bit is sampling PHY
 	 * dp_mpllb_state interface signal.
 	 */
-	if (intel_de_wait_for_set(display, enable_reg, PLL_LOCK, 5))
+	if (intel_de_wait_for_set_ms(display, enable_reg, PLL_LOCK, 5))
 		drm_dbg_kms(display->drm, "Port %c PLL not locked\n", phy_name(phy));
 
 	/*
@@ -1875,11 +1874,17 @@ void intel_mpllb_enable(struct intel_encoder *encoder,
 	 */
 }
 
+void intel_mpllb_enable(struct intel_encoder *encoder,
+			const struct intel_crtc_state *crtc_state)
+{
+	intel_mpllb_enable_phy(encoder, &crtc_state->dpll_hw_state.mpllb);
+}
+
 void intel_mpllb_disable(struct intel_encoder *encoder)
 {
 	struct intel_display *display = to_intel_display(encoder);
 	enum phy phy = intel_encoder_to_phy(encoder);
-	i915_reg_t enable_reg = (phy <= PHY_D ?
+	intel_reg_t enable_reg = (phy <= PHY_D ?
 				 DG2_PLL_ENABLE(phy) : MG_PLL_ENABLE(0));
 
 	/*
@@ -1903,7 +1908,7 @@ void intel_mpllb_disable(struct intel_encoder *encoder)
 	 * 5. Software polls DPLL_ENABLE [PLL Lock] for PHY acknowledgment
 	 * (dp_txX_ack) that the new transmitter setting request is completed.
 	 */
-	if (intel_de_wait_for_clear(display, enable_reg, PLL_LOCK, 5))
+	if (intel_de_wait_for_clear_ms(display, enable_reg, PLL_LOCK, 5))
 		drm_err(display->drm, "Port %c PLL not locked\n", phy_name(phy));
 
 	/*
@@ -1976,53 +1981,4 @@ void intel_mpllb_readout_hw_state(struct intel_encoder *encoder,
 	 * software state.
 	 */
 	pll_state->mpllb_div &= ~SNPS_PHY_MPLLB_FORCE_EN;
-}
-
-void intel_mpllb_state_verify(struct intel_atomic_state *state,
-			      struct intel_crtc *crtc)
-{
-	struct intel_display *display = to_intel_display(state);
-	const struct intel_crtc_state *new_crtc_state =
-		intel_atomic_get_new_crtc_state(state, crtc);
-	struct intel_mpllb_state mpllb_hw_state = {};
-	const struct intel_mpllb_state *mpllb_sw_state = &new_crtc_state->dpll_hw_state.mpllb;
-	struct intel_encoder *encoder;
-
-	if (!display->platform.dg2)
-		return;
-
-	if (!new_crtc_state->hw.active)
-		return;
-
-	/* intel_get_crtc_new_encoder() only works for modeset/fastset commits */
-	if (!intel_crtc_needs_modeset(new_crtc_state) &&
-	    !intel_crtc_needs_fastset(new_crtc_state))
-		return;
-
-	encoder = intel_get_crtc_new_encoder(state, new_crtc_state);
-	intel_mpllb_readout_hw_state(encoder, &mpllb_hw_state);
-
-#define MPLLB_CHECK(__name)						\
-	INTEL_DISPLAY_STATE_WARN(display, mpllb_sw_state->__name != mpllb_hw_state.__name, \
-				 "[CRTC:%d:%s] mismatch in MPLLB: %s (expected 0x%08x, found 0x%08x)", \
-				 crtc->base.base.id, crtc->base.name,	\
-				 __stringify(__name),			\
-				 mpllb_sw_state->__name, mpllb_hw_state.__name)
-
-	MPLLB_CHECK(mpllb_cp);
-	MPLLB_CHECK(mpllb_div);
-	MPLLB_CHECK(mpllb_div2);
-	MPLLB_CHECK(mpllb_fracn1);
-	MPLLB_CHECK(mpllb_fracn2);
-	MPLLB_CHECK(mpllb_sscen);
-	MPLLB_CHECK(mpllb_sscstep);
-
-	/*
-	 * ref_control is handled by the hardware/firemware and never
-	 * programmed by the software, but the proper values are supplied
-	 * in the bspec for verification purposes.
-	 */
-	MPLLB_CHECK(ref_control);
-
-#undef MPLLB_CHECK
 }

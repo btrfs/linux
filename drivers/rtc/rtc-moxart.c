@@ -17,7 +17,6 @@
 #include <linux/rtc.h>
 #include <linux/platform_device.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/gpio/consumer.h>
 
 #define GPIO_RTC_RESERVED			0x0C
@@ -246,7 +245,7 @@ static int moxart_rtc_probe(struct platform_device *pdev)
 	struct moxart_rtc *moxart_rtc;
 	int ret = 0;
 
-	moxart_rtc = devm_kzalloc(&pdev->dev, sizeof(*moxart_rtc), GFP_KERNEL);
+	moxart_rtc = devm_kzalloc_obj(&pdev->dev, *moxart_rtc);
 	if (!moxart_rtc)
 		return -ENOMEM;
 

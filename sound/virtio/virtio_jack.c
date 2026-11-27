@@ -139,12 +139,11 @@ int virtsnd_jack_parse_cfg(struct virtio_snd *snd)
 	if (!snd->njacks)
 		return 0;
 
-	snd->jacks = devm_kcalloc(&vdev->dev, snd->njacks, sizeof(*snd->jacks),
-				  GFP_KERNEL);
+	snd->jacks = devm_kzalloc_objs(&vdev->dev, *snd->jacks, snd->njacks);
 	if (!snd->jacks)
 		return -ENOMEM;
 
-	info = kcalloc(snd->njacks, sizeof(*info), GFP_KERNEL);
+	info = kzalloc_objs(*info, snd->njacks);
 	if (!info)
 		return -ENOMEM;
 

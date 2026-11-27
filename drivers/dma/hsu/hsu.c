@@ -245,11 +245,11 @@ static struct hsu_dma_desc *hsu_dma_alloc_desc(unsigned int nents)
 {
 	struct hsu_dma_desc *desc;
 
-	desc = kzalloc(sizeof(*desc), GFP_NOWAIT);
+	desc = kzalloc_obj(*desc, GFP_NOWAIT);
 	if (!desc)
 		return NULL;
 
-	desc->sg = kcalloc(nents, sizeof(*desc->sg), GFP_NOWAIT);
+	desc->sg = kzalloc_objs(*desc->sg, nents, GFP_NOWAIT);
 	if (!desc->sg) {
 		kfree(desc);
 		return NULL;
@@ -431,7 +431,7 @@ int hsu_dma_probe(struct hsu_dma_chip *chip)
 	unsigned short i;
 	int ret;
 
-	hsu = devm_kzalloc(chip->dev, sizeof(*hsu), GFP_KERNEL);
+	hsu = devm_kzalloc_obj(chip->dev, *hsu);
 	if (!hsu)
 		return -ENOMEM;
 
@@ -440,8 +440,7 @@ int hsu_dma_probe(struct hsu_dma_chip *chip)
 	/* Calculate nr_channels from the IO space length */
 	hsu->nr_channels = (chip->length - chip->offset) / HSU_DMA_CHAN_LENGTH;
 
-	hsu->chan = devm_kcalloc(chip->dev, hsu->nr_channels,
-				 sizeof(*hsu->chan), GFP_KERNEL);
+	hsu->chan = devm_kzalloc_objs(chip->dev, *hsu->chan, hsu->nr_channels);
 	if (!hsu->chan)
 		return -ENOMEM;
 

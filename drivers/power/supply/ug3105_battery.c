@@ -52,7 +52,6 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/i2c.h>
-#include <linux/mod_devicetable.h>
 #include <linux/power_supply.h>
 
 #include "adc-battery-helper.h"
@@ -135,7 +134,7 @@ static int ug3105_probe(struct i2c_client *client)
 	struct ug3105_chip *chip;
 	int ret;
 
-	chip = devm_kzalloc(dev, sizeof(*chip), GFP_KERNEL);
+	chip = devm_kzalloc_obj(dev, *chip);
 	if (!chip)
 		return -ENOMEM;
 
@@ -195,7 +194,7 @@ static SIMPLE_DEV_PM_OPS(ug3105_pm_ops, ug3105_suspend,
 			ug3105_resume);
 
 static const struct i2c_device_id ug3105_id[] = {
-	{ "ug3105" },
+	{ .name = "ug3105" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ug3105_id);

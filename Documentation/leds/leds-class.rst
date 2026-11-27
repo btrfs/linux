@@ -116,6 +116,69 @@ above leaves scope for further attributes should they be needed. If sections
 of the name don't apply, just leave that section blank.
 
 
+Keyboard backlight control LED Device Naming
+============================================
+
+For backlit keyboards with a single brightness / color settings a single
+(multicolor) LED class device should be used to allow userspace to change
+the backlight brightness (and if possible the color). This LED class device
+must use "kbd_backlight" for the function part of the LED class device name.
+IOW the name must end with ":kbd_backlight".
+
+For backlit keyboards with multiple control zones, one (multicolor) LED class
+device should be used per zone. These LED class devices' name must follow:
+
+	"<devicename>:<color>:kbd_zoned_backlight-<zone_name>"
+
+and <devicename> must be the same for all zones of the same keyboard.
+
+<zone_name> should be descriptive of which part of the keyboard backlight
+the zone covers and should be suitable for userspace to show to an end user
+in an UI for controlling the zones.
+
+Where possible <zone_name> should be a value already used by other
+zoned keyboards with a similar or identical zone layout, e.g.:
+
+<devicename>:<color>:kbd_zoned_backlight-right
+<devicename>:<color>:kbd_zoned_backlight-middle
+<devicename>:<color>:kbd_zoned_backlight-left
+<devicename>:<color>:kbd_zoned_backlight-corners
+<devicename>:<color>:kbd_zoned_backlight-wasd
+
+or:
+
+<devicename>:<color>:kbd_zoned_backlight-main
+<devicename>:<color>:kbd_zoned_backlight-cursor
+<devicename>:<color>:kbd_zoned_backlight-numpad
+<devicename>:<color>:kbd_zoned_backlight-corners
+<devicename>:<color>:kbd_zoned_backlight-wasd
+
+Note that this is intended for keyboards with a limited number of zones,
+keyboards with per key addressable backlighting must not use LED class devices
+since the sysfs API is not suitable for rapidly change multiple LEDs in one
+"commit" as is necessary to do animations / special effects on such keyboards.
+
+An exception to the rule that all zones must follow:
+
+	"<devicename>:<color>:kbd_zoned_backlight-<zone_name>"
+
+is made for the special case where there is a single big zone which controls
+the backlighting of almost all of the keyboard and there are some small areas
+with separate control, like just the 4 cursor keys, or the WASD keys. In this
+case the main zone should use 'kbd_backlight' for the function part of the name
+for compatibility with (older) userspace code which is not aware of
+the "kbd_zoned_backlight-<zone_name>" function naming scheme.
+
+While the smaller zones should use the new zoned naming scheme. Such a setup
+would result in e.g.:
+
+<devicename>:<color>:kbd_backlight
+<devicename>:<color>:kbd_zoned_backlight-wasd
+
+"kbd_zoned_backlight-<zone_name>" aware userspace should be aware of this
+exception and check for a main zone with a "kbd_backlight" function-name.
+
+
 Brightness setting API
 ======================
 
@@ -179,6 +242,9 @@ ops and needs to declare specific support for the supported triggers.
 
 With hw control we refer to the LED driven by hardware.
 
+A sysfs attribute `trigger_may_offload_to_hw` is provided for userspace
+to query supported triggers and their states.
+
 LED driver must define the following value to support hw control:
 
     - hw_control_trigger:
@@ -235,6 +301,15 @@ LED driver must implement the following API to support hw control:
                 Returns a pointer to a struct device or NULL if nothing
                 is currently attached.
 
+LED trigger should implement the following API to indicate hw control:
+    - hw_offloaded:
+                return a boolean indicating if the trigger is currently
+                offloaded to hardware.
+
+                If a trigger doesn't implement this callback, the default
+                value will be true for private triggers and false for generic
+                ones.
+
 LED driver can activate additional modes by default to workaround the
 impossibility of supporting each different mode on the supported trigger.
 Examples are hardcoding the blink speed to a set interval, enable special
@@ -248,8 +323,68 @@ the end use hw_control_set to activate hw control.
 A trigger can use hw_control_get to check if a LED is already in hw control
 and init their flags.
 
+Alternatively, a private trigger can be implemented along with the LED driver if
+the LED's hardware control doesn't fit any generic trigger. To associate the
+private trigger with the LED classdev, their `trigger_type` must be the same. To
+declare that the private trigger provides hardware control for the associated
+LED classdev, set the `hw_control_trigger` string to the trigger's name. Since
+both the LED classdev and the private trigger are in the same LED driver, it's
+not necessary for them to coordinate via `hw_control_*` callbacks.
+
 When the LED is in hw control, no software blink is possible and doing so
 will effectively disable hw control.
+
+Hardware-initiated trigger transition
+=====================================
+
+Some hardware can autonomously activate/deactivate hardware control. After that,
+the LED hardware notifies the LED driver.
+
+If the driver can detect such transitions and thus wants to notify the LED core
+to update the current trigger then the `LED_TRIG_HW_CHANGED` flag must be set in
+flags before registering. To update the current trigger accordingly, call
+`led_trigger_notify_hw_control_changed` on the LED classdev.
+
+This capability is restricted to the LED device's private trigger. The private
+trigger must have been properly registered (see above) and named after
+`hw_control_trigger`.
+
+Only two transitions are defined:
+
+- "none" => private trigger:
+        This happens when the hardware autonomously activates hardware control
+        and when "none" (i.e., no trigger) is currently active. If the private
+        trigger is already active when the method is called, this is essentially
+        a no-op.
+
+        The activation sequence for the private trigger will be executed as
+        normal.
+
+        The LED driver and its private trigger must be able to handle the
+        activation sequence even if the hardware is currently in hardware
+        control.
+
+        If error occurs in the activation sequence, the LED Trigger core reverts
+        the effective trigger to "none".
+
+- private trigger => "none"
+        This happens when the hardware autonomously deactivates hardware control
+        and when the private trigger is currently active. If "none" (i.e., no
+        trigger) is active when the method is called, this is essentially a
+        no-op.
+
+        The deactivation sequence for the private trigger will be executed as
+        normal, except that the current LED brightness is retained. The reason
+        for keeping the brightness unchanged is that some hardware may choose a
+        specific brightness instead of simply turning off the LED after
+        autonomously deactivating hardware control.
+
+        The LED driver and its private trigger must be able to handle the
+        deactivation sequence even if the hardware is not currently in hardware
+        control.
+
+If the current trigger is neither the private trigger nor "none", no transition
+will be made.
 
 Known Issues
 ============

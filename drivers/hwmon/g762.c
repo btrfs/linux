@@ -44,9 +44,9 @@
 #define DRVNAME "g762"
 
 static const struct i2c_device_id g762_id[] = {
-	{ "g761" },
-	{ "g762" },
-	{ "g763" },
+	{ .name = "g761" },
+	{ .name = "g762" },
+	{ .name = "g763" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, g762_id);
@@ -1076,7 +1076,7 @@ static int g762_probe(struct i2c_client *client)
 				     I2C_FUNC_SMBUS_BYTE_DATA))
 		return -ENODEV;
 
-	data = devm_kzalloc(dev, sizeof(struct g762_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct g762_data);
 	if (!data)
 		return -ENOMEM;
 

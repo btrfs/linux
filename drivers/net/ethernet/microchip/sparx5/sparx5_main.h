@@ -31,11 +31,11 @@ enum spx5_target_chiptype {
 	SPX5_TARGET_CT_7552       = 0x7552,  /* SparX-5-128 Enterprise */
 	SPX5_TARGET_CT_7556       = 0x7556,  /* SparX-5-160 Enterprise */
 	SPX5_TARGET_CT_7558       = 0x7558,  /* SparX-5-200 Enterprise */
-	SPX5_TARGET_CT_7546TSN    = 0x47546, /* SparX-5-64i Industrial */
-	SPX5_TARGET_CT_7549TSN    = 0x47549, /* SparX-5-90i Industrial */
-	SPX5_TARGET_CT_7552TSN    = 0x47552, /* SparX-5-128i Industrial */
-	SPX5_TARGET_CT_7556TSN    = 0x47556, /* SparX-5-160i Industrial */
-	SPX5_TARGET_CT_7558TSN    = 0x47558, /* SparX-5-200i Industrial */
+	SPX5_TARGET_CT_7546TSN    = 0x0546,  /* SparX-5-64i Industrial */
+	SPX5_TARGET_CT_7549TSN    = 0x0549,  /* SparX-5-90i Industrial */
+	SPX5_TARGET_CT_7552TSN    = 0x0552,  /* SparX-5-128i Industrial */
+	SPX5_TARGET_CT_7556TSN    = 0x0556,  /* SparX-5-160i Industrial */
+	SPX5_TARGET_CT_7558TSN    = 0x0558,  /* SparX-5-200i Industrial */
 	SPX5_TARGET_CT_LAN9694    = 0x9694,  /* lan969x-40 */
 	SPX5_TARGET_CT_LAN9691VAO = 0x9691,  /* lan969x-40-VAO */
 	SPX5_TARGET_CT_LAN9694TSN = 0x9695,  /* lan969x-40-TSN */
@@ -108,6 +108,7 @@ enum sparx5_feature {
 #define SPX5_PRIOS             8     /* Number of priority queues */
 #define SPX5_BUFFER_CELL_SZ    184   /* Cell size  */
 #define SPX5_BUFFER_MEMORY     4194280 /* 22795 words * 184 bytes */
+#define SPX5_TAS_ENTRIES_PER_PORT 2 /* TAS lists per port */
 
 #define XTR_QUEUE     0
 #define INJ_QUEUE     0
@@ -236,6 +237,11 @@ struct sparx5_port {
 	struct sk_buff_head tx_skbs;
 	bool is_mrouter;
 	struct list_head tc_templates; /* list of TC templates on this port */
+	/* TAS GCL entries owned by each of the port's two TAS lists. */
+	struct {
+		int gcl_base;
+		int gcl_count;
+	} tas_lists[SPX5_TAS_ENTRIES_PER_PORT];
 };
 
 enum sparx5_core_clockfreq {
@@ -316,6 +322,8 @@ struct sparx5_consts {
 	u32 n_gates;             /* Number of PSFP gates */
 	u32 n_sdlbs;             /* Number of service dual leaky buckets */
 	u32 n_dsm_cal_taxis;     /* Number of DSM calendar taxis */
+	u32 n_tas_gcl;           /* Number of TAS gate control list entries */
+	u32 n_tas_lists;         /* Number of TAS lists */
 	u32 buf_size;            /* Amount of QLIM watermark memory */
 	u32 qres_max_prio_idx;   /* Maximum QRES prio index */
 	u32 qres_max_colour_idx; /* Maximum QRES colour index */
@@ -374,6 +382,8 @@ struct sparx5 {
 	void __iomem *regs[NUM_TARGETS];
 	int port_count;
 	struct mutex lock; /* MAC reg lock */
+	struct mutex tas_lock; /* Time Aware Shaper lock */
+	unsigned long *tas_gcl_bitmap; /* Allocated TAS GCL entries */
 	/* port structures are in net device */
 	struct sparx5_port *ports[SPX5_PORTS];
 	enum sparx5_core_clockfreq coreclock;
@@ -392,6 +402,7 @@ struct sparx5 {
 	struct notifier_block switchdev_blocking_nb;
 	/* Switch state */
 	u8 base_mac[ETH_ALEN];
+	u8 base_mac_assign_type;
 	/* Associated bridge device (when bridged) */
 	struct net_device *hw_bridge_dev;
 	/* Bridged interfaces */
@@ -470,7 +481,6 @@ void sparx5_fdma_reload(struct sparx5 *sparx5, struct fdma *fdma);
 void sparx5_fdma_injection_mode(struct sparx5 *sparx5);
 
 /* sparx5_mactable.c */
-void sparx5_mact_pull_work(struct work_struct *work);
 int sparx5_mact_learn(struct sparx5 *sparx5, int port,
 		      const unsigned char mac[ETH_ALEN], u16 vid);
 bool sparx5_mact_getnext(struct sparx5 *sparx5,
@@ -489,7 +499,8 @@ int sparx5_del_mact_entry(struct sparx5 *sparx5,
 int sparx5_mc_sync(struct net_device *dev, const unsigned char *addr);
 int sparx5_mc_unsync(struct net_device *dev, const unsigned char *addr);
 void sparx5_set_ageing(struct sparx5 *sparx5, int msecs);
-void sparx5_mact_init(struct sparx5 *sparx5);
+int sparx5_mact_init(struct sparx5 *sparx5);
+void sparx5_mact_deinit(struct sparx5 *sparx5);
 
 /* sparx5_vlan.c */
 void sparx5_pgid_update_mask(struct sparx5_port *port, int pgid, bool enable);
@@ -504,8 +515,7 @@ int sparx5_vlan_vid_del(struct sparx5_port *port, u16 vid);
 void sparx5_vlan_port_apply(struct sparx5 *sparx5, struct sparx5_port *port);
 
 /* sparx5_calendar.c */
-int sparx5_config_auto_calendar(struct sparx5 *sparx5);
-int sparx5_config_dsm_calendar(struct sparx5 *sparx5);
+int sparx5_calendar_init(struct sparx5 *sparx5);
 int sparx5_dsm_calendar_calc(struct sparx5 *sparx5, u32 taxi,
 			     struct sparx5_calendar_data *data);
 u32 sparx5_cal_speed_to_value(enum sparx5_cal_bw speed);
@@ -514,7 +524,8 @@ enum sparx5_cal_bw sparx5_get_port_cal_speed(struct sparx5 *sparx5, u32 portno);
 
 /* sparx5_ethtool.c */
 void sparx5_get_stats64(struct net_device *ndev, struct rtnl_link_stats64 *stats);
-int sparx_stats_init(struct sparx5 *sparx5);
+int sparx5_stats_init(struct sparx5 *sparx5);
+void sparx5_stats_deinit(struct sparx5 *sparx5);
 
 /* sparx5_dcb.c */
 #ifdef CONFIG_SPARX5_DCB
@@ -563,7 +574,7 @@ void sparx5_get_hwtimestamp(struct sparx5 *sparx5,
 
 /* sparx5_vcap_impl.c */
 int sparx5_vcap_init(struct sparx5 *sparx5);
-void sparx5_vcap_destroy(struct sparx5 *sparx5);
+void sparx5_vcap_deinit(struct sparx5 *sparx5);
 
 /* sparx5_pgid.c */
 enum sparx5_pgid_type {
@@ -705,6 +716,24 @@ void sparx5_psfp_init(struct sparx5 *sparx5);
 /* sparx5_qos.c */
 void sparx5_new_base_time(struct sparx5 *sparx5, const u32 cycle_time,
 			  const ktime_t org_base_time, ktime_t *new_base_time);
+
+/* sparx5_tas.c */
+/* TAS list states, mirrors the HSCH_TAS_LIST_STATE_LIST_STATE HW field */
+enum sparx5_tas_state {
+	SPX5_TAS_STATE_ADMIN,
+	SPX5_TAS_STATE_ADVANCING,
+	SPX5_TAS_STATE_PENDING,
+	SPX5_TAS_STATE_OPERATING,
+	SPX5_TAS_STATE_TERMINATING,
+	SPX5_NUM_TAS_STATE,
+};
+
+int sparx5_tas_init(struct sparx5 *sparx5);
+struct tc_taprio_qopt_offload;
+int sparx5_tas_enable(struct sparx5_port *port,
+		      struct tc_taprio_qopt_offload *qopt);
+int sparx5_tas_disable(struct sparx5_port *port);
+void sparx5_tas_speed(struct sparx5_port *port, int speed);
 
 /* sparx5_mirror.c */
 int sparx5_mirror_add(struct sparx5_mall_entry *entry);

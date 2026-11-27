@@ -720,7 +720,7 @@ static int h_msb_parallel_switch(struct memstick_dev *card,
 
 static int msb_switch_to_parallel(struct msb_data *msb);
 
-/* Reset the card, to guard against hw errors beeing treated as bad blocks */
+/* Reset the card, to guard against hw errors being treated as bad blocks */
 static int msb_reset(struct msb_data *msb, bool full)
 {
 
@@ -1203,8 +1203,7 @@ static int msb_read_boot_blocks(struct msb_data *msb)
 	dbg_verbose("Start of a scan for the boot blocks");
 
 	if (!msb->boot_page) {
-		page = kmalloc_array(2, sizeof(struct ms_boot_page),
-				     GFP_KERNEL);
+		page = kmalloc_objs(struct ms_boot_page, 2);
 		if (!page)
 			return -ENOMEM;
 
@@ -1339,13 +1338,16 @@ static int msb_ftl_initialize(struct msb_data *msb)
 		return 0;
 
 	msb->zone_count = msb->block_count / MS_BLOCKS_IN_ZONE;
+	if (msb->block_count > MS_MAX_ZONES * MS_BLOCKS_IN_ZONE) {
+		pr_err("Too many blocks: %d\n", msb->block_count);
+		return -EINVAL;
+	}
 	msb->logical_block_count = msb->zone_count * 496 - 2;
 
 	msb->used_blocks_bitmap = bitmap_zalloc(msb->block_count, GFP_KERNEL);
 	msb->erased_blocks_bitmap = bitmap_zalloc(msb->block_count, GFP_KERNEL);
 	msb->lba_to_pba_table =
-		kmalloc_array(msb->logical_block_count, sizeof(u16),
-			      GFP_KERNEL);
+		kmalloc_objs(u16, msb->logical_block_count);
 
 	if (!msb->used_blocks_bitmap || !msb->lba_to_pba_table ||
 						!msb->erased_blocks_bitmap) {
@@ -2151,7 +2153,7 @@ static int msb_probe(struct memstick_dev *card)
 	struct msb_data *msb;
 	int rc = 0;
 
-	msb = kzalloc(sizeof(struct msb_data), GFP_KERNEL);
+	msb = kzalloc_obj(struct msb_data);
 	if (!msb)
 		return -ENOMEM;
 	memstick_set_drvdata(card, msb);
@@ -2201,6 +2203,8 @@ static void msb_remove(struct memstick_dev *card)
 	msb_data_clear(msb);
 	mutex_unlock(&msb_disk_lock);
 
+	destroy_workqueue(msb->io_queue);
+
 	put_disk(msb->disk);
 	memstick_set_drvdata(card, NULL);
 }
@@ -2225,7 +2229,7 @@ static int msb_resume(struct memstick_dev *card)
 #endif
 	mutex_lock(&card->host->lock);
 
-	new_msb = kzalloc(sizeof(struct msb_data), GFP_KERNEL);
+	new_msb = kzalloc_obj(struct msb_data);
 	if (!new_msb)
 		goto out;
 

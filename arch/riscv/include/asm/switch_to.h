@@ -14,6 +14,7 @@
 #include <asm/processor.h>
 #include <asm/ptrace.h>
 #include <asm/csr.h>
+#include <asm/qos.h>
 
 #ifdef CONFIG_FPU
 extern void __fstate_save(struct task_struct *save_to);
@@ -27,11 +28,13 @@ static inline void __fstate_clean(struct pt_regs *regs)
 static inline void fstate_off(struct task_struct *task,
 			      struct pt_regs *regs)
 {
+	preempt_disable();
 	regs->status = (regs->status & ~SR_FS) | SR_FS_OFF;
+	preempt_enable();
 }
 
-static inline void fstate_save(struct task_struct *task,
-			       struct pt_regs *regs)
+static inline void fstate_save_preempt_off(struct task_struct *task,
+					   struct pt_regs *regs)
 {
 	if ((regs->status & SR_FS) == SR_FS_DIRTY) {
 		__fstate_save(task);
@@ -39,13 +42,29 @@ static inline void fstate_save(struct task_struct *task,
 	}
 }
 
-static inline void fstate_restore(struct task_struct *task,
-				  struct pt_regs *regs)
+static inline void fstate_restore_preempt_off(struct task_struct *task,
+					      struct pt_regs *regs)
 {
 	if ((regs->status & SR_FS) != SR_FS_OFF) {
 		__fstate_restore(task);
 		__fstate_clean(regs);
 	}
+}
+
+static inline void fstate_save(struct task_struct *task,
+			       struct pt_regs *regs)
+{
+	preempt_disable();
+	fstate_save_preempt_off(task, regs);
+	preempt_enable();
+}
+
+static inline void fstate_restore(struct task_struct *task,
+				  struct pt_regs *regs)
+{
+	preempt_disable();
+	fstate_restore_preempt_off(task, regs);
+	preempt_enable();
 }
 
 static inline void __switch_to_fpu(struct task_struct *prev,
@@ -54,14 +73,14 @@ static inline void __switch_to_fpu(struct task_struct *prev,
 	struct pt_regs *regs;
 
 	regs = task_pt_regs(prev);
-	fstate_save(prev, regs);
-	fstate_restore(next, task_pt_regs(next));
+	fstate_save_preempt_off(prev, regs);
+	fstate_restore_preempt_off(next, task_pt_regs(next));
 }
 
 static __always_inline bool has_fpu(void)
 {
-	return riscv_has_extension_likely(RISCV_ISA_EXT_f) ||
-		riscv_has_extension_likely(RISCV_ISA_EXT_d);
+	/* D extension depends on F, so checking D alone is sufficient. */
+	return riscv_has_extension_likely(RISCV_ISA_EXT_D);
 }
 #else
 static __always_inline bool has_fpu(void) { return false; }
@@ -119,6 +138,8 @@ do {							\
 		__switch_to_fpu(__prev, __next);	\
 	if (has_vector() || has_xtheadvector())		\
 		__switch_to_vector(__prev, __next);	\
+	if (has_srmcfg())				\
+		__switch_to_srmcfg(__next);		\
 	if (switch_to_should_flush_icache(__next))	\
 		local_flush_icache_all();		\
 	__switch_to_envcfg(__next);			\

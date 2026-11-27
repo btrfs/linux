@@ -12,8 +12,10 @@
 #ifndef __ASSEMBLER__
 
 #include <linux/instrumented.h>
+#include <linux/kmsan.h>
 #include <asm/asm-extable.h>
 
+asm(".include \"asm/insn-common-asm.h\"\n");
 asm(".include \"asm/fpu-insn-asm.h\"\n");
 
 /*
@@ -102,9 +104,9 @@ static inline void fpu_lfpc_safe(unsigned int *fpc)
 {
 	instrument_read(fpc, sizeof(*fpc));
 	asm_inline volatile(
-		"	lfpc	%[fpc]\n"
-		"0:	nopr	%%r7\n"
-		EX_TABLE_FPC(0b, 0b)
+		"0:	lfpc	%[fpc]\n"
+		"1:\n"
+		EX_TABLE_INSN_FPC(0b, 1b)
 		:
 		: [fpc] "Q" (*fpc)
 		: "memory");
@@ -393,6 +395,7 @@ static __always_inline void fpu_vstl(u8 v1, u32 index, const void *vxr)
 		     : [vxr] "=Q" (*(u8 *)vxr)
 		     : [index] "d" (index), [v1] "I" (v1)
 		     : "memory");
+	kmsan_unpoison_memory(vxr, size);
 }
 
 #else /* CONFIG_CC_HAS_ASM_AOR_FORMAT_FLAGS */
@@ -409,6 +412,7 @@ static __always_inline void fpu_vstl(u8 v1, u32 index, const void *vxr)
 		: [vxr] "=R" (*(u8 *)vxr)
 		: [index] "d" (index), [v1] "I" (v1)
 		: "memory", "1");
+	kmsan_unpoison_memory(vxr, size);
 }
 
 #endif /* CONFIG_CC_HAS_ASM_AOR_FORMAT_FLAGS */

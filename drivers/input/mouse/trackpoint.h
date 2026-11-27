@@ -30,6 +30,7 @@
 #define TP_VARIANT_NXP			0x04
 #define TP_VARIANT_JYT_SYNAPTICS	0x05
 #define TP_VARIANT_SYNAPTICS		0x06
+#define TP_VARIANT_JYT_NDT		0x07
 
 /*
  * Commands
@@ -68,6 +69,8 @@
 #define TP_DRAGHYS		0x58	/* Drag Hysteresis */
 					/* (how hard it is to drag */
 					/* with Z-axis pressed) */
+
+#define TP_DOUBLETAP		0x58	/* TrackPoint doubletap register */
 
 #define TP_MINDRAG		0x59	/* Minimum amount of force needed */
 					/* to trigger dragging */
@@ -110,6 +113,9 @@
 					   external device will be forced to 1 */
 #define TP_MASK_EXT_TAG			0x04
 
+/* Doubletap register values */
+#define TP_DOUBLETAP_ENABLE	0xFF	/* Enable value */
+#define TP_DOUBLETAP_DISABLE	0xFE	/* Disable value */
 
 /* Power on Self Test Results */
 #define TP_POR_SUCCESS		0x3B

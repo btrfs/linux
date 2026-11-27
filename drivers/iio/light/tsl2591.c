@@ -16,6 +16,7 @@
 #include <linux/interrupt.h>
 #include <linux/iopoll.h>
 #include <linux/kernel.h>
+#include <linux/math64.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/pm_runtime.h>
@@ -192,6 +193,24 @@ static const int tsl2591_calibscale_available[] = {
 	1, 25, 428, 9876,
 };
 
+static const u8 tsl2591_persist_table[] = {
+	[TSL2591_PRST_ALS_INT_CYCLE_ANY] = 1,
+	[TSL2591_PRST_ALS_INT_CYCLE_2]   = 2,
+	[TSL2591_PRST_ALS_INT_CYCLE_3]   = 3,
+	[TSL2591_PRST_ALS_INT_CYCLE_5]   = 5,
+	[TSL2591_PRST_ALS_INT_CYCLE_10]  = 10,
+	[TSL2591_PRST_ALS_INT_CYCLE_15]  = 15,
+	[TSL2591_PRST_ALS_INT_CYCLE_20]  = 20,
+	[TSL2591_PRST_ALS_INT_CYCLE_25]  = 25,
+	[TSL2591_PRST_ALS_INT_CYCLE_30]  = 30,
+	[TSL2591_PRST_ALS_INT_CYCLE_35]  = 35,
+	[TSL2591_PRST_ALS_INT_CYCLE_40]  = 40,
+	[TSL2591_PRST_ALS_INT_CYCLE_45]  = 45,
+	[TSL2591_PRST_ALS_INT_CYCLE_50]  = 50,
+	[TSL2591_PRST_ALS_INT_CYCLE_55]  = 55,
+	[TSL2591_PRST_ALS_INT_CYCLE_60]  = 60,
+};
+
 static int tsl2591_set_als_lower_threshold(struct tsl2591_chip *chip,
 					   u16 als_lower_threshold);
 static int tsl2591_set_als_upper_threshold(struct tsl2591_chip *chip,
@@ -231,78 +250,22 @@ static int tsl2591_multiplier_to_gain(const u32 multiplier)
 
 static int tsl2591_persist_cycle_to_lit(const u8 als_persist)
 {
-	switch (als_persist) {
-	case TSL2591_PRST_ALS_INT_CYCLE_ANY:
-		return 1;
-	case TSL2591_PRST_ALS_INT_CYCLE_2:
-		return 2;
-	case TSL2591_PRST_ALS_INT_CYCLE_3:
-		return 3;
-	case TSL2591_PRST_ALS_INT_CYCLE_5:
-		return 5;
-	case TSL2591_PRST_ALS_INT_CYCLE_10:
-		return 10;
-	case TSL2591_PRST_ALS_INT_CYCLE_15:
-		return 15;
-	case TSL2591_PRST_ALS_INT_CYCLE_20:
-		return 20;
-	case TSL2591_PRST_ALS_INT_CYCLE_25:
-		return 25;
-	case TSL2591_PRST_ALS_INT_CYCLE_30:
-		return 30;
-	case TSL2591_PRST_ALS_INT_CYCLE_35:
-		return 35;
-	case TSL2591_PRST_ALS_INT_CYCLE_40:
-		return 40;
-	case TSL2591_PRST_ALS_INT_CYCLE_45:
-		return 45;
-	case TSL2591_PRST_ALS_INT_CYCLE_50:
-		return 50;
-	case TSL2591_PRST_ALS_INT_CYCLE_55:
-		return 55;
-	case TSL2591_PRST_ALS_INT_CYCLE_60:
-		return 60;
-	default:
+	if (als_persist >= ARRAY_SIZE(tsl2591_persist_table) ||
+	    !tsl2591_persist_table[als_persist])
 		return -EINVAL;
-	}
+
+	return tsl2591_persist_table[als_persist];
 }
 
 static int tsl2591_persist_lit_to_cycle(const u8 als_persist)
 {
-	switch (als_persist) {
-	case 1:
-		return TSL2591_PRST_ALS_INT_CYCLE_ANY;
-	case 2:
-		return TSL2591_PRST_ALS_INT_CYCLE_2;
-	case 3:
-		return TSL2591_PRST_ALS_INT_CYCLE_3;
-	case 5:
-		return TSL2591_PRST_ALS_INT_CYCLE_5;
-	case 10:
-		return TSL2591_PRST_ALS_INT_CYCLE_10;
-	case 15:
-		return TSL2591_PRST_ALS_INT_CYCLE_15;
-	case 20:
-		return TSL2591_PRST_ALS_INT_CYCLE_20;
-	case 25:
-		return TSL2591_PRST_ALS_INT_CYCLE_25;
-	case 30:
-		return TSL2591_PRST_ALS_INT_CYCLE_30;
-	case 35:
-		return TSL2591_PRST_ALS_INT_CYCLE_35;
-	case 40:
-		return TSL2591_PRST_ALS_INT_CYCLE_40;
-	case 45:
-		return TSL2591_PRST_ALS_INT_CYCLE_45;
-	case 50:
-		return TSL2591_PRST_ALS_INT_CYCLE_50;
-	case 55:
-		return TSL2591_PRST_ALS_INT_CYCLE_55;
-	case 60:
-		return TSL2591_PRST_ALS_INT_CYCLE_60;
-	default:
-		return -EINVAL;
+	for (unsigned int i = TSL2591_PRST_ALS_INT_CYCLE_ANY;
+	     i < ARRAY_SIZE(tsl2591_persist_table); i++) {
+		if (als_persist == tsl2591_persist_table[i])
+			return i;
 	}
+
+	return -EINVAL;
 }
 
 static int tsl2591_compatible_int_time(struct tsl2591_chip *chip,
@@ -340,31 +303,6 @@ static int tsl2591_compatible_gain(struct tsl2591_chip *chip, const u8 als_gain)
 	case TSL2591_CTRL_ALS_MED_GAIN:
 	case TSL2591_CTRL_ALS_HIGH_GAIN:
 	case TSL2591_CTRL_ALS_MAX_GAIN:
-		return 0;
-	default:
-		return -EINVAL;
-	}
-}
-
-static int tsl2591_compatible_als_persist_cycle(struct tsl2591_chip *chip,
-						const u32 als_persist)
-{
-	switch (als_persist) {
-	case TSL2591_PRST_ALS_INT_CYCLE_ANY:
-	case TSL2591_PRST_ALS_INT_CYCLE_2:
-	case TSL2591_PRST_ALS_INT_CYCLE_3:
-	case TSL2591_PRST_ALS_INT_CYCLE_5:
-	case TSL2591_PRST_ALS_INT_CYCLE_10:
-	case TSL2591_PRST_ALS_INT_CYCLE_15:
-	case TSL2591_PRST_ALS_INT_CYCLE_20:
-	case TSL2591_PRST_ALS_INT_CYCLE_25:
-	case TSL2591_PRST_ALS_INT_CYCLE_30:
-	case TSL2591_PRST_ALS_INT_CYCLE_35:
-	case TSL2591_PRST_ALS_INT_CYCLE_40:
-	case TSL2591_PRST_ALS_INT_CYCLE_45:
-	case TSL2591_PRST_ALS_INT_CYCLE_50:
-	case TSL2591_PRST_ALS_INT_CYCLE_55:
-	case TSL2591_PRST_ALS_INT_CYCLE_60:
 		return 0;
 	default:
 		return -EINVAL;
@@ -425,6 +363,10 @@ static int tsl2591_wait_adc_complete(struct tsl2591_chip *chip)
  * Scale values to get more representative value of lux i.e.
  * lux = ((C0DATA - C1DATA) * (1000 - ((C1DATA * 1000) / C0DATA))) / CPL
  *
+ * CPL is not computed on its own: at 1x gain it is below 1 for integration
+ * times under 500 ms, so the division by LUX DF is folded into the final
+ * division instead.
+ *
  * Channel 0 = IR + Visible
  * Channel 1 = IR only
  */
@@ -436,8 +378,10 @@ static int tsl2591_read_channel_data(struct iio_dev *indio_dev,
 	struct tsl2591_als_settings *settings = &chip->als_settings;
 	struct i2c_client *client = chip->client;
 	u8 als_data[TSL2591_NUM_DATA_REGISTERS];
-	int counts_per_lux, int_time_fval, gain_multi, lux;
+	int int_time_fval, gain_multi;
 	u16 als_ch0, als_ch1;
+	u64 lux;
+	u32 rem;
 	int ret;
 
 	ret = tsl2591_wait_adc_complete(chip);
@@ -473,23 +417,28 @@ static int tsl2591_read_channel_data(struct iio_dev *indio_dev,
 			return gain_multi;
 		}
 
-		int_time_fval = TSL2591_FVAL_TO_MSEC(settings->als_int_time);
-		/* Calculate counts per lux value */
-		counts_per_lux = (int_time_fval * gain_multi) / TSL2591_LUX_COEFFICIENT;
+		/* No visible light, this also catches C0DATA == 0 */
+		if (als_ch0 <= als_ch1) {
+			*val = 0;
+			*val2 = 0;
+			break;
+		}
 
-		dev_dbg(&client->dev, "Counts Per Lux: %d\n", counts_per_lux);
+		int_time_fval = TSL2591_FVAL_TO_MSEC(settings->als_int_time);
 
 		/* Calculate lux value */
-		lux = ((als_ch0 - als_ch1) *
-		       (1000 - ((als_ch1 * 1000) / als_ch0))) / counts_per_lux;
+		lux = (u64)(als_ch0 - als_ch1) *
+		      (1000 - ((als_ch1 * 1000) / als_ch0)) *
+		      TSL2591_LUX_COEFFICIENT;
+		lux = div_u64(lux, int_time_fval * gain_multi);
 
-		dev_dbg(&client->dev, "Raw lux calculation: %d\n", lux);
+		dev_dbg(&client->dev, "Raw lux calculation: %llu\n", lux);
 
 		/* Divide by 1000 to get real lux value before scaling */
-		*val = lux / 1000;
+		*val = div_u64_rem(lux, 1000, &rem);
 
 		/* Get the decimal part of lux reading */
-		*val2 = (lux - (*val * 1000)) * 1000;
+		*val2 = rem * 1000;
 
 		break;
 	default:
@@ -952,10 +901,6 @@ static int tsl2591_write_event_value(struct iio_dev *indio_dev,
 			goto err_unlock;
 		}
 
-		ret = tsl2591_compatible_als_persist_cycle(chip, als_persist);
-		if (ret < 0)
-			goto err_unlock;
-
 		ret = tsl2591_set_als_persist_cycle(chip, als_persist);
 		if (ret < 0)
 			goto err_unlock;
@@ -1137,10 +1082,8 @@ static int tsl2591_probe(struct i2c_client *client)
 						NULL, tsl2591_event_handler,
 						IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
 						"tsl2591_irq", indio_dev);
-		if (ret) {
-			dev_err_probe(&client->dev, ret, "IRQ request error\n");
-			return -EINVAL;
-		}
+		if (ret)
+			return ret;
 		indio_dev->info = &tsl2591_info;
 	} else {
 		indio_dev->info = &tsl2591_info_no_irq;

@@ -1007,7 +1007,7 @@ static struct usb_request *max3420_alloc_request(struct usb_ep *_ep,
 	struct max3420_ep *ep = to_max3420_ep(_ep);
 	struct max3420_req *req;
 
-	req = kzalloc(sizeof(*req), gfp_flags);
+	req = kzalloc_obj(*req, gfp_flags);
 	if (!req)
 		return NULL;
 
@@ -1215,7 +1215,7 @@ static int max3420_probe(struct spi_device *spi)
 		return -EFAULT;
 	}
 
-	udc = devm_kzalloc(&spi->dev, sizeof(*udc), GFP_KERNEL);
+	udc = devm_kzalloc_obj(&spi->dev, *udc);
 	if (!udc)
 		return -ENOMEM;
 

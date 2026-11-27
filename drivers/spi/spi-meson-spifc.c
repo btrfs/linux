@@ -288,9 +288,9 @@ static int meson_spifc_probe(struct platform_device *pdev)
 	struct meson_spifc *spifc;
 	void __iomem *base;
 	unsigned int rate;
-	int ret = 0;
+	int ret;
 
-	host = spi_alloc_host(&pdev->dev, sizeof(struct meson_spifc));
+	host = devm_spi_alloc_host(&pdev->dev, sizeof(struct meson_spifc));
 	if (!host)
 		return -ENOMEM;
 
@@ -300,29 +300,23 @@ static int meson_spifc_probe(struct platform_device *pdev)
 	spifc->dev = &pdev->dev;
 
 	base = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(base)) {
-		ret = PTR_ERR(base);
-		goto out_err;
-	}
+	if (IS_ERR(base))
+		return PTR_ERR(base);
 
 	spifc->regmap = devm_regmap_init_mmio(spifc->dev, base,
 					      &spifc_regmap_config);
-	if (IS_ERR(spifc->regmap)) {
-		ret = PTR_ERR(spifc->regmap);
-		goto out_err;
-	}
+	if (IS_ERR(spifc->regmap))
+		return PTR_ERR(spifc->regmap);
 
 	spifc->clk = devm_clk_get_enabled(spifc->dev, NULL);
 	if (IS_ERR(spifc->clk)) {
 		dev_err(spifc->dev, "missing clock\n");
-		ret = PTR_ERR(spifc->clk);
-		goto out_err;
+		return PTR_ERR(spifc->clk);
 	}
 
 	rate = clk_get_rate(spifc->clk);
 
 	host->num_chipselect = 1;
-	host->dev.of_node = pdev->dev.of_node;
 	host->bits_per_word_mask = SPI_BPW_MASK(8);
 	host->auto_runtime_pm = true;
 	host->transfer_one = meson_spifc_transfer_one;
@@ -331,30 +325,23 @@ static int meson_spifc_probe(struct platform_device *pdev)
 
 	meson_spifc_hw_init(spifc);
 
-	pm_runtime_set_active(spifc->dev);
-	pm_runtime_enable(spifc->dev);
+	ret =  devm_pm_runtime_set_active_enabled(spifc->dev);
+	if (ret)
+		return dev_err_probe(spifc->dev, ret, "failed to set runtime PM\n");
 
 	ret = devm_spi_register_controller(spifc->dev, host);
-	if (ret) {
-		dev_err(spifc->dev, "failed to register spi host\n");
-		goto out_pm;
-	}
+	if (ret)
+		return dev_err_probe(spifc->dev, ret, "failed to register spi host\n");
 
 	return 0;
-out_pm:
-	pm_runtime_disable(spifc->dev);
-out_err:
-	spi_controller_put(host);
-	return ret;
 }
 
 static void meson_spifc_remove(struct platform_device *pdev)
 {
 	pm_runtime_get_sync(&pdev->dev);
-	pm_runtime_disable(&pdev->dev);
+	pm_runtime_put_noidle(&pdev->dev);
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int meson_spifc_suspend(struct device *dev)
 {
 	struct spi_controller *host = dev_get_drvdata(dev);
@@ -391,9 +378,7 @@ static int meson_spifc_resume(struct device *dev)
 
 	return ret;
 }
-#endif /* CONFIG_PM_SLEEP */
 
-#ifdef CONFIG_PM
 static int meson_spifc_runtime_suspend(struct device *dev)
 {
 	struct spi_controller *host = dev_get_drvdata(dev);
@@ -411,13 +396,12 @@ static int meson_spifc_runtime_resume(struct device *dev)
 
 	return clk_prepare_enable(spifc->clk);
 }
-#endif /* CONFIG_PM */
 
 static const struct dev_pm_ops meson_spifc_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(meson_spifc_suspend, meson_spifc_resume)
-	SET_RUNTIME_PM_OPS(meson_spifc_runtime_suspend,
-			   meson_spifc_runtime_resume,
-			   NULL)
+	SYSTEM_SLEEP_PM_OPS(meson_spifc_suspend, meson_spifc_resume)
+	RUNTIME_PM_OPS(meson_spifc_runtime_suspend,
+		       meson_spifc_runtime_resume,
+		       NULL)
 };
 
 static const struct of_device_id meson_spifc_dt_match[] = {
@@ -433,7 +417,7 @@ static struct platform_driver meson_spifc_driver = {
 	.driver	= {
 		.name		= "meson-spifc",
 		.of_match_table	= of_match_ptr(meson_spifc_dt_match),
-		.pm		= &meson_spifc_pm_ops,
+		.pm		= pm_ptr(&meson_spifc_pm_ops),
 	},
 };
 

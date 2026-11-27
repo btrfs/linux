@@ -16,6 +16,38 @@ Supported chips:
 
     Datasheet: Available from the Nuvoton web site
 
+  * Nuvoton NCT6112D/NCT6114D/NCT6116D
+
+    Prefix: 'nct6116'
+
+    Addresses scanned: ISA address retrieved from Super I/O registers
+
+    Datasheet: Available from the Nuvoton web site
+
+  * Nuvoton NCT6122D/NCT6126D
+
+    Prefix: 'nct6126'
+
+    Addresses scanned: ISA address retrieved from Super I/O registers
+
+    Datasheet: Available from the Nuvoton web site
+
+  * Nuvoton NCT6112D/NCT6114D/NCT6116D
+
+    Prefix: 'nct6116'
+
+    Addresses scanned: ISA address retrieved from Super I/O registers
+
+    Datasheet: Available from the Nuvoton web site
+
+  * Nuvoton NCT6122D/NCT6126D
+
+    Prefix: 'nct6126'
+
+    Addresses scanned: ISA address retrieved from Super I/O registers
+
+    Datasheet: Available from the Nuvoton web site
+
   * Nuvoton NCT5572D/NCT6771F/NCT6772F/NCT6775F/W83677HG-I
 
     Prefix: 'nct6775'
@@ -79,6 +111,30 @@ Supported chips:
     Addresses scanned: ISA address retrieved from Super I/O registers
 
     Datasheet: Available from Nuvoton upon request
+
+  * Nuvoton NCT6797D
+
+    Prefix: 'nct6797'
+
+    Addresses scanned: ISA address retrieved from Super I/O registers
+
+    Datasheet: Available from Nuvoton upon request
+
+  * Nuvoton NCT6798D
+
+    Prefix: 'nct6798'
+
+    Addresses scanned: ISA address retrieved from Super I/O registers
+
+    Datasheet: Available from Nuvoton upon request
+
+  * Nuvoton NCT5585D (compatible to NCT6798D)
+
+    Prefix: 'nct6798'
+
+    Addresses scanned: ISA address retrieved from Super I/O registers
+
+    Datasheet: Not available
 
   * Nuvoton NCT6796D-S/NCT6799D-R
 

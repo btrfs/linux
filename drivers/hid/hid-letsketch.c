@@ -213,6 +213,12 @@ static int letsketch_raw_event(struct hid_device *hdev,
  * string descriptors. But the firmware is buggy and does not like it if
  * we do this too fast. Even if we go slow sometimes the usb_string() call
  * fails. Ignore errors and retry it a couple of times if necessary.
+ *
+ * Some firmware revisions (e.g. "Vision_V201_180530", sold as the Starcom
+ * GC-422) do not implement every string descriptor index the handshake
+ * reads. For those indices usb_string() keeps returning an empty string or
+ * -EPIPE (STALL). Report such an index as missing with -ENOENT once the
+ * retries are used up, so that the caller can skip it.
  */
 static int letsketch_get_string(struct usb_device *udev, int index, char *buf, int size)
 {
@@ -225,9 +231,14 @@ static int letsketch_get_string(struct usb_device *udev, int index, char *buf, i
 			return 0;
 	}
 
+	if (ret == 0 || ret == -EPIPE) {
+		dev_dbg(&udev->dev, "String descriptor %d not implemented\n", index);
+		return -ENOENT;
+	}
+
 	dev_err(&udev->dev, "Max retries (%d) exceeded reading string descriptor %d\n",
 		LETSKETCH_GET_STRING_RETRIES, index);
-	return ret ? ret : -EIO;
+	return ret;
 }
 
 static int letsketch_probe(struct hid_device *hdev, const struct hid_device_id *id)
@@ -256,6 +267,8 @@ static int letsketch_probe(struct hid_device *hdev, const struct hid_device_id *
 	 */
 	for (i = LETSKETCH_INFO_STR_IDX_BEGIN; i <= LETSKETCH_INFO_STR_IDX_END; i++) {
 		ret = letsketch_get_string(udev, i, buf, sizeof(buf));
+		if (ret == -ENOENT)
+			continue;
 		if (ret)
 			return ret;
 
@@ -264,16 +277,16 @@ static int letsketch_probe(struct hid_device *hdev, const struct hid_device_id *
 
 	for (i = 1; i <= 250; i++) {
 		ret = letsketch_get_string(udev, i, buf, sizeof(buf));
-		if (ret)
+		if (ret && ret != -ENOENT)
 			return ret;
 	}
 
 	ret = letsketch_get_string(udev, 0x64, buf, sizeof(buf));
-	if (ret)
+	if (ret && ret != -ENOENT)
 		return ret;
 
 	ret = letsketch_get_string(udev, LETSKETCH_INFO_STR_IDX_BEGIN, buf, sizeof(buf));
-	if (ret)
+	if (ret && ret != -ENOENT)
 		return ret;
 
 	/*
@@ -286,7 +299,7 @@ static int letsketch_probe(struct hid_device *hdev, const struct hid_device_id *
 	if (ret)
 		return ret;
 
-	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, *data);
 	if (!data)
 		return -ENOMEM;
 
@@ -296,13 +309,42 @@ static int letsketch_probe(struct hid_device *hdev, const struct hid_device_id *
 
 	ret = letsketch_setup_input_tablet(data);
 	if (ret)
-		return ret;
+		goto err_shutdown_timer;
 
 	ret = letsketch_setup_input_tablet_pad(data);
 	if (ret)
-		return ret;
+		goto err_shutdown_timer;
 
-	return hid_hw_start(hdev, HID_CONNECT_HIDRAW);
+	ret = hid_hw_start(hdev, HID_CONNECT_HIDRAW);
+	if (ret)
+		goto err_shutdown_timer;
+
+	return 0;
+
+err_shutdown_timer:
+	/*
+	 * Drain any pending callback and permanently disable the timer
+	 * before devm releases data: if hid_hw_start() enabled I/O on an
+	 * always-poll-quirk device and then failed, raw_event may have
+	 * armed the timer already.
+	 */
+	timer_shutdown_sync(&data->inrange_timer);
+	return ret;
+}
+
+static void letsketch_remove(struct hid_device *hdev)
+{
+	struct letsketch_data *data = hid_get_drvdata(hdev);
+
+	/*
+	 * hid_hw_stop() synchronously kills the URBs that deliver
+	 * raw_event(), so once it returns no path can re-arm
+	 * inrange_timer.  timer_shutdown_sync() then drains any
+	 * in-flight callback and permanently disables further
+	 * mod_timer() calls before devm releases data.
+	 */
+	hid_hw_stop(hdev);
+	timer_shutdown_sync(&data->inrange_timer);
 }
 
 static const struct hid_device_id letsketch_devices[] = {
@@ -315,6 +357,7 @@ static struct hid_driver letsketch_driver = {
 	.name = "letsketch",
 	.id_table = letsketch_devices,
 	.probe = letsketch_probe,
+	.remove = letsketch_remove,
 	.raw_event = letsketch_raw_event,
 };
 module_hid_driver(letsketch_driver);

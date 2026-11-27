@@ -712,7 +712,7 @@ TEST_FAIL_NTH(basic_fail_nth, device)
 		return -1;
 
 	if (_test_cmd_veventq_alloc(self->fd, viommu_id,
-				    IOMMU_VEVENTQ_TYPE_SELFTEST, &veventq_id,
+				    IOMMU_VEVENTQ_TYPE_SELFTEST, 2, &veventq_id,
 				    &veventq_fd))
 		return -1;
 	close(veventq_fd);
@@ -745,4 +745,16 @@ TEST_FAIL_NTH(basic_fail_nth, device)
 	return 0;
 }
 
-TEST_HARNESS_MAIN
+static bool iommufd_mock_available(void)
+{
+	return access("/sys/bus/iommufd_mock", F_OK) == 0;
+}
+
+int main(int argc, char **argv)
+{
+	if (!iommufd_mock_available())
+		ksft_exit_skip(
+			"no iommufd mock device, the tests need CONFIG_IOMMUFD_TEST=y and the iommufd module loaded\n");
+
+	return test_harness_run(argc, argv);
+}

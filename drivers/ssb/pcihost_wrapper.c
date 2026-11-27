@@ -6,7 +6,7 @@
  * Copyright (c) 2005 Stefano Brivio <st3@riseup.net>
  * Copyright (c) 2005 Danny van Dyk <kugelfang@gentoo.org>
  * Copyright (c) 2005 Andreas Jaggi <andreas.jaggi@waterwave.ch>
- * Copyright (c) 2005-2007 Michael Buesch <m@bues.ch>
+ * Copyright (c) 2005-2007 Michael Buesch
  *
  * Licensed under the GNU/GPL. See COPYING for details.
  */
@@ -71,7 +71,7 @@ static int ssb_pcihost_probe(struct pci_dev *dev,
 	int err = -ENOMEM;
 	u32 val;
 
-	ssb = kzalloc(sizeof(*ssb), GFP_KERNEL);
+	ssb = kzalloc_obj(*ssb);
 	if (!ssb)
 		goto out;
 	err = pci_enable_device(dev);

@@ -920,7 +920,7 @@ static int dpaa2_eth_build_sg_fd(struct dpaa2_eth_priv *priv,
 	if (unlikely(PAGE_SIZE / sizeof(struct scatterlist) < nr_frags + 1))
 		return -EINVAL;
 
-	scl = kmalloc_array(nr_frags + 1, sizeof(struct scatterlist), GFP_ATOMIC);
+	scl = kmalloc_objs(struct scatterlist, nr_frags + 1, GFP_ATOMIC);
 	if (unlikely(!scl))
 		return -ENOMEM;
 
@@ -1403,10 +1403,10 @@ static netdev_tx_t __dpaa2_eth_tx(struct sk_buff *skb,
 	struct dpaa2_eth_fq *fq;
 	struct netdev_queue *nq;
 	struct dpaa2_fd *fd;
+	int err, i, num_tc;
 	u16 queue_mapping;
 	void *swa = NULL;
 	u8 prio = 0;
-	int err, i;
 	u32 fd_len;
 
 	percpu_stats = this_cpu_ptr(priv->percpu_stats);
@@ -1418,9 +1418,9 @@ static netdev_tx_t __dpaa2_eth_tx(struct sk_buff *skb,
 	/* We'll be holding a back-reference to the skb until Tx Confirmation;
 	 * we don't want that overwritten by a concurrent Tx with a cloned skb.
 	 */
-	skb = skb_unshare(skb, GFP_ATOMIC);
+	skb = skb_unclone_full(skb, GFP_ATOMIC);
 	if (unlikely(!skb)) {
-		/* skb_unshare() has already freed the skb */
+		/* skb_unclone_full() has already freed the skb */
 		percpu_stats->tx_dropped++;
 		return NETDEV_TX_OK;
 	}
@@ -1468,12 +1468,14 @@ static netdev_tx_t __dpaa2_eth_tx(struct sk_buff *skb,
 	 */
 	queue_mapping = skb_get_queue_mapping(skb);
 
-	if (net_dev->num_tc) {
+	num_tc = netdev_get_num_tc(net_dev);
+
+	if (num_tc) {
 		prio = netdev_txq_to_tc(net_dev, queue_mapping);
 		/* Hardware interprets priority level 0 as being the highest,
 		 * so we need to do a reverse mapping to the netdev tc index
 		 */
-		prio = net_dev->num_tc - prio - 1;
+		prio = num_tc - prio - 1;
 		/* We have only one FQ array entry for all Tx hardware queues
 		 * with the same flow id (but different priority levels)
 		 */
@@ -1679,11 +1681,9 @@ static int dpaa2_eth_add_bufs(struct dpaa2_eth_priv *priv,
 	struct device *dev = priv->net_dev->dev.parent;
 	u64 buf_array[DPAA2_ETH_BUFS_PER_CMD];
 	struct dpaa2_eth_swa *swa;
-	struct page *page;
 	dma_addr_t addr;
 	int retries = 0;
 	int i = 0, err;
-	u32 batch;
 
 	/* Allocate buffers visible to WRIOP */
 	if (!ch->xsk_zc) {
@@ -1693,14 +1693,16 @@ static int dpaa2_eth_add_bufs(struct dpaa2_eth_priv *priv,
 			 * the entire page except for a tailroom reserved for
 			 * skb shared info
 			 */
-			page = dev_alloc_pages(0);
+			struct page *page = dev_alloc_pages(0);
 			if (!page)
 				goto err_alloc;
 
 			addr = dma_map_page(dev, page, 0, priv->rx_buf_size,
 					    DMA_BIDIRECTIONAL);
-			if (unlikely(dma_mapping_error(dev, addr)))
-				goto err_map;
+			if (unlikely(dma_mapping_error(dev, addr))) {
+				__free_pages(page, 0);
+				goto err_alloc;
+			}
 
 			buf_array[i] = addr;
 
@@ -1716,8 +1718,8 @@ static int dpaa2_eth_add_bufs(struct dpaa2_eth_priv *priv,
 		 * of DPAA2_ETH_BUFS_PER_CMD. Bail out if the UMEM cannot
 		 * provide enough buffers at the moment
 		 */
-		batch = xsk_buff_alloc_batch(ch->xsk_pool, xdp_buffs,
-					     DPAA2_ETH_BUFS_PER_CMD);
+		u32 batch = xsk_buff_alloc_batch(ch->xsk_pool, xdp_buffs,
+						 DPAA2_ETH_BUFS_PER_CMD);
 		if (!batch)
 			goto err_alloc;
 
@@ -1727,8 +1729,11 @@ static int dpaa2_eth_add_bufs(struct dpaa2_eth_priv *priv,
 			swa->xsk.xdp_buff = xdp_buffs[i];
 
 			addr = xsk_buff_xdp_get_frame_dma(xdp_buffs[i]);
-			if (unlikely(dma_mapping_error(dev, addr)))
-				goto err_map;
+			if (unlikely(dma_mapping_error(dev, addr))) {
+				for (int j = i; j < batch; j++)
+					xsk_buff_free(xdp_buffs[j]);
+				goto err_alloc;
+			}
 
 			buf_array[i] = addr;
 
@@ -1759,13 +1764,6 @@ release_bufs:
 
 	return i;
 
-err_map:
-	if (!ch->xsk_zc) {
-		__free_pages(page, 0);
-	} else {
-		for (; i < batch; i++)
-			xsk_buff_free(xdp_buffs[i]);
-	}
 err_alloc:
 	/* If we managed to allocate at least some buffers,
 	 * release them to hardware
@@ -2913,7 +2911,7 @@ static int update_xps(struct dpaa2_eth_priv *priv)
 		return -ENOMEM;
 
 	num_queues = dpaa2_eth_queue_count(priv);
-	netdev_queues = (net_dev->num_tc ? : 1) * num_queues;
+	netdev_queues = (netdev_get_num_tc(net_dev) ? : 1) * num_queues;
 
 	/* The first <num_queues> entries in priv->fq array are Tx/Tx conf
 	 * queues, so only process those
@@ -2946,7 +2944,7 @@ static int dpaa2_eth_setup_mqprio(struct net_device *net_dev,
 	num_queues = dpaa2_eth_queue_count(priv);
 	num_tc = mqprio->num_tc;
 
-	if (num_tc == net_dev->num_tc)
+	if (num_tc == netdev_get_num_tc(net_dev))
 		return 0;
 
 	if (num_tc  > dpaa2_eth_tc_count(priv)) {
@@ -3125,7 +3123,7 @@ static struct dpaa2_eth_channel *dpaa2_eth_alloc_channel(struct dpaa2_eth_priv *
 	struct device *dev = priv->net_dev->dev.parent;
 	int err;
 
-	channel = kzalloc(sizeof(*channel), GFP_KERNEL);
+	channel = kzalloc_obj(*channel);
 	if (!channel)
 		return NULL;
 
@@ -3392,7 +3390,7 @@ struct dpaa2_eth_bp *dpaa2_eth_allocate_dpbp(struct dpaa2_eth_priv *priv)
 		return ERR_PTR(err);
 	}
 
-	bp = kzalloc(sizeof(*bp), GFP_KERNEL);
+	bp = kzalloc_obj(*bp);
 	if (!bp) {
 		err = -ENOMEM;
 		goto err_alloc;
@@ -3864,9 +3862,8 @@ static int dpaa2_eth_setup_dpni(struct fsl_mc_device *ls_dev)
 	if (err && err != -EOPNOTSUPP)
 		goto close;
 
-	priv->cls_rules = devm_kcalloc(dev, dpaa2_eth_fs_count(priv),
-				       sizeof(struct dpaa2_eth_cls_rule),
-				       GFP_KERNEL);
+	priv->cls_rules = devm_kzalloc_objs(dev, struct dpaa2_eth_cls_rule,
+					    dpaa2_eth_fs_count(priv));
 	if (!priv->cls_rules) {
 		err = -ENOMEM;
 		goto close;
@@ -4673,7 +4670,7 @@ static int dpaa2_eth_connect_mac(struct dpaa2_eth_priv *priv)
 		goto out_put_device;
 	}
 
-	mac = kzalloc(sizeof(struct dpaa2_mac), GFP_KERNEL);
+	mac = kzalloc_obj(struct dpaa2_mac);
 	if (!mac) {
 		err = -ENOMEM;
 		goto out_put_device;
@@ -4732,6 +4729,7 @@ static void dpaa2_eth_disconnect_mac(struct dpaa2_eth_priv *priv)
 		dpaa2_mac_disconnect(mac);
 
 	dpaa2_mac_close(mac);
+	put_device(&mac->mc_dev->dev);
 	kfree(mac);
 }
 
@@ -4768,6 +4766,8 @@ static irqreturn_t dpni_irq0_handler_thread(int irq_num, void *arg)
 			dpaa2_eth_disconnect_mac(priv);
 		else
 			dpaa2_eth_connect_mac(priv);
+
+		dpaa2_eth_dl_port_check(priv);
 	}
 
 	return IRQ_HANDLED;

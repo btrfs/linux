@@ -254,7 +254,6 @@ struct fcloop_nport {
 struct fcloop_lsreq {
 	struct nvmefc_ls_req		*lsreq;
 	struct nvmefc_ls_rsp		ls_rsp;
-	int				lsdir;	/* H2T or T2H */
 	int				status;
 	struct list_head		ls_list; /* fcloop_rport->ls_list */
 };
@@ -380,6 +379,8 @@ fcloop_h2t_ls_req(struct nvme_fc_local_port *localport,
 	ret = nvmet_fc_rcv_ls_req(rport->targetport, rport,
 				  &tls_req->ls_rsp,
 				  lsreq->rqstaddr, lsreq->rqstlen);
+	if (ret)
+		kmem_cache_free(lsreq_cache, tls_req);
 
 	return ret;
 }
@@ -492,6 +493,7 @@ fcloop_t2h_xmt_ls_rsp(struct nvme_fc_local_port *localport,
 	struct fcloop_rport *rport = remoteport->private;
 	struct nvmet_fc_target_port *targetport = rport->targetport;
 	struct fcloop_tport *tport;
+	int ret = 0;
 
 	if (!targetport) {
 		/*
@@ -501,12 +503,18 @@ fcloop_t2h_xmt_ls_rsp(struct nvme_fc_local_port *localport,
 		 * We end up here from delete association exchange:
 		 * nvmet_fc_xmt_disconnect_assoc sends an async request.
 		 *
-		 * Return success because this is what LLDDs do; silently
-		 * drop the response.
+		 * Return success when remoteport is still online because this
+		 * is what LLDDs do and silently drop the response.  Otherwise,
+		 * return with error to signal upper layer to perform the lsrsp
+		 * resource cleanup.
 		 */
-		lsrsp->done(lsrsp);
+		if (remoteport->port_state == FC_OBJSTATE_ONLINE)
+			lsrsp->done(lsrsp);
+		else
+			ret = -ENODEV;
+
 		kmem_cache_free(lsreq_cache, tls_req);
-		return 0;
+		return ret;
 	}
 
 	memcpy(lsreq->rspaddr, lsrsp->rspbuf,
@@ -560,7 +568,7 @@ fcloop_tgt_discovery_evt(struct nvmet_fc_target_port *tgtport)
 {
 	struct fcloop_rscn *tgt_rscn;
 
-	tgt_rscn = kzalloc(sizeof(*tgt_rscn), GFP_KERNEL);
+	tgt_rscn = kzalloc_obj(*tgt_rscn);
 	if (!tgt_rscn)
 		return;
 
@@ -767,7 +775,7 @@ fcloop_fcp_req(struct nvme_fc_local_port *localport,
 	if (!rport->targetport)
 		return -ECONNREFUSED;
 
-	tfcp_req = kzalloc(sizeof(*tfcp_req), GFP_ATOMIC);
+	tfcp_req = kzalloc_obj(*tfcp_req, GFP_ATOMIC);
 	if (!tfcp_req)
 		return -ENOMEM;
 
@@ -1111,8 +1119,10 @@ fcloop_remoteport_delete(struct nvme_fc_remote_port *remoteport)
 	rport->nport->rport = NULL;
 	spin_unlock_irqrestore(&fcloop_lock, flags);
 
-	if (put_port)
+	if (put_port) {
+		WARN_ON(!list_empty(&rport->ls_list));
 		fcloop_nport_put(rport->nport);
+	}
 }
 
 static void
@@ -1130,8 +1140,10 @@ fcloop_targetport_delete(struct nvmet_fc_target_port *targetport)
 	tport->nport->tport = NULL;
 	spin_unlock_irqrestore(&fcloop_lock, flags);
 
-	if (put_port)
+	if (put_port) {
+		WARN_ON(!list_empty(&tport->ls_list));
 		fcloop_nport_put(tport->nport);
+	}
 }
 
 #define	FCLOOP_HW_QUEUES		4
@@ -1191,11 +1203,11 @@ fcloop_create_local_port(struct device *dev, struct device_attribute *attr,
 	unsigned long flags;
 	int ret = -ENOMEM;
 
-	lport = kzalloc(sizeof(*lport), GFP_KERNEL);
+	lport = kzalloc_obj(*lport);
 	if (!lport)
 		return -ENOMEM;
 
-	opts = kzalloc(sizeof(*opts), GFP_KERNEL);
+	opts = kzalloc_obj(*opts);
 	if (!opts)
 		goto out_free_lport;
 
@@ -1342,7 +1354,7 @@ fcloop_alloc_nport(const char *buf, size_t count, bool remoteport)
 	u32 opts_mask = (remoteport) ? RPORT_OPTS : TGTPORT_OPTS;
 	int ret;
 
-	opts = kzalloc(sizeof(*opts), GFP_KERNEL);
+	opts = kzalloc_obj(*opts);
 	if (!opts)
 		return NULL;
 
@@ -1354,7 +1366,7 @@ fcloop_alloc_nport(const char *buf, size_t count, bool remoteport)
 	if ((opts->mask & opts_mask) != opts_mask)
 		goto out_free_opts;
 
-	newnport = kzalloc(sizeof(*newnport), GFP_KERNEL);
+	newnport = kzalloc_obj(*newnport);
 	if (!newnport)
 		goto out_free_opts;
 

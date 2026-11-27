@@ -131,7 +131,7 @@ static int sy8824_i2c_probe(struct i2c_client *client)
 	struct regmap *regmap;
 	int ret;
 
-	di = devm_kzalloc(dev, sizeof(struct sy8824_device_info), GFP_KERNEL);
+	di = devm_kzalloc_obj(dev, struct sy8824_device_info);
 	if (!di)
 		return -ENOMEM;
 
@@ -213,10 +213,10 @@ static const struct of_device_id sy8824_dt_ids[] = {
 MODULE_DEVICE_TABLE(of, sy8824_dt_ids);
 
 static const struct i2c_device_id sy8824_id[] = {
-	{ "sy8824c", (kernel_ulong_t)&sy8824c_cfg },
-	{ "sy8824e", (kernel_ulong_t)&sy8824e_cfg },
-	{ "sy20276", (kernel_ulong_t)&sy20276_cfg },
-	{ "sy20278", (kernel_ulong_t)&sy20278_cfg },
+	{ .name = "sy8824c", .driver_data = (kernel_ulong_t)&sy8824c_cfg },
+	{ .name = "sy8824e", .driver_data = (kernel_ulong_t)&sy8824e_cfg },
+	{ .name = "sy20276", .driver_data = (kernel_ulong_t)&sy20276_cfg },
+	{ .name = "sy20278", .driver_data = (kernel_ulong_t)&sy20278_cfg },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, sy8824_id);

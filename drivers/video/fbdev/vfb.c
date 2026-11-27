@@ -30,7 +30,10 @@
      *  The default can be overridden if the driver is compiled as a module
      */
 
-#define VIDEOMEMSIZE	(1*1024*1024)	/* 1 MB */
+#define MAX_XRES		8192
+#define MAX_YRES		8192
+#define VIDEOMEMSIZE		(1 * 1024 * 1024)	/* 1 MB */
+#define MAX_VIDEOMEMSIZE	(8192 * 8192 * sizeof(u32))
 
 static void *videomemory;
 static u_long videomemorysize = VIDEOMEMSIZE;
@@ -78,6 +81,13 @@ static int vfb_pan_display(struct fb_var_screeninfo *var,
 static int vfb_mmap(struct fb_info *info,
 		    struct vm_area_struct *vma);
 
+static void vfb_destroy(struct fb_info *info)
+{
+	vfree(info->screen_buffer);
+	fb_dealloc_cmap(&info->cmap);
+	framebuffer_release(info);
+}
+
 static const struct fb_ops vfb_ops = {
 	.owner		= THIS_MODULE,
 	__FB_DEFAULT_SYSMEM_OPS_RDWR,
@@ -87,6 +97,7 @@ static const struct fb_ops vfb_ops = {
 	.fb_pan_display	= vfb_pan_display,
 	__FB_DEFAULT_SYSMEM_OPS_DRAW,
 	.fb_mmap	= vfb_mmap,
+	.fb_destroy	= vfb_destroy,
 };
 
     /*
@@ -149,6 +160,14 @@ static int vfb_check_var(struct fb_var_screeninfo *var,
 	else if (var->bits_per_pixel <= 32)
 		var->bits_per_pixel = 32;
 	else
+		return -EINVAL;
+
+	if (var->xres_virtual > MAX_XRES ||
+	    var->yres_virtual > MAX_YRES)
+		return -EINVAL;
+
+	if (var->xoffset > MAX_XRES - var->xres ||
+	    var->yoffset > MAX_YRES - var->yres)
 		return -EINVAL;
 
 	if (var->xres_virtual < var->xoffset + var->xres)
@@ -426,8 +445,11 @@ static int __init vfb_setup(char *options)
 static int vfb_probe(struct platform_device *dev)
 {
 	struct fb_info *info;
-	unsigned int size = PAGE_ALIGN(videomemorysize);
+	unsigned int size;
 	int retval = -ENOMEM;
+
+	videomemorysize = min(videomemorysize, MAX_VIDEOMEMSIZE);
+	size = PAGE_ALIGN(videomemorysize);
 
 	/*
 	 * For real video cards we use ioremap.
@@ -485,9 +507,6 @@ static void vfb_remove(struct platform_device *dev)
 
 	if (info) {
 		unregister_framebuffer(info);
-		vfree(videomemory);
-		fb_dealloc_cmap(&info->cmap);
-		framebuffer_release(info);
 	}
 }
 

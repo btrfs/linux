@@ -8,7 +8,6 @@
 #include <linux/iio/buffer.h>
 #include <linux/iio/iio.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 
 #include "../common/hid-sensors/hid-sensor-trigger.h"
@@ -16,6 +15,7 @@
 struct temperature_state {
 	struct hid_sensor_common common_attributes;
 	struct hid_sensor_hub_attribute_info temperature_attr;
+	struct hid_sensor_hub_callbacks callbacks;
 	struct {
 		s32 temperature_data;
 		aligned_s64 timestamp;
@@ -45,7 +45,7 @@ static const struct iio_chan_spec temperature_channels[] = {
 
 /* Adjust channel real bits based on report descriptor */
 static void temperature_adjust_channel_bit_mask(struct iio_chan_spec *channels,
-					int channel, int size)
+						int channel, int size)
 {
 	channels[channel].scan_type.sign = 's';
 	/* Real storage bits will change based on the report desc. */
@@ -101,8 +101,8 @@ static int temperature_read_raw(struct iio_dev *indio_dev,
 }
 
 static int temperature_write_raw(struct iio_dev *indio_dev,
-				struct iio_chan_spec const *chan,
-				int val, int val2, long mask)
+				 struct iio_chan_spec const *chan,
+				 int val, int val2, long mask)
 {
 	struct temperature_state *temp_st = iio_priv(indio_dev);
 
@@ -125,7 +125,7 @@ static const struct iio_info temperature_info = {
 
 /* Callback handler to send event after all samples are received and captured */
 static int temperature_proc_event(struct hid_sensor_hub_device *hsdev,
-				unsigned int usage_id, void *pdev)
+				  u32 usage_id, void *pdev)
 {
 	struct iio_dev *indio_dev = platform_get_drvdata(pdev);
 	struct temperature_state *temp_st = iio_priv(indio_dev);
@@ -140,8 +140,9 @@ static int temperature_proc_event(struct hid_sensor_hub_device *hsdev,
 
 /* Capture samples in local storage */
 static int temperature_capture_sample(struct hid_sensor_hub_device *hsdev,
-				unsigned int usage_id, size_t raw_len,
-				char *raw_data, void *pdev)
+				      u32 usage_id,
+				      size_t raw_len, char *raw_data,
+				      void *pdev)
 {
 	struct iio_dev *indio_dev = platform_get_drvdata(pdev);
 	struct temperature_state *temp_st = iio_priv(indio_dev);
@@ -157,10 +158,10 @@ static int temperature_capture_sample(struct hid_sensor_hub_device *hsdev,
 
 /* Parse report which is specific to an usage id*/
 static int temperature_parse_report(struct platform_device *pdev,
-				struct hid_sensor_hub_device *hsdev,
-				struct iio_chan_spec *channels,
-				unsigned int usage_id,
-				struct temperature_state *st)
+				    struct hid_sensor_hub_device *hsdev,
+				    struct iio_chan_spec *channels,
+				    u32 usage_id,
+				    struct temperature_state *st)
 {
 	int ret;
 
@@ -171,8 +172,7 @@ static int temperature_parse_report(struct platform_device *pdev,
 	if (ret < 0)
 		return ret;
 
-	temperature_adjust_channel_bit_mask(channels, 0,
-					st->temperature_attr.size);
+	temperature_adjust_channel_bit_mask(channels, 0, st->temperature_attr.size);
 
 	st->scale_precision = hid_sensor_format_scale(
 				HID_USAGE_SENSOR_TEMPERATURE,
@@ -181,11 +181,6 @@ static int temperature_parse_report(struct platform_device *pdev,
 
 	return ret;
 }
-
-static struct hid_sensor_hub_callbacks temperature_callbacks = {
-	.send_event = &temperature_proc_event,
-	.capture_sample = &temperature_capture_sample,
-};
 
 /* Function to initialize the processing for usage id */
 static int hid_temperature_probe(struct platform_device *pdev)
@@ -213,13 +208,13 @@ static int hid_temperature_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	temp_chans = devm_kmemdup(&indio_dev->dev, temperature_channels,
-				sizeof(temperature_channels), GFP_KERNEL);
+	temp_chans = devm_kmemdup(&pdev->dev, temperature_channels,
+				  sizeof(temperature_channels), GFP_KERNEL);
 	if (!temp_chans)
 		return -ENOMEM;
 
 	ret = temperature_parse_report(pdev, hsdev, temp_chans,
-				HID_USAGE_SENSOR_TEMPERATURE, temp_st);
+				       HID_USAGE_SENSOR_TEMPERATURE, temp_st);
 	if (ret)
 		return ret;
 
@@ -232,19 +227,23 @@ static int hid_temperature_probe(struct platform_device *pdev)
 	atomic_set(&temp_st->common_attributes.data_ready, 0);
 
 	ret = hid_sensor_setup_trigger(indio_dev, name,
-				&temp_st->common_attributes);
+				       &temp_st->common_attributes);
 	if (ret)
 		return ret;
 
 	platform_set_drvdata(pdev, indio_dev);
 
-	temperature_callbacks.pdev = pdev;
+	temp_st->callbacks = (struct hid_sensor_hub_callbacks) {
+		.send_event = temperature_proc_event,
+		.capture_sample = temperature_capture_sample,
+		.pdev = pdev,
+	};
 	ret = sensor_hub_register_callback(hsdev, HID_USAGE_SENSOR_TEMPERATURE,
-					&temperature_callbacks);
+					   &temp_st->callbacks);
 	if (ret)
 		goto error_remove_trigger;
 
-	ret = devm_iio_device_register(indio_dev->dev.parent, indio_dev);
+	ret = iio_device_register(indio_dev);
 	if (ret)
 		goto error_remove_callback;
 
@@ -264,6 +263,7 @@ static void hid_temperature_remove(struct platform_device *pdev)
 	struct iio_dev *indio_dev = platform_get_drvdata(pdev);
 	struct temperature_state *temp_st = iio_priv(indio_dev);
 
+	iio_device_unregister(indio_dev);
 	sensor_hub_remove_callback(hsdev, HID_USAGE_SENSOR_TEMPERATURE);
 	hid_sensor_remove_trigger(indio_dev, &temp_st->common_attributes);
 }

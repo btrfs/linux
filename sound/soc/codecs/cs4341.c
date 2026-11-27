@@ -171,10 +171,18 @@ static const struct snd_kcontrol_new cs4341_controls[] = {
 	SOC_SINGLE("Popguard Transient Switch", CS4341_REG_MODE2, 1, 1, 0),
 };
 
+static const u64 cs4341_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF;
+
 static const struct snd_soc_dai_ops cs4341_dai_ops = {
 	.set_fmt	= cs4341_set_fmt,
 	.hw_params	= cs4341_hw_params,
 	.mute_stream	= cs4341_mute,
+	.auto_selectable_formats	= &cs4341_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 	.no_capture_mute = 1,
 };
 
@@ -228,7 +236,7 @@ static int cs4341_i2c_probe(struct i2c_client *i2c)
 {
 	struct cs4341_priv *cs4341;
 
-	cs4341 = devm_kzalloc(&i2c->dev, sizeof(*cs4341), GFP_KERNEL);
+	cs4341 = devm_kzalloc_obj(&i2c->dev, *cs4341);
 	if (!cs4341)
 		return -ENOMEM;
 
@@ -248,7 +256,7 @@ static int cs4341_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id cs4341_i2c_id[] = {
-	{ "cs4341" },
+	{ .name = "cs4341" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, cs4341_i2c_id);
@@ -274,7 +282,7 @@ static int cs4341_spi_probe(struct spi_device *spi)
 	struct cs4341_priv *cs4341;
 	int ret;
 
-	cs4341 = devm_kzalloc(&spi->dev, sizeof(*cs4341), GFP_KERNEL);
+	cs4341 = devm_kzalloc_obj(&spi->dev, *cs4341);
 	if (!cs4341)
 		return -ENOMEM;
 
